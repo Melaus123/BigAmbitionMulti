@@ -225,7 +225,19 @@ namespace BigAmbitionsMP
                 { Plugin.Logger.LogWarning($"{Tag} price edit from '{p.PlayerId}': {p.Price} out of range — ignored."); return; }
                 var reg = GameStatePatcher.FindRegistration(p.AddressKey);
                 if (reg == null) return;
-                if (!MergerFlip.TrulyMine(reg)) return;                       // only the real owner applies
+                // W3-0 r1 (F1): the real owner applies — and so does the machine SIMULATING an absent
+                // owner's businesses, whose lifted copy IS the live state and whose owner-style pushes carry
+                // the edit onward. Anywhere else the edit is not ours to run, and a routed edit never dies in
+                // silence. (`merged` above is company MEMBERSHIP between me and the sender — no address in it —
+                // so the [Merger] applied line below fires on the simulator exactly as it does on the owner.)
+                bool runsHere = MergerFlip.TrulyMine(reg);
+                if (!runsHere) { try { runsHere = MergerAbsence.SimulatesHere(p.AddressKey); } catch { } }
+                if (!runsHere)
+                {
+                    if (_logged.Add("price-notmine|" + p.AddressKey))
+                        Plugin.Logger.LogWarning($"{Tag} routed price for '{p.AddressKey}' — not run here, dropped");
+                    return;
+                }
                 string key = p.AddressKey + "|" + p.ItemName + "|" + p.PlayerId;
                 if (_appliedSeq.TryGetValue(key, out var last) && last.epoch == p.SeqEpoch && p.Seq <= last.seq) return;   // a delayed duplicate never undoes a newer edit
                 _appliedSeq[key] = (p.SeqEpoch, p.Seq);

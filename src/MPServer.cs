@@ -6219,8 +6219,15 @@ namespace BigAmbitionsMP
                 string ownerPid = owner == "host" ? MPConfig.PlayerId : owner;
                 if (ownerPid != senderPid && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
                 { Plugin.Logger.LogWarning($"[MergerStaff] employee edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no access, dropped."); return; }
-                if (ownerPid == MPConfig.PlayerId) MergerEmployeeSync.ApplyOnOwner(p);
-                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", p));
+                // W3-0 r1 (F6): the fifth write route joins the other four — an offline owner's edit goes to
+                // the machine simulating them (MergerEmployeeSync.ApplyOnOwner already accepts SimulatesHere),
+                // and with nobody running the address RouteTargetFor logs the refusal and we drop it.
+                string etarget = RouteTargetFor(p.AddressKey, ownerPid);
+                if (etarget.Length == 0) return;                       // RouteTargetFor logged why
+                if (etarget == senderPid)
+                { Plugin.Logger.LogWarning($"[MergerStaff] employee edit by '{senderPid}' on '{p.AddressKey}' — that machine already runs the address, dropped."); return; }
+                if (etarget == MPConfig.PlayerId) MergerEmployeeSync.ApplyOnOwner(p);
+                else SendToPid(etarget, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] HostRouteEmployeeEdit: {ex.Message}"); }
         }
@@ -6290,11 +6297,71 @@ namespace BigAmbitionsMP
             return false;
         }
 
-        /// <summary>Resolve a shop's owner pid from the rental ledger; "" when unowned.</summary>
+        /// <summary>Resolve a shop's owner pid from the rental ledger; "" when unowned. This is the
+        /// AUTHORISATION answer (whose grant/membership a sender must hold, and the identity every
+        /// ask/answer pair checks) — never the delivery answer; RouteTargetFor below is that.</summary>
         private static string SharedShopOwnerPid(string addressKey)
         {
             if (!BuildingOwners.TryGetValue(addressKey, out var owner) || string.IsNullOrEmpty(owner)) return "";
             return owner == "host" ? MPConfig.PlayerId : owner;
+        }
+
+        /// <summary>MERGER PHASE 2 WAVE 3 (W3-0): WHERE a routed WRITE for this address must be delivered.
+        /// The ledger owner when that player is ONLINE; else, while they are away, the machine simulating
+        /// their businesses (its lifted copy IS the live state, and its owner-style pushes/publishes carry
+        /// the edit onward); else "" — and "" means the caller REFUSES with the WARN logged here. Nothing is
+        /// ever applied locally as a fallback. Before this, every write route sent to the ledger owner and a
+        /// route to an offline owner was dropped by SendToPid without a word (the shipped price route
+        /// included).</summary>
+        public static string RouteTargetFor(string addressKey) => RouteTargetFor(addressKey, SharedShopOwnerPid(addressKey));
+
+        private static string RouteTargetFor(string addressKey, string ownerPid)
+        {
+            if (string.IsNullOrEmpty(ownerPid)) return "";
+            if (IsOnlinePid(ownerPid)) return ownerPid;
+            try
+            {
+                // StableIdByPlayer survives a departure (it is not an online test, :5881), which is exactly
+                // why it still answers for the absent owner the marks are keyed by.
+                string stable = StableIdByPlayer.TryGetValue(ownerPid, out var s) && !string.IsNullOrEmpty(s) ? s : ownerPid;
+                if (MergerAbsence.Marks.TryGetValue(stable, out var mark) && mark != null
+                    && !string.IsNullOrEmpty(mark.SimulatorPid) && IsOnlinePid(mark.SimulatorPid))
+                    return mark.SimulatorPid;
+            }
+            catch { }
+            Plugin.Logger.LogWarning($"[Merger] route for '{addressKey}' refused: owner '{ownerPid}' offline and nobody simulating");
+            return "";
+        }
+
+        /// <summary>W3-0 r1 (F7): an ASK — session open/close, sales history, work info, valuation — is answered
+        /// by the LEDGER OWNER and nobody else: the simulator's lifted copy holds none of what those payloads
+        /// carry, so a READ is never re-pointed at it (unlike a WRITE, which RouteTargetFor sends there). With the
+        /// owner offline the send died inside SendToPid without a word, and the asking member's tab stayed blank
+        /// and re-polled for ever. False = refused, with one line per asker+address+ask per minute so a 5 s poll
+        /// cannot flood the log. No on-screen text: the tab stays exactly as it is. Main thread, like every
+        /// host route (UnityEngine.Time, as SharedRateOk uses).</summary>
+        private static readonly Dictionary<string, float> _askOffline = new Dictionary<string, float>();
+        private static bool AskOwnerOnline(string ask, string addressKey, string askerPid, string ownerPid)
+        {
+            if (IsOnlinePid(ownerPid)) return true;
+            try
+            {
+                float now = UnityEngine.Time.unscaledTime;
+                string key = askerPid + "|" + addressKey + "|" + ask;
+                if (_askOffline.Count > 256)
+                {
+                    var stale = new List<string>();
+                    foreach (var kv in _askOffline) if (now - kv.Value > 60f) stale.Add(kv.Key);
+                    foreach (var k in stale) _askOffline.Remove(k);
+                }
+                if (!_askOffline.TryGetValue(key, out var last) || now - last >= 60f)
+                {
+                    _askOffline[key] = now;
+                    Plugin.Logger.LogWarning($"[SharedShop] {ask} for '{addressKey}' by '{askerPid}': owner '{ownerPid}' offline — no answer");
+                }
+            }
+            catch { }
+            return false;
         }
 
         /// <summary>Review #6: a Business grant is blanket across the owner's ESTABLISHED businesses — never
@@ -6326,8 +6393,10 @@ namespace BigAmbitionsMP
                 if (ownerPid == senderPid) return;   // an owner's own edits never route
                 if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid) && !MergerSync.MergedRuntime(ownerPid, senderPid))
                 { Plugin.Logger.LogWarning($"[SharedShop] schedule edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission or merger membership, dropped."); return; }
-                if (ownerPid == MPConfig.PlayerId) SharedShopSchedule.ApplyOnOwner(p);
-                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedScheduleEdit, "host", p));
+                string starget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0: owner, else their simulator, else refuse
+                if (starget.Length == 0 || starget == senderPid) return;
+                if (starget == MPConfig.PlayerId) SharedShopSchedule.ApplyOnOwner(p);
+                else SendToPid(starget, MessageEnvelope.Create(MessageType.SharedScheduleEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedScheduleEdit: {ex.Message}"); }
         }
@@ -6352,11 +6421,16 @@ namespace BigAmbitionsMP
                         if (ownerPid == senderPid) return;   // the owner has no session with themself
                         if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid) && !MergerSync.MergedRuntime(ownerPid, senderPid))
                         { Plugin.Logger.LogWarning($"[SharedShop] session '{p.Action}' by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission or merger membership, dropped."); return; }
+                        if (!AskOwnerOnline("session", p.AddressKey, senderPid, ownerPid)) return;   // W3-0 r1 (F7)
                         target = ownerPid;
                         break;
                     case "snapshot":
-                        if (ownerPid != senderPid)
-                        { Plugin.Logger.LogWarning($"[SharedShop] snapshot for '{p.AddressKey}' from '{senderPid}', who is not its owner ('{ownerPid}') — dropped."); return; }
+                        // W3-0 r1 (F3): the echo comes from the machine that RUNS the address — the ledger owner
+                        // while they are online, else the simulator standing in for them. A REJECTED edit reverts
+                        // on the helper by this very echo, so dropping the simulator's left the helper's copy wrong.
+                        string runner = RouteTargetFor(p.AddressKey, ownerPid);
+                        if (senderPid != runner)
+                        { Plugin.Logger.LogWarning($"[SharedShop] schedule snapshot for '{p.AddressKey}' from '{senderPid}', which is not the machine running it ('{(runner.Length > 0 ? runner : "nobody")}'; ledger owner '{ownerPid}') — dropped."); return; }
                         if (string.IsNullOrEmpty(p.ToPid) || p.ToPid == senderPid) return;
                         target = p.ToPid;
                         break;
@@ -6452,7 +6526,10 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] ReplaySharedPoolsTo: {ex.Message}"); }
         }
 
-        /// <summary>HOST (main thread): a permitted player's assign/unassign of an owner's employee → the owner.</summary>
+        /// <summary>HOST (main thread): a permitted player's staff op on an owner's employee → the owner.
+        /// assign/unassign (slice 3) plus wave 3's "raise". Merger phase 2 wave 3 (W3-1): the gate is the
+        /// UNION check, so a company member acting on a merger-flipped partner shop reaches the owner
+        /// instead of writing to their own replica.</summary>
         public static void HostRouteSharedStaffEdit(SharedStaffEditPayload p, string senderPid)
         {
             try
@@ -6462,10 +6539,12 @@ namespace BigAmbitionsMP
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] staff edit for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
                 if (ownerPid == senderPid) return;
-                if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[SharedShop] staff edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission, dropped."); return; }
-                if (ownerPid == MPConfig.PlayerId) SharedShopStaff.ApplyOnOwner(p);
-                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedStaffEdit, "host", p));
+                if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 3 (W3-1): UNION — direct grant or merger membership
+                { Plugin.Logger.LogWarning($"[SharedShop] staff edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission and not a company member, dropped."); return; }
+                string ftarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
+                if (ftarget.Length == 0 || ftarget == senderPid) return;
+                if (ftarget == MPConfig.PlayerId) SharedShopStaff.ApplyOnOwner(p);
+                else SendToPid(ftarget, MessageEnvelope.Create(MessageType.SharedStaffEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedStaffEdit: {ex.Message}"); }
         }
@@ -6485,8 +6564,10 @@ namespace BigAmbitionsMP
                 if (ownerPid == senderPid) return;
                 if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
                 { Plugin.Logger.LogWarning($"[SharedShop] price edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission and not a company member, dropped."); return; }
-                if (ownerPid == MPConfig.PlayerId) SharedShopPrices.ApplyOnOwner(p);
-                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedPriceEdit, "host", p));
+                string ptarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0 retrofit: an offline owner no longer swallows the edit
+                if (ptarget.Length == 0 || ptarget == senderPid) return;
+                if (ptarget == MPConfig.PlayerId) SharedShopPrices.ApplyOnOwner(p);
+                else SendToPid(ptarget, MessageEnvelope.Create(MessageType.SharedPriceEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedPriceEdit: {ex.Message}"); }
         }
@@ -6506,6 +6587,7 @@ namespace BigAmbitionsMP
                     if (ownerPid == senderPid) return;
                     if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 2: UNION — direct grant or merger membership
                     { Plugin.Logger.LogWarning($"[SharedShop] sales-history request by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
+                    if (!AskOwnerOnline("sales-history", p.AddressKey, senderPid, ownerPid)) return;   // W3-0 r1 (F7)
                     if (ownerPid == MPConfig.PlayerId) SharedShopPrices.HandleSalesHistory(p);
                     else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedSalesHistory, "host", p));
                 }
@@ -6524,7 +6606,8 @@ namespace BigAmbitionsMP
         /// <summary>H-BIZ-1: "request" → the address's OWNER (answered here when the host owns it); "answer" → the ONE
         /// viewer that asked (ToPid), never a broadcast. No grant gate — the native page shows an estimate to anyone —
         /// but only the ledger owner may answer, and the snapshot rate bucket applies. An absent owner (ledger holds a
-        /// stable id, no peer) simply never answers; the viewer keeps $0.</summary>
+        /// stable id, no peer) still never answers — the viewer keeps $0 — but since W3-0 r1 (F7) the refusal says so
+        /// in the log instead of dying inside SendToPid.</summary>
         public static void HostRouteShopValuation(ShopValuationPayload p, string senderPid)
         {
             try
@@ -6536,6 +6619,7 @@ namespace BigAmbitionsMP
                 if (p.Action == "request")
                 {
                     if (ownerPid == senderPid) return;
+                    if (!AskOwnerOnline("valuation", p.AddressKey, senderPid, ownerPid)) return;   // W3-0 r1 (F7)
                     if (ownerPid == MPConfig.PlayerId) ShopValuation.Handle(p);
                     else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.ShopValuation, "host", p));
                 }
@@ -6570,12 +6654,18 @@ namespace BigAmbitionsMP
                     { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
                     if (!SharedWorkAddressAllowed(p.AddressKey))
                     { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
+                    if (!AskOwnerOnline("work-info", p.AddressKey, senderPid, ownerPid)) return;   // W3-0 r1 (F7)
                     if (ownerPid == MPConfig.PlayerId) SharedShopWorkTabs.HandleWorkInfo(p);
                     else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedWorkInfo, "host", p));
                 }
                 else if (p.Action == "snapshot")
                 {
-                    if (senderPid != ownerPid) { Plugin.Logger.LogWarning($"[SharedShop] work snapshot for '{p.AddressKey}' from non-owner '{senderPid}' — dropped."); return; }
+                    // W3-0 r1 (F3): the answer comes from whichever machine RUNS the address (owner online → owner,
+                    // else its absence simulator) — the ledger owner alone dropped the simulator's echo and the
+                    // REVERT a rejected edit depends on with it.
+                    string wrunner = RouteTargetFor(p.AddressKey, ownerPid);
+                    if (senderPid != wrunner)
+                    { Plugin.Logger.LogWarning($"[SharedShop] work snapshot for '{p.AddressKey}' from '{senderPid}', which is not the machine running it ('{(wrunner.Length > 0 ? wrunner : "nobody")}'; ledger owner '{ownerPid}') — dropped."); return; }
                     if (string.IsNullOrEmpty(p.ToPid)) return;
                     if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, p.ToPid)) return;   // wave 2: UNION
                     if (p.ToPid == MPConfig.PlayerId) SharedShopWorkTabs.HandleWorkInfo(p);
@@ -6585,8 +6675,11 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedWorkInfo: {ex.Message}"); }
         }
 
-        /// <summary>Shared-shop slice 6b/6c: a helper's warehouse/factory edit → the building's owner
-        /// (applied here if the host owns it). Grant-gated + rate-capped like every routed op.</summary>
+        /// <summary>Shared-shop slice 6b/6c: a helper's warehouse/factory/marketing/settings edit → the
+        /// building's owner (applied here if the host owns it). Rate-capped like every routed op, and since
+        /// merger phase 2 wave 3 (W3-1) gated on the UNION check, so a company member's native work-tab edit
+        /// on a merger-flipped partner building reaches the owner. SharedWorkAddressAllowed still refuses a
+        /// headquarters (phase 4c).</summary>
         public static void HostRouteSharedWorkEdit(SharedWorkEditPayload p, string senderPid)
         {
             try
@@ -6595,12 +6688,14 @@ namespace BigAmbitionsMP
                 if (!SharedRateOk(senderPid, "work edit")) return;
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0 || ownerPid == senderPid) return;
-                if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' on '{p.AddressKey}' — no Business permission, dropped."); return; }
+                if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 3 (W3-1): UNION — direct grant or merger membership
+                { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
                 if (!SharedWorkAddressAllowed(p.AddressKey))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
-                if (ownerPid == MPConfig.PlayerId) SharedShopWorkTabs.OwnerApplyEdit(p);
-                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedWorkEdit, "host", p));
+                string wtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
+                if (wtarget.Length == 0 || wtarget == senderPid) return;
+                if (wtarget == MPConfig.PlayerId) SharedShopWorkTabs.OwnerApplyEdit(p);
+                else SendToPid(wtarget, MessageEnvelope.Create(MessageType.SharedWorkEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedWorkEdit: {ex.Message}"); }
         }

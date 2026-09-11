@@ -645,6 +645,42 @@ namespace BigAmbitionsMP
                     return MergerAbsence.TestDriveLine();
                 }
 
+                case "warehouses":
+                {
+                    // W3-0 r1 (F9). Read-only. Every Entities.Warehouse registration ON THIS MACHINE that any
+                    // merger surface can touch, grouped by WHO RUNS IT HERE: own = TrulyMine; flipped = a
+                    // partner's copy the merger flipped and nobody here simulates; simulated = SimulatesHere
+                    // (an absent owner's warehouse this machine stands in for). A warehouse that is none of
+                    // the three (a rival's, an empty one) is not a merger surface and is not listed.
+                    var wOwn = new System.Collections.Generic.List<string>();
+                    var wFlip = new System.Collections.Generic.List<string>();
+                    var wSim = new System.Collections.Generic.List<string>();
+                    try
+                    {
+                        var wgi = SaveGameManager.Current;
+                        if (wgi?.BuildingRegistrations == null) return "ERR no building registrations";
+                        foreach (var wr in wgi.BuildingRegistrations)
+                        {
+                            if (!(wr is Entities.Warehouse)) continue;
+                            string wk = ""; try { wk = GameStateReader.AddressKey(wr); } catch { }
+                            if (wk.Length == 0) continue;
+                            bool wsim = false; try { wsim = MergerAbsence.SimulatesHere(wk); } catch { }
+                            if (MergerFlip.TrulyMine(wr)) wOwn.Add(wk);
+                            else if (wsim) wSim.Add(wk);
+                            else if (MergerFlip.IsFlipped(wk)) wFlip.Add(wk);
+                        }
+                    }
+                    catch (Exception exW) { return "ERR " + exW.Message; }
+                    wOwn.Sort(StringComparer.Ordinal); wFlip.Sort(StringComparer.Ordinal); wSim.Sort(StringComparer.Ordinal);
+                    string WList(System.Collections.Generic.List<string> l)
+                    {
+                        var wsb = new StringBuilder("[");
+                        for (int i = 0; i < l.Count; i++) { if (i > 0) wsb.Append(','); wsb.Append('\'').Append(l[i]).Append('\''); }
+                        return wsb.Append(']').ToString();
+                    }
+                    return $"OK warehouses own={WList(wOwn)} flipped={WList(wFlip)} simulated={WList(wSim)}";
+                }
+
                 case "paperwork":
                 {
                     // Merger phase 3-A. No argument on the HOST = the store census; "push" on ANY
@@ -974,8 +1010,47 @@ namespace BigAmbitionsMP
                     return $"OK setprice addr='{vkey}' product='{vprod}' value={vshown} routed={vrouted}";
                 }
 
+                case "workedit":
+                {
+                    // W3-6: the routed warehouse/factory work edit. The DRIVER SLOT is the field chosen here —
+                    // its native write is the single assignment at SharedShopWorkTabs.cs:483, so
+                    // CommitWorkEdit exercises the real payload and the real host gate.
+                    var wtk = arg.Split(' ');
+                    if (wtk.Length < 4) return "ERR usage: workedit <num> <ba:street_x> driver<slot> <employeeId|->";
+                    string waddr  = wtk[0] + " " + wtk[1];
+                    string wfield = wtk[2];
+                    string wvalue = wtk[3] == "-" ? "" : wtk[3];
+                    var wreg = GameStatePatcher.FindRegistration(waddr);
+                    if (wreg == null) return $"ERR no registration at '{waddr}'";
+                    string wkey = waddr; try { wkey = GameStateReader.AddressKey(wreg); } catch { }
+                    bool wrouted = SharedShopWorkTabs.CommitWorkEdit(wkey, wfield, wvalue);
+                    return $"OK workedit addr='{wkey}' field='{wfield}' value='{wtk[3]}' routed={wrouted}";
+                }
+
+                case "staffop":
+                {
+                    // W3-6: the routed staff op. The game has NO player-facing raise surface — hourlyWage is
+                    // written only by hiring negotiation (CandidateSalaryNegotiation.cs:101) and by rival
+                    // poaching (EmployeeInstance.cs:1087/:1159) — so this lever IS the seam for "raise".
+                    var stk = arg.Split(' ');
+                    if (stk.Length < 5) return "ERR usage: staffop <num> <ba:street_x> <employeeId> raise <wage>";
+                    string saddr  = stk[0] + " " + stk[1];
+                    string sempId = stk[2];
+                    string sop    = stk[3];
+                    if (sop != "raise") return "ERR only 'raise' is routed (training and to-do are refused on a routed record)";
+                    if (!float.TryParse(stk[4], System.Globalization.NumberStyles.Float,
+                                        System.Globalization.CultureInfo.InvariantCulture, out var swage))
+                        return "ERR wage must be a number";
+                    var sreg = GameStatePatcher.FindRegistration(saddr);
+                    if (sreg == null) return $"ERR no registration at '{saddr}'";
+                    string skey = saddr; try { skey = GameStateReader.AddressKey(sreg); } catch { }
+                    if (FindEmployee(sempId) == null) return $"ERR no employee '{sempId}' on this machine";
+                    bool srouted = SharedShopStaff.CommitStaffOp(sempId, skey, sop, swage);
+                    return $"OK staffop addr='{skey}' employee='{sempId}' op='{sop}' wage={swage.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} routed={srouted}";
+                }
+
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop)";
             }
         }
 

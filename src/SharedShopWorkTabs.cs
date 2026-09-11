@@ -154,14 +154,20 @@ namespace BigAmbitionsMP
             try { return reg != null ? GameStateReader.AddressKey(reg) : ""; } catch { return ""; }
         }
 
-        /// <summary>Merger phase 2 wave 2 (2026-09-11): the buildings whose work-tab INFO is read from the owner —
-        /// a DIRECT-grant shared building, or a merger-flipped partner building (locally RentedByPlayer through the
-        /// flip, so a member's NATIVE tabs otherwise draw a replica whose interior never loaded). READ side only:
-        /// the edit routes still ride SendEdit, whose host gate stays permission-only until waves 3-4.</summary>
+        /// <summary>The buildings whose work tabs are the OWNER's, not this machine's — a DIRECT-grant shared
+        /// building, or a merger-flipped partner building (locally RentedByPlayer through the flip, so a member's
+        /// NATIVE tabs otherwise draw a replica whose interior never loaded). Wave 2 used it for the INFO read;
+        /// wave 3 (W3-1/W3-2/W3-4) makes it the EDIT predicate too — SharedAddrOf now answers off this one body,
+        /// so the marketing, settings, logo and uniform routes cover a flipped partner building as well, and the
+        /// host's union gate lets them land on the owner.</summary>
         private static bool InfoRead(BuildingRegistration reg, string addr)
         {
             if (SharedShopSchedule.IsSharedShop(reg, addr)) return true;
             if (!SharedShopSchedule.IsMergedShop(reg, addr)) return false;
+            // W3-0: on the machine SIMULATING an absent owner's businesses, the address is still flipped but the
+            // lifted copy IS the live state — those tabs are local, and routing them would send the edit to
+            // itself and then drop it (HostRouteSharedWorkEdit refuses a target that is the sender).
+            try { if (MergerAbsence.SimulatesHere(addr)) return false; } catch { }
             // r2 (review MAJOR-1): IsMergedShop INCLUDES a partner's headquarters (the schedule pipeline wants it), but
             // the host's SharedWorkAddressAllowed refuses HQ addresses for every routed op - a request would die there
             // with a WARN every 5 s while the tab is open. HQ tabs are phase 4c; until then no info session for an HQ.
@@ -1845,8 +1851,39 @@ namespace BigAmbitionsMP
         private static void SendEdit(SharedWorkEditPayload p)
         {
             _lastEditSentAt = Time.unscaledTime;
+            // W3-7: one line per edit routed off a merger-flipped partner building. A direct-grant shop is the
+            // shared-shop feature's own traffic and stays as quiet as it was.
+            try
+            {
+                if (p != null && MergerFlip.FlippedCount > 0 && MergerFlip.IsFlipped(p.AddressKey))
+                    Plugin.Logger.LogInfo($"[Merger] work edit routed to owner '{MergerFlip.ParkedRunner(p.AddressKey)}' for '{p.AddressKey}' ({p.Op})");
+            }
+            catch { }
             if (MPServer.IsRunning) MPServer.HostRouteSharedWorkEdit(p, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkEdit, MPConfig.PlayerId, p));
+        }
+
+        /// <summary>W3-6 lever: commit ONE routed work edit from outside the native tabs. The field set is the
+        /// DRIVER SLOT ("driver0".."driver15" → SlotIndex), whose native write is a single assignment (:483).
+        /// True = the edit left this machine on a route; false = this building is not routed from here, the
+        /// field is not one of those, or there is no session to send it over.</summary>
+        public static bool CommitWorkEdit(string addressKey, string field, string value)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(field)) return false;
+                if (!field.StartsWith("driver", StringComparison.Ordinal)
+                    || !int.TryParse(field.Substring(6), out var slot) || slot < 0 || slot > 15) return false;
+                var reg = GameStatePatcher.FindRegistration(addressKey);
+                string addr = AddrOf(reg);
+                if (reg == null || addr.Length == 0 || !InfoRead(reg, addr)) return false;
+                SendEdit(new SharedWorkEditPayload
+                {
+                    PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "driver", SlotIndex = slot, StrValue = value ?? "",
+                });
+                return MPServer.IsRunning || MPClient.IsConnected;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} CommitWorkEdit: {ex.Message}"); return false; }
         }
 
         /// <summary>MAIN THREAD (MPCanvasUI.Update). Deferred renders (never the same frame a tab was enabled —
@@ -2524,11 +2561,28 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
-        /// <summary>Is this a shop shared with me, and what is its address key?</summary>
+        /// <summary>Is this a building whose edits belong to somebody else — shared with me by a direct grant,
+        /// or a merger-flipped partner building — and what is its address key? Wave 3 (W3-2/W3-4): one body with
+        /// InfoRead, so the marketing/settings/logo/uniform routes and the work-tab info session can never draw
+        /// a different line. A partner's HQ is excluded until phase 4c, as is an address this machine simulates.</summary>
         private static bool SharedAddrOf(BuildingRegistration reg, out string addr)
         {
             addr = AddrOf(reg);
-            return reg != null && addr.Length > 0 && SharedShopSchedule.IsSharedShop(reg, addr);
+            return reg != null && addr.Length > 0 && InfoRead(reg, addr);
+        }
+
+        /// <summary>Ruling 34's surface (W3-0 r1, F8): the buildings whose IDENTITY and existence are not this
+        /// machine's to change — everything SharedAddrOf covers, PLUS an address this machine SIMULATES for an
+        /// absent owner. InfoRead deliberately answers false there (those tabs are local), but running a shop in
+        /// someone's absence is not permission to shut it down or retype it, and there is nobody to route either
+        /// to — so both are refused on the spot. `simulated` tells the caller which of the two it is.</summary>
+        private static bool OwnersIdentity(BuildingRegistration reg, out string addr, out bool simulated)
+        {
+            simulated = false;
+            if (SharedAddrOf(reg, out addr)) return true;
+            addr = AddrOf(reg);
+            try { simulated = addr.Length > 0 && MergerAbsence.SimulatesHere(addr); } catch { }
+            return simulated;
         }
 
         /// <summary>The Marketing tab on a shared shop: open the session so the carry lands and the poll runs.</summary>
@@ -3262,7 +3316,7 @@ namespace BigAmbitionsMP
             {
                 var biz = __instance != null ? __instance.GetComponentInParent<BizManBusiness>() : null;
                 var reg = biz != null ? biz.buildingRegistration : null;
-                if (reg == null || !SharedAddrOf(reg, out var addr)) return true;
+                if (reg == null || !OwnersIdentity(reg, out var addr, out _)) return true;   // W3-0 r1 (F8): a simulator may run the shop, never close it
                 if (_logged.Add("st-shutdown|" + addr))
                     Plugin.Logger.LogInfo($"{Tag} shutdown refused on shared '{addr}' — reserved for the merger (ruling 34).");
                 return false;
@@ -3282,12 +3336,21 @@ namespace BigAmbitionsMP
                     // Read the page native is about to write to, not the session.
                     var biz = __instance != null ? __instance.GetComponentInParent<BizManBusiness>() : null;
                     var reg = biz != null ? biz.buildingRegistration : null;
-                    if (reg == null || !SharedAddrOf(reg, out var addr)) return true;
+                    if (reg == null || !OwnersIdentity(reg, out var addr, out var simulated)) return true;
                     string typed = "";
                     if (AccessTools.Field(typeof(BizManSettings), "businessName")?.GetValue(__instance) is TMP_InputField f)
                         typed = (f.text ?? "").Trim();
                     if (typed.Length > 0 && typed != (reg.BusinessName ?? ""))
-                        SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "rename", StrValue = typed });
+                    {
+                        // W3-0 r1 (F8): on the SIMULATOR there is nothing to route to (this machine is the route
+                        // target) and a stand-in never retypes the absent owner's business — refuse, do not send.
+                        if (simulated)
+                        {
+                            if (_logged.Add("st-rename-sim|" + addr))
+                                Plugin.Logger.LogInfo($"{Tag} rename refused on shared '{addr}' — reserved for the merger (ruling 34).");
+                        }
+                        else SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "rename", StrValue = typed });
+                    }
                     // Clear the panel's own dirty flag (review MINOR). Left set, it makes every later tab
                     // click pop native's unsaved-changes confirm — and, worse, our snapshot apply reads it as
                     // "the helper is typing" and suppresses the repaint, so a REFUSED rename never snaps
@@ -3300,7 +3363,10 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Saving the logo on a shared shop routes the five settings; the owner regenerates the
-        /// images and the existing business sync carries them back to everyone.</summary>
+        /// images and the existing business sync carries them back to everyone. On an address this machine
+        /// SIMULATES there is nobody to route to, and ruling 34 forbids the change anyway (W3-0 r3, F3): a
+        /// logo is IDENTITY, so a stand-in running the shop may not retype it — refused on the spot, exactly
+        /// like shutdown and rename on the same screen. Hence OwnersIdentity here and not SharedAddrOf.</summary>
         [HarmonyPatch(typeof(LogoCustomizer), nameof(LogoCustomizer.SaveLogo))]
         public static class Patch_LogoCustomizer_Save_Routed
         {
@@ -3310,7 +3376,13 @@ namespace BigAmbitionsMP
                 {
                     var biz = __instance != null ? __instance.GetComponentInParent<BizManBusiness>() : null;
                     var lreg = biz != null ? biz.buildingRegistration : null;
-                    if (lreg == null || !SharedAddrOf(lreg, out var addr)) return true;
+                    if (lreg == null || !OwnersIdentity(lreg, out var addr, out var simulated)) return true;
+                    if (simulated)
+                    {
+                        if (_logged.Add("st-logo|" + addr))
+                            Plugin.Logger.LogInfo($"{Tag} logo refused on shared '{addr}' — reserved for the merger (ruling 34).");
+                        return false;   // routes nothing: the owner is away and this is not ours to retype
+                    }
                     var info = new SettingsInfo();
                     var t = typeof(LogoCustomizer);
                     info.LogoShape = AccessTools.Field(t, "_logoShape")?.GetValue(__instance) as string ?? "";
@@ -3954,14 +4026,24 @@ namespace BigAmbitionsMP
             try
             {
                 if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.PlayerId)) return;
-                if (!GrantSync.IsGrantedDirect(GrantKind.Business, MPConfig.PlayerId, p.PlayerId))
+                if (!GrantSync.IsGranted(GrantKind.Business, MPConfig.PlayerId, p.PlayerId))   // W3-2: the UNION the host gate now uses
                 {
                     if (_logged.Add("edit-nogrant|" + p.PlayerId))
-                        Plugin.Logger.LogInfo($"{Tag} work edit from '{p.PlayerId}' but they hold no Business grant from me — ignored.");
+                        Plugin.Logger.LogInfo($"{Tag} work edit from '{p.PlayerId}' but they hold no Business grant from me and are not a company member — ignored.");
                     return;
                 }
                 var reg = GameStatePatcher.FindRegistration(p.AddressKey);
-                if (reg == null || !MergerFlip.TrulyMine(reg)) return;
+                // W3-0: mine, or a business I am simulating for an absent partner (still flipped here, but its
+                // lifted copy is the live state, and my owner-style pushes carry the edit onward).
+                bool commitsHere = reg != null && MergerFlip.TrulyMine(reg);
+                if (!commitsHere) { try { commitsHere = reg != null && MergerAbsence.SimulatesHere(p.AddressKey); } catch { } }
+                if (!commitsHere)
+                {
+                    // W3-0 r1 (F4): the resolver sent this here, so silence is the one thing we must not do.
+                    if (_logged.Add("edit-notmine|" + p.AddressKey))
+                        Plugin.Logger.LogWarning($"{Tag} work edit '{p.Op}' on '{p.AddressKey}' from '{p.PlayerId}' refused — not run here (not mine and not simulated here).");
+                    return;
+                }
                 bool applied; string echoTab;
                 if (p.Op == "rename" || p.Op == "logo")
                 {
@@ -3998,8 +4080,17 @@ namespace BigAmbitionsMP
                         _ => false,
                     };
                 }
-                else return;
-                if (!applied) Plugin.Logger.LogInfo($"{Tag} work edit '{p.Op}' on '{p.AddressKey}' from '{p.PlayerId}' NOT applied — echoing truth back.");
+                else
+                {
+                    // RUN T-P2-WAVE3 step 12 (F4): a routed "driver"/"recipe"/"produce"/"order"/"alias" op on a
+                    // building that is not a warehouse/factory fell through to a bare return — no apply, no echo,
+                    // no log, and nobody could tell it from a delivered edit. Say why (the echo stays out of it:
+                    // there is no tab on this building to snapshot).
+                    Plugin.Logger.LogWarning($"{Tag} work edit '{p.Op}' on '{p.AddressKey}' from '{p.PlayerId}' refused — not a warehouse/factory.");
+                    return;
+                }
+                if (applied) Plugin.Logger.LogInfo($"[Merger] work edit applied on '{p.AddressKey}' from '{p.PlayerId}' ({p.Op})");
+                else Plugin.Logger.LogInfo($"{Tag} work edit '{p.Op}' on '{p.AddressKey}' from '{p.PlayerId}' NOT applied — echoing truth back.");
                 BuildAndSendSnapshot(p.AddressKey, echoTab, p.PlayerId, "", echo: true);   // echo either way: apply confirms, reject REVERTS (Echo bypasses the helper's sig gate — review blocker)
                 // ruling 32: data alone never repaints a native tab. "endcontract" is the ONLY routed op that
                 // changes the owner's contract LIST (ApplyContractOp creates item rows, never contracts).

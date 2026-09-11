@@ -456,7 +456,11 @@ namespace BigAmbitionsMP
                 p.BaseSigs ??= new List<string>();
                 var reg = FindReg(p.AddressKey);
                 if (reg == null) { Plugin.Logger.LogWarning($"{Tag} routed schedule for unknown '{p.AddressKey}' — dropped."); return; }
-                if (!MergerFlip.TrulyMine(reg)) { Plugin.Logger.LogWarning($"{Tag} routed schedule for '{p.AddressKey}' — not my shop, dropped."); return; }
+                // W3-0 r1 (F1): mine, or an absent owner's business this machine simulates (its lifted copy
+                // is the live state) — anywhere else the resolver mis-delivered and we say so.
+                bool runsHere = MergerFlip.TrulyMine(reg);
+                if (!runsHere) { try { runsHere = MergerAbsence.SimulatesHere(p.AddressKey); } catch { } }
+                if (!runsHere) { Plugin.Logger.LogWarning($"{Tag} routed schedule for '{p.AddressKey}' — not my shop and not simulated here, dropped."); return; }
                 if (!ScheduleShapeOk(p.Days, out var why)) { Plugin.Logger.LogWarning($"{Tag} routed schedule for '{p.AddressKey}' from '{p.PlayerId}' dropped — {why}."); return; }
                 string key = p.AddressKey + "|" + p.PlayerId;
                 _appliedSeq.TryGetValue(key, out var last);

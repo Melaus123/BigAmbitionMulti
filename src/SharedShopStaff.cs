@@ -86,6 +86,55 @@ namespace BigAmbitionsMP
 
         public static bool ShowInMyEmployees(string employeeId) => ListScope && IsFromGrantOwner(employeeId);
 
+        /// <summary>Merger phase 2 wave 3 (W3-3): a record copied from an owner whose writes I must ROUTE —
+        /// a direct Business grant OR merger membership, the same UNION the host gates now use. The narrower
+        /// IsFromGrantOwner still decides the direct-grant-only SURFACES (which list shows the record, whose
+        /// shops the assign dropdown offers); this decides whether a WRITE here may stand.</summary>
+        public static bool IsFromRoutedOwner(string employeeId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(employeeId) || !MPRegisterSync.IsInjectedStaff(employeeId)) return false;
+                string owner = MPRegisterSync.OwnerOfInjected(employeeId);
+                if (owner.Length == 0 || owner == MPConfig.PlayerId) return false;
+                return GrantSync.IsGranted(GrantKind.Business, owner, MPConfig.PlayerId);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>W3-0/W3-3: is THIS machine the one that commits for that building — the owner's own, or,
+        /// while the owner is away, the machine simulating their businesses (whose lifted copy is the live
+        /// state and still reads as flipped, so TrulyMine alone would refuse its own routed work).</summary>
+        private static bool CommitsHere(BuildingRegistration reg, string addressKey)
+        {
+            if (reg == null) return false;
+            if (MergerFlip.TrulyMine(reg)) return true;
+            try { return MergerAbsence.SimulatesHere(addressKey); } catch { return false; }
+        }
+
+        /// <summary>W3-6 lever + any future UI seam: send ONE routed staff op ("raise") for an employee copied
+        /// from an owner I route to. True = it left this machine on a route; false = not a routed record (the
+        /// caller's own write stands) or nothing to send it over.</summary>
+        public static bool CommitStaffOp(string employeeId, string addressKey, string op, float wage)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(employeeId) || string.IsNullOrEmpty(op)) return false;
+                if (!IsFromRoutedOwner(employeeId)) return false;
+                _seq.TryGetValue(employeeId, out var seq); seq++; _seq[employeeId] = seq;
+                var p = new SharedStaffEditPayload
+                {
+                    PlayerId = MPConfig.PlayerId, EmployeeId = employeeId, Seq = seq, SeqEpoch = _seqEpoch,
+                    Action = op, AddressKey = addressKey ?? "", FromAddressKey = addressKey ?? "", Wage = wage,
+                };
+                Plugin.Logger.LogInfo($"[Merger] staff op routed to owner '{MPRegisterSync.OwnerOfInjected(employeeId)}' for '{p.AddressKey}' ({op} {employeeId})");
+                if (MPServer.IsRunning) { MPServer.HostRouteSharedStaffEdit(p, MPConfig.PlayerId); return true; }
+                if (MPClient.IsConnected) { MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedStaffEdit, MPConfig.PlayerId, p)); return true; }
+                return false;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} CommitStaffOp: {ex.Message}"); return false; }
+        }
+
         // ── bulk (mass) actions: ONE GROUP per selection (ruling 23) ──
 
         /// <summary>Which group a row belongs to: "" = mine, an owner id = a record copied from that granting owner,
@@ -441,6 +490,32 @@ namespace BigAmbitionsMP
                 bool candidate = false; try { candidate = emp.IsCandidate; } catch { }
                 if (candidate) { Plugin.Logger.LogWarning($"{Tag} routed {p.Action}: '{SafeName(emp)}' is a candidate, not hired — ignored."); return; }
 
+                // W3-3: ops that do not MOVE anybody are applied BEFORE the owner-wins placement gate — a
+                // raise has no "where did you think they were" for the owner and the helper to disagree about.
+                if (p.Action == "raise")
+                {
+                    float want = p.Wage;
+                    if (!(want > 0f) || want > 10000f)
+                    { Plugin.Logger.LogWarning($"{Tag} routed raise of '{SafeName(emp)}' by '{p.PlayerId}': implausible wage {want} — ignored."); return; }
+                    // W3-0 r1 (F2/MAJOR): a Business grant and a company membership are per-ADDRESS. Without
+                    // this test, holding ONE of my shops let the sender set the wage of ANY of my employees —
+                    // bench, headquarters, drivers included. The employee must be AT the address they routed on.
+                    string atKey = (AddrOf(emp.assignedAddress) ?? "").Trim();
+                    string wantKey = (p.AddressKey ?? "").Trim();
+                    if (wantKey.Length == 0 || !string.Equals(atKey, wantKey, StringComparison.OrdinalIgnoreCase))
+                    {
+                        Plugin.Logger.LogWarning($"{Tag} routed raise of '{SafeName(emp)}' by '{p.PlayerId}': employee is not at '{wantKey}' — ignored.");
+                        return;
+                    }
+                    try { emp.hourlyWage = want; } catch (Exception rex) { Plugin.Logger.LogWarning($"{Tag} routed raise: {rex.Message}"); return; }
+                    try { SaveGameManager.MarkChange(); } catch { }
+                    string rkey = AddrOf(emp.assignedAddress);
+                    Plugin.Logger.LogInfo($"{Tag} applied routed raise of '{SafeName(emp)}' from '{p.PlayerId}' — hourly wage {want.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}.");
+                    RefreshMyEmployeesIfOpen();
+                    RepublishAfterStaffEdit(rkey, rkey);
+                    return;
+                }
+
                 var gi = SaveGameManager.Current;
                 Address oldAddr = emp.assignedAddress;
                 string oldKey = AddrOf(oldAddr);
@@ -459,7 +534,7 @@ namespace BigAmbitionsMP
                 if (p.Action == "assign")
                 {
                     var target = FindReg(p.AddressKey, gi);
-                    if (target == null || !MergerFlip.TrulyMine(target)) { Plugin.Logger.LogWarning($"{Tag} routed assign of '{SafeName(emp)}' to '{p.AddressKey}' — not my shop, ignored."); RepublishAfterStaffEdit(oldKey, oldKey); return; }
+                    if (target == null || !CommitsHere(target, p.AddressKey)) { Plugin.Logger.LogWarning($"{Tag} routed assign of '{SafeName(emp)}' to '{p.AddressKey}' — not my shop, ignored."); RepublishAfterStaffEdit(oldKey, oldKey); return; }
                     string type = ""; try { type = target.businessTypeName ?? ""; } catch { }
                     if (type == "ba:businesstype_headquarters" || type == "ba:businesstype_empty" || type == "ba:businesstype_warehouse" || type.Length == 0)
                     { Plugin.Logger.LogWarning($"{Tag} routed assign of '{SafeName(emp)}' to '{p.AddressKey}' — not a shop that can be staffed through permissions, ignored."); RepublishAfterStaffEdit(oldKey, oldKey); return; }
@@ -472,7 +547,7 @@ namespace BigAmbitionsMP
                     // shop it knows, the two "already"/"elsewhere" halves below cannot be reached today — kept as guards.
                     if (oldKey.Length == 0) { RepublishAfterStaffEdit("", ""); return; }   // already unassigned — confirm
                     var cur = FindReg(oldKey, gi);
-                    if (cur == null || !MergerFlip.TrulyMine(cur) || oldKey != p.AddressKey)
+                    if (cur == null || !CommitsHere(cur, oldKey) || oldKey != p.AddressKey)
                     { Plugin.Logger.LogWarning($"{Tag} routed unassign of '{SafeName(emp)}' from '{p.AddressKey}' — they are at '{oldKey}', ignored."); RepublishAfterStaffEdit(oldKey, oldKey); return; }
                 }
                 else return;
@@ -716,13 +791,18 @@ namespace BigAmbitionsMP
             static void Finalizer() { _massAssignOwner = ""; }
         }
 
-        /// <summary>Training is money — the owner's people are never trainable here (the game then hides the train buttons).</summary>
+        /// <summary>Training is money — the owner's people are never trainable here (the game then hides the
+        /// train buttons). Wave 3 (W3-3) widens this to the routed UNION, so a company member cannot train a
+        /// merger-flipped partner's employee on their own replica either. CanTrainSkill is the ONE seam both
+        /// training paths pass through (MyEmployees.cs:373-374 and TrainPrimarySkillMassAction.cs:24); the
+        /// writes themselves live in anonymous confirm lambdas, so refusal here is the whole gate and there
+        /// is nothing to route to the owner.</summary>
         [HarmonyPatch(typeof(EmployeeInstance), nameof(EmployeeInstance.CanTrainSkill))]
         public static class Patch_EmployeeInstance_CanTrainSkill_Guard
         {
             static void Postfix(EmployeeInstance __instance, ref bool __result)
             {
-                try { if (__result && IsFromGrantOwner(__instance?.id)) __result = false; } catch { }
+                try { if (__result && IsFromRoutedOwner(__instance?.id)) __result = false; } catch { }
             }
         }
 
@@ -761,13 +841,16 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>No to-do entries about the owner's staff in the helper's save (they would outlive the copy).</summary>
+        /// <summary>No to-do entries about another player's staff in this save (they would outlive the copy).
+        /// Wave 3 (W3-3) widens it to the routed UNION so a merger-flipped partner's employee is covered too.
+        /// Suppression, not a route: the owner's own engine files the same to-do on the real record whenever
+        /// it is due (EmployeeHelper.cs:401/:545), so routing one would duplicate their bookkeeping.</summary>
         [HarmonyPatch(typeof(EmployeeInstance), nameof(EmployeeInstance.AddTodoTask))]
         public static class Patch_EmployeeInstance_AddTodoTask_Guard
         {
             static bool Prefix(EmployeeInstance __instance)
             {
-                try { return !IsFromGrantOwner(__instance?.id); } catch { return true; }
+                try { return !IsFromRoutedOwner(__instance?.id); } catch { return true; }
             }
         }
 

@@ -2133,10 +2133,12 @@ namespace BigAmbitionsMP
         ///
         /// INCOME IS SUMMED OVER DE-DUPLICATED PER-BUSINESS ROWS, NOT PER-MEMBER TOTALS. A member's
         /// published WeeklyIncome is FinancialSummaryHelper.GetLastFinancialSummaries(7).totalProfit
-        /// (RivalSelfStats.Build), and Patch_FinancialSummary_OwnBusinessesOnly deliberately keeps
-        /// merger-FLIPPED partner shops IN each member's daily summary ("a merged company's combined
-        /// books") - so two members' totals already overlap on every flipped address and adding them
-        /// would count the same shop twice. Address-keyed de-duplication is immune to that.
+        /// (RivalSelfStats.Build). Patch_FinancialSummary_OwnBusinessesOnly EXCLUDES merger-FLIPPED
+        /// partner shops from each member's daily summary: CreateFinancialSummary is a step of
+        /// Patch_MergerAuthorityVeil (:3506) and the veil un-flips every flipped registration for the
+        /// duration of that pass, so a member's own books hold only what they themselves operate.
+        /// Address-keyed de-duplication stands on its own merit - it is what makes the company total
+        /// independent of WHICH member is operating an address on any given day.
         ///
         /// ONE BUSINESS DEFINITION for every member including the local one: the NATIVE leaderboard
         /// test (RivalLeaderboard.GetPlayerLeaderboardData decompile :73 - generatesrevenue-tagged, or
@@ -3611,7 +3613,11 @@ namespace BigAmbitionsMP
         /// destination)` moves the goods for ONE leg. It checks only RAW RentedByPlayer on the plan's own
         /// warehouse (:79) — which the flip satisfies — and does not test the DESTINATION at all, and the
         /// logistics pass has no veil entry, so a leg would move goods into or out of a partner's flipped
-        /// replica. The leg is refused when either end is flipped; the HQ owner's own legs are untouched
+        /// replica. A leg runs only when BOTH ends sit in the SAME operating set (W3-0 r3, F1): both mine, or
+        /// both simulated here for an absent owner — on the machine standing in for one, its lifted copy is the
+        /// live state, so that owner's own daily legs keep running while they are away. Every mixed leg is
+        /// refused: one end mine and the other run here for an absent partner is a goods movement between two
+        /// MEMBERS' buildings — wave 4's route, never a side effect of an absence. The HQ owner's own legs are untouched
         /// (which is why this is a per-leg gate and not a veil entry). The plan's UI creation is not
         /// touched. LogisticsManagerPlan has NO name field (its id is a base64 uuid), so the plan is
         /// named in the log by its warehouse address key. One INFO per plan per game day.</summary>
@@ -3628,9 +3634,20 @@ namespace BigAmbitionsMP
                     if (MergerFlip.FlippedCount == 0 || __instance == null) return true;   // inert without a merger
                     bool src = FlippedAddr(__instance.targetAddress);
                     bool dst = destination != null && FlippedAddr(destination.deliveryTargetAddress);
-                    if (!src && !dst) return true;
-                    string plan = "?";
-                    try { plan = GameStateReader.AddressKey(__instance.targetAddress); } catch { }
+                    string srcKey = "", dstKey = "";
+                    try { srcKey = GameStateReader.AddressKey(__instance.targetAddress); } catch { }
+                    try { if (destination != null) dstKey = GameStateReader.AddressKey(destination.deliveryTargetAddress); } catch { }
+                    // W3-0 r3 (F1): an end this machine SIMULATES is not "operated elsewhere" — it is operated
+                    // HERE, for an absent owner. The two ends must sit in the SAME operating set: both mine, or
+                    // both simulated here. Every mixed leg (one end mine + one simulated, or any end flipped and
+                    // NOT simulated) is a cross-owner goods movement — wave 4's route, refused for good, never
+                    // something an absence may start. An end with no address does not vote: an unset destination
+                    // row cannot cross an owner boundary.
+                    if (!src && !dst) return true;                                        // both ends mine
+                    bool srcSim = srcKey.Length == 0 || MergerAbsence.SimulatesHere(srcKey);
+                    bool dstSim = dstKey.Length == 0 || MergerAbsence.SimulatesHere(dstKey);
+                    if (srcSim && dstSim) return true;                                    // both ends simulated here
+                    string plan = srcKey.Length > 0 ? srcKey : "?";
                     int day = 0; try { day = SaveGameManager.Current != null ? SaveGameManager.Current.Day : 0; } catch { }
                     string key = __instance.id ?? plan;
                     if (!_loggedDay.TryGetValue(key, out var seen) || seen != day)
@@ -3641,6 +3658,133 @@ namespace BigAmbitionsMP
                     return false;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics leg gate: {ex.Message}"); return true; }
+            }
+        }
+
+        /// <summary>STOP-GAP S4 — HQ LOGISTICS PLAN EDIT (wave 3, W3-5b).
+        /// S3 above gates the per-tick DELIVERY pass; the plan's own commits are un-gated. Decompile pass
+        /// 2026-09-11: the EDIT UIs mutate a STORED plan object in place (LogisticsManagerPlanUI.cs :107/:227/
+        /// :566, LogisticsManagerDestinationUI.cs :60, each followed by SaveGameManager.MarkChange; the only
+        /// list reference in PlanUI is the READ at :178). The single place a plan enters the list is
+        /// LogisticsManagersPlanList.cs:236 AddPlan → :243, stamping headquartersAddress from the BizMan page
+        /// being viewed (:240). A plans list is per-save, so a plain co-member holds NO plan object for a
+        /// partner's HQ — the in-place mutations are unreachable there and only CREATION needs the gate.
+        /// The two dropdowns are gated as well, because they are reachable on a member's OWN plan and can
+        /// name a partner's flipped building as source or destination — a leg S3 then refuses every day.
+        /// W3-0 r3 (F2): what decides is the PLAN's own operating set, read off its headquartersAddress — a
+        /// plan whose HQ this machine SIMULATES may name only ends it simulates, a plan whose HQ is mine may
+        /// name only mine, and a plan belonging to a partner who is here to run it is not editable at all.
+        /// That is the line S3 draws on the leg, drawn one step earlier, so the mixed plan cannot be built.
+        /// Refusal = the
+        /// native method does not run: silent to the player, one INFO line in the existing merger wording,
+        /// inert without a merger. Wave 4 replaces these with routes.</summary>
+        private static bool PartnerOperated(BuildingRegistration reg)
+        {
+            if (reg == null) return false;
+            bool rented; try { rented = reg.RentedByPlayer; } catch { return false; }
+            if (!rented || MergerFlip.TrulyMine(reg)) return false;
+            try { if (MergerAbsence.SimulatesHere(GameStateReader.AddressKey(reg))) return false; } catch { }
+            return true;
+        }
+
+        // W3-0 r3 (F2): which operating set a plan or an end belongs to. SetOwn = this player's own building;
+        // SetSim = a building this machine runs for an ABSENT owner; SetElsewhere = a partner's building run on
+        // another machine; SetNone = no address at all (an unset dropdown row — it does not vote).
+        private const int SetOwn = 0, SetSim = 1, SetElsewhere = -1, SetNone = 2;
+
+        private static int SetOf(string key, bool flipped)
+        {
+            if (key == null || key.Length == 0) return SetNone;
+            if (!flipped) return SetOwn;
+            try { return MergerAbsence.SimulatesHere(key) ? SetSim : SetElsewhere; } catch { return SetElsewhere; }
+        }
+
+        private static int OperatingSet(Address address)
+        {
+            string k = ""; try { k = GameStateReader.AddressKey(address); } catch { }
+            return SetOf(k, FlippedAddr(address));
+        }
+
+        private static int OperatingSet(BuildingRegistration reg)
+        {
+            if (reg == null) return SetNone;
+            string k = ""; try { k = GameStateReader.AddressKey(reg); } catch { }
+            bool rented; try { rented = reg.RentedByPlayer; } catch { return SetNone; }
+            return SetOf(k, rented && !MergerFlip.TrulyMine(reg));
+        }
+
+        /// <summary>The PLAN's set, read off its headquartersAddress (LogisticsManagerPlan.cs:36). A plan the
+        /// UI has not loaded (null) counts as this player's own: both native commits dereference _currentPlan
+        /// unconditionally (LogisticsManagerPlanUI.cs:214/:568), so a null there is native's own crash and not
+        /// a case this gate should widen for.</summary>
+        private static int PlanSet(Buildings.Office.Headquarters.LogisticsManagerPlan plan)
+        {
+            if (plan == null) return SetOwn;
+            int s = OperatingSet(plan.headquartersAddress);
+            return s == SetNone ? SetOwn : s;
+        }
+
+        /// <summary>May this end go on that plan? Only inside one operating set, and never on a plan that is
+        /// somebody else's to edit. SetNone (clearing a row) is allowed on any plan we may edit at all.</summary>
+        private static bool EndFitsPlan(int planSet, int endSet)
+            => (planSet == SetOwn || planSet == SetSim) && (endSet == SetNone || endSet == planSet);
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList), "AddPlan")]
+        public static class Patch_LogisticsPlanCreate_MergerGate
+        {
+            static bool Prefix()
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;   // inert without a merger
+                    var ui = InstanceBehavior<UI.UIs>.Instance;
+                    var biz = ui != null && ui.fullMenu != null && ui.fullMenu.bizMan != null ? ui.fullMenu.bizMan.business : null;
+                    var reg = biz != null ? biz.buildingRegistration : null;
+                    if (!PartnerOperated(reg)) return true;
+                    Plugin.Logger.LogWarning($"[Merger] logistics plan at '{GameStateReader.AddressKey(reg)}' refused - company building operated elsewhere (route pending)");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics plan-create gate: {ex.Message}"); return true; }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI), "UpdateSelectedBusiness")]
+        public static class Patch_LogisticsPlanDestination_MergerGate
+        {
+            // ____currentPlan = ___ + the field name '_currentPlan' (LogisticsManagerPlanUI.cs:71
+            // `private LogisticsManagerPlan _currentPlan;`) = four underscores.
+            static bool Prefix(Address businessAddress, Buildings.Office.Headquarters.LogisticsManagerPlan ____currentPlan)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;
+                    if (EndFitsPlan(PlanSet(____currentPlan), OperatingSet(businessAddress))) return true;
+                    string a = ""; try { a = GameStateReader.AddressKey(businessAddress); } catch { }
+                    Plugin.Logger.LogWarning($"[Merger] logistics plan destination '{a}' refused - company building operated elsewhere (route pending)");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics plan-destination gate: {ex.Message}"); return true; }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI), "OnChangedWarehouse")]
+        public static class Patch_LogisticsPlanWarehouse_MergerGate
+        {
+            // ___ + the field names '_warehouses' (LogisticsManagerPlanUI.cs:73) and '_currentPlan' (:71
+            // `private LogisticsManagerPlan _currentPlan;`) = four underscores each.
+            static bool Prefix(int warehouseIndex, System.Collections.Generic.List<BuildingRegistration> ____warehouses,
+                               Buildings.Office.Headquarters.LogisticsManagerPlan ____currentPlan)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || warehouseIndex <= 0 || ____warehouses == null
+                        || warehouseIndex - 1 >= ____warehouses.Count) return true;   // index 0 = clearing the warehouse
+                    var reg = ____warehouses[warehouseIndex - 1];
+                    if (EndFitsPlan(PlanSet(____currentPlan), OperatingSet(reg))) return true;
+                    Plugin.Logger.LogWarning($"[Merger] logistics plan warehouse '{GameStateReader.AddressKey(reg)}' refused - company building operated elsewhere (route pending)");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics plan-warehouse gate: {ex.Message}"); return true; }
             }
         }
 
@@ -5054,9 +5198,10 @@ namespace BigAmbitionsMP
         // foreign regs for the duration of the build (RunDaily-strip pattern:
         // Prefix hides, Finalizer restores and rethrows) so the native loop skips
         // them naturally.  Forward-looking only: summaries already persisted stay
-        // polluted (not provably repairable).  Merger-aware via
-        // HideFromOwnAssetLists — flipped shops stay IN the summary, which is
-        // exactly what a merged company's combined books should do.
+        // polluted (not provably repairable).  Merger: CreateFinancialSummary is a
+        // step of Patch_MergerAuthorityVeil (:3506), and that veil un-flips every
+        // flipped registration for the pass — so a partner's flipped shops are
+        // EXCLUDED here too, and each member's summary is only what they operate.
         [HarmonyPatch(typeof(Helpers.FinancialSummaryHelper), nameof(Helpers.FinancialSummaryHelper.CreateFinancialSummary))]
         public static class Patch_FinancialSummary_OwnBusinessesOnly
         {
