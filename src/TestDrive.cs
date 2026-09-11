@@ -634,6 +634,14 @@ namespace BigAmbitionsMP
                     return gsb.ToString();
                 }
 
+                case "absence":
+                {
+                    // Merger phase 3-B (B6). On the HOST the marks come from the live table; on any
+                    // other machine from the MergerState broadcast. simulating_here is what THIS
+                    // machine actually runs for an absent owner. Read-only - no write path of its own.
+                    return MergerAbsence.TestDriveLine();
+                }
+
                 case "paperwork":
                 {
                     // Merger phase 3-A. No argument on the HOST = the store census; "push" on ANY

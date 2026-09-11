@@ -1944,6 +1944,10 @@ namespace BigAmbitionsMP
                             pending.Add((kv.Key, kv.Value));
                 foreach (var (addr, v) in pending)
                 {
+                    // P3-B (B3c): a shop THIS machine simulates for an absent owner holds REAL records
+                    // now (promoted out of the injected registry). A roster publish for it must not
+                    // re-inject display copies beside them — nobody but us is running that shop.
+                    if (MergerAbsence.SimulatesHere(addr)) continue;
                     BuildingRegistration? reg = null;
                     foreach (var r in gi.BuildingRegistrations)
                         if (r != null && GameStateReader.AddressKey(r) == addr) { reg = r; break; }

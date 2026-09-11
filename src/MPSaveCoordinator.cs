@@ -2373,7 +2373,17 @@ namespace BigAmbitionsMP
             // must never claim a partner's business as this player's tenancy (two-owners class).
             // VeilPush reverts every flipped reg to native truth for the whole serialization;
             // the finally below re-flips (VeilPop) even if the save throws.
-            MergerFlip.VeilPush();
+            MergerFlip.SaveStripPush();
+            // P3-B, same choke point: the owner lists this machine INSTALLED to simulate an absent
+            // member's businesses are that member's paperwork, not this save's - they come out for the
+            // serialization and go straight back in the finally (exactly as the flip is un-done).
+            // r4 m2: this sits BETWEEN SaveStripPush and the try/finally below, so a throw here skipped
+            // the finally entirely - VeilPop never ran and _veilDepth stayed wedged for the rest of the
+            // session. Guarded exactly like the fork site (OfflineForkSave.cs:40); the no-op default
+            // keeps the finally's call valid.
+            Action restoreAbsenceLists = () => { };
+            try { restoreAbsenceLists = MergerAbsence.StripInstalledForSave(); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] save strip: {ex.Message}"); }
             // Round-68, same choke point: ActiveVehicleId must never persist a BAMP_ ghost-proxy id
             // (live save artifact 2026-07-24: the host saved "using" the client's flatbed proxy; on the
             // next load IsUsingVehicle=true + GetCurrentVehicle()=null → HasPaidForAllItems NREs →
@@ -2495,7 +2505,8 @@ namespace BigAmbitionsMP
                 // can't leave the live session with un-staffed registers.  JoinSaveGameThreads (inside the try)
                 // has returned in every normal/caught path by here, so serialization is done and gi is safe.
                 try { restoreSynthetics(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore synthetics: {ex.Message}"); }
-                try { MergerFlip.VeilPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore merger flip: {ex.Message}"); }
+                try { MergerFlip.SaveStripPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore merger flip: {ex.Message}"); }
+                try { restoreAbsenceLists(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore absence lists: {ex.Message}"); }
                 // Round-68: put the live borrowed-ghost state back (serialization is done by here).
                 try { if (ghostActiveId.Length > 0) SaveGameManager.Current.ActiveVehicleId = ghostActiveId; }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] restore ActiveVehicleId: {ex.Message}"); }
@@ -3520,6 +3531,7 @@ namespace BigAmbitionsMP
                 // carries it atomically; there is no second write to tear or lose.
                 try { PaperworkSync.FlushNow("pre-save"); } catch { }
                 m.Paperwork = MPServer.SnapshotPaperwork();
+                m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                 m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans are part of the save moment
                 // Round-53: the running session's tuning dials persist with the save (mid-session
                 // changes included), so the next load's lobby mirrors what this world actually ran.
@@ -3584,6 +3596,7 @@ namespace BigAmbitionsMP
                     m.MergerWalletBalance     = MPServer.SnapshotWalletBalances();      // slice 4: pooling/payout
                     m.MergerWalletContributed = MPServer.SnapshotWalletContributed();   // states persist immediately
                     m.Paperwork = MPServer.SnapshotPaperwork();   // phase 3-A: the store rides the model, so a grants-only write cannot drop it (no flush here — this path is not guaranteed main-thread)
+                    m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                     m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans ride the manifest like grants
                     // Round-274/H1: do NOT touch SavedAtUnix here — it means "when was this
                     // WORLD saved", and a grants-only persist is not a world save.  Re-stamping
@@ -3663,7 +3676,10 @@ namespace BigAmbitionsMP
                 // Any other session keeps whatever paperwork its own manifest already carries — no
                 // carry-over across slots or timelines.
                 if (StripAutoSuffix(sessionName) == StripAutoSuffix(_activeSessionName))
+                {   // P3-B review MAJOR-5: BOTH stamps sit under the lineage gate (a bare second statement escaped it)
                     m.Paperwork = MPServer.SnapshotPaperwork();
+                    m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
+                }
                 MPSaveManager.WriteManifest(sessionName, m);
             }
         }

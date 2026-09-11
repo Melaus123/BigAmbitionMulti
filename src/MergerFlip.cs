@@ -76,6 +76,7 @@ namespace BigAmbitionsMP
         {
             if (UnityEngine.Time.unscaledTime < _nextTick) return;
             _nextTick = UnityEngine.Time.unscaledTime + 1f;
+            try { MergerAbsence.Tick(); } catch { }   // P3-B: the host's PACED hand-over snapshots, one per tick
             if (_veilDepth > 0)
             {
                 // DIAG [FlipProbe] (2026-07-07, host stuck-flip: no 'flip OFF' after dissolve): a
@@ -202,27 +203,41 @@ namespace BigAmbitionsMP
         // ── Authority veil (§13-A passes) + save strip ────────────────────────
         /// <summary>Revert every flipped reg to native truth. Nesting-counted: only the OUTERMOST
         /// push/pop touches the flags (veiled native passes call each other).</summary>
-        public static void VeilPush()
+        public static void VeilPush() => Push(saveStrip: false);
+        public static void VeilPop()  => Pop();
+
+        /// <summary>P3-B: the SAVE strip's push. Same revert, but the simulated-address exception is
+        /// NOT honoured — a .hsg must never claim an absent partner's tenancy, on the simulator least
+        /// of all (its copy of that shop is a hand-over, not a purchase).</summary>
+        public static void SaveStripPush() => Push(saveStrip: true);
+        public static void SaveStripPop()  => Pop();
+
+        private static bool _saveStrip;   // true while the OUTERMOST push is the save strip
+
+        private static void Push(bool saveStrip)
         {
-            if (_veilDepth++ > 0 || _flipped.Count == 0) return;
+            if (_veilDepth++ > 0) return;
+            _saveStrip = saveStrip;
+            if (_flipped.Count == 0) return;
             // DIAG [FlipProbe]: outermost push with live flips — the save-leak tracer (a save with
             // flips but NO such line before it means a save path bypassed the strip).
-            Plugin.Logger.LogInfo($"[FlipProbe] veil ON — {_flipped.Count} flip(s) reverted to native truth.");
-            ApplyAll(flip: false);
+            Plugin.Logger.LogInfo($"[FlipProbe] veil ON — {_flipped.Count} flip(s) reverted to native truth{(saveStrip ? " (save strip: simulated addresses included)" : "")}.");
+            ApplyAll(flip: false, honourSimulated: !saveStrip);
         }
 
-        public static void VeilPop()
+        private static void Pop()
         {
             if (--_veilDepth > 0) return;
             if (_veilDepth < 0) _veilDepth = 0;   // defensive — unmatched pop must not wedge the veil
+            bool wasSaveStrip = _saveStrip; _saveStrip = false;
             if (_flipped.Count > 0)
             {
                 Plugin.Logger.LogInfo($"[FlipProbe] veil OFF — {_flipped.Count} flip(s) restored.");
-                ApplyAll(flip: true);
+                ApplyAll(flip: true, honourSimulated: !wasSaveStrip);
             }
         }
 
-        private static void ApplyAll(bool flip)
+        private static void ApplyAll(bool flip, bool honourSimulated)
         {
             try
             {
@@ -234,6 +249,11 @@ namespace BigAmbitionsMP
                     string key;
                     try { key = GameStateReader.AddressKey(reg); } catch { continue; }
                     if (string.IsNullOrEmpty(key) || !_flipped.TryGetValue(key, out var parkedRival)) continue;
+                    // P3-B (B3a): an address THIS machine simulates for an absent owner stays flipped
+                    // THROUGH the authority veil — it is the only machine running that shop, so its
+                    // wage/rent/marketing/summary passes must see it as owned. One machine only (a mark
+                    // names a single simulator), and NEVER for the save strip (SaveStripPush: false).
+                    if (honourSimulated && MergerAbsence.SimulatesHere(key)) continue;
                     reg.RentedByPlayer = flip;
                     reg.businessOwnerRivalId = flip ? "" : parkedRival;
                 }
@@ -243,6 +263,6 @@ namespace BigAmbitionsMP
 
         /// <summary>Scene boundary: the regs died with the scene — clear tracking WITHOUT touching
         /// objects (the fresh scene's regs arrive unflipped; the tick re-applies from state).</summary>
-        public static void Reset() { _flipped.Clear(); _veilDepth = 0; }
+        public static void Reset() { _flipped.Clear(); _veilDepth = 0; _saveStrip = false; }
     }
 }

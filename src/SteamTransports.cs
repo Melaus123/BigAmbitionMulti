@@ -63,6 +63,7 @@ namespace BigAmbitionsMP
                 // Merger phase 3-A: a paperwork bundle is snapshot-class (books + lists + full staff
                 // records, up to the 2 MB refusal cap) - it must not head-of-line-block gameplay.
                 case (int)MessageType.BusinessPaperwork:
+                case (int)MessageType.MergerHandover:      // P3-B: the hand-over CARRIES that bundle (plus the marks) - same class, same lane
                 case (int)MessageType.ClientDisconnectUpload:
                 case (int)MessageType.PeerLogReply:
                 case (int)MessageType.AuditDrillReply:

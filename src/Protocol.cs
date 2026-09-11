@@ -207,6 +207,7 @@ namespace BigAmbitionsMP
         BusinessChangeBatch   = 206,     // 2026-09-10 (burst fix): several changed business records in ONE envelope so the 4 KB deflate floor applies — the host sweep and the join/daily delta use it; a single immediate push still uses BusinessChange.
         NotificationRelay     = 207,     // Merger slice 6 (2026-09-10, user requirement: the top-right pop-ups must MATCH on every member of a merged company): ONE business-scoped game toast — the GAME'S OWN headerKey + notificationData — from the member whose shop raised it, via the Host, to every OTHER ONLINE member of THAT sender's group. No new on-screen text: the receiver calls the game's own Notifications.Show with the same key, untracked (nothing persisted) and click-inert. Never leaves the group; non-members and other groups never receive it. Rides Gameplay (small, timely, and it writes no state a Bulk snapshot also writes).
         BusinessPaperwork     = 208,     // MERGER PHASE 3-A (2026-09-11, D13): one member's per-business PAPERWORK bundle - client -> HOST only, never the other way in this build. The books the interior/business syncs never carried (orderHistory, today's till, factory exports, marketing campaigns), the owner-level agreements FILTERED to the sender's own addresses (delivery contracts, import partnerships + this week's importer orders, the four manager plans, installation/moving contracts, licensing-fee state), and the FULL employee records behind the 7-field roster publish. The host keeps the LATEST bundle per member in the mod's session manifest (manifest.bamp.json - never a .hsg field) so an absent member's businesses can be handed to a simulator (P3-B) and survive a host restart. Publish-and-store only: nothing here changes gameplay. Rides Bulk (rule 9: it is a snapshot-class bundle).
+        MergerHandover        = 209,     // MERGER PHASE 3-B (2026-09-11, plan §9, D1/D13/D15): Host -> the DESIGNATED SIMULATOR - "run these addresses of this absent member as an owner would". Carries the absent owner's building keys, the paperwork bundle the host stored in P3-A (as TEXT - a straight passthrough of what P3-A serialised), and the whole absence table so every receiver knows who simulates what. The INTERIORS follow separately as ordinary direct InteriorSnapshots, one per host tick (paced). The simulator sends the SAME type back carrying only Ack, so the host logs delivery; Drop=true retires a mark (dissolve, re-designation, nobody online) and the receiver undoes its apply. NEVER sent to the absent owner's own machine - the return leg is P3-C.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -648,6 +649,9 @@ namespace BigAmbitionsMP
         /// merger chips from this, so an offer that was silently refused or quietly retired can never
         /// leave a chip stranded on a client.</summary>
         public List<MergerOfferInfo> Offers { get; set; } = new List<MergerOfferInfo>();
+        /// <summary>MERGER PHASE 3-B (additive): who simulates which absent member's addresses. Every
+        /// machine needs it (P3-C's return leg, and any later UI); an older client ignores the field.</summary>
+        public List<AbsenceInfo> Absences { get; set; } = new List<AbsenceInfo>();
     }
 
     /// <summary>Phase 1-A r4 — ONE pending merger offer as the host holds it. TargetKey is the company id
@@ -3624,5 +3628,32 @@ namespace BigAmbitionsMP
         public List<BusinessPaperwork>   Businesses { get; set; } = new();
         public PaperworkOwnerLists       Lists      { get; set; } = new();
         public List<EmployeeEditPayload> Employees  { get; set; } = new();
+    }
+
+    /// <summary>MERGER PHASE 3-B: ONE absence as the host holds it - the absent owner, the member
+    /// designated to run their businesses, and exactly which addresses that covers.</summary>
+    public class AbsenceInfo
+    {
+        public string OwnerPid     { get; set; } = "";
+        public string OwnerStable  { get; set; } = "";
+        public string SimulatorPid { get; set; } = "";
+        public int    SinceDay     { get; set; }
+        public List<string> Addresses { get; set; } = new();
+    }
+
+    /// <summary>MERGER PHASE 3-B: the hand-over itself (Host -> simulator), and the simulator's ACK
+    /// back on the same type (Ack set, everything else empty). PaperworkJson is the P3-A bundle as
+    /// the host stored it - text, so a future bundle shape rides through an older host untouched.</summary>
+    public class MergerHandoverPayload
+    {
+        public string OwnerPid      { get; set; } = "";
+        public string OwnerStable   { get; set; } = "";
+        public string SimulatorPid  { get; set; } = "";
+        public int    SinceDay      { get; set; }
+        public List<string> Addresses { get; set; } = new();
+        public string PaperworkJson { get; set; } = "";
+        public bool   Drop          { get; set; }        // retire the mark and undo the apply
+        public string Ack           { get; set; } = "";  // simulator -> host only
+        public List<AbsenceInfo> Marks { get; set; } = new();
     }
 }

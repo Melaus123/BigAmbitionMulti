@@ -289,6 +289,17 @@ namespace BigAmbitionsMP
         private static void OnDisconnected(string reason, byte[] extra)
         {
             try { PaperworkSync.Reset(); } catch { }   // P3-A r3 (re-review r2 MINOR-1): per-world publisher state dies with the connection
+            // P3-B r4 C1 (CRASH CLASS): OnDisconnected runs on the NETWORK POLL thread, and Reset() is
+            // an UNDO - it mutates gi.DeliveryContracts, the four plan lists, movingServiceContracts,
+            // the licensing lists, itemsOrderedThisWeekByImporter, gi.EmployeeInstances and the employee
+            // dictionary. Off the main thread that is exactly the 0xc0000005 class MPSaveCoordinator
+            // warns about at its save choke point, so it is MARSHALLED - the same thing the host's own
+            // peer-disconnect cleanup does for its main-thread-owned maps. Ordering: the offline-fork
+            // save is a Harmony prefix on SaveGameManager.Save and therefore main-thread too, and that
+            // prefix ALREADY takes the installed items and the promoted staff out for the write and puts
+            // them back after, so a fork save that beats this drain still cannot write an absent owner's
+            // paperwork into the player's own .hsg.
+            try { GameStatePatcher.EnqueueOnMainThread(MergerAbsence.Reset); } catch { }
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): an involuntary drop ends the session too - Disconnect() only covers the voluntary path
             bool wasConnected = _connected;
             double secs = _connectClock.IsRunning ? _connectClock.Elapsed.TotalSeconds : -1;
@@ -526,7 +537,10 @@ namespace BigAmbitionsMP
                 case MessageType.MergerState:
                 {
                     var ms = env.GetPayload<MergerStatePayload>();
-                    if (ms != null) GameStatePatcher.EnqueueOnMainThread(() => MergerSync.ApplyState(ms));
+                    // P3-B: the absence table rides the same broadcast (additive) - adopted beside the
+                    // membership so this machine knows who simulates what without a second message.
+                    if (ms != null) GameStatePatcher.EnqueueOnMainThread(() =>
+                    { MergerSync.ApplyState(ms); MergerAbsence.ApplyStateAbsences(ms); });
                     break;
                 }
 
@@ -560,6 +574,15 @@ namespace BigAmbitionsMP
                     // drop - never write game state off an unexpected direction.
                     Plugin.Logger.LogWarning("[Paperwork] a BusinessPaperwork arrived from the host - P3-A publishes client -> host only; ignored.");
                     break;
+
+                case MessageType.MergerHandover:
+                {
+                    // MERGER PHASE 3-B: the host designated THIS machine to run an absent member's
+                    // businesses (or told it to stop). Main thread - the apply touches GameInstance.
+                    var hv = env.GetPayload<MergerHandoverPayload>();
+                    if (hv != null) GameStatePatcher.EnqueueOnMainThread(() => MergerAbsence.ApplyHandover(hv));
+                    break;
+                }
 
                 case MessageType.NotificationRelay:
                 {

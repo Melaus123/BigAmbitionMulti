@@ -421,6 +421,13 @@ namespace BigAmbitionsMP
                 // from the slot being restored, beside the merger roster, clear-then-apply. An older
                 // slot can never keep the newer world's bundles (user rule 2026-09-11).
                 RestorePaperworkFromManifest(m);
+                // P3-B: the absence marks follow the same timeline - clear-then-apply from THIS
+                // manifest, BEFORE HostReconcileAbsence can run, so a restored mark keeps its SinceDay
+                // and the reconcile only re-designates the simulator. This machine's own simulation
+                // state dies with the world either way.
+                MergerAbsence.HostReset();
+                MergerAbsence.Reset();
+                RestoreAbsenceFromManifest(m);
                 try { PaperworkSync.Reset(); } catch { }   // and this machine's publisher forgets the previous world's day/edge
                 PruneOffers("session state restored");   // r4: the restored store decides which offers still stand
                 RestoreWalletFromManifest(m);   // slice 4: ledger BEFORE the broadcast below (members snap to it)
@@ -455,7 +462,40 @@ namespace BigAmbitionsMP
         /// <summary>StableId to that member's latest paperwork bundle (P3-B's read surface).</summary>
         public static IReadOnlyDictionary<string, PaperworkEntry> PaperworkStore => _paperwork;
 
-        public static void ResetPaperwork() { lock (_paperwork) _paperwork.Clear(); }
+        public static void ResetPaperwork()
+        {
+            lock (_paperwork) _paperwork.Clear();
+            lock (_capWarnedDay) _capWarnedDay.Clear();
+            lock (_resendServedAt) { _resendServedAt.Clear(); _resendThrottleLogged.Clear(); }   // r7: the throttle dies with the session too
+        }
+
+        /// <summary>HOST (r7): hand the parts of `addrs` BACK from the discarded owner copy to the sender's
+        /// bundle. MergeAddresses MOVES (Surgery empties its source), so after the filing merge the fresh
+        /// parts live only in `owned` - they are re-split from there. The sender's own copy of those
+        /// addresses was moved out earlier, so nothing is duplicated: the bundle ends exactly as it arrived.</summary>
+        private static void GiveBack(BusinessPaperworkPayload sender, BusinessPaperworkPayload owned, HashSet<string> addrs)
+        {
+            try
+            {
+                var back = PaperworkSync.SplitOutAddresses(owned, addrs, out int n);
+                if (n > 0) PaperworkSync.MergeAddresses(sender, back, addrs);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] give-back: {ex.Message}"); }
+        }
+
+        /// <summary>HOST (r6 F2): true at most ONCE per owner per game day, so an entry that sits over the
+        /// 2 MB cap warns once instead of at every publish.</summary>
+        private static readonly Dictionary<string, int> _capWarnedDay = new();
+        private static bool CapWarnDue(string ownerStable, int day)
+        {
+            string k = ownerStable ?? "";
+            lock (_capWarnedDay)
+            {
+                if (_capWarnedDay.TryGetValue(k, out var d) && d == day) return false;
+                _capWarnedDay[k] = day;
+                return true;
+            }
+        }
 
         /// <summary>Host: take one member's bundle. Called from the receive case (a validated sender)
         /// and directly by PaperworkSync when the HOST itself is the member.</summary>
@@ -477,12 +517,156 @@ namespace BigAmbitionsMP
                 // and the merger roster). A sender that somehow has none falls back to its pid.
                 string key = string.IsNullOrEmpty(p.StableId) ? (senderPid ?? "") : p.StableId;
                 if (string.IsNullOrEmpty(key)) return;
+                // P3-B r4 C2/F2: a SIMULATOR publishes the absent owner's shops inside its OWN bundle
+                // (PaperworkSync.Build's SimulatesHere gate), and filing that under the SENDER froze the
+                // owner's entry at the moment they dropped. Every re-send of the hand-over then
+                // re-installed that STALE copy - nextDeliveryDay, daysUntilRepeat, plan nextUpdateDay
+                // and paidLicensingFeesToday all rewound, so deliveries re-fired and the POOLED WALLET
+                // paid again. File those addresses under the OWNER first; what is left is the sender's.
+                try
+                {
+                    if (HostFileSimulatedPaperwork(p, senderPid))
+                    {
+                        json  = Newtonsoft.Json.JsonConvert.SerializeObject(p);
+                        bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] owner filing for '{senderPid}': {ex.Message}"); }
                 int hostDay = 0; try { hostDay = GameStateReader.GetGameTime().day; } catch { }
+                // P3-B r6 F1: a RETURNED owner's first publish is its PRE-ABSENCE view of the shops the
+                // simulator ran while it was away, and r5 stops that simulator the moment the owner is back
+                // (its installs lifted) - so the host's entry is the ONLY structured record of the absence
+                // period, and a wholesale store wiped it within 30 s (PaperworkSync's publish cadence),
+                // leaving the mark pointing at nothing simulated. While the mark says OwnerBack the host
+                // KEEPS its own parts for the MARKED addresses and takes the publisher's for every OTHER
+                // address. P3-C clears the mark, and that is what ends this guard.
+                int keptAddrs = 0, keptParts = 0;
+                try
+                {
+                    if (MergerAbsence.Marks.TryGetValue(key, out var back) && back != null
+                        && back.OwnerBack && back.Addresses.Count > 0)
+                    {
+                        string had;
+                        lock (_paperwork) had = _paperwork.TryGetValue(key, out var pe) ? (pe.Json ?? "") : "";
+                        var marked = new HashSet<string>(back.Addresses, StringComparer.OrdinalIgnoreCase);
+                        marked.Remove("");
+                        if (!string.IsNullOrEmpty(had) && marked.Count > 0)
+                        {
+                            var hostPw = Newtonsoft.Json.JsonConvert.DeserializeObject<BusinessPaperworkPayload>(had);
+                            if (hostPw != null)
+                            {
+                                // The host's simulated parts for exactly those addresses go back over the
+                                // publisher's copy of them (MergeAddresses drops the incoming ones first).
+                                var simulated = PaperworkSync.SplitOutAddresses(hostPw, marked, out int simParts);
+                                if (simParts > 0)
+                                {
+                                    int simBiz = simulated.Businesses?.Count ?? 0;   // r7: counted BEFORE the merge empties `simulated`
+                                    PaperworkSync.MergeAddresses(p, simulated, marked);
+                                    string gjson = Newtonsoft.Json.JsonConvert.SerializeObject(p);
+                                    int gbytes = System.Text.Encoding.UTF8.GetByteCount(gjson);
+                                    if (gbytes > PaperworkSync.MaxBundleBytes)
+                                    {
+                                        // Never store over the cap, never drop the simulated record: the
+                                        // owner's previous entry stands until P3-C consumes it.
+                                        if (CapWarnDue(key, hostDay))
+                                            Plugin.Logger.LogWarning($"[Paperwork] merged entry for returned owner '{senderPid}' would be "
+                                                                   + $"{gbytes} bytes > {PaperworkSync.MaxBundleBytes} cap - the previous entry stands.");
+                                        return;
+                                    }
+                                    keptAddrs = simBiz; keptParts = simParts;   // r7: what the host's entry actually held, not the mark's size
+                                    json  = gjson;
+                                    bytes = gbytes;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] return guard for '{senderPid}': {ex.Message}"); }
+                if (keptParts > 0)
+                    Plugin.Logger.LogInfo($"[Paperwork] kept the simulated record of {keptAddrs} businesses ({keptParts} parts) for "
+                                        + $"returned owner '{senderPid}' (return leg pending).");
                 lock (_paperwork)
                     _paperwork[key] = new PaperworkEntry { StableId = key, Day = p.Day, ReceivedDay = hostDay, Json = json };
                 Plugin.Logger.LogInfo($"[Paperwork] stored for '{senderPid}' (day {p.Day}, {bytes} bytes).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] store: {ex.Message}"); }
+        }
+
+        /// <summary>HOST, MAIN THREAD (P3-B r4 F2): split one incoming bundle by OWNER. Every address in
+        /// it that THIS host has marked as simulated BY THIS SENDER belongs to the absent owner of that
+        /// mark: that address's business record, its owner-list items and its employee records are lifted
+        /// out of the sender's bundle and merged into the OWNER's stored entry, replacing only those
+        /// addresses' parts there and leaving the owner's other addresses exactly as they were. The store
+        /// stays TEXT - the owner's entry is deserialised, merged and re-serialised - so the manifest
+        /// section is still the straight passthrough P3-A designed and no other reader changes. Returns
+        /// true when anything moved (the caller then re-serialises what is left of the sender's).</summary>
+        private static bool HostFileSimulatedPaperwork(BusinessPaperworkPayload p, string senderPid)
+        {
+            if (p == null || string.IsNullOrEmpty(senderPid) || MergerAbsence.MarkCount == 0) return false;
+            var mine = new List<MergerAbsence.AbsenceMark>();
+            foreach (var kv in MergerAbsence.Marks)
+                if (kv.Value != null && kv.Value.SimulatorPid == senderPid && kv.Value.Addresses.Count > 0)
+                    mine.Add(kv.Value);
+            if (mine.Count == 0) return false;
+
+            bool any = false;
+            int hostDay = 0; try { hostDay = GameStateReader.GetGameTime().day; } catch { }
+            foreach (var mark in mine)
+            {
+                var addrs = new HashSet<string>(mark.Addresses, StringComparer.OrdinalIgnoreCase);
+                addrs.Remove("");
+                if (addrs.Count == 0) continue;
+                var moved = PaperworkSync.SplitOutAddresses(p, addrs, out int parts);
+                if (parts == 0) continue;
+
+                string have;
+                lock (_paperwork) have = _paperwork.TryGetValue(mark.OwnerStable, out var pe) ? (pe.Json ?? "") : "";
+                BusinessPaperworkPayload? owned = null;
+                if (!string.IsNullOrEmpty(have))
+                {
+                    try { owned = Newtonsoft.Json.JsonConvert.DeserializeObject<BusinessPaperworkPayload>(have); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] owner entry parse '{mark.OwnerStable}': {ex.Message}"); }
+                }
+                owned ??= new BusinessPaperworkPayload();
+                if (!string.IsNullOrEmpty(mark.OwnerPid)) owned.PlayerId = mark.OwnerPid;
+                owned.StableId = mark.OwnerStable;
+                if (p.Day > owned.Day) owned.Day = p.Day;
+                int movedBiz = moved.Businesses?.Count ?? 0;   // r7: counted BEFORE the merge - MergeAddresses MOVES (it empties `moved`)
+                PaperworkSync.MergeAddresses(owned, moved, addrs);
+
+                string mjson;
+                try { mjson = Newtonsoft.Json.JsonConvert.SerializeObject(owned); }
+                catch (Exception ex)
+                {
+                    // r6 F2: SplitOutAddresses already TOOK these parts out of the sender's bundle, so a
+                    // bare 'continue' lost them from BOTH entries. Put them back before giving up - r7: from
+                    // `owned`, which is where the merge above MOVED them (`moved` is empty by now).
+                    Plugin.Logger.LogWarning($"[Paperwork] owner entry serialise '{mark.OwnerStable}': {ex.Message}");
+                    GiveBack(p, owned, addrs);
+                    continue;
+                }
+                int mbytes = System.Text.Encoding.UTF8.GetByteCount(mjson);
+                if (mbytes > PaperworkSync.MaxBundleBytes)
+                {
+                    // r6 F2 (m-a): the same loss, and this one RECURRED at every publish while over the cap.
+                    // The moved parts go BACK into the sender's bundle, so they live in exactly one entry
+                    // instead of none; the WARN is once per owner per game day. r7: taken back from `owned`
+                    // (the merge above MOVED them there; `moved` is empty by now).
+                    GiveBack(p, owned, addrs);
+                    if (CapWarnDue(mark.OwnerStable, hostDay))
+                        Plugin.Logger.LogWarning($"[Paperwork] REFUSED merged entry for '{mark.OwnerPid}': {mbytes} bytes > "
+                                               + $"{PaperworkSync.MaxBundleBytes} cap - that owner's previous entry stands "
+                                               + $"and the {parts} moved parts stay with '{senderPid}'.");
+                    continue;
+                }
+                lock (_paperwork)
+                    _paperwork[mark.OwnerStable] = new PaperworkEntry
+                    { StableId = mark.OwnerStable, Day = owned.Day, ReceivedDay = hostDay, Json = mjson };
+                any = true;
+                Plugin.Logger.LogInfo($"[Paperwork] filed {movedBiz} simulated businesses of "
+                                    + $"'{mark.OwnerPid}' from '{senderPid}'.");
+            }
+            return any;
         }
 
         /// <summary>A one-line census for the TestDrive verb: "stable=<id>:day/bytes,...". The store is
@@ -505,6 +689,194 @@ namespace BigAmbitionsMP
         /// every manifest write for the session this host is RUNNING. The bundles ride the model like
         /// the merger roster and the loan ledger, so they inherit WriteManifest's atomic temp +
         /// File.Replace and there is no second write to tear, lose, or re-apply.</summary>
+        /// <summary>P3-B: one member's stored bundle as TEXT for the hand-over ("" when the host has
+        /// none - a member who never published still gets its interiors and its marks).</summary>
+        public static string PaperworkJsonForStable(string stable)
+        {
+            if (string.IsNullOrEmpty(stable)) return "";
+            lock (_paperwork) return _paperwork.TryGetValue(stable, out var e) ? (e.Json ?? "") : "";
+        }
+
+        // ══ MERGER PHASE 3-B - DESIGNATION (2026-09-11, plan §9, D1/D13/D15) ══════════════════
+
+        /// <summary>HOST, MAIN THREAD: the ONE absence validator. Every membership change, roster
+        /// change and departure reaches it through RefreshGrantsAndBroadcast (the 10 s merger-state
+        /// cadence is the safety net), so there is no separate departure timer and no path that can
+        /// leave a stale designation:
+        ///   • a company member who is OFFLINE while a co-member is online gets a MARK naming a
+        ///     SIMULATOR - the host when the host is a member of that company, else the member online
+        ///     the LONGEST (JoinedAtByPid, the connect stamp bound at Hello), falling back to the
+        ///     first online member in join order when no stamp exists (D1);
+        ///   • a mark whose simulator has itself dropped is simply re-pointed and re-sent - the host
+        ///     holds every push, so the new simulator is seeded exactly like the first (D15);
+        ///   • a mark whose company dissolved or whose owner left it is DROPPED and the old simulator
+        ///     told to undo (B5) - but NOT one whose owner is merely BACK (r4 m1, below);
+        ///   • a company with NOBODY online simulates nothing (D1), but its existing marks are
+        ///     SUSPENDED (SimulatorPid cleared), never dropped - a host restart with the whole company
+        ///     offline must not lose the SinceDay the return leg reads (P3-B/R1);
+        ///   • an owner who RETURNS is logged once WITH that SinceDay (B4) and the mark is KEPT and
+        ///     flagged OwnerBack (r4 m1 - it used to fall straight into the sweep below in the same
+        ///     pass, so the return leg would have found nothing to copy); the owner's own machine is
+        ///     never told to un-flip anything, and the copy-back off the simulator's tagged installs is
+        ///     P3-C, which is also what CLEARS the mark. r5: the simulator is told to STOP the moment the
+        ///     owner is back (one machine per address, always), so what P3-C consumes is the HOST's stored
+        ///     record of the absence - which StorePaperwork's OwnerBack guard (r6 F1) keeps the returned
+        ///     owner's own republish from overwriting.
+        /// Idempotent: nothing is sent unless the designation actually changed - and when it DOES
+        /// change, the OLD simulator is told to stop BEFORE the new one is handed the same owner
+        /// (P3-B r1 MAJOR-1; without that both machines ran the same shops).</summary>
+        internal static void HostReconcileAbsence()
+        {
+            if (!_running) return;
+            try
+            {
+                // r1 m2: a session with no merger and no marks reconciles nothing - no day read, no HashSet.
+                if (MergerSync.StoreGroups.Count == 0 && MergerAbsence.MarkCount == 0) return;
+                int day = 0; try { day = GameStateReader.GetGameTime().day; } catch { }
+                var wanted = new HashSet<string>();
+
+                foreach (var grp in MergerSync.StoreGroups)
+                {
+                    var online = PidsOfGroup(grp.Key);          // join order, ONLINE only
+                    if (online.Count == 0)
+                    {
+                        // D1 + P3-B/R1: nobody online, so nothing simulates and no NEW mark is made
+                        // here. An EXISTING mark (restored from the manifest, or left behind when the
+                        // whole company went dark) PERSISTS with its SimulatorPid CLEARED - dropping it
+                        // would throw away the SinceDay the return leg needs. It is spared the dead
+                        // sweep below and re-designated the moment any member of the company is back.
+                        foreach (var stable in MergerSync.JoinOrderOfGroup(grp.Key))
+                            if (MergerAbsence.HostSuspendMark(stable)) wanted.Add(stable);
+                        continue;
+                    }
+                    string sim = online.Contains(MPConfig.PlayerId) ? MPConfig.PlayerId : LongestOnlineOf(online);
+                    if (string.IsNullOrEmpty(sim)) continue;
+
+                    foreach (var stable in MergerSync.JoinOrderOfGroup(grp.Key))
+                    {
+                        string pid = PidOfStable(stable);
+                        if (IsOnlinePid(pid))
+                        {
+                            // B4 + r4 m1: log once, flag OwnerBack, and WANT the mark. Without the
+                            // wanted.Add the dead sweep below dropped it in this very pass.
+                            if (MergerAbsence.HostNoteReturn(stable, pid, day)) wanted.Add(stable);
+                            continue;
+                        }
+                        MergerAbsence.HostClearReturnLog(pid);
+                        if (sim == pid) continue;                             // cannot simulate for itself
+                        var addrs = AddressesOfStable(stable);
+                        if (addrs.Count == 0) continue;                       // nothing to hand over
+                        wanted.Add(stable);
+                        // r1 MAJOR-1: who WAS simulating, read BEFORE HostSetMark over-writes the mark.
+                        // A changed SimulatorPid is a RE-DESIGNATION: the old machine has to give the
+                        // veil exception, the promoted staff and the installed paperwork back first.
+                        string wasSim = MergerAbsence.Marks.TryGetValue(stable, out var had) ? had.SimulatorPid : "";
+                        var wasAddrs = had != null ? new List<string>(had.Addresses) : new List<string>();
+                        if (MergerAbsence.HostSetMark(stable, pid, sim, addrs, day))
+                        {
+                            if (!string.IsNullOrEmpty(wasSim) && wasSim != sim)
+                                MergerAbsence.HostSendDrop(wasSim, stable, pid, wasAddrs, $"re-designated to '{sim}'");
+                            if (MergerAbsence.Marks.TryGetValue(stable, out var mk)) MergerAbsence.SendHandover(mk);
+                        }
+                        else if (sim == MPConfig.PlayerId && !MergerAbsence.SimulatesHere(addrs[0])
+                                 && MergerAbsence.Marks.TryGetValue(stable, out var mk2))
+                            MergerAbsence.SendHandover(mk2);                  // scene churn wiped the local apply
+                    }
+                }
+
+                var dead = new List<string>();
+                foreach (var kv in MergerAbsence.Marks) if (!wanted.Contains(kv.Key)) dead.Add(kv.Key);
+                foreach (var s in dead)
+                    MergerAbsence.HostDropMark(s, "company dissolved, owner no longer a member, owner is back online, or no addresses left");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] reconcile: {ex.Message}"); }
+        }
+
+        /// <summary>HOST, MAIN THREAD (P3-B r4 F3): re-send ONE hand-over to the machine that already
+        /// holds the mark. Only the CURRENT simulator of that owner can ask, so a stale request from a
+        /// re-designated machine (or a forged one) serves nothing. It re-enters SendHandover, which is
+        /// the same one-shot the first designation used - and ApplyHandover undoes before it installs,
+        /// so arriving twice is harmless (D15).</summary>
+        private static void HostResendHandover(string simPid, string ownerStable)
+        {
+            try
+            {
+                if (!_running || string.IsNullOrEmpty(simPid) || string.IsNullOrEmpty(ownerStable)) return;
+                if (!MergerAbsence.Marks.TryGetValue(ownerStable, out var m) || m == null || m.SimulatorPid != simPid)
+                {
+                    Plugin.Logger.LogInfo($"[Absence] re-send asked by '{simPid}' for '{ownerStable}' - not its mark, ignored.");
+                    return;
+                }
+                // r6 F3 (m-b): ONE service per owner per 30 s. The asking side retries on a 10 s cadence
+                // and every service queues one interior snapshot per address while Tick drains ONE per
+                // second, so an unthrottled loop outran the drain for any owner with more than 10 shops.
+                if (!HostResendDue(ownerStable, out bool logRefusal))
+                {
+                    if (logRefusal)   // r7: once per throttle window, not once per ask
+                        Plugin.Logger.LogInfo($"[Absence] re-send asked by '{simPid}' for '{ownerStable}' - throttled (one service per 30 s).");
+                    return;
+                }
+                Plugin.Logger.LogInfo($"[Absence] re-sending the hand-over of '{m.OwnerPid}' to '{simPid}' (its installs were lost).");
+                MergerAbsence.SendHandover(m);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] re-send: {ex.Message}"); }
+        }
+
+        /// <summary>HOST (r6 F3): true at most once per owner per 30 s. The TickCount delta is unchecked, so
+        /// the wrap is harmless. `logRefusal` is true for the FIRST refusal of a window only (r7). Both
+        /// tables are cleared by ResetPaperwork (new game; manifest restore on load) - both precede any
+        /// mark of the next session, so a stale stamp cannot delay its first re-send.</summary>
+        private static readonly Dictionary<string, int> _resendServedAt = new();
+        private static readonly HashSet<string> _resendThrottleLogged = new();
+        private static bool HostResendDue(string ownerStable, out bool logRefusal)
+        {
+            string k = ownerStable ?? "";
+            int now = Environment.TickCount;
+            lock (_resendServedAt)
+            {
+                if (_resendServedAt.TryGetValue(k, out var at) && unchecked(now - at) < 30000)
+                {
+                    logRefusal = _resendThrottleLogged.Add(k);
+                    return false;
+                }
+                _resendServedAt[k] = now;
+                _resendThrottleLogged.Remove(k);
+                logRefusal = false;
+                return true;
+            }
+        }
+
+        /// <summary>HOST: of these ONLINE pids, the one connected LONGEST. JoinedAtByPid is stamped at
+        /// Hello with Environment.TickCount, so the elapsed figure (unchecked, wrap-safe) is the age of
+        /// the connection. No stamp at all -> the list's first entry, which is join order.</summary>
+        private static string LongestOnlineOf(List<string> online)
+        {
+            string best = online.Count > 0 ? online[0] : "";
+            int bestAge = -1;
+            foreach (var pid in online)
+            {
+                if (!JoinedAtByPid.TryGetValue(pid, out var at)) continue;
+                int age = unchecked(Environment.TickCount - at);
+                if (age > bestAge) { bestAge = age; best = pid; }
+            }
+            return best;
+        }
+
+        /// <summary>HOST: every building the rental ledger attributes to this StableId.</summary>
+        private static List<string> AddressesOfStable(string stable)
+        {
+            var list = new List<string>();
+            if (string.IsNullOrEmpty(stable)) return list;
+            foreach (var kv in BuildingOwners)
+            {
+                string s = kv.Value == "host" ? MPConfig.StableId
+                         : StableIdByPlayer.TryGetValue(kv.Value, out var os) ? (os ?? "") : "";
+                if (!string.IsNullOrEmpty(s) && s == stable) list.Add(kv.Key);
+            }
+            list.Sort(StringComparer.OrdinalIgnoreCase);
+            return list;
+        }
+
         public static List<MpPaperworkEntry> SnapshotPaperwork()
         {
             var list = new List<MpPaperworkEntry>();
@@ -542,6 +914,51 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Paperwork] restored {n} member bundle(s) from the manifest.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] manifest restore: {ex.Message}"); }
+        }
+
+        /// <summary>Merger phase 3-B: the host's absence marks for the manifest MODEL, beside the
+        /// paperwork store they belong with.</summary>
+        public static List<MpAbsenceMark> SnapshotAbsence()
+        {
+            var list = new List<MpAbsenceMark>();
+            try
+            {
+                foreach (var a in MergerAbsence.HostSnapshot())
+                    list.Add(new MpAbsenceMark
+                    {
+                        OwnerStable  = a.OwnerStable,
+                        OwnerPid     = a.OwnerPid,
+                        SimulatorPid = a.SimulatorPid,
+                        Addresses    = new List<string>(a.Addresses ?? new List<string>()),
+                        SinceDay     = a.SinceDay,
+                    });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] manifest snapshot: {ex.Message}"); }
+            return list;
+        }
+
+        /// <summary>Host: REPLACE the absence table from the manifest being restored - clear-then-apply
+        /// beside the paperwork restore, and BEFORE the first HostReconcileAbsence can run. A restored
+        /// mark keeps its SinceDay (nothing else records when the absence began) and comes back with NO
+        /// simulator: a player id from the previous session names nobody here, so the reconcile
+        /// re-designates and re-sends the hand-over. A manifest written before the field existed
+        /// restores an empty table.</summary>
+        public static void RestoreAbsenceFromManifest(MpManifest m)
+        {
+            try
+            {
+                int n = 0;
+                if (m?.Absence != null)
+                    foreach (var a in m.Absence)
+                    {
+                        if (string.IsNullOrEmpty(a?.OwnerStable)) continue;
+                        MergerAbsence.HostRestoreMark(a.OwnerStable, a.OwnerPid, a.Addresses, a.SinceDay);
+                        n++;
+                    }
+                if (n > 0)
+                    Plugin.Logger.LogInfo($"[Absence] restored {n} absence mark(s) from the manifest (simulator to be re-designated).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] manifest restore: {ex.Message}"); }
         }
 
         /// <summary>Host: send each connected client its own stored .hsg for the
@@ -915,6 +1332,7 @@ namespace BigAmbitionsMP
             MergerSync.ResetStore();  // fresh world — no merger (same session-boundary lifecycle)
             ResetPaperwork();         // phase 3-A (review r1 MAJOR-2): the paperwork store dies with the session too — a new world never inherits the old world's bundles
             try { PaperworkSync.Reset(); } catch { }   // and this machine's publisher forgets the previous world's day/edge
+            MergerAbsence.HostReset(); MergerAbsence.Reset();   // phase 3-B: the absence marks die with the session too - a new world starts with nobody simulating for anybody
             _mergerPendingByTarget.Clear();   // and no proposals carried in from the previous world (audit 2026-08-26)
             ResetWallet();            // fresh world — no shared wallet (slice 4)
             MPSaveCoordinator.ConsumeDevHostLoadAs("new game");   // round-285: a fresh world has no member slots to impersonate
@@ -1508,6 +1926,27 @@ namespace BigAmbitionsMP
                     var nr = env.GetPayload<NotificationRelayPayload>();
                     if (nr != null && SenderIs(nr.PlayerId, senderPid, MessageType.NotificationRelay))
                         GameStatePatcher.EnqueueOnMainThread(() => HostRelayNotification(nr, senderPid));
+                    break;
+                }
+
+                case MessageType.MergerHandover:
+                {
+                    // MERGER PHASE 3-B: the ONLY direction a client sends this type is the designated
+                    // simulator's ACK of a hand-over. Nothing is applied here - the ack is a log line
+                    // (D15: the host holds the pushes regardless, so a lost ack costs nothing).
+                    // r4 F3: the same client -> host direction also carries the ONE request a simulator
+                    // can make - Ack="resend" ("my scene reloaded, my installs are gone, hand it to me
+                    // again"). Nothing was added to the payload for it: this type already travelled this
+                    // way carrying nothing but Ack.
+                    var hv = env.GetPayload<MergerHandoverPayload>();
+                    if (hv == null) break;
+                    if (hv.Ack == "resend")
+                    {
+                        string askPid = senderPid, askStable = hv.OwnerStable ?? "";
+                        GameStatePatcher.EnqueueOnMainThread(() => HostResendHandover(askPid, askStable));
+                    }
+                    else if (!string.IsNullOrEmpty(hv.Ack))
+                        Plugin.Logger.LogInfo($"[Absence] '{senderPid}' acked the hand-over of '{hv.OwnerPid}': {hv.Ack}.");
                     break;
                 }
 
@@ -5073,6 +5512,7 @@ namespace BigAmbitionsMP
             RebuildRuntimeGrants();
             // Merger runtime BEFORE the building-access push below — RefreshBuildingAccess reads
             // IsGranted, which unions merger membership (slice 1).
+            HostReconcileAbsence();   // P3-B: departures/joins/membership changes all land here first
             var merger = BuildMergerState();
             MergerSync.ApplyState(merger);
             Broadcast(MessageEnvelope.Create(MessageType.MergerState, "host", merger));
@@ -6126,6 +6566,7 @@ namespace BigAmbitionsMP
                 pay.Offers.Add(oi);
             }
             pay.Offers.Sort((x, y) => string.CompareOrdinal(x.TargetKey, y.TargetKey));   // r6: dictionary order is not stable across a remove+insert
+            pay.Absences = MergerAbsence.HostSnapshot();   // P3-B (additive): who simulates what, for every machine
             return pay;
         }
 
@@ -6139,6 +6580,7 @@ namespace BigAmbitionsMP
         {
             if (!_running) return;
             if (!force && MergerSync.StoreGroups.Count == 0 && _mergerPendingByTarget.Count == 0) return;
+            HostReconcileAbsence();   // P3-B: the 10 s cadence is also the re-designation safety net
             var pay = BuildMergerState();
             MergerSync.ApplyState(pay);
             Broadcast(MessageEnvelope.Create(MessageType.MergerState, "host", pay));

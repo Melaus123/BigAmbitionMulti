@@ -88,6 +88,13 @@ namespace BigAmbitionsMP
         /// exactly - written with the slot, replaced from the loaded slot on every load, never carried
         /// over in memory. Empty/absent on manifests written before the field existed.</summary>
         public List<MpPaperworkEntry> Paperwork { get; set; } = new();
+        /// <summary>Merger phase 3-B: the host's ABSENCE MARKS as of this save moment - whose
+        /// businesses are being run for them, and since which game day. Rides the model like Paperwork
+        /// and follows the same timeline exactly - written with the slot, replaced from the loaded
+        /// slot on every load, reset on a new world. Without it a host RESTART with nobody from that
+        /// company online would forget "simulated since day D", which the return leg needs.
+        /// Empty/absent on manifests written before the field existed.</summary>
+        public List<MpAbsenceMark> Absence { get; set; } = new();
 
         /// <summary>Round-53 — per-SAVE needs/morale authority (user design 2026-07-22): the load
         /// lobby mirrors these, the Customize panel edits them, and the edited values become the
@@ -136,6 +143,20 @@ namespace BigAmbitionsMP
         public string StableId { get; set; } = "";
         public int    Day      { get; set; }   // the sender's game day at publish time
         public string Json     { get; set; } = "";
+    }
+
+    /// <summary>Merger phase 3-B - one ABSENCE MARK, StableId-keyed like the merger roster and the
+    /// paperwork store it rides beside. SimulatorPid is written for diagnostics only: a player id from
+    /// the previous session names nobody in this one, so the restore blanks it and lets the host's
+    /// reconcile re-designate (and re-send the hand-over). SinceDay is the point of the record - it is
+    /// the only thing that says when the absence began, and the return leg needs it.</summary>
+    public class MpAbsenceMark
+    {
+        public string OwnerStable  { get; set; } = "";
+        public string OwnerPid     { get; set; } = "";
+        public string SimulatorPid { get; set; } = "";
+        public List<string> Addresses { get; set; } = new();
+        public int    SinceDay     { get; set; }
     }
 
     public static class MPSaveManager

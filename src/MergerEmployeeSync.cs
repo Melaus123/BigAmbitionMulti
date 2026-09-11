@@ -213,8 +213,10 @@ namespace BigAmbitionsMP
                     BuildingRegistration target = null;
                     foreach (var reg in gi.BuildingRegistrations)
                         if (reg != null && GameStateReader.AddressKey(reg) == p.AddressKey) { target = reg; break; }
-                    if (target == null || !MergerFlip.TrulyMine(target))
-                    { Plugin.Logger.LogWarning($"[MergerStaff] routed adopt for '{p.AddressKey}' — not truly mine, dropped."); return; }
+                    // P3-B (B3c): a shop this machine SIMULATES for an absent owner is ours to staff for
+                    // the duration — the promotion is the same reconstruction, on the same real ids.
+                    if (target == null || (!MergerFlip.TrulyMine(target) && !MergerAbsence.SimulatesHere(p.AddressKey)))
+                    { Plugin.Logger.LogWarning($"[MergerStaff] routed adopt for '{p.AddressKey}' — neither truly mine nor simulated here, dropped."); return; }
 
                     // Reconstruct by primary skill (the GenerateCandidate subclass mapping — managers
                     // must keep their class or their plans break).
@@ -264,6 +266,62 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] ApplyOnOwner: {ex.Message}"); }
+        }
+
+        /// <summary>MERGER PHASE 3-B (B3c): promote an ABSENT owner's employee record — carried in the
+        /// P3-A paperwork bundle as Action="record" — into a full local EmployeeInstance on the machine
+        /// that simulates that shop, through the SAME adopt reconstruction the merger staff transfer
+        /// uses. That path keeps the REAL id and forgets this machine's injected copy, which is exactly
+        /// what the three employee-pass strips and the wage skip consult (they exclude by injected-ness)
+        /// — so the promotion alone makes the record work, get paid, get sick and train here. The
+        /// extended P3-A fields the adopt path never needed are stamped afterwards, so the record
+        /// RESUMES its life instead of starting as a fresh hire. Idempotent: a re-send repeats it.</summary>
+        public static bool PromoteRecord(EmployeeEditPayload rec)
+        {
+            if (rec == null || string.IsNullOrEmpty(rec.EmployeeId) || string.IsNullOrEmpty(rec.AddressKey)) return false;
+            string was = rec.Action;
+            try { rec.Action = "adopt"; ApplyOnOwner(rec); }
+            finally { rec.Action = was; }
+
+            EmployeeInstance? inst = null;
+            try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(rec.EmployeeId, out inst); } catch { }
+            if (inst == null) return false;
+            StampExtendedFields(inst, rec);
+            return true;
+        }
+
+        /// <summary>The P3-A record fields the adopt reconstruction never needed (it built a NEW hire).
+        /// Each in its own try so one renamed field cannot cost the whole promotion.</summary>
+        private static void StampExtendedFields(EmployeeInstance inst, EmployeeEditPayload p)
+        {
+            try { if (p.DayHired > 0) inst.dayHired = p.DayHired; } catch { }
+            try { if (p.NextSickDay > 0) inst.nextSickDay = p.NextSickDay; } catch { }
+            try { inst.workedHoursToday = p.WorkedHoursToday; inst.workedHoursThisWeek = p.WorkedHoursThisWeek; } catch { }
+            try { inst.workedDays = p.WorkedDays; inst.assignedWeeklyHours = p.AssignedWeeklyHours; } catch { }
+            try { inst.isAbsent = p.IsAbsent; inst.isReplaced = p.IsReplaced; inst.isBeingReplaced = p.IsBeingReplaced; } catch { }
+            try { inst.isTrainingDay = p.IsTrainingDay; inst.hasSendQuitWarning = p.HasSendQuitWarning; } catch { }
+            try { inst.sendRetirementNotice = p.SendRetirementNotice; } catch { }
+            try { if (!string.IsNullOrEmpty(p.AssignedHrManagerPlanId)) inst.assignedHrManagerPlanId = p.AssignedHrManagerPlanId; } catch { }
+            try { if (p.InitialCombinedSkillAmount > 0f) inst.initialCombinedSkillAmount = p.InitialCombinedSkillAmount; } catch { }
+            try { if (!string.IsNullOrEmpty(p.PresetId)) inst.presetId = p.PresetId; } catch { }
+            try
+            {
+                var ws = inst.assignedWorkStationItems;
+                if (ws != null && p.AssignedWorkStationItems != null) { ws.Clear(); ws.AddRange(p.AssignedWorkStationItems); }
+            }
+            catch { }
+            try
+            {   // the weekly-day enum is not csproj-named here — go through IList so the element type
+                // comes from the live list itself (the same trick the absence list installer uses).
+                var days = inst.assignedWeeklyDays as System.Collections.IList;
+                var et   = days?.GetType().GetGenericArguments();
+                if (days != null && et != null && et.Length == 1 && p.AssignedWeeklyDays != null)
+                {
+                    days.Clear();
+                    foreach (var d in p.AssignedWeeklyDays) days.Add(System.Enum.ToObject(et[0], d));
+                }
+            }
+            catch { }
         }
 
         private static readonly HashSet<string> _refusedSynthetic = new();   // H-ADOPT-1 refusal log, once per id

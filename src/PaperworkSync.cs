@@ -111,6 +111,9 @@ namespace BigAmbitionsMP
                     return null;
                 }
 
+                // r7: counted BEFORE the store - on the host, StorePaperwork may MOVE parts out of this very
+                // bundle (filing for an absent owner; the return guard), and the log should say what was built.
+                int nBiz = p.Businesses.Count, nItems = CountListItems(p.Lists), nEmp = p.Employees.Count;
                 if (MPServer.IsRunning)
                     MPServer.StorePaperwork(p, MPConfig.PlayerId);   // the host is a member too — applied locally
                 else if (MPClient.IsConnected)
@@ -121,8 +124,8 @@ namespace BigAmbitionsMP
                 _dirty = false;
                 _lastPublishAt = UnityEngine.Time.unscaledTime;
                 _lastPublishedDay = p.Day;
-                Plugin.Logger.LogInfo($"[Paperwork] published day {p.Day}: {p.Businesses.Count} businesses, "
-                    + $"{CountListItems(p.Lists)} list items, {p.Employees.Count} employees, {bytes} bytes ({why}).");
+                Plugin.Logger.LogInfo($"[Paperwork] published day {p.Day}: {nBiz} businesses, "
+                    + $"{nItems} list items, {nEmp} employees, {bytes} bytes ({why}).");
                 return p;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] publish: {ex.Message}"); return null; }
@@ -160,15 +163,106 @@ namespace BigAmbitionsMP
             var mine = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var reg in gi.BuildingRegistrations)
             {
-                if (reg == null || !MergerFlip.TrulyMine(reg)) continue;
+                if (reg == null) continue;
                 string key; try { key = GameStateReader.AddressKey(reg); } catch { continue; }
-                if (string.IsNullOrEmpty(key) || !mine.Add(key)) continue;
+                if (string.IsNullOrEmpty(key)) continue;
+                // P3-B (B3e): a business this machine SIMULATES for an absent owner publishes from here
+                // too - it is the only machine running it, so this bundle is the only live record of its
+                // books. The settled gate is INHERITED, not re-implemented: Build() is reached only
+                // through Publish(), which returns before this whenever MPWorldReady.IsSettled is false
+                // (P3-A r3) - so a marked address can never refill the store from an abandoned timeline.
+                if (!MergerFlip.TrulyMine(reg) && !MergerAbsence.SimulatesHere(key)) continue;
+                if (!mine.Add(key)) continue;
                 p.Businesses.Add(BuildOne(reg, key));
             }
 
             p.Lists     = BuildLists(gi, mine);
             p.Employees = BuildEmployees(gi, mine);
             return p;
+        }
+
+        // ══ P3-B r4 (F2) - PER-ADDRESS BUNDLE SURGERY ══════════════════════════════════════════
+        // A SIMULATOR publishes an absent owner's shops inside its OWN bundle (the SimulatesHere gate in
+        // Build above), so the host has to take them back OUT and file them under the owner. Both halves
+        // are address-filtered exactly the way MergerAbsence.InstallListsFor selects what to install, so
+        // what is filed is what will be handed back.
+
+        /// <summary>The IMPORTER addresses that follow these HQ addresses: itemsOrderedThisWeekByImporter
+        /// is keyed by the importer's building, never by one of the owner's own.</summary>
+        private static HashSet<string> ImporterKeysFor(PaperworkOwnerLists? l, HashSet<string> addrs)
+        {
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (l?.ImportPartnerships == null) return keys;
+            foreach (var ip in l.ImportPartnerships)
+                if (ip != null && addrs.Contains(ip.HeadquartersAddressKey ?? "") && !string.IsNullOrEmpty(ip.ImportAddressKey))
+                    keys.Add(ip.ImportAddressKey);
+            return keys;
+        }
+
+        /// <summary>Move (or, with a null destination, DROP) every element a predicate picks. Returns how
+        /// many moved.</summary>
+        private static int Move<T>(List<T>? src, List<T>? dst, System.Func<T, bool> pick)
+        {
+            if (src == null) return 0;
+            int n = 0;
+            for (int i = 0; i < src.Count; i++)
+                if (src[i] != null && pick(src[i])) { dst?.Add(src[i]); n++; }
+            if (n > 0) src.RemoveAll(x => x != null && pick(x));
+            return n;
+        }
+
+        private static void EnsureParts(BusinessPaperworkPayload b)
+        {
+            b.Businesses ??= new List<BusinessPaperwork>();
+            b.Employees  ??= new List<EmployeeEditPayload>();
+            b.Lists      ??= new PaperworkOwnerLists();
+        }
+
+        /// <summary>Every part of `addrs` leaves `from` and (when `to` is given) joins it. Returns the
+        /// number of parts that moved - 0 means this bundle held nothing of those addresses.</summary>
+        private static int Surgery(BusinessPaperworkPayload from, BusinessPaperworkPayload? to, HashSet<string> addrs)
+        {
+            if (from == null || addrs == null || addrs.Count == 0) return 0;
+            EnsureParts(from);
+            if (to != null) EnsureParts(to);
+            bool A(string? s) => !string.IsNullOrEmpty(s) && addrs.Contains(s!);
+            var imp = ImporterKeysFor(from.Lists, addrs);
+            int n = 0;
+            n += Move(from.Businesses, to?.Businesses, b => A(b.AddressKey));
+            n += Move(from.Employees,  to?.Employees,  e => A(e.AddressKey));
+            var l = from.Lists; var t = to?.Lists;
+            n += Move(l.DeliveryContracts,     t?.DeliveryContracts,     x => A(x.BusinessAddressKey));
+            n += Move(l.ImportPartnerships,    t?.ImportPartnerships,    x => A(x.HeadquartersAddressKey));
+            n += Move(l.LogisticsManagerPlans, t?.LogisticsManagerPlans, x => A(x.HeadquartersAddressKey));
+            n += Move(l.PricingManagerPlans,   t?.PricingManagerPlans,   x => A(x.HeadquartersAddressKey));
+            n += Move(l.HrManagerPlans,        t?.HrManagerPlans,        x => A(x.HeadquartersAddressKey));
+            n += Move(l.HeadhunterPlans,       t?.HeadhunterPlans,       x => A(x.HeadquartersAddressKey));
+            n += Move(l.InteriorInstallationFirmContracts, t?.InteriorInstallationFirmContracts, x => A(x.AddressKey));
+            // A move NAMES two addresses and belongs to whichever end is being filed (the installer
+            // already refuses to install it twice).
+            n += Move(l.MovingServiceContracts, t?.MovingServiceContracts, x => A(x.OriginAddressKey) || A(x.DestinationAddressKey));
+            n += Move(l.DisabledLicensingFees,  t?.DisabledLicensingFees,  x => A(x.AddressKey));
+            n += Move(l.PaidLicensingFeesToday, t?.PaidLicensingFeesToday, x => A(x.AddressKey));
+            n += Move(l.ItemsOrderedThisWeekByImporter, t?.ItemsOrderedThisWeekByImporter, x => imp.Contains(x.AddressKey ?? ""));
+            return n;
+        }
+
+        /// <summary>HOST (F2): lift these addresses out of an incoming bundle into a bundle of their own.
+        /// The parts end up in exactly one of the two.</summary>
+        public static BusinessPaperworkPayload SplitOutAddresses(BusinessPaperworkPayload from, HashSet<string> addrs, out int movedParts)
+        {
+            var moved = new BusinessPaperworkPayload();
+            movedParts = Surgery(from, moved, addrs);
+            return moved;
+        }
+
+        /// <summary>HOST (F2): put a split-out bundle INTO the owner's stored one, replacing whatever that
+        /// one held for the SAME addresses and leaving every other address of it exactly as it was.</summary>
+        public static void MergeAddresses(BusinessPaperworkPayload into, BusinessPaperworkPayload moved, HashSet<string> addrs)
+        {
+            if (into == null || moved == null) return;
+            Surgery(into, null, addrs);      // the owner's stale copy of exactly these addresses goes
+            Surgery(moved, into, addrs);     // and the simulator's fresh one takes its place
         }
 
         private static BusinessPaperwork BuildOne(BuildingRegistration reg, string key)
@@ -539,7 +633,8 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!MergerSync.IAmMember || buildingRegistration == null) return;
-                    if (!MergerFlip.TrulyMine(buildingRegistration)) return;
+                    if (!MergerFlip.TrulyMine(buildingRegistration)
+                        && !MergerAbsence.SimulatesHere(GameStateReader.AddressKey(buildingRegistration))) return;   // P3-B: a simulated shop's till is ours to publish
                     MarkDirty();
                 }
                 catch { }

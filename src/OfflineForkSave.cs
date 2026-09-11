@@ -16,6 +16,7 @@ namespace BigAmbitionsMP
         private sealed class State
         {
             public Action? RestoreSynthetics;
+            public Action? RestoreAbsence;
             public string GhostActiveId = "";
             public bool Veiled;
         }
@@ -30,7 +31,13 @@ namespace BigAmbitionsMP
                 try { GameStatePatcher.StripGhostVehicles("fork-save"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] ghost-vehicle strip: {ex.Message}"); }
                 try { GameStatePatcher.StripSyntheticRivalStates("fork-save"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] rival-state strip: {ex.Message}"); }
                 try { st.RestoreSynthetics = MPRegisterSync.StripSyntheticsForSave("fork-save"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] synthetics strip: {ex.Message}"); }
-                try { MergerFlip.VeilPush(); st.Veiled = true; } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] veil push: {ex.Message}"); }
+                // P3-B r1 (m3 + MAJOR-4): the fork save is a .hsg like any other, so it gets the SAME pair the
+                // coordinator uses - SaveStripPush (which does NOT honour the simulated-address exception, unlike
+                // VeilPush) and the absence strip (installed list items + promoted staff records). Reset() empties
+                // both tables on disconnect nowadays, so this is belt and braces - and it is the only thing standing
+                // between a fork save and an absent owner's paperwork if any path ever reaches here still simulating.
+                try { MergerFlip.SaveStripPush(); st.Veiled = true; } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] save-strip push: {ex.Message}"); }
+                try { st.RestoreAbsence = MergerAbsence.StripInstalledForSave(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] absence strip: {ex.Message}"); }
                 try
                 {
                     var gi = SaveGameManager.Current;
@@ -55,7 +62,8 @@ namespace BigAmbitionsMP
                 if (__state is State st)
                 {
                     try { st.RestoreSynthetics?.Invoke(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] synthetics restore: {ex.Message}"); }
-                    try { if (st.Veiled) MergerFlip.VeilPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] veil pop: {ex.Message}"); }
+                    try { if (st.Veiled) MergerFlip.SaveStripPop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] save-strip pop: {ex.Message}"); }
+                    try { st.RestoreAbsence?.Invoke(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] absence restore: {ex.Message}"); }
                     try { if (st.GhostActiveId.Length > 0 && SaveGameManager.Current != null) SaveGameManager.Current.ActiveVehicleId = st.GhostActiveId; } catch (Exception ex) { Plugin.Logger.LogWarning($"[ForkSave] ActiveVehicleId restore: {ex.Message}"); }
                 }
             }

@@ -1276,6 +1276,9 @@ namespace BigAmbitionsMP
         private static bool IsLocalOwnerBusiness(BuildingRegistration reg)
         {
             try { if (MergerFlip.TrulyMine(reg)) return true; } catch { }   // TrulyMine: flipped partner shops are NOT locally owner-authoritative
+            // P3-B (B3b): ...EXCEPT one this machine SIMULATES for an absent owner — nobody else is
+            // running it, so its owner snapshots must publish from here exactly as the owner's did.
+            try { if (MergerAbsence.SimulatesHere(GameStateReader.AddressKey(reg))) return true; } catch { }
             try
             {
                 string owner = reg.businessOwnerRivalId?.ToString() ?? "";
