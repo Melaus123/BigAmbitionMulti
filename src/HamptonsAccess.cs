@@ -105,4 +105,43 @@ namespace BigAmbitionsMP
             catch { }
         }
     }
+
+    /// <summary>H3 (2026-09-12) — the HAMPTONS EXIT ZONE. OwnsAHamptonsHouseExitCondition.CanExit
+    /// (decompile :10-33) walks the LOCAL save for a Hamptons registration that is RentedByPlayer or
+    /// BuildingOwnedByPlayer, so an invited guest who reached a friend's house was refused the way out
+    /// of the zone — the same tenancy-only lock the fence and the plot blocker had. A residence grant
+    /// for a Hamptons house is the session's statement that this player belongs behind that gate, so it
+    /// answers here too. Postfix-only: a natively true result is never touched.</summary>
+    [HarmonyPatch(typeof(OwnsAHamptonsHouseExitCondition), nameof(OwnsAHamptonsHouseExitCondition.CanExit))]
+    public static class Patch_HamptonsExit_GrantOpens
+    {
+        private static bool _logged;
+
+        static void Postfix(ref bool __result)
+        {
+            try
+            {
+                if (__result) return;                                         // natively allowed — done
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return; // single player — native
+                var regs = SaveGameManager.Current?.BuildingRegistrations;
+                if (regs == null) return;
+                foreach (var reg in regs)
+                {
+                    if (reg == null) continue;
+                    var b = reg.BuildingCached;
+                    if (b == null || !b.IsHamptonsHouse()) continue;
+                    string key = GameStateReader.AddressKey(reg);
+                    if (!GrantSync.CanEnterGranted(key)) continue;
+                    __result = true;
+                    if (!_logged)
+                    {
+                        _logged = true;
+                        Plugin.Logger.LogInfo($"[Hamptons] exit gate opened by a residence grant ('{key}').");
+                    }
+                    return;
+                }
+            }
+            catch { }
+        }
+    }
 }

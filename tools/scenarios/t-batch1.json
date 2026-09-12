@@ -1,0 +1,260 @@
+{
+  "id": "T-BATCH1",
+  "title": "batched non-merger scenario (user ruling 2026-09-12): RIVAL-FAIR-2 (the host's rival state reaches the client and both signatures agree; a fired price war publishes on change; a low-demand wave in the client's neighbourhood shields the client's shop from site selection and the client's registration survives; rival news relays by the neighbourhood rule) + SMALLFIX icons parity (the client, granted a business permission on the host's shop, enters it and sees the same warning icons the host sees inside, licensing icon withheld); NO merger; ends with the client leaving the building; NO save",
+  "preconditions": "Fixture save1 (the host melaus, Client1). Builds RIVAL-FAIR-2 (e27cb12) + SMALLFIX (uncommitted) deployed. Levers: rivalstate, rivalsig, rivalfire, rivalnews, warnicons, grant, enterbuilding, exitbuilding, regstate. The takeover and Hamptons fixes have no fixture surface (no AI shop for sale in reach, no Hamptons house) and stay review-verified. FIXTURE HYGIENE: NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "hostShop": "6 ba:street_seventhstreet",
+    "clientShop": "3 ba:street_broadwaystreet"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "upload SKIPPED",
+    "\\[RivalSync\\] .*(failed|exception|threw)",
+    "\\[RivalNews\\] .*(failed|exception|threw)",
+    "\\[RivalGuard\\] .*(failed|exception|threw)",
+    "\\[Business\\] warning icons .*(failed|exception|threw)"
+  ],
+  "oracles_report": [
+    "\\[RivalSync\\] ",
+    "\\[RivalNews\\] ",
+    "\\[RivalGuard\\] ",
+    "\\[Business\\] warning icons"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 90,
+      "note": "both worlds load and settle"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST BATCH1 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "rivalstate",
+      "expect_result": "^OK rivalstate rivals=[1-9]\\d* active=\\d+ defenses=\\d+",
+      "note": "the host's rival state exists"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "sleep_s": 5,
+      "note": "fold g: a rival state change that lands in a monologue callback reaches the client by the 3 s heartbeat publish - settle before the signature pair"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "rivalsig",
+      "expect_result": "^OK rivalsig (\\S+)",
+      "capture": {
+        "hostSig": "^OK rivalsig (\\S+)"
+      }
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "rivalsig",
+      "expect_result": "^OK rivalsig ${hostSig}$",
+      "note": "R3: the join snapshot carried the host's rival state - the client computes the same signature"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "rivalfire price @${hostShop}",
+      "expect_result": "^OK rivalfire price nb='[^']+' rival='[^']+' result=(True|False)",
+      "capture": {
+        "hostNb": "nb='([^']+)'"
+      },
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalSync\\] host rival state published: \\d+ rival\\(s\\), \\d+ active, \\d+ defense\\(s\\)",
+          "within_s": 10
+        }
+      ],
+      "note": "a price war fired in the host shop's neighbourhood (result may be False when that neighbourhood has no special rival - the publish-on-change hook still runs and the state signature is re-evaluated)"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 4
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "rivalsig",
+      "expect_result": "^OK rivalsig (\\S+)",
+      "capture": {
+        "hostSig2": "^OK rivalsig (\\S+)"
+      }
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "rivalsig",
+      "expect_result": "^OK rivalsig ${hostSig2}$",
+      "note": "R3 on change: after the war the client agrees with the host again"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "rivalfire lowdemand @${hostShop}",
+      "expect_result": "^OK rivalfire lowdemand nb='[^']+' rival='[^']+' result=(True|False)",
+      "capture": {
+        "waveNb": "nb='([^']+)'"
+      },
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalGuard\\] low-demand wave in '[^']+': \\d+ player-held building\\(s\\) shielded from site selection\\.",
+          "within_s": 10
+        }
+      ],
+      "note": "R1: the wave must run in a neighbourhood that HAS a special rival (the game's mechanics assume one; run 4 threw natively in Midtown, which has none). Murray Hill has one (the price war above fired True). The guard's count here is REPORTED (the host's own shop is natively rented and needs no raise); the RAISE itself was proven in run 4: 'low-demand wave in ba:neighborhood_midtown: 3 player-held building(s) shielded' - the client's three Midtown shops."
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK",
+      "capture": {
+        "clientRegAfter": "^(OK .{0,160})"
+      },
+      "note": "REPORT: the client's registration on the host after the wave (must not have become a rival's shop - compared by eye in the report: the business name/type must still be the client's)"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK",
+      "note": "REPORT: the client's own view of its shop after the wave"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "rivalnews ba:messagetype_rivals_businesses_opened",
+      "expect_result": "^OK rivalnews key='ba:messagetype_rivals_businesses_opened' rival='[^']*'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalNews\\] 'ba:messagetype_rivals_businesses_opened' from rival '[^']*' \\([^)]*\\): relayed to \\d+ player\\(s\\) \\[[^\\]]*\\]; host copy (kept|suppressed)\\.",
+          "within_s": 10
+        }
+      ],
+      "note": "R2: the neighbourhood rule ran for a real rival contact send (recipients depend on which players hold a business in that rival's neighbourhood - the log names them)"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "grant ${clientPid} business on",
+      "expect_result": "^OK grant ${clientPid} business on",
+      "note": "SMALLFIX I: a business (helper) permission for the client on the host's shops"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "enterbuilding ${hostShop}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "sleep_s": 8,
+      "note": "the host's own entry: the icon pass runs on entry"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "warnicons",
+      "expect_result": "^OK warnicons n=(\\d+)",
+      "capture": {
+        "hostIcons": "n=(\\d+)"
+      },
+      "note": "the OWNER's icon count inside its shop"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "enterbuilding ${hostShop}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Business\\] warning icons shown as helper in '${hostShop}' \\(licensing icon withheld\\)\\.",
+          "within_s": 20
+        }
+      ],
+      "note": "the client enters the host's shop as a helper: the parity log fires on the first icon pass"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "sleep_s": 8
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "warnicons",
+      "expect_result": "^OK warnicons n=${hostIcons}\\b",
+      "note": "PARITY: the helper's icon count equals the owner's (the licensing icon is withheld on both counts by the lever's own filter; the fixture shop carries no licence icon)"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 29,
+      "role": "both",
+      "cmd": "mark TEST BATCH1 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

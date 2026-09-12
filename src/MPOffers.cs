@@ -213,6 +213,22 @@ namespace BigAmbitionsMP
 
                 MPRegisterSync.PromoteInjectedForTransfer(p.AddressKey);
 
+                // T2 (2026-09-12, same hazard as MPTakeover's claim): the seller's items are ALREADY
+                // here (localItems > 0, read at the top of this method), so the native takeover's
+                // AddToPlayer -> InsertBusinessLayoutSet (decompile BuildingRegistration :333) must not
+                // insert reg.Layout's whole set again with fresh ids on top of them. A null Layout takes
+                // the "can't find a layout set" branch and adds nothing; with no local items we leave it
+                // alone so a bare shell still gets its native furniture.
+                if (localItems > 0)
+                {
+                    try
+                    {
+                        reg.Layout = null;
+                        Plugin.Logger.LogInfo($"[Offers] finalize '{p.AddressKey}': blueprint cleared ({localItems} item(s) already present)");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Offers] blueprint clear '{p.AddressKey}': {ex.Message}"); }
+                }
+
                 TransferInProgress = true;
                 MPPatches.AuthorizedPlayerBusinessTransfer = p.AddressKey;
                 try { BizManPresentation.OvertakeBusiness(reg); }

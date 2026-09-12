@@ -1281,9 +1281,31 @@ namespace BigAmbitionsMP
             return snap;
         }
 
+        /// <summary>H1: addresses whose owned-residence publish has already been announced.</summary>
+        private static readonly HashSet<string> _ownedResidenceLogged = new HashSet<string>();
+
         private static bool IsLocalOwnerBusiness(BuildingRegistration reg)
         {
             try { if (MergerFlip.TrulyMine(reg)) return true; } catch { }   // TrulyMine: flipped partner shops are NOT locally owner-authoritative
+            // H1 (2026-09-12): a PURCHASED residence is owner-authoritative here too. TrulyMine needs
+            // RentedByPlayer (MergerFlip :66-67) and a bought house is never rented, so a Hamptons home
+            // matched NOTHING and its interior was never published — the visitor's reg.itemInstances
+            // stayed empty and HamptonsHouse.LoadHamptonsItems (decompile :358-361) instantiated an
+            // empty house. BuildingRegistration.BuildingOwnedByPlayer (decompile :194) is a lookup in
+            // THIS save's own realEstate list, so it is the LOCAL player's deed only: a merger partner's
+            // purchased house on a member's machine still does not match. Narrowed to a building with no
+            // business tenant, so a deeded shop someone else runs keeps ITS runner authoritative.
+            try
+            {
+                if (reg.BuildingOwnedByPlayer && string.IsNullOrEmpty(reg.businessOwnerRivalId?.ToString() ?? ""))
+                {
+                    string rk = GameStateReader.AddressKey(reg);
+                    if (_ownedResidenceLogged.Add(rk))
+                        Plugin.Logger.LogInfo($"[InteriorSync] owned residence '{rk}' published (purchased, not rented).");
+                    return true;
+                }
+            }
+            catch { }
             // P3-B (B3b): ...EXCEPT one this machine SIMULATES for an absent owner — nobody else is
             // running it, so its owner snapshots must publish from here exactly as the owner's did.
             try { if (MergerAbsence.SimulatesHere(GameStateReader.AddressKey(reg))) return true; } catch { }

@@ -357,18 +357,70 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>Round-34: owner-management WARNING ICONS ("out of paper bags", low stock…) leaked to
-    /// helpers — the visibility flip lets UpdateSelectedStockOverlay run its UpdateWarningIcon call in
-    /// owner mode. Warning icons are the owner's management UI; suppress them entirely for a helper in
-    /// someone else's business.</summary>
+    /// <summary>2026-09-12 (I1, supersedes round-34's blanket suppress): WARNING ICONS are the shop
+    /// floor's shared state, not owner-only UI — a helper or a merger co-member restocking someone
+    /// else's shelves could not see which shelf was empty. Native gates the icon on
+    /// <c>alwaysShowWarningIcon || BuildingManager.IsPlayerOwnedBusiness || CanInteractInAnyBusiness</c>
+    /// (decompile ItemWarningIconManager :140-149), and IsPlayerOwnedBusiness is just
+    /// <c>buildingRegistration.RentedByPlayer</c> (BuildingManager :187) — so the same scoped visibility
+    /// flip the stock-overlay wrap uses gives a visitor icon PARITY. Held back: the licensing-fee Danger.
+    /// Its requirement (Furniture.Requirements.HasActiveLicensingFee :13-30) early-returns "met" while
+    /// <c>!RentedByPlayer</c> and otherwise reads the OWNER's local fee schedule, which a visitor does not
+    /// hold — under the flip it would fabricate a red exclamation off our own save. Read-only: the icon
+    /// itself is inert (no button, no tooltip) and nothing here mutates the replica.</summary>
     [HarmonyPatch(typeof(Player.HUD.ItemWarningIcons.ItemWarningIconManager),
                   nameof(Player.HUD.ItemWarningIcons.ItemWarningIconManager.UpdateWarningIcon), typeof(ItemController))]
-    public static class Patch_WarningIcons_HelperSuppress
+    public static class Patch_WarningIcons_VisitorParity
     {
-        static bool Prefix()
+        /// <summary>Set by the prefix when IT opened the flip, cleared by the finalizer. Main-thread
+        /// only (UpdateWarningIcon is a HUD call) and never re-entrant.</summary>
+        private static bool _flipped;
+        /// <summary>Edge detection for the once-per-building log line.</summary>
+        private static string _notedAddr = "";
+
+        // Fold f (review r1 MAJOR-1): the patched method is an INSTANCE method of the ICON MANAGER, so
+        // Harmony's `__instance` is the manager, not the item - the item is the method's argument and
+        // is injected by its parameter NAME (`itemController`). The first build declared
+        // `ItemController __instance` and would have read the manager through an item-typed reference.
+        static bool Prefix(ItemController itemController)
         {
-            try { return !BusinessHelperRoute.HelperHere(out _); }
-            catch { return true; }
+            _flipped = false;
+            try
+            {
+                if (!BusinessHelperRoute.HelperHere(out var addr)) { _notedAddr = ""; return true; }
+                if (itemController == null) return true;
+                if (itemController.CanInteractInAnyBusiness) return true;   // native already shows this one to everyone
+                HousingFurniture.Enter(includeHelper: true);
+                _flipped = true;
+                NoteEntry(addr);
+                if (itemController.GetWarningIconType() != Player.HUD.ItemWarningIcons.WarningIconType.Danger) return true;
+                var missing = ItemHelper.GetMissingRequirements(itemController.ItemInstance);   // decompile ItemHelper :526
+                if (missing != null)
+                    foreach (var r in missing)
+                        if (r is Furniture.Requirements.HasActiveLicensingFee)
+                            return false;   // the owner's fee schedule — not ours to render
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] warning-icon parity: {ex.Message}"); return true; }
+        }
+
+        static void Finalizer()
+        {
+            try { if (_flipped) { _flipped = false; HousingFurniture.Exit(); } }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] warning-icon parity exit: {ex.Message}"); }
+        }
+
+        /// <summary>One line per building entry (edge-detected by address), naming which grant it is:
+        /// a merger co-member is a helper to GrantSync (HelperAddressKeys unions merger membership), so
+        /// the owner pid decides the wording.</summary>
+        private static void NoteEntry(string addr)
+        {
+            if (string.IsNullOrEmpty(addr) || _notedAddr == addr) return;
+            _notedAddr = addr;
+            bool coMember = false;
+            try { coMember = CompanyLists.TryOwnerOfAddress(addr, out var owner) && !string.IsNullOrEmpty(owner) && MergerSync.IsMemberPid(owner); }
+            catch { }
+            Plugin.Logger.LogInfo($"[Business] warning icons shown as {(coMember ? "co-member" : "helper")} in '{addr}' (licensing icon withheld).");
         }
     }
 

@@ -187,6 +187,21 @@ namespace BigAmbitionsMP
             // (the round-196 landmine — OvertakeBusiness's tail calls it with a null UI
             // object); we run the REGISTRATION-level auto-filler ourselves right after,
             // which is the same scheduling native's UI wrapper performs.
+            // T1 (bug bamp-bug-20260908, 2026-09-12): DROP THE AI BLUEPRINT BEFORE THE NATIVE CLAIM.
+            // The host furnished this shop from its layout set and cleared reg.Layout on ITS copy only
+            // (HostFurnishClaimedShop :344); our copy still carries the AI blueprint name, because the
+            // interior apply writes reg.Layout only when the payload's layout is non-empty
+            // (GameStatePatcher :1219-1220) and the entry-clear is player-run-shops only (:4874-4885).
+            // OvertakeBusiness -> BuildingRegistration.AddToPlayer -> InsertBusinessLayoutSet
+            // (decompile BuildingRegistration :333) would then insert the WHOLE set a SECOND time with
+            // fresh ids — the 336-applied / 672-in-the-next-snapshot doubling. With Layout null the
+            // insert takes its "can't find a layout set" branch (BusinessLayoutSetHelper :586-604) and
+            // adds nothing. Kept when NOT ONE furnished item landed (`have == 0`: the deadline path
+            // claimed against an empty shell) so an unfurnished claim still gets native furniture.
+            bool blueprintCleared = false;
+            try { if (have > 0) { reg.Layout = null; blueprintCleared = true; } }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Takeover] blueprint clear '{addr}': {ex.Message}"); }
+
             ClaimInProgress = true;
             try { BizManPresentation.OvertakeBusiness(reg); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Takeover] native claim threw mid-tail (continuing): {ex.Message}"); }
@@ -195,7 +210,29 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Takeover] auto-fill schedule: {ex.Message}"); }
 
             Toast(UI.Notification.NotificationType.Success, $"You took over {reg.BusinessName}!");
-            Plugin.Logger.LogInfo($"[Takeover] CONFIRMED '{addr}' for ${offer:N0} — native claim executed against {have} item(s), {staffRecords} staff record(s) minted.");
+            Plugin.Logger.LogInfo($"[Takeover] CONFIRMED '{addr}' for ${offer:N0} — native claim executed against {have} item(s), {staffRecords} staff record(s) minted, blueprint {(blueprintCleared ? "cleared" : "kept")}.");
+        }
+
+        /// <summary>TestDrive lever entry (2026-09-12): the tail of ClientOfferPrefix — arm the pending
+        /// slot and send the SAME MessageType.TakeoverRequest the UI's offer click sends
+        /// (MPClient.SendTakeoverRequest, :72), so the accept/deferred-claim path runs unchanged.
+        /// Returns a one-line result for the lever; no money is touched here (the host arbitrates).</summary>
+        internal static string LeverRequest(string addressKey, float offer)
+        {
+            try
+            {
+                if (!MPClient.IsConnected) return "ERR not connected as a client";
+                if (string.IsNullOrEmpty(addressKey)) return "ERR address key required";
+                if (offer <= 0f) return "ERR amount must be > 0";
+                if (!string.IsNullOrEmpty(_pendingAddr)) return $"ERR an offer for '{_pendingAddr}' is still pending";
+                _pendingAddr   = addressKey;
+                _pendingOffer  = offer;
+                _pendingSentAt = UnityEngine.Time.unscaledTime;
+                MPClient.SendTakeoverRequest(addressKey, offer);
+                Plugin.Logger.LogInfo($"[Takeover] lever offer ${offer:N0} for '{addressKey}' sent to host for arbitration.");
+                return $"OK takeoverbuy '{addressKey}' requested amount={offer:0.##}";
+            }
+            catch (Exception ex) { return $"ERR takeoverbuy: {ex.Message}"; }
         }
 
         /// <summary>Client: expire a pending offer that got no reply (older host that

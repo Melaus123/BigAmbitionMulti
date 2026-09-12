@@ -9645,9 +9645,15 @@ namespace BigAmbitionsMP
             {
                 var gi = SaveGameManager.Current;
                 if (gi?.specialRivalStates == null) return list;
+                // Fold e (rig T-BATCH1 run 1): a save can hold the SAME rival id more than once (the fixture's
+                // host save carries each special rival twice; a client mirror carried each 21 times). The game
+                // reads the FIRST entry per id (RivalsHelper.GetSpecialRivalState :741-750), so the payload carries
+                // exactly that one - never the duplicates.
+                var seenIds = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var st in gi.specialRivalStates)
                 {
                     if (st == null || string.IsNullOrEmpty(st.rivalId)) continue;
+                    if (!seenIds.Add(st.rivalId)) continue;   // fold e: first per id wins
                     var row = new CbRivalState { RivalId = st.rivalId, IsActive = st.isActive, IsDefeated = st.isDefeated };
                     if (st.defenseStates != null)
                         foreach (var d in st.defenseStates)
@@ -9679,7 +9685,11 @@ namespace BigAmbitionsMP
         private static string SignatureOf(List<CbRivalState> states)
         {
             var sb = new System.Text.StringBuilder();
-            foreach (var r in states)
+            // Fold e: canonical order (by rival id) so the signature compares across machines whatever
+            // order each save happens to hold its states in.
+            var ordered = new List<CbRivalState>(states);
+            ordered.Sort((a, b) => string.CompareOrdinal(a.RivalId, b.RivalId));
+            foreach (var r in ordered)
             {
                 sb.Append(r.RivalId).Append('|').Append(r.IsActive ? '1' : '0').Append(r.IsDefeated ? '1' : '0')
                   .Append('|').Append(r.Defenses.Count);
@@ -10148,6 +10158,11 @@ namespace BigAmbitionsMP
         public static void BroadcastGameTime(float? speedOverride = null)
         {
             if (!_running) return;
+            // RIVAL-FAIR-2 fold g (rig T-BATCH1 run 2): a rival's activation/deactivation can land in a
+            // MONOLOGUE CALLBACK after the hooked timeline sweep returned (the client showed a rival active
+            // that the host had already deactivated), so the change-gated publish also rides this 3 s
+            // heartbeat - a poll of the authoritative state, sent only when the signature moved.
+            try { PublishRivalStateIfChanged("heartbeat"); } catch (Exception rx) { Plugin.Logger.LogWarning($"[RivalSync] heartbeat publish: {rx.Message}"); }
             var (day, hour) = GameStateReader.GetGameTime();
             float speed = speedOverride ?? UnityEngine.Time.timeScale;
 

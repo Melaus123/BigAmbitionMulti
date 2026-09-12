@@ -224,6 +224,61 @@ namespace BigAmbitionsMP
                     return $"OK '{arg}': deliveryspot={cspots} handtruckspawner={cspawners} avail={availv} rented={rentedv} name='{bn}' type='{bt}'";
                 }
 
+                case "warnicons":
+                {
+                    // I-lever (2026-09-12): recompute GetWarningIconType over BuildingManager.allItemControllers
+                    // under the SAME scoped flip and licensing filter Patch_WarningIcons_VisitorParity applies.
+                    // The manager's _activeIcons dictionary is private, so this re-derives the set rather than
+                    // reading it — which also means it answers "what SHOULD be showing" for the local player.
+                    var bmw = InstanceBehavior<BuildingManager>.Instance;
+                    if (bmw?.allItemControllers == null) return "ERR not inside a building (no item controllers)";
+                    bool wHelper = false; try { wHelper = BusinessHelperRoute.HelperHere(out _); } catch { }
+                    var wsb = new StringBuilder(); int wn = 0;
+                    if (wHelper) HousingFurniture.Enter(includeHelper: true);
+                    try
+                    {
+                        foreach (var wic in bmw.allItemControllers)
+                        {
+                            if (wic == null) continue;
+                            var wt = Player.HUD.ItemWarningIcons.WarningIconType.None;
+                            try { wt = wic.GetWarningIconType(); } catch { continue; }
+                            if (wt == Player.HUD.ItemWarningIcons.WarningIconType.None) continue;
+                            if (wHelper && !wic.CanInteractInAnyBusiness
+                                && wt == Player.HUD.ItemWarningIcons.WarningIconType.Danger)
+                            {
+                                bool wLic = false;
+                                try
+                                {
+                                    var wMiss = ItemHelper.GetMissingRequirements(wic.ItemInstance);
+                                    if (wMiss != null)
+                                        foreach (var wr in wMiss)
+                                            if (wr is Furniture.Requirements.HasActiveLicensingFee) { wLic = true; break; }
+                                }
+                                catch { }
+                                if (wLic) continue;   // withheld by the parity prefix — the owner's fee schedule
+                            }
+                            wn++;
+                            if (wn <= 12) wsb.Append($"{(wn > 1 ? "," : "")}{wt}:{wic.ItemInstance?.itemName ?? "?"}");
+                        }
+                    }
+                    finally { if (wHelper) HousingFurniture.Exit(); }
+                    return $"OK warnicons n={wn} [{wsb}]";
+                }
+
+                case "takeoverbuy":
+                {
+                    // T-lever (2026-09-12): drive the CLIENT's takeover request for an AI-run business —
+                    // the same MessageType.TakeoverRequest the BizMan offer click sends (ClientOfferPrefix
+                    // :72 -> MPClient.SendTakeoverRequest), so accept -> furnish -> deferred claim runs
+                    // unchanged. 'itemcount <addr>' proves the resulting item count.
+                    // The address key itself contains spaces, so the AMOUNT is the last token.
+                    var tba = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (tba.Length < 2) return "ERR usage: takeoverbuy <addr> <amount>";
+                    if (!float.TryParse(tba[tba.Length - 1], out float tbAmount)) return "ERR amount must be a number";
+                    string tbAddr = string.Join(" ", tba, 0, tba.Length - 1);
+                    return MPTakeover.LeverRequest(tbAddr, tbAmount);
+                }
+
                 case "forrent":
                 {
                     // Round-260 helper: list up to 8 for-rent addresses on this machine.
@@ -1466,6 +1521,12 @@ namespace BigAmbitionsMP
                         try { rfNb = rfReg.Neighborhood ?? ""; } catch { rfNb = ""; }
                     }
                     if (rfNb.Length == 0) return "ERR no neighborhood";
+                    // Rig run 4: the game's own ActivateLowDemand/ActivatePriceReduction assume a special rival
+                    // lives in the neighbourhood (RivalDefenseHelper.cs:107/:115 read rival.rivalData.id) - native
+                    // only ever calls them from that rival's own timeline. Refuse instead of letting native throw.
+                    BigAmbitions.Rivals.SpecialRival? rfRival = null;
+                    try { rfRival = BigAmbitions.Rivals.RivalsHelper.GetSpecialRivalByNeighborhood(rfNb); } catch { }
+                    if (rfRival == null) return $"ERR no special rival in '{rfNb}' (the game's mechanics need one there)";
                     bool rfResult;
                     try
                     {
@@ -1476,7 +1537,7 @@ namespace BigAmbitionsMP
                             : BigAmbitions.Rivals.RivalDefenseHelper.ActivateLowDemand(rfNb, Enums.Priority.High);
                     }
                     catch (Exception rfEx) { return $"ERR rivalfire {rfKind}: {rfEx.GetType().Name}: {rfEx.Message}"; }
-                    return $"OK rivalfire {rfKind} nb='{rfNb}' result={rfResult}";
+                    return $"OK rivalfire {rfKind} nb='{rfNb}' rival='{rfRival.rivalData?.id ?? ""}' result={rfResult}";
                 }
 
                 case "rivalnews":

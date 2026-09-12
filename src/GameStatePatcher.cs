@@ -627,6 +627,7 @@ namespace BigAmbitionsMP
         /// nothing useful and could resurrect messages.  ItemHelper.ClearPriceCaches (public,
         /// ItemHelper.cs:152) is called when something changed so the price consumers re-read.
         /// Inert on the host and in single player.</summary>
+        private static bool _dupLogged;   // fold e: the duplicate sweep logs once per session
         public static void ApplyRivalStates(List<CbRivalState>? states)
         {
             try
@@ -682,6 +683,16 @@ namespace BigAmbitionsMP
                         changed++;
                     }
                 }
+                // Fold e (rig T-BATCH1 run 1): a client mirror held each special rival 21 times (an old
+                // accumulation in the save). The game reads only the FIRST entry per id, so the extra ones are
+                // dead weight that also made the two machines' signatures disagree - drop them, keeping the first.
+                try
+                {
+                    var keep = new HashSet<string>(StringComparer.Ordinal);
+                    int dropped = gi.specialRivalStates.RemoveAll(e => e != null && !string.IsNullOrEmpty(e.rivalId) && !keep.Add(e.rivalId));
+                    if (dropped > 0 && !_dupLogged) { _dupLogged = true; Plugin.Logger.LogInfo($"[RivalSync] removed {dropped} duplicate special rival state(s) from this save, keeping the first per rival as the game reads it."); changed++; }
+                }
+                catch (Exception dx) { Plugin.Logger.LogWarning($"[RivalSync] duplicate sweep: {dx.Message}"); }
                 if (changed == 0) return;                  // log only when something actually moved
                 try { ItemHelper.ClearPriceCaches(); } catch { }
                 Plugin.Logger.LogInfo($"[RivalSync] applied host rival state: {states.Count} rival(s), {active} active, {defenses} defense(s).");
@@ -1719,6 +1730,13 @@ namespace BigAmbitionsMP
                     // again re-runs the full pipeline (layout, designs, items)
                     // against the now-fresh fields.
                     TryRefreshActiveInteriorIfMatches(payload.AddressKey, changedIds, removedIds, changedDesignUuids, _layoutChanged, movedIds);
+                    // H2 (2026-09-12): a Hamptons house does not rebuild from an interior write. Its
+                    // loader is one-shot — HamptonsHouse.LoadItemsIfNeeded (decompile :349) is
+                    // IsHouseLoaded-gated — so a visitor already standing at LOD0 keeps the empty house
+                    // it loaded before the owner's snapshot arrived. ReloadHouseCoroutine(true)
+                    // (decompile :64-86) clears the container and re-instantiates from the registration
+                    // we just wrote.
+                    TryReloadHamptonsHouseAfterApply(payload.AddressKey, reg);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}"); }
             });
@@ -2258,6 +2276,8 @@ namespace BigAmbitionsMP
                     }
 
                     int changed = 0, unknown = 0;
+                    // I2: ids we actually wrote — the helper icon refresh below needs them by id.
+                    var cargoChangedIds = new System.Collections.Generic.HashSet<string>();
                     _lastItemSer.TryGetValue(addr, out var lastSer);
                     foreach (var entry in payload.Items)
                     {
@@ -2274,8 +2294,25 @@ namespace BigAmbitionsMP
                         // "unchanged", keep the live object, and freeze our out-of-band value in place.
                         // Dropping the entry costs one deserialize on the next full apply and closes it.
                         try { lastSer?.Remove(entry.Id); } catch { }
+                        cargoChangedIds.Add(entry.Id);
                         changed++;
                     }
+
+                    // I2 (2026-09-12): the native per-stock-change icon refresh
+                    // (OnItemsInCargoUpdated -> UpdateVisuals -> SetStockAmount -> UpdateSelectedStockOverlay
+                    // -> UpdateWarningIcon) is IsPlayerOwnedBusiness-gated and must STAY gated (its
+                    // FillUpShowcaseShelfOrPointOfSale tail mutates the replica). So when the local player
+                    // stands in this address as a HELPER, refresh the changed items' icons directly — the
+                    // parity prefix supplies the scoped flip. A merger co-member already refreshes through
+                    // the flipped native path.
+                    try
+                    {
+                        if (cargoChangedIds.Count > 0
+                            && BusinessHelperRoute.HelperHere(out var helperAddr) && helperAddr == addr)
+                            InstanceBehavior<Player.HUD.ItemWarningIcons.ItemWarningIconManager>.Instance?
+                                .UpdateWarningIconByIds(cargoChangedIds);
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] helper warning-icon refresh for '{addr}': {ex.Message}"); }
 
                     // A cargo write moves state the S4-lite fingerprint cannot see (counts are
                     // unchanged — same items, same designs, same dirt cells; only amounts moved), so
@@ -2926,6 +2963,29 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] NoteLocalItemState: {ex.Message}"); }
         }
 
+        /// <summary>H2: rebuild a REPLICATED Hamptons house after its interior apply.
+        /// Owner gate: we skip any registration this machine holds by tenancy or by deed — an owner
+        /// never applies a snapshot of its own house (the interior/cargo authority shield refuses the
+        /// host's relay of our own push), and this guard states that rather than relying on it.</summary>
+        private static void TryReloadHamptonsHouseAfterApply(string addressKey, BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg?.BuildingCached == null || !reg.BuildingCached.IsHamptonsHouse()) return;
+                bool mine = false;
+                try { mine = reg.RentedByPlayer || reg.BuildingOwnedByPlayer; } catch { }
+                if (mine) return;
+                var cc = InstanceBehavior<CityManager>.Instance?.FindCityBuildingController(reg.BuildingCached.Address)
+                         as CityHamptonsHouseController;
+                var hh = cc?.hamptonsHouse;
+                if (hh == null || !hh.IsHouseLoaded) return;   // not at LOD0 — the one-shot loader will read the fresh data itself
+                int n = 0; try { n = reg.itemInstances?.Count ?? 0; } catch { }
+                hh.StartCoroutine(hh.ReloadHouseCoroutine(true));
+                Plugin.Logger.LogInfo($"[Hamptons] '{addressKey}' interior reloaded after apply ({n} items).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] reload after apply '{addressKey}': {ex.Message}"); }
+        }
+
         private static void TryRefreshActiveInteriorIfMatches(string addressKey,
             HashSet<string>? changedIds = null, HashSet<string>? removedIds = null,
             HashSet<string>? changedDesignUuids = null, bool layoutChanged = true,
@@ -3057,7 +3117,11 @@ namespace BigAmbitionsMP
                 {
                     // Round-86: itemWork gate — OwnerWarningRefreshNow already no-ops on empty ids, but
                     // scheduling the coroutine every apply was still overhead.
-                    if (itemWork && reg.RentedByPlayer)
+                    // I3 (2026-09-12): a HELPER standing in the owner's shop needs the same post-apply
+                    // icon pass — adoption/structure changes skip the native placement tail for them too.
+                    bool helperHere = false;
+                    try { helperHere = BusinessHelperRoute.HelperHere(out var ha) && ha == addressKey; } catch { }
+                    if (itemWork && (reg.RentedByPlayer || helperHere))
                         matched.StartCoroutine(OwnerWarningRefreshAfterInit(matched, addressKey, changedIds, movedIds));
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] schedule owner warning refresh: {ex.Message}"); }
@@ -3081,17 +3145,27 @@ namespace BigAmbitionsMP
             try
             {
                 var reg = bm?.buildingRegistration;
-                if (reg == null || !reg.RentedByPlayer) return;
+                if (reg == null) return;
                 if (GameStateReader.AddressKey(reg) != addressKey) return;   // owner left this building → skip
+                // I3: the OWNER gets the whole pass; a HELPER standing in the same shop gets the ICONS
+                // only. The rest of this method is owner bookkeeping — OnItemChanged rebinds employees
+                // and capacity, GenerateItemsWithoutStockTasks writes the owner's to-do list, and the
+                // security recompute writes reg.securityLevel — none of which a visitor may author.
+                bool ownerHere  = false;
+                try { ownerHere = reg.RentedByPlayer; } catch { }
+                bool helperHere = false;
+                if (!ownerHere) { try { helperHere = BusinessHelperRoute.HelperHere(out var ha) && ha == addressKey; } catch { } }
+                if (!ownerHere && !helperHere) return;
                 var ids = new System.Collections.Generic.HashSet<string>();
                 if (changed != null) foreach (var i in changed) ids.Add(i);
                 if (moved   != null) foreach (var i in moved)   ids.Add(i);
                 if (ids.Count == 0) return;
+                try { InstanceBehavior<Player.HUD.ItemWarningIcons.ItemWarningIconManager>.Instance?.UpdateWarningIconByIds(ids); } catch { }
+                if (!ownerHere) return;
                 // The game's own "items changed" hub (designer close funnels here too): available producers,
                 // customer capacity from seating, promotion, employee↔work-station assignments, and the
                 // onBuildingRegistrationChange listeners. Self-gates on owner-inside.
                 try { bm.OnItemChanged(forced: true); } catch { }
-                try { InstanceBehavior<Player.HUD.ItemWarningIcons.ItemWarningIconManager>.Instance?.UpdateWarningIconByIds(ids); } catch { }
                 try { Helpers.BusinessHelper.GenerateItemsWithoutStockTasks(reg); } catch { }
                 // Security devices are the one family the hub skips (native placement covers them in
                 // OnItemPositionUpdated :1387): recompute per-panel coverage + the registration's level.
