@@ -9048,11 +9048,10 @@ namespace BigAmbitionsMP
         /// prefix runs the native body's EXACT sequence - same contact, same key, same three data entries -
         /// with `amount` = own + partners, and returns false so the native body does not also send.  Off a
         /// merger, or with no partner bill, it returns true and the native body runs untouched.
-        /// NOT DONE HERE (reported): the tax BILL itself (SendTaxNotice) - its renderer (decompile
-        /// UI.Smartphone.Apps.Contacts/TaxesMessage.cs:180-196) computes the total it shows out of
-        /// subtotalRegisteredBusinesses / subtotalDeductibleExpenses / subtotalRealEstateTaxes / taxPercentage
-        /// and shows each of them on its own labelled line, so no clone can raise the shown total without
-        /// falsifying a labelled line; the company-books payload carries one scalar, not those parts.</summary>
+        /// The tax BILL itself is a company bill too now (TAXBILL-ONE, user ruling 2026-09-12): the
+        /// payload carries each member's WHOLE filed return rather than one scalar, so
+        /// Patch_TaxesMessage_CompanyBill below hands the game's own renderer a company Taxes object
+        /// whose labelled lines and whose grand total agree with each other.</summary>
         [HarmonyPatch(typeof(Helpers.TaxHelper), "SendUnpaidWarning")]
         public static class Patch_TaxHelper_UnpaidWarning_CompanyTotal
         {
@@ -9095,6 +9094,12 @@ namespace BigAmbitionsMP
             {
                 __state = 0;
                 try { __state = SaveGameManager.Current?.currentUnpaidTaxes?.day ?? 0; } catch { }
+                // TAXBILL-ONE T3 (PATCH F): with NO own bill the native body returns true at once
+                // (decompile Helpers/TaxHelper.cs:377-379) and the postfix's "own record null
+                // afterwards" test still holds - but the period would be 0 and the pay-all would name
+                // no bill.  Name the co-members' period instead, so a member who owes nothing itself
+                // can still settle the COMPANY's bill at the counter.
+                try { if (__state == 0 && MergerSync.IAmMember) __state = CompanyBooks.PartnerTopPaidPeriod(); } catch { }
             }
             static void Postfix(bool __result, int __state)
             {
@@ -9102,6 +9107,11 @@ namespace BigAmbitionsMP
                 {
                     if (!__result || !MergerSync.IAmMember) return;
                     if (CompanyBooks.PayingForCompany) return;           // this IS the relayed payment
+                    // TAXBILL-ONE fold c (rig run 2): the payer's partners must see THIS machine's due drop at
+                    // once - the game's own pay path publishes nothing, so every other machine's company
+                    // counter kept showing this member's old bill until the next day change.  One publish per
+                    // pay action, partial or full (the relayed leg publishes in PayOwnForCompany already).
+                    CompanyBooks.Publish("tax paid");
                     // M5 (review r2): this method returns TRUE for a PARTIAL payment too - the game's own
                     // UI pays whatever the player typed through it (IRSEmployee.cs:51 passes
                     // purchaseUI.CurrentTaxPaymentAmount; TaxHelper.cs:376-419 pays min(amount, due) and
@@ -9113,6 +9123,258 @@ namespace BigAmbitionsMP
                     CompanyBooks.SendPayAll(__state);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] pay-all hook: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>TAXBILL-ONE T1: capture the return at FILING - and ONLY at filing (fold b, review r1
+        /// MAJOR-1).  A postfix on ExecutePlayerTaxesEvent cannot reach the figure it needs - the Taxes
+        /// object is a LOCAL there (decompile Helpers/TaxHelper.cs:106-148) and a ZERO bill is never stored
+        /// on the game instance at all (:117-125) - so the snapshot is taken where the object is a return
+        /// value: GenerateTaxes (:203-274).  GenerateTaxes has TWO callers: ExecutePlayerTaxesEvent (:108)
+        /// and the game's console command IRSPrintTaxesOwedSoFar (:555), which only PRINTS what would be
+        /// owed and files nothing - a snapshot taken there would be published to the partners as a return
+        /// this member never filed.  So the snapshot is taken only while the filing pass is up:
+        /// Patch_TaxHelper_ExecuteTaxes_Publish raises FilingPass in its prefix and drops it in its
+        /// finalizer (an exception inside the pass cannot leave it up).  The snapshot is a DEEP copy
+        /// because the live record keeps being mutated by later payments (:409-411).</summary>
+        [HarmonyPatch(typeof(Helpers.TaxHelper), "GenerateTaxes")]
+        public static class Patch_TaxHelper_GenerateTaxes_Capture
+        {
+            /// <summary>TRUE only between ExecutePlayerTaxesEvent's entry and its exit (fold b).</summary>
+            public static bool FilingPass;
+            static void Postfix(Entities.Taxes __result)
+            {
+                try
+                {
+                    if (!FilingPass || !MergerSync.IAmMember || __result == null) return;
+                    CompanyBooks.LastFiledReturn = CompanyBooks.CloneReturn(__result);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] filed-return capture: {ex.Message} — this member's rows may be missing from the company bill."); }
+            }
+        }
+
+        /// <summary>TAXBILL-ONE T1: publish AT FILING, so the other members see this member's parts within
+        /// seconds rather than at the next day change.  This runs INSIDE the RunDaily lift
+        /// (Patch_TaxHelper_RunDaily_BooksInert above has SuspendPush up), and that is safe: Publish does
+        /// not test the suspend counter at all - it lifts the overlay itself and reads the live records
+        /// (CompanyBooks.cs:231, "lift the overlay HERE") - so a suspended publish is neither dropped nor
+        /// deferred, it goes out immediately with own-only figures, which is exactly what a filed return
+        /// must carry.  No PublishAfterPop is needed.
+        /// Fold b: the prefix raises Patch_TaxHelper_GenerateTaxes_Capture.FilingPass and the finalizer drops
+        /// it, so GenerateTaxes is snapshotted only when this pass called it; the postfix publishes only a
+        /// return dated TODAY - the one this very pass produced - never an older snapshot.</summary>
+        [HarmonyPatch(typeof(Helpers.TaxHelper), "ExecutePlayerTaxesEvent")]
+        public static class Patch_TaxHelper_ExecuteTaxes_Publish
+        {
+            static void Prefix() { Patch_TaxHelper_GenerateTaxes_Capture.FilingPass = true; }
+            static Exception? Finalizer(Exception? __exception)
+            {
+                Patch_TaxHelper_GenerateTaxes_Capture.FilingPass = false;
+                return __exception;
+            }
+            static void Postfix()
+            {
+                try
+                {
+                    if (!MergerSync.IAmMember) return;
+                    var t = CompanyBooks.LastFiledReturn;
+                    if (t == null || t.day != (SaveGameManager.Current?.Day ?? -1)) return;   // fold b: only THIS pass's return
+                    CompanyBooks.Publish("tax filed");
+                    Plugin.Logger.LogInfo($"[Tax] filed this member's return for period day {t.day}: total {t.totalToPay:F2} ({t.businessesIncome?.Count ?? 0} business row(s), {t.deductibleExpenses?.Count ?? 0} deduction row(s), {t.estateTaxes?.Count ?? 0} property row(s)); published to the company.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] filing publish: {ex.Message} — the company sees this member's parts at its next publish."); }
+            }
+        }
+
+        /// <summary>TAXBILL-ONE T2 (user ruling 2026-09-12): under a merger the bill the IRS sends IS the
+        /// company's return - every member's businesses, deductions and properties on one sheet, one
+        /// total, equal to what the shared wallet will pay.  Nothing new is drawn: the renderer is the
+        /// game's own (UI.Smartphone.Apps.Contacts/TaxesMessage.SetData, decompile :71-80) and it is
+        /// simply handed a DIFFERENT Taxes object.  ContactsApp.cs:495-499 re-runs SetData from the
+        /// STORED message on every open of the conversation, so the swap is never persisted - and a
+        /// member who files later completes the bill by itself at the next open.
+        /// The only label this build adds is a member's DISPLAY NAME, which the repossession variant
+        /// already draws as a plain row with an empty value (TaxesMessage.cs:140).</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Contacts.TaxesMessage),
+                      nameof(UI.Smartphone.Apps.Contacts.TaxesMessage.SetData), new Type[] { typeof(Entities.Taxes) })]
+        public static class Patch_TaxesMessage_CompanyBill
+        {
+            // Same thread, same frame: the prefix fills this and the postfix empties it.
+            private static System.Collections.Generic.List<string>? _pendingRows;
+            private static System.Reflection.MethodInfo? _addPlain, _addSplitter;
+
+            /// <summary>A row label may carry a colour tag only where the renderer's own line template has
+            /// rich text ON.  Read off the LIVE template: TaxesMessage.taxLineTemplate (private
+            /// SerializeField, TaxesMessage.cs:57-58) -> TaxesMessageLine.leftLabel (private
+            /// SerializeField, TaxesMessageLine.cs:14-15) -> the TMP text component on it.</summary>
+            private static bool RichTextOn(UI.Smartphone.Apps.Contacts.TaxesMessage msg)
+            {
+                try
+                {
+                    var tmpl = AccessTools.Field(typeof(UI.Smartphone.Apps.Contacts.TaxesMessage), "taxLineTemplate")?.GetValue(msg)
+                               as UI.Smartphone.Apps.Contacts.TaxesMessageLine;
+                    if (tmpl == null) return false;
+                    var left = AccessTools.Field(typeof(UI.Smartphone.Apps.Contacts.TaxesMessageLine), "leftLabel")?.GetValue(tmpl)
+                               as UnityEngine.Component;
+                    if (left == null) return false;
+                    var tmp = left.GetComponent<TMPro.TMP_Text>();
+                    if (tmp == null) tmp = left.GetComponentInChildren<TMPro.TMP_Text>(true);
+                    return tmp != null && tmp.richText;
+                }
+                catch { return false; }
+            }
+
+            static void Prefix(UI.Smartphone.Apps.Contacts.TaxesMessage __instance, ref Entities.Taxes taxes)
+            {
+                _pendingRows = null;
+                try
+                {
+                    if (!MergerSync.IAmMember || taxes == null) return;
+                    CompanyBooks.TaxRowTint = RichTextOn(__instance);
+                    float own = taxes.totalToPay;
+                    var company = CompanyBooks.CompanyReturn(taxes, out var pending, out int lossRows);
+                    int folded = 0;
+                    foreach (var kv in CompanyBooks.Partners)
+                        if (MergerSync.IsMemberPid(kv.Key) && kv.Value.TaxReturn != null && kv.Value.TaxReturn!.Day == company.day) folded++;
+                    _pendingRows = pending;
+                    taxes = company;
+                    Plugin.Logger.LogInfo($"[Tax] company bill drawn for period day {company.day}: own {own:F2} + {folded} co-member(s) {company.totalToPay - own:F2} = {company.totalToPay:F2}; {pending.Count} pending, {lossRows} loss adjustment(s).");
+                }
+                catch (Exception ex)
+                {
+                    _pendingRows = null;
+                    Plugin.Logger.LogWarning($"[Tax] company bill: {ex.Message} — this member's own bill is shown instead.");
+                }
+            }
+
+            static void Postfix(UI.Smartphone.Apps.Contacts.TaxesMessage __instance)
+            {
+                var pending = _pendingRows;
+                _pendingRows = null;
+                try
+                {
+                    if (pending == null || pending.Count == 0) return;
+                    var t = typeof(UI.Smartphone.Apps.Contacts.TaxesMessage);
+                    if (_addSplitter == null) _addSplitter = AccessTools.Method(t, "AddSplitter");
+                    if (_addPlain == null)    _addPlain    = AccessTools.Method(t, "AddPlainLine", new Type[] { typeof(string), typeof(string) });
+                    if (_addSplitter == null || _addPlain == null)
+                    { Plugin.Logger.LogWarning("[Tax] pending-member rows skipped: the renderer's own line builders (AddSplitter/AddPlainLine) were not found."); return; }
+                    _addSplitter!.Invoke(__instance, null);
+                    foreach (var pid in pending)
+                        _addPlain!.Invoke(__instance, new object[] { CompanyBooks.MemberRowLabel(pid), string.Empty });
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] pending-member rows: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>TAXBILL-ONE T3 (PATCH C): the IRS counter shows and charges the COMPANY total.  Native
+        /// PurchaseUI.GetIrsPaymentAmount (decompile UI.Purchase/PurchaseUI.cs:486-493, private static)
+        /// answers TaxHelper.GetCurrentTaxesToPay() for the current-taxes item, which PurchaseUiTax.Setup
+        /// turns into both the price label and the pre-filled amount (:31-48).
+        /// HOW THE MONEY MOVES: with the amount = the company total, the native pay path still charges
+        /// only min(amount, this machine's own bill) here (TaxHelper.cs:389) - the payer's machine settles
+        /// its OWN bill, and the existing pay-all (CompanyBooks.SendPayAll, fired by
+        /// Patch_TaxHelper_PayCurrent_PayAll above) has each partner settle theirs on their machine.  Every
+        /// one of those payments comes out of the SAME shared wallet (the MergerWallet mirror), so what
+        /// leaves the wallet is the company total, once.  No new money path is added here.</summary>
+        [HarmonyPatch(typeof(UI.Purchase.PurchaseUI), "GetIrsPaymentAmount", new Type[] { typeof(Entities.TaxPaymentType) })]
+        public static class Patch_PurchaseUI_IrsAmount_CompanyTotal
+        {
+            static void Postfix(Entities.TaxPaymentType taxPaymentType, ref float __result)
+            {
+                try
+                {
+                    if (!MergerSync.IAmMember || taxPaymentType != Entities.TaxPaymentType.CurrentTaxes) return;
+                    float partners = CompanyBooks.PartnerTaxCurrentDue();
+                    if (partners <= 0f) return;                      // nothing to add: leave the counter alone
+                    __result += partners;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] counter amount: {ex.Message} — the own figure stands."); }
+            }
+        }
+
+        /// <summary>TAXBILL-ONE T3 (PATCH D): a member with NO bill of its own can still pay the company's.
+        /// Native HasCurrentTaxesToPay (decompile Helpers/TaxHelper.cs:450-453) is only ever a UI gate -
+        /// every caller either opens a screen, adds a screen row or picks a click label
+        /// (IRSStationController.cs:56 and :78, ManageCtaBehavior.cs:134, PurchaseUI.cs:190, and through
+        /// HasAnyTaxesToPay :460-467, InfoOverlay.cs:38).  None of them moves money and none creates a
+        /// todo task (the task is created in ExecutePlayerTaxesEvent, TaxHelper.cs:141, which never asks
+        /// this), so widening the answer only lets the counter open.</summary>
+        [HarmonyPatch(typeof(Helpers.TaxHelper), nameof(Helpers.TaxHelper.HasCurrentTaxesToPay))]
+        public static class Patch_TaxHelper_HasCurrent_CompanyBill
+        {
+            static void Postfix(ref bool __result)
+            {
+                try
+                {
+                    if (__result || !MergerSync.IAmMember) return;
+                    if (CompanyBooks.PartnerTaxCurrentDue() > 0f) __result = true;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] company bill outstanding: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>TAXBILL-ONE T3 (PATCH E): the counter's amount field is not editable while it carries a
+        /// COMPANY total.  Native pre-fills it with the max and lets the player type a smaller figure
+        /// (PurchaseUiTax.Setup :44-45, SelectPayment :50-68 clamps to that max) - but a typed-down figure
+        /// would settle only part of the company's bill while the pay-all still asks every partner to
+        /// settle theirs in full.  Only the field is locked: the button and the keyboard confirm still
+        /// work (KeyboardInputHelper.Configure, :48) and the pre-filled max is what gets paid.</summary>
+        [HarmonyPatch(typeof(UI.Purchase.PurchaseUiTax), nameof(UI.Purchase.PurchaseUiTax.Setup))]
+        public static class Patch_PurchaseUiTax_CompanyAmountFixed
+        {
+            static void Postfix(string key, UI.Components.InputField ___amountInput)
+            {
+                try
+                {
+                    if (!MergerSync.IAmMember || key != "taxes_pay_item") return;
+                    if (CompanyBooks.PartnerTaxCurrentDue() <= 0f) return;   // own bill only: native behaviour
+                    var inp = ___amountInput;
+                    if (inp == null) return;
+                    var f = inp.tmpInputField;
+                    if (f != null) f.readOnly = true;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] counter field: {ex.Message} — the field stays editable."); }
+            }
+        }
+
+        /// <summary>TAXBILL-ONE T4 (PATCH G): under a merger the game's own $150,000 filing line is tested
+        /// against the COMPANY's sales.  Native PlayerShouldDoTaxes (decompile Helpers/TaxHelper.cs:150-171,
+        /// private static) answers false off an anniversary and otherwise sums TotalSales over the last
+        /// daysPerYear summaries BY LIST INDEX.  The day test is kept exactly as native; only the sum
+        /// widens.  The overlay is already lifted for this whole pass (Patch_TaxHelper_RunDaily_BooksInert
+        /// above), and OwnLastYearSales lifts it again for its own sum - the lift nests, so that costs
+        /// nothing here.  When the company falls short only because a co-member has not published yet, the
+        /// anniversary is marked pending and re-checked the moment those books arrive
+        /// (CompanyBooks.TaxAnniversaryRecheck, called from Receive).</summary>
+        [HarmonyPatch(typeof(Helpers.TaxHelper), "PlayerShouldDoTaxes")]
+        public static class Patch_TaxHelper_ShouldDoTaxes_CompanyLine
+        {
+            static bool Prefix(ref bool __result)
+            {
+                try
+                {
+                    if (!MergerSync.IAmMember) return true;                          // vanilla
+                    var gi = SaveGameManager.Current;
+                    int dpy = gi?.gameVariables?.daysPerYear ?? 0;
+                    if (gi == null || dpy <= 0) return true;
+                    if (gi.Day % dpy != 0) { __result = false; return false; }        // native :152-155
+                    float own      = CompanyBooks.OwnLastYearSales();
+                    float partners = CompanyBooks.PartnerLastYearSales();
+                    float company  = own + partners;
+                    __result = company >= 150000f;
+                    if (!__result)
+                    {
+                        int missing = CompanyBooks.UnpublishedMemberCount();
+                        if (missing > 0)
+                        {
+                            CompanyBooks.AnniversaryPending = gi.Day;
+                            Plugin.Logger.LogInfo($"[Tax] anniversary day {gi.Day}: company sales {company:F2} below the line with {missing} member(s) unpublished — re-checked when their books arrive.");
+                        }
+                    }
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] company filing line: {ex.Message} — the game's own test stands."); return true; }
             }
         }
 

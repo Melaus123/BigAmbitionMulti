@@ -3920,6 +3920,38 @@ namespace BigAmbitionsMP
         public float TaxCurrentDue  { get; set; }
         public int   TaxDeadlineDay { get; set; }
         public int   TaxPeriod      { get; set; }
+        // TAXBILL-ONE T1 - the company's filing line and the company's BILL.  Additive: a bundle from
+        // an older build carries 0 sales and a null return, so it adds nothing to either.
+        /// <summary>This member's OWN sales over the last daysPerYear summaries, summed exactly as
+        /// TaxHelper.PlayerShouldDoTaxes does - the company's half of the game's $150,000 filing line.</summary>
+        public float LastYearSales { get; set; }
+        /// <summary>This member's CURRENT filed return, as filed (a later partial payment lowers what is
+        /// owed, carried in TaxCurrentDue, and never this).</summary>
+        public CbTaxReturn? TaxReturn { get; set; }
+    }
+
+    /// <summary>TAXBILL-ONE T1: one line of a filed return.  Entities.Taxes holds these as
+    /// List&lt;(string, float)&gt; and a tuple does not serialize - the wire carries this DTO instead.</summary>
+    public class CbTaxRow
+    {
+        public string Label  { get; set; } = "";
+        public float  Amount { get; set; }
+    }
+
+    /// <summary>TAXBILL-ONE T1: one member's whole filed return - the parts the game's own bill renderer
+    /// draws (UI.Smartphone.Apps.Contacts/TaxesMessage.SetData), not one scalar.  TotalToPay is the
+    /// figure AS FILED; what is still owed after a partial payment or a late fee is TaxCurrentDue.</summary>
+    public class CbTaxReturn
+    {
+        public int   Day    { get; set; }         // Taxes.day - the tax period this return belongs to
+        public int   DueDay { get; set; }         // Taxes.dueDay
+        public int   Pct    { get; set; }         // Taxes.taxPercentage
+        public float TotalToPay { get; set; }
+        public float Gambling   { get; set; }     // Taxes.subtotalGamblingWinnings
+        public float SubtotalDeductible { get; set; }
+        public List<CbTaxRow> Businesses  { get; set; } = new();
+        public List<CbTaxRow> Estate      { get; set; } = new();
+        public List<CbTaxRow> Deductibles { get; set; } = new();
     }
 
     /// <summary>MERGER PHASE 4a / B9 - the tax pay-all, its relay and the partner's report back.</summary>

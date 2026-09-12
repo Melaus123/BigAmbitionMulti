@@ -1,0 +1,258 @@
+{
+  "id": "T-TAXONE",
+  "title": "one company tax bill, two players: while merged each machine files a SYNTHETIC return (the host a profitable one, the client a loss - deductions above its income, so it owes only its property tax); the filed parts reach the partner within seconds; on BOTH machines the company return renders with the game's own arithmetic adding up to the sum of the two native bills (one loss adjustment row, nothing pending); the IRS counter shows the same company total on both machines; the client pays that total: its own bill settles natively, the pay-all makes the host settle its own from the shared wallet; afterwards both counters show nothing owed and the filed return still renders; ends dissolved, NO save",
+  "preconditions": "Fixture save1 (the host melaus, Client1). Build TAXBILL-ONE deployed (levers `taxbill synth`, `taxparts`, `taxrender`, `taxcounter`, `taxgate`, `taxpay`). The gate on COMPANY sales is smoke-checked only (`taxgate` reports the fixture's real figures; its decision is review-verified). The shared wallet must cover the two synthetic bills (about $1,650 at the default 10% rate; the run reports the balance before paying). FIXTURE HYGIENE: NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "\\[Tax\\] .*invariant",
+    "\\[Tax\\] .*pay refused",
+    "\\[Tax\\] pay-all refused",
+    "\\[Tax\\] .*(failed|exception|threw)"
+  ],
+  "oracles_report": [
+    "\\[Tax\\] "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 90,
+      "note": "both worlds load and settle"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST TAXONE START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "both worlds settle; the books bundles are exchanged"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "^OK money=\\d+\\.\\d\\d merged=True",
+      "note": "REPORT the shared balance: it must cover the two synthetic bills below"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "taxbill synth 20000 5000 100",
+      "expect_result": "^OK taxbill synth totalToPay=(\\d+\\.\\d\\d) day=\\d+",
+      "capture": {
+        "hostTotal": "totalToPay=(\\d+\\.\\d\\d)"
+      },
+      "note": "the host's synthetic return: income 20,000, deductions 5,000, property tax 100 -> a positive bill (15,000 x rate + 100) (the synthetic filing publishes without the real filing's '[Tax] filed' log line; the partner's taxparts filed=1 below is the proof it arrived)"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "taxbill synth 1000 3000 50",
+      "expect_result": "^OK taxbill synth totalToPay=50\\.00 day=\\d+",
+      "note": "the client's LOSS return: deductions 3,000 above income 1,000 -> its game floors the income tax at zero; only the 50 property tax is owed (the synthetic filing publishes without the real filing's '[Tax] filed' log line; the partner's taxparts filed=1 below is the proof it arrived)"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "sleep_s": 6,
+      "note": "the filed parts travel both ways"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "taxparts",
+      "expect_result": "^OK taxparts own=${hostTotal} period=\\d+ members=1 filed=1 pending=0 sum=\\d+\\.\\d\\d \\[${clientPid}:50\\.00:\\d+\\]"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "taxparts",
+      "expect_result": "^OK taxparts own=50\\.00 period=\\d+ members=1 filed=1 pending=0 sum=\\d+\\.\\d\\d \\[${hostPid}:${hostTotal}:\\d+\\]"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "taxrender",
+      "expect_result": "^OK taxrender income=21000\\.00 deductions=6000\\.00 taxable=15000\\.00 tax=\\d+\\.\\d\\d estate=150\\.00 total=(\\d+\\.\\d\\d) sumbills=\\1 match=True pending=0 lossrows=1 rows=\\d+",
+      "note": "the company return on the host: income 20,000 + 1,000; deductions 5,000 + 3,000 minus the client's 2,000 loss adjustment = 6,000; taxable 15,000; property 100 + 50; the shown total equals the sum of the two native bills"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "taxrender",
+      "expect_result": "^OK taxrender income=21000\\.00 deductions=6000\\.00 taxable=15000\\.00 tax=\\d+\\.\\d\\d estate=150\\.00 total=(\\d+\\.\\d\\d) sumbills=\\1 match=True pending=0 lossrows=1 rows=\\d+",
+      "note": "the same company return on the client"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "taxcounter",
+      "expect_result": "^OK taxcounter show=(\\d+\\.\\d\\d) own=${hostTotal} partners=50\\.00 hascurrent=True",
+      "capture": {
+        "companyShow": "show=(\\d+\\.\\d\\d)"
+      },
+      "note": "the IRS counter on the host shows the company total"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "taxcounter",
+      "expect_result": "^OK taxcounter show=${companyShow} own=50\\.00 partners=${hostTotal} hascurrent=True",
+      "note": "the same company total on the client's counter"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "taxgate",
+      "expect_result": "^OK taxgate own=\\d+\\.\\d\\d partners=\\d+\\.\\d\\d company=\\d+\\.\\d\\d qualifies=(True|False) pending=-1",
+      "note": "SMOKE ONLY: the company sales sum on the fixture's real history; no anniversary is pending"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "taxpay",
+      "expect_result": "^OK taxpay ok=True ownleft=0\\.00",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Tax\\] pay-all sent by '${clientPid}'\\.",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[Tax\\] paid own bill on behalf of the company \\(asked by '${clientPid}'\\)\\.",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[Tax\\] partner '${hostPid}' paid its own bill on behalf of the company\\.",
+          "within_s": 25
+        }
+      ],
+      "note": "the client pays the company total at the counter: its own 50 settles natively, the pay-all makes the host settle its own bill from the shared wallet"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "sleep_s": 4,
+      "note": "the 'tax paid' republish lands on both sides"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "taxcounter",
+      "expect_result": "^OK taxcounter show=0\\.00 own=0\\.00 partners=0\\.00 hascurrent=False",
+      "note": "nothing owed on the host"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "taxcounter",
+      "expect_result": "^OK taxcounter show=0\\.00 own=0\\.00 partners=0\\.00 hascurrent=False",
+      "note": "nothing owed on the client"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "taxrender",
+      "expect_result": "^OK taxrender income=21000\\.00 deductions=6000\\.00 taxable=15000\\.00 tax=\\d+\\.\\d\\d estate=150\\.00 total=(\\d+\\.\\d\\d) sumbills=\\1 match=True pending=0 lossrows=1 rows=\\d+",
+      "note": "the filed return still renders as the company's after payment (the bill message stays readable)"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "sleep_s": 6,
+      "note": "the flip un-does itself (1 Hz)"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 33,
+      "role": "both",
+      "cmd": "mark TEST TAXONE END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

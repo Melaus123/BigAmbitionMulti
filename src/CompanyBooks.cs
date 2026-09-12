@@ -43,6 +43,26 @@ namespace BigAmbitionsMP
         /// <summary>Partner books as last received, keyed by the OWNER's player id.</summary>
         private static readonly Dictionary<string, CompanyBooksPayload> _partner = new();
 
+        /// <summary>TAXBILL-ONE T5: the co-members' bundles as this machine holds them (lever read-out).</summary>
+        public static IReadOnlyDictionary<string, CompanyBooksPayload> Partners => _partner;
+
+        /// <summary>TAXBILL-ONE T1: the return THIS machine last FILED, snapshotted at filing time
+        /// (MPPatches.Patch_TaxHelper_GenerateTaxes_Capture).  Two reasons it is not read back off the
+        /// game: a ZERO bill leaves NO record at all (TaxHelper.cs:117-125), and a partial payment
+        /// lowers the live record's totalToPay (TaxHelper.cs:409-411) while leaving its subtotals alone,
+        /// which would make the company bill's lines and its grand total disagree.  Session fact -
+        /// cleared with _partner in Reset().</summary>
+        public static Taxes? LastFiledReturn;
+
+        /// <summary>TAXBILL-ONE T2: true while the bill's row labels may carry a rich-text colour tag -
+        /// set from the renderer's own line template by the bill patch.  False everywhere else, and the
+        /// labels are then plain display names.</summary>
+        public static bool TaxRowTint;
+
+        /// <summary>TAXBILL-ONE T4: the anniversary day whose COMPANY assessment was declined because a
+        /// co-member's books had not arrived yet; -1 = nothing pending.  Session fact.</summary>
+        public static int AnniversaryPending = -1;
+
         /// <summary>What THIS machine added to each day record, so it can be removed exactly.
         /// day → ownerPid → ledger entry.  This is the only record of the overlay: the game's own
         /// objects are mutated in place (every reader holds the live object).</summary>
@@ -179,6 +199,30 @@ namespace BigAmbitionsMP
                 p.TaxPeriod      = gi.currentUnpaidTaxes?.day ?? 0;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] tax figure unavailable: {ex.Message} — this member contributes 0 to the company bill."); }
+
+            // TAXBILL-ONE T1: the member's CURRENT filed return - the parts the bill renderer draws.
+            // Preferred source is the snapshot taken at filing; the fallback (a bill filed before this
+            // machine joined, or before the mod loaded) is the live record with its total REBUILT from
+            // its own subtotals by the game's formula (GenerateTaxes, TaxHelper.cs:268-272), which is
+            // the as-filed figure a partial payment has since lowered.
+            try
+            {
+                int dpyR = gi.gameVariables?.daysPerYear ?? 0;
+                var filed = LastFiledReturn;
+                Taxes? src = null;
+                bool asFiled = false;
+                if (filed != null && dpyR > 0 && filed.day / dpyR == gi.Day / dpyR) { src = filed; asFiled = true; }
+                else if (gi.currentUnpaidTaxes != null) src = gi.currentUnpaidTaxes;
+                if (src != null) p.TaxReturn = ToReturnDto(src, asFiled);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] filed return unavailable: {ex.Message} — this member contributes no rows to the company bill."); }
+
+            // TAXBILL-ONE T1: this member's OWN sales over the tax year, for the company's filing line.
+            // ORDER: this is the LAST thing Build does.  OwnLastYearSales lifts the overlay, and the
+            // matching SuspendPop can RE-APPLY it (CompanyBooks.cs:816-824) - every other field must
+            // already have been taken from the own-only record by the time that happens.
+            try { p.LastYearSales = OwnLastYearSales(); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] own last-year sales unavailable: {ex.Message} — this member contributes 0 to the company filing line."); }
 
             return p;
         }
@@ -587,6 +631,7 @@ namespace BigAmbitionsMP
                 _partner[p.OwnerPid] = p;
                 _pending = true;
                 Apply("books receipt");
+                TaxAnniversaryRecheck();   // TAXBILL-ONE T4: the late books may be what puts the company over the filing line
                 try { MPPatches.RefreshTopbarMoneyChange(); } catch { }   // B4: the arrow/tooltip are event-driven
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] receive: {ex.Message}"); }
@@ -795,6 +840,7 @@ namespace BigAmbitionsMP
             _overlaid.Clear(); _rowOwner.Clear(); _labelOwner.Clear(); _partner.Clear(); _nativeKept.Clear();
             _suspend = 0; _pending = false; _wasMember = false; _memberSig = ""; _edgeHeldSig = ""; _edgeRetryAt = 0f;
             _lastPublishedDay = -1; _inertLoggedDay = -1; _veilBuildLoggedDay = -1;
+            LastFiledReturn = null; TaxRowTint = false; AnniversaryPending = -1;   // TAXBILL-ONE: session facts, cleared with _partner
             Plugin.Logger.LogInfo("[Books] reset: tracking cleared without touching any record (scene boundary).");
         }
 
@@ -1028,6 +1074,276 @@ namespace BigAmbitionsMP
                 sum += kv.Value.TaxCurrentDue;
             }
             return sum;
+        }
+
+        // ══ TAXBILL-ONE — ONE COMPANY, ONE BILL (user ruling 2026-09-12) ══════════════════
+        /// <summary>T1/T4.  This member's OWN sales over the last daysPerYear summaries, summed exactly
+        /// as TaxHelper.PlayerShouldDoTaxes does (decompile Helpers/TaxHelper.cs:150-171 — by LIST
+        /// INDEX, not by day number).  The overlay is lifted around the sum so a partner's rows are
+        /// never counted; precedent TimeSync.cs:535-556.  The lift nests, so it costs nothing where it
+        /// is already up (inside the RunDaily tax pass).</summary>
+        public static float OwnLastYearSales()
+        {
+            var gi = SaveGameManager.Current;
+            if (gi?.financialSummaries == null) return 0f;
+            int dpy = gi.gameVariables?.daysPerYear ?? 0;
+            if (dpy <= 0) return 0f;
+            float sales = 0f;
+            SuspendPush();
+            try
+            {
+                var sums = gi.financialSummaries;
+                int start = System.Math.Max(0, sums.Count - dpy);
+                for (int i = start; i < sums.Count; i++)
+                {
+                    var st = sums[i]?.businessIncomeStatements;
+                    if (st == null) continue;
+                    foreach (var bis in st) if (bis != null) sales += bis.TotalSales;
+                }
+            }
+            finally { SuspendPop(); }
+            return sales;
+        }
+
+        /// <summary>T4: the co-members' own last-year sales, as they published them.</summary>
+        public static float PartnerLastYearSales()
+        {
+            float sum = 0f;
+            foreach (var kv in _partner) if (MergerSync.IsMemberPid(kv.Key)) sum += kv.Value.LastYearSales;
+            return sum;
+        }
+
+        /// <summary>T4: co-members this machine holds NO bundle for yet.</summary>
+        public static int UnpublishedMemberCount()
+        {
+            int n = 0;
+            try
+            {
+                foreach (var pid in MergerSync.MyMemberPidsOrdered)
+                {
+                    if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) continue;
+                    if (!_partner.ContainsKey(pid)) n++;
+                }
+            }
+            catch { }
+            return n;
+        }
+
+        /// <summary>T3 (PATCH F): the period a pay-all should name when THIS machine has no own bill —
+        /// the highest period among the co-members that still owe.</summary>
+        public static int PartnerTopPaidPeriod()
+        {
+            int best = 0;
+            foreach (var kv in _partner)
+            {
+                if (!MergerSync.IsMemberPid(kv.Key)) continue;
+                if (kv.Value.TaxCurrentDue <= 0f) continue;
+                int period = kv.Value.TaxReturn?.Day ?? kv.Value.TaxPeriod;
+                if (period > best) best = period;
+            }
+            return best;
+        }
+
+        /// <summary>T2: a member's DISPLAY NAME as a bill row label — the only label this build adds,
+        /// and no new wording (the repossession variant already draws a plain name row with an empty
+        /// value, TaxesMessage.cs:140).  Colour-tinted only when the renderer's line template has rich
+        /// text on, which the bill patch checks off the live template before it calls CompanyReturn.</summary>
+        public static string MemberRowLabel(string pid)
+        {
+            string name = "";
+            try { name = MPNames.Resolve(pid); } catch { }
+            if (string.IsNullOrEmpty(name)) name = pid;
+            if (!TaxRowTint) return name;
+            if (name.IndexOf('<') >= 0 || name.IndexOf('>') >= 0) return name;   // fold b (review r1 MINOR-4): a name that could read as markup is never wrapped in it
+            try
+            {
+                if (PlayerColours.TryColourFor(pid, out var c))
+                    return "<color=#" + UnityEngine.ColorUtility.ToHtmlStringRGB(c) + ">" + name + "</color>";
+            }
+            catch { }
+            return name;
+        }
+
+        private static float SumRows(List<(string, float)> rows)
+        {
+            float s = 0f;
+            foreach (var r in rows) s += r.Item2;
+            return s;
+        }
+
+        /// <summary>T2, MAIN THREAD.  Build the COMPANY's return from this member's own one and every
+        /// co-member's published return for the SAME period.  `own` is NEVER mutated: the game hands the
+        /// STORED Taxes object to the renderer on every open of the conversation (ContactsApp.cs:495-499),
+        /// so a mutated argument would compound on the second open.
+        ///
+        /// LOSS CASE (user ruling 2026-09-12): the company total is the SUM of the members' native bills,
+        /// never a netted figure — a member whose deductions exceed its income pays zero on its own
+        /// machine (GenerateTaxes floors the taxable figure at 0, TaxHelper.cs:268-271), so its excess
+        /// deduction must not net against a profitable member's income here.  The LOSS ADJUSTMENT row
+        /// takes that excess straight back out of the deduction section, as a negative line the game's
+        /// own currency formatter draws (ToCurrencyFormat = ToString("C"), GenericExtensions.cs:40-43).</summary>
+        public static Taxes CompanyReturn(Taxes own, out List<string> pendingPids, out int lossRows)
+        {
+            pendingPids = new List<string>();
+            lossRows = 0;
+            var outp = new Taxes
+            {
+                day                = own.day,
+                dueDay             = own.dueDay,
+                taxPercentage      = own.taxPercentage,
+                lateFeeApplied     = own.lateFeeApplied,
+                businessesIncome   = new List<(string, float)>(),
+                estateTaxes        = new List<(string, float)>(),
+                deductibleExpenses = new List<(string, float)>(),
+            };
+            if (own.businessesIncome != null) outp.businessesIncome.AddRange(own.businessesIncome);
+            if (own.estateTaxes != null)      outp.estateTaxes.AddRange(own.estateTaxes);
+
+            // Deduction categories are COMPANY-wide: the same label is one summed row across members.
+            // The labels are the game's own localization keys, so they stay plain (a colour tag would
+            // stop TaxesMessageLine.SetPlain recognising the key, TaxesMessageLine.cs:23-30).
+            var dedOrder  = new List<string>();
+            var dedAmount = new Dictionary<string, float>();
+
+            if (own.deductibleExpenses != null)
+                foreach (var d in own.deductibleExpenses)
+                {
+                    string k = d.Item1 ?? "";
+                    if (!dedAmount.ContainsKey(k)) { dedOrder.Add(k); dedAmount[k] = 0f; }
+                    dedAmount[k] += d.Item2;
+                }
+
+            float gambling = own.subtotalGamblingWinnings;
+            // OWN's contribution is the AS-FILED total (see LastFiledReturn): a partial payment lowers
+            // the live record's totalToPay but not its subtotals.
+            float total = (LastFiledReturn != null && LastFiledReturn.day == own.day)
+                        ? LastFiledReturn.totalToPay : own.totalToPay;
+
+            var losses = new List<(string, float)>();
+            float ownExcess = own.subtotalDeductibleExpenses - own.subtotalRegisteredBusinesses - own.subtotalGamblingWinnings;
+            if (ownExcess > 0f) losses.Add((MemberRowLabel(MPConfig.PlayerId), -ownExcess));
+
+            foreach (var kv in _partner)
+            {
+                if (!MergerSync.IsMemberPid(kv.Key)) continue;
+                var r = kv.Value.TaxReturn;
+                if (r == null || r.Day != own.day) { pendingPids.Add(kv.Key); continue; }
+                string label = MemberRowLabel(kv.Key);
+                float bus = 0f;
+                foreach (var row in r.Businesses) { bus += row.Amount; outp.businessesIncome.Add((label, row.Amount)); }
+                foreach (var row in r.Estate)     outp.estateTaxes.Add((label, row.Amount));
+                foreach (var row in r.Deductibles)
+                {
+                    string k = row.Label ?? "";
+                    if (!dedAmount.ContainsKey(k)) { dedOrder.Add(k); dedAmount[k] = 0f; }
+                    dedAmount[k] += row.Amount;
+                }
+                gambling += r.Gambling;
+                total    += r.TotalToPay;
+                float excess = r.SubtotalDeductible - bus - r.Gambling;
+                if (excess > 0f) losses.Add((label, -excess));
+            }
+
+            foreach (var k in dedOrder) outp.deductibleExpenses.Add((k, dedAmount[k]));
+            foreach (var l in losses) { outp.deductibleExpenses.Add(l); lossRows++; }
+
+            outp.subtotalGamblingWinnings     = gambling;
+            outp.subtotalRegisteredBusinesses = SumRows(outp.businessesIncome);
+            outp.subtotalRealEstateTaxes      = SumRows(outp.estateTaxes);
+            outp.subtotalDeductibleExpenses   = SumRows(outp.deductibleExpenses);
+            outp.totalToPay                   = total;
+
+            // INVARIANT: the renderer's OWN arithmetic on the object we hand it (TaxesMessage.cs:194-207
+            // through GetTotalIncome :247-250, GetTaxableIncome :252-260, GetIncomeTax :262-265) must
+            // land on the same total the members' bills add up to.  Warn, never throw — the bill is
+            // still shown exactly as the game draws it.
+            float income  = outp.subtotalRegisteredBusinesses + outp.subtotalGamblingWinnings;
+            float taxable = income - outp.subtotalDeductibleExpenses;
+            if (taxable < 0f) taxable = 0f;
+            float drawn = taxable * outp.taxPercentage / 100f + outp.subtotalRealEstateTaxes;
+            if (System.Math.Abs(drawn - outp.totalToPay) > 1f)
+                Plugin.Logger.LogWarning($"[Tax] company bill arithmetic disagrees: the lines draw {drawn:F2} but the members' bills sum to {outp.totalToPay:F2} — the bill is shown as the renderer draws it.");
+            return outp;
+        }
+
+        /// <summary>T4, MAIN THREAD.  A co-member's books just arrived.  If this machine declined its own
+        /// anniversary assessment because the COMPANY's sales could not be totalled yet, total them now
+        /// and run the game's own assessment when the company clears the $150,000 line — exactly as the
+        /// join snap runs a skipped one (TimeSync.cs:534-560).</summary>
+        internal static void TaxAnniversaryRecheck()
+        {
+            try
+            {
+                if (AnniversaryPending <= 0 || !MergerSync.IAmMember) return;
+                var gi = SaveGameManager.Current;
+                int dpy = gi?.gameVariables?.daysPerYear ?? 0;
+                if (gi == null || dpy <= 0) return;
+                if (gi.currentUnpaidTaxes != null || gi.Day / dpy != AnniversaryPending / dpy)
+                { AnniversaryPending = -1; return; }   // a bill already exists, or the year moved on
+                float company = OwnLastYearSales() + PartnerLastYearSales();
+                if (company < 150000f) return;
+                var m = HarmonyLib.AccessTools.Method(typeof(Helpers.TaxHelper), "ExecutePlayerTaxesEvent");
+                if (m == null) { Plugin.Logger.LogWarning("[Tax] late-books assessment: TaxHelper.ExecutePlayerTaxesEvent not found."); AnniversaryPending = -1; return; }
+                AnniversaryPending = -1;   // cleared BEFORE the invoke: the publish it triggers must not re-enter here
+                SuspendPush();
+                try { m.Invoke(null, null); }
+                finally { SuspendPop(); }
+                Plugin.Logger.LogInfo($"[Tax] company qualifies on the late books: assessment run now, bill dated day {gi.Day}.");
+            }
+            catch (Exception ex)
+            {
+                var inner = (ex as System.Reflection.TargetInvocationException)?.InnerException ?? ex;
+                Plugin.Logger.LogWarning($"[Tax] late-books assessment: {inner.GetType().Name}: {inner.Message}");
+            }
+        }
+
+        /// <summary>T1: the parts of a filed return, as the wire carries them (tuples do not serialize).</summary>
+        private static List<CbTaxRow> ToRows(List<(string, float)>? src)
+        {
+            var rows = new List<CbTaxRow>();
+            if (src == null) return rows;
+            foreach (var r in src) rows.Add(new CbTaxRow { Label = r.Item1 ?? "", Amount = r.Item2 });
+            return rows;
+        }
+
+        private static CbTaxReturn ToReturnDto(Taxes t, bool asFiled)
+        {
+            float taxable = t.subtotalRegisteredBusinesses + t.subtotalGamblingWinnings - t.subtotalDeductibleExpenses;
+            if (taxable < 0f) taxable = 0f;
+            float rebuilt = taxable * t.taxPercentage / 100f + t.subtotalRealEstateTaxes;
+            return new CbTaxReturn
+            {
+                Day                = t.day,
+                DueDay             = t.dueDay,
+                Pct                = t.taxPercentage,
+                TotalToPay         = asFiled ? t.totalToPay : rebuilt,
+                Gambling           = t.subtotalGamblingWinnings,
+                SubtotalDeductible = t.subtotalDeductibleExpenses,
+                Businesses         = ToRows(t.businessesIncome),
+                Estate             = ToRows(t.estateTaxes),
+                Deductibles        = ToRows(t.deductibleExpenses),
+            };
+        }
+
+        /// <summary>T1: the deep snapshot the filing postfix takes — the live record keeps being mutated
+        /// by payments, and a ZERO bill leaves no record at all.</summary>
+        public static Taxes CloneReturn(Taxes t)
+        {
+            return new Taxes
+            {
+                day                       = t.day,
+                taxPercentage             = t.taxPercentage,
+                dueDay                    = t.dueDay,
+                lateFeeApplied            = t.lateFeeApplied,
+                businessesIncome          = t.businessesIncome   == null ? new List<(string, float)>() : new List<(string, float)>(t.businessesIncome),
+                estateTaxes               = t.estateTaxes        == null ? new List<(string, float)>() : new List<(string, float)>(t.estateTaxes),
+                deductibleExpenses        = t.deductibleExpenses == null ? new List<(string, float)>() : new List<(string, float)>(t.deductibleExpenses),
+                subtotalGamblingWinnings  = t.subtotalGamblingWinnings,
+                subtotalRegisteredBusinesses = t.subtotalRegisteredBusinesses,
+                subtotalRealEstateTaxes   = t.subtotalRealEstateTaxes,
+                subtotalDeductibleExpenses = t.subtotalDeductibleExpenses,
+                totalToPay                = t.totalToPay,
+            };
         }
 
         private static int _payAllPendingPeriod = -1;

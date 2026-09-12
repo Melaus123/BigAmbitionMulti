@@ -1291,6 +1291,142 @@ namespace BigAmbitionsMP
                     return $"OK claim addr-less candidate='{cid}' origin='{(cowner.Length > 0 ? cowner : "mine")}' mode='{(cmode.Length > 0 ? cmode : "ask")}' sent={csent} heldBy='{CompanyCandidates.ClaimantOf(cid)}'";
                 }
 
+                // ── TAXBILL-ONE T5: the ONE company tax bill ───────────────────────────
+                case "taxbill":
+                {
+                    // `taxbill` runs the game's own annual assessment now (under the books lift, exactly
+                    // as the join snap does); `taxbill synth <sales> <deduct> <estate>` installs a made-up
+                    // return instead, so a rig can put a known figure on every member without playing a year.
+                    var txGi = SaveGameManager.Current;
+                    if (txGi == null) return "ERR no world loaded";
+                    var txTk = arg.Length > 0 ? arg.Split(' ') : new string[0];
+                    if (txTk.Length > 0 && txTk[0].ToLowerInvariant() == "synth")
+                    {
+                        if (txTk.Length < 4) return "ERR usage: taxbill synth <sales> <deduct> <estate>";
+                        if (!float.TryParse(txTk[1], out float sSales) || !float.TryParse(txTk[2], out float sDed) || !float.TryParse(txTk[3], out float sEst))
+                            return "ERR usage: taxbill synth <sales> <deduct> <estate>";
+                        int sPct = txGi.gameVariables?.taxPercentage ?? 0;
+                        float sTaxable = sSales - sDed;
+                        if (sTaxable < 0f) sTaxable = 0f;                     // the game's own floor (TaxHelper.cs:268-271)
+                        var synth = new Entities.Taxes
+                        {
+                            day                = txGi.Day,
+                            dueDay             = txGi.Day + 20,
+                            taxPercentage      = sPct,
+                            businessesIncome   = new System.Collections.Generic.List<(string, float)> { ("SYNTH-" + MPNames.Resolve(MPConfig.PlayerId), sSales) },
+                            deductibleExpenses = new System.Collections.Generic.List<(string, float)> { ("SYNTH-DEDUCT", sDed) },
+                            estateTaxes        = new System.Collections.Generic.List<(string, float)> { ("SYNTH-ESTATE", sEst) },
+                            subtotalRegisteredBusinesses = sSales,
+                            subtotalDeductibleExpenses   = sDed,
+                            subtotalRealEstateTaxes      = sEst,
+                            subtotalGamblingWinnings     = 0f,
+                        };
+                        synth.totalToPay = sTaxable * sPct / 100f + sEst;
+                        if (synth.totalToPay > 0f) txGi.currentUnpaidTaxes = synth;   // as native: a ZERO bill leaves no record
+                        CompanyBooks.LastFiledReturn = CompanyBooks.CloneReturn(synth);
+                        var sNotice = HarmonyLib.AccessTools.Method(typeof(Helpers.TaxHelper), "SendTaxNotice", new Type[] { typeof(Entities.Taxes) });
+                        if (sNotice != null) sNotice.Invoke(null, new object[] { synth });
+                        CompanyBooks.Publish("tax filed");
+                        return $"OK taxbill synth totalToPay={synth.totalToPay:F2} day={synth.day}";
+                    }
+                    var txExec = HarmonyLib.AccessTools.Method(typeof(Helpers.TaxHelper), "ExecutePlayerTaxesEvent");
+                    if (txExec == null) return "ERR TaxHelper.ExecutePlayerTaxesEvent not found";
+                    CompanyBooks.SuspendPush();
+                    try { txExec.Invoke(null, null); } finally { CompanyBooks.SuspendPop(); }
+                    var txFiled = CompanyBooks.LastFiledReturn;
+                    if (txFiled == null) return "ERR taxbill fired but no return was captured (off a merger the capture is inert)";
+                    int txRows = (txFiled!.businessesIncome?.Count ?? 0) + (txFiled!.deductibleExpenses?.Count ?? 0) + (txFiled!.estateTaxes?.Count ?? 0);
+                    return $"OK taxbill fired totalToPay={txFiled!.totalToPay:F2} day={txFiled!.day} due={txFiled!.dueDay} rows={txRows}";
+                }
+
+                case "taxparts":
+                {
+                    // What this machine holds of the COMPANY's return: its own bill and every co-member's
+                    // published one, so a rig can see the parts before the bill is opened.
+                    var tpGi = SaveGameManager.Current;
+                    if (tpGi == null) return "ERR no world loaded";
+                    float tpOwn = 0f;
+                    try { tpOwn = Helpers.TaxHelper.GetCurrentTaxesToPay(); } catch { }
+                    int tpPeriod = tpGi.currentUnpaidTaxes?.day ?? (CompanyBooks.LastFiledReturn?.day ?? 0);
+                    int tpMembers = 0, tpFiled = 0, tpPending = 0;
+                    float tpSum = 0f;
+                    var tpSb = new StringBuilder();
+                    foreach (var tpKv in CompanyBooks.Partners)
+                    {
+                        if (!MergerSync.IsMemberPid(tpKv.Key)) continue;
+                        tpMembers++;
+                        var tpR = tpKv.Value.TaxReturn;
+                        if (tpR != null && tpR.Day == tpPeriod) { tpFiled++; tpSum += tpR.TotalToPay; }
+                        else tpPending++;
+                        if (tpSb.Length > 0) tpSb.Append(',');
+                        tpSb.Append($"{tpKv.Key}:{(tpR != null ? tpR.TotalToPay : 0f):F2}:{(tpR != null ? tpR.Day : 0)}");
+                    }
+                    return $"OK taxparts own={tpOwn:F2} period={tpPeriod} members={tpMembers} filed={tpFiled} pending={tpPending} sum={tpSum:F2} [{tpSb}]";
+                }
+
+                case "taxrender":
+                {
+                    // The renderer's OWN arithmetic (TaxesMessage.cs:194-207) on the company return, so a
+                    // rig can check the lines and the grand total agree WITHOUT opening the phone.
+                    var trGi = SaveGameManager.Current;
+                    if (trGi == null) return "ERR no world loaded";
+                    var trOwn = trGi.currentUnpaidTaxes ?? CompanyBooks.LastFiledReturn;
+                    if (trOwn == null) return "ERR no return on this machine";
+                    var trCo = CompanyBooks.CompanyReturn(trOwn!, out var trPending, out int trLoss);
+                    float trIncome  = trCo.subtotalRegisteredBusinesses + trCo.subtotalGamblingWinnings;
+                    float trTaxable = trIncome - trCo.subtotalDeductibleExpenses;
+                    if (trTaxable < 0f) trTaxable = 0f;
+                    float trTax   = trTaxable * trCo.taxPercentage / 100f;
+                    float trTotal = trTax + trCo.subtotalRealEstateTaxes;
+                    int trRows = trCo.businessesIncome.Count + trCo.deductibleExpenses.Count + trCo.estateTaxes.Count;
+                    return $"OK taxrender income={trIncome:F2} deductions={trCo.subtotalDeductibleExpenses:F2} taxable={trTaxable:F2} tax={trTax:F2} estate={trCo.subtotalRealEstateTaxes:F2} total={trTotal:F2} sumbills={trCo.totalToPay:F2} match={System.Math.Abs(trTotal - trCo.totalToPay) <= 1f} pending={trPending.Count} lossrows={trLoss} rows={trRows}";
+                }
+
+                case "taxcounter":
+                {
+                    // What the IRS counter would show and charge: the patched GetIrsPaymentAmount itself.
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    float tcOwn = 0f;
+                    try { tcOwn = Helpers.TaxHelper.GetCurrentTaxesToPay(); } catch { }
+                    var tcM = HarmonyLib.AccessTools.Method(typeof(UI.Purchase.PurchaseUI), "GetIrsPaymentAmount", new Type[] { typeof(Entities.TaxPaymentType) });
+                    if (tcM == null) return "ERR PurchaseUI.GetIrsPaymentAmount not found";
+                    float tcShow = (float)(tcM.Invoke(null, new object[] { Entities.TaxPaymentType.CurrentTaxes }) ?? 0f);
+                    return $"OK taxcounter show={tcShow:F2} own={tcOwn:F2} partners={CompanyBooks.PartnerTaxCurrentDue():F2} hascurrent={Helpers.TaxHelper.HasCurrentTaxesToPay()}";
+                }
+
+                case "taxgate":
+                {
+                    // The company's half of the game's $150,000 filing line, as PATCH G computes it.
+                    // `qualifies` ignores the anniversary-day test, so it can be read on any day.
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    float tgOwn = CompanyBooks.OwnLastYearSales();
+                    float tgP   = CompanyBooks.PartnerLastYearSales();
+                    float tgC   = tgOwn + tgP;
+                    return $"OK taxgate own={tgOwn:F2} partners={tgP:F2} company={tgC:F2} qualifies={tgC >= 150000f} pending={CompanyBooks.AnniversaryPending}";
+                }
+
+                case "taxpay":
+                {
+                    // The game's OWN pay action, on the main thread, exactly as IRSEmployee.cs:51 calls it -
+                    // with the counter's figure when no amount is given.  No new money path.
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    float tyAmount;
+                    if (arg.Length > 0)
+                    {
+                        if (!float.TryParse(arg.Trim(), out tyAmount)) return "ERR usage: taxpay [amount]";
+                    }
+                    else
+                    {
+                        var tyM = HarmonyLib.AccessTools.Method(typeof(UI.Purchase.PurchaseUI), "GetIrsPaymentAmount", new Type[] { typeof(Entities.TaxPaymentType) });
+                        if (tyM == null) return "ERR PurchaseUI.GetIrsPaymentAmount not found";
+                        tyAmount = (float)(tyM.Invoke(null, new object[] { Entities.TaxPaymentType.CurrentTaxes }) ?? 0f);
+                    }
+                    bool tyOk = Helpers.TaxHelper.PayCurrentTaxes(tyAmount);
+                    float tyLeft = 0f;
+                    try { tyLeft = Helpers.TaxHelper.GetCurrentTaxesToPay(); } catch { }
+                    return $"OK taxpay ok={tyOk} ownleft={tyLeft:F2}";
+                }
+
                 case "negotiations":
                 {
                     // NEGO-ORPHAN: what StripOrphanNegotiations would take now - the salary negotiations whose embedded

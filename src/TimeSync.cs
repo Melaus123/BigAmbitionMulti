@@ -551,9 +551,19 @@ namespace BigAmbitionsMP
                         foreach (var b in st) if (b != null) sales += b.TotalSales;
                     }
                 }
-                if (sales < 150000f)
+                // TAXBILL-ONE T4: under a merger the filing line is the COMPANY's sales, the same sum
+                // Patch_TaxHelper_ShouldDoTaxes_CompanyLine tests on the day-change path - this member's
+                // own sales (summed just above, with the overlay lifted) plus every co-member's published
+                // LastYearSales.  Off a merger the company figure IS the own figure, so nothing changes.
+                float company = sales;
+                try { if (MergerSync.IAmMember) company += CompanyBooks.PartnerLastYearSales(); } catch { }
+                if (company < 150000f)
                 {
-                    Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: tax anniversary day {anniversary} fell inside the skipped days — assessment NOT run, sales ${sales:N0} below the game's $150,000 threshold (H-SNAP-1).");
+                    // A co-member whose books have not arrived yet may be what is missing: mark the
+                    // anniversary pending so CompanyBooks.TaxAnniversaryRecheck re-runs this test when
+                    // that member's bundle lands.
+                    try { if (MergerSync.IAmMember && CompanyBooks.UnpublishedMemberCount() > 0) CompanyBooks.AnniversaryPending = anniversary; } catch { }
+                    Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: tax anniversary day {anniversary} fell inside the skipped days — assessment NOT run, sales ${sales:N0} (company ${company:N0}) below the game's $150,000 threshold (H-SNAP-1).");
                     return;
                 }
                 var m = HarmonyLib.AccessTools.Method(typeof(Helpers.TaxHelper), "ExecutePlayerTaxesEvent");
