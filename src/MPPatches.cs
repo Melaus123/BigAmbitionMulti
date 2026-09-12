@@ -1299,6 +1299,212 @@ namespace BigAmbitionsMP
             static void Finalizer(object? __state) => RestoreInjected(__state);
         }
 
+        // ── CROSS-HR-1 S3: NOTHING RUNS THROUGH A SHADOW ───────────────────────────────────────────
+        // A partner's HR plans are now INSTALLED on a plain member as tagged DISPLAY COPIES
+        // (CompanyLists.Apply -> MergerAbsence.InstallListsForDisplay, "display:<pid>"), so the member's
+        // own lookups resolve them - which is the whole point - and so do the game's own passes, which
+        // must not.  StripModEmployeeRecords keeps injected partner records out of EmployeeHelper.RunDaily
+        // / RunHourly / the complaints, but NOT out of EmployeeHelper.WorkDaily (decompile
+        // Helpers/EmployeeHelper.cs:97-105, its OWN NewDay step at GameManager.cs:649, where the only mod
+        // patch is the throw wrapper), and MergerEmployeeSync builds the partner's HR manager as a real
+        // `new HRManager()` - so HRManager.WorkDaily (Entities/HRManager.cs:30-38) would find the shadow
+        // through HrManagerHelper.GetAssignedPlanForHrManager(id) and TRAIN + PAY a second time out of the
+        // shared wallet.  Each guard below is a prefix that skips on a DISPLAY INSTALL ONLY: an absence
+        // stand-in's items are tagged with a REAL pid, IsDisplayInstall is false for them and they still
+        // run, which is exactly what standing in means.  No new on-screen text - the skips only log.
+        private static bool IsShadowPlan(object plan)
+        { try { return plan != null && MergerAbsence.IsDisplayInstall(plan); } catch { return false; } }
+
+        /// <summary>One log line per plan per guard (not per day: GameInstance exposes no plain day counter
+        /// and a shadow set is small and bounded, so this is strictly quieter than the brief's cadence).</summary>
+        private static readonly System.Collections.Generic.HashSet<string> _shadowSkipLogged
+            = new System.Collections.Generic.HashSet<string>();
+
+        private static void LogShadowSkip(string what, string planId)
+        {
+            try
+            {
+                if (_shadowSkipLogged.Add(what + "|" + (planId ?? "")))
+                    Plugin.Logger.LogInfo($"[Shadow] {what} skipped for HR plan '{planId}' - it is a partner's "
+                                        + "display copy; the machine that owns it is the one that runs it.");
+            }
+            catch { }
+        }
+
+        // (a) THE DECIDING ONE: the daily HR pass itself (train + charge the insurance).
+        [HarmonyPatch(typeof(Entities.HRManager), nameof(Entities.HRManager.WorkDaily))]
+        public static class Patch_HRManagerWorkDaily_SkipShadow
+        {
+            static bool Prefix(Entities.HRManager __instance)
+            {
+                try
+                {
+                    string id = __instance?.id ?? "";
+                    if (id.Length == 0) return true;
+                    // Resolved exactly the way native does it (HRManager.cs:32).
+                    var plan = Buildings.Office.Headquarters.HrManagerHelper.GetAssignedPlanForHrManager(id);
+                    if (!IsShadowPlan(plan)) return true;
+                    LogShadowSkip("the daily HR pass (TrainEmployees + PayHealthInsurance)", plan.id);
+                    return false;
+                }
+                catch { return true; }   // fail OPEN only for my own plans: a shadow always answers above
+            }
+        }
+
+        // (b) ScheduleHelper.UpdateHQPlans (decompile :425-431) unassigns the manager of every plan at a
+        // headquarters whose manager has no work shift - on a shadow that manager is the OWNER's, and the
+        // owner's machine decides.  The guard sits on the WRITE, so HRManager.UnAssignWork (:40-43) and
+        // any other route to it are covered by the same prefix.
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.HrManagerPlan),
+                      nameof(Buildings.Office.Headquarters.HrManagerPlan.UnAssignEmployee))]
+        public static class Patch_HrPlanUnAssignEmployee_SkipShadow
+        {
+            static bool Prefix(Buildings.Office.Headquarters.HrManagerPlan __instance)
+            {
+                if (!IsShadowPlan(__instance)) return true;
+                LogShadowSkip("UnAssignEmployee", __instance.id);
+                return false;
+            }
+        }
+
+        // (c) The deregistration sweep BusinessHelper.DeleteHQPlans (:1002-1005) deletes every HR plan of
+        // the address through HrManagerHelper.DeletePlan -> HrManagerPlan.Delete (:223-236, a RemoveAll by
+        // id that also closes the insurance offers).  On a member that would drop a partner's plan out of
+        // the list behind MergerAbsence's install record and orphan it.  Guarding Delete covers every route
+        // (the pane's own delete is already ROUTED by Patch_HrPaneDelete_MergerGate).
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.HrManagerPlan),
+                      nameof(Buildings.Office.Headquarters.HrManagerPlan.Delete))]
+        public static class Patch_HrPlanDelete_SkipShadow
+        {
+            static bool Prefix(Buildings.Office.Headquarters.HrManagerPlan __instance)
+            {
+                if (!IsShadowPlan(__instance)) return true;
+                LogShadowSkip("Delete", __instance.id);
+                return false;
+            }
+        }
+
+        // (e) HrManagerPlan.UpgradeHealthInsurancePlan (:173-195) is ONE of the writes that BUY insurance -
+        // it charges through GameManager.ChangeMoneySafe and then assigns healthInsurancePlan.  It is
+        // reachable from the HR pane (already routed) AND from UI.Dialog/HealthInsurancePartnershipSettings
+        // :41, which offers EVERY plan in gi.hrManagerPlans with CanHaveHealthInsurancePlan - a shadow
+        // included.  The guard is on the write, so both PANE routes are covered - but it is NOT the only
+        // write that buys: the NEGOTIATED route commits in Entities/HealthInsurancePlanOffer.AcceptOffer
+        // (:86-97), which assigns healthInsurancePlan directly and never passes through here (CROSS-HR-1b
+        // K1 - the comment that used to stand here said "the only write", and it was wrong).  (f) and (g)
+        // below close that route at both ends: the offer is never made, and an offer in flight never lands.
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.HrManagerPlan),
+                      nameof(Buildings.Office.Headquarters.HrManagerPlan.UpgradeHealthInsurancePlan))]
+        public static class Patch_HrPlanUpgradeInsurance_SkipShadow
+        {
+            static bool Prefix(Buildings.Office.Headquarters.HrManagerPlan __instance)
+            {
+                if (!IsShadowPlan(__instance)) return true;
+                LogShadowSkip("UpgradeHealthInsurancePlan", __instance.id);
+                return false;
+            }
+        }
+
+        // (f) CROSS-HR-1b K1(a): THE PARTNERSHIP DIALOG MUST NOT OFFER A SHADOW.  The collection at
+        // UI.Dialog/HealthInsurancePartnershipSettings.cs:41 is a LOCAL (`availablePlans`, captured by the
+        // two dropdown closures), so there is no member for a postfix to filter - THE FILTER ITSELF is the
+        // seam: `.Where(x => x.CanHaveHealthInsurancePlan)`, and :42 builds the dropdown's options from that
+        // same list, so one postfix on the property removes a shadow from BOTH the list and the options.
+        // A shadow arrives with healthInsurancePlan == null (MergerAbsence :850 sets it only when
+        // HealthInsurancePlanType >= 0) and resolves its manager through the injected copy, so native
+        // answers TRUE for it (decompile HrManagerPlan.cs:44-47).  A shadow is READ-ONLY on this machine
+        // whatever asks, so false is the right answer everywhere this property is read.
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.HrManagerPlan),
+                      nameof(Buildings.Office.Headquarters.HrManagerPlan.CanHaveHealthInsurancePlan),
+                      HarmonyLib.MethodType.Getter)]
+        public static class Patch_HrPlanCanHaveInsurance_SkipShadow
+        {
+            static void Postfix(Buildings.Office.Headquarters.HrManagerPlan __instance, ref bool __result)
+            {
+                try
+                {
+                    if (!__result || !IsShadowPlan(__instance)) return;
+                    __result = false;
+                    LogShadowSkip("the insurance partnership offer list", __instance.id);
+                }
+                catch { }
+            }
+        }
+
+        // (g) CROSS-HR-1b K1(b): AND AN OFFER ALREADY IN FLIGHT MUST NOT COMMIT ONTO ONE.
+        // Entities/HealthInsurancePlanOffer.AcceptOffer (:86-97) writes `HrManagerPlan.healthInsurancePlan`
+        // straight onto the plan the offer names (the property resolves through HrManagerHelper
+        // .GetPlanFromId, which finds a shadow like any other element), so it never meets (e)'s guard.
+        // CompanyMessages.RouteOfferCommit gates the RELAYED offers only (CompanyMessages.cs :951), so an
+        // offer minted HERE - by an older build, or by any route this one does not own - would still land.
+        // Refused in place: the offer object is left exactly as it was, not finished and not accepted,
+        // which is the game's own "nothing happened" state.  No new text: the skip only logs.
+        [HarmonyPatch(typeof(Entities.HealthInsurancePlanOffer),
+                      nameof(Entities.HealthInsurancePlanOffer.AcceptOffer))]
+        public static class Patch_InsuranceOfferAccept_SkipShadow
+        {
+            // CROSS-HR-1c (re-check MAJOR-1): CompanyCandidates.Patch_HealthInsuranceOffer_Accept_CompanyRoute
+            // prefixes the SAME method to route a RELAYED partner offer (D23), whose plan id is the owner's id =
+            // this machine's shadow id.  Without an order the shadow refusal could win the tie and swallow that
+            // accept.  Priority.Last runs this prefix AFTER the route: a routed offer skips it (the route
+            // returns false), an own offer on a shadow still reaches it and is refused here.
+            [HarmonyLib.HarmonyPriority(HarmonyLib.Priority.Last)]
+            static bool Prefix(Entities.HealthInsurancePlanOffer __instance)
+            {
+                try
+                {
+                    string id = __instance?.hrManagerPlanId ?? "";
+                    if (id.Length == 0 || !CompanyPlans.IsShadowHrPlanId(id)) return true;
+                    LogShadowSkip("AcceptOffer (the insurance commit)", id);
+                    return false;
+                }
+                catch { return true; }   // fail OPEN only for my own plans: a shadow always answers above
+            }
+        }
+
+        // (d) BizManTransfer (:174-180) rewrites headquartersAddress on EVERY HR plan at the origin
+        // address - it is a bare foreach over the list, so there is no per-plan seam to prefix.  The whole
+        // transfer therefore runs with the shadows OUT of the list (the same shape as the injected-record
+        // strip directly above), and they go back untouched afterwards.
+        [HarmonyPatch(typeof(Buildings.BuildingTypes.Special.MovingCompany.BizManTransfer),
+                      nameof(Buildings.BuildingTypes.Special.MovingCompany.BizManTransfer.Transfer))]
+        public static class Patch_BizManTransfer_HideShadowPlans
+        {
+            static void Prefix(out System.Collections.Generic.List<Buildings.Office.Headquarters.HrManagerPlan>? __state)
+            {
+                __state = null;
+                try
+                {
+                    var list = SaveGameManager.Current?.hrManagerPlans;
+                    if (list == null || list.Count == 0) return;
+                    System.Collections.Generic.List<Buildings.Office.Headquarters.HrManagerPlan>? taken = null;
+                    for (int i = list.Count - 1; i >= 0; i--)
+                    {
+                        if (!IsShadowPlan(list[i])) continue;
+                        (taken ??= new System.Collections.Generic.List<Buildings.Office.Headquarters.HrManagerPlan>()).Add(list[i]);
+                        list.RemoveAt(i);
+                    }
+                    __state = taken;
+                    if (taken != null)
+                        Plugin.Logger.LogInfo($"[Shadow] {taken.Count} partner HR plan(s) sit out a BizMan business transfer.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Shadow] transfer strip: {ex.Message}"); }
+            }
+
+            static void Finalizer(System.Collections.Generic.List<Buildings.Office.Headquarters.HrManagerPlan>? __state)
+            {
+                try
+                {
+                    if (__state == null) return;
+                    var list = SaveGameManager.Current?.hrManagerPlans;
+                    if (list == null) return;
+                    for (int i = __state.Count - 1; i >= 0; i--)
+                        if (!list.Contains(__state[i])) list.Add(__state[i]);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Shadow] transfer restore: {ex.Message}"); }
+            }
+        }
+
         // AI rival poach-defense (the long-standing phantom-poach edge, backlog → closed): under a
         // merger flip the partner's regs read RentedByPlayer=true, so the AI could select an
         // injected MIRROR as its poach target — a poach of an employee that only exists as a copy.
@@ -9013,7 +9219,9 @@ namespace BigAmbitionsMP
 
         /// <summary>The shared driver for the four postfixes. Returns how many partner rows were drawn.</summary>
         private static int OverlayPlanRows(string family, object instance, System.Type listType,
-                                           UnityEngine.Transform rowParent, UnityEngine.Transform buttonEntry)
+                                           UnityEngine.Transform rowParent, UnityEngine.Transform buttonEntry,
+                                           System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string,
+                                               UnityEngine.Transform>> nativeRows = null)
         {
             try
             {
@@ -9025,11 +9233,32 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[Plans] {family}: SetUpPlanEntry is not on {listType.Name} - the partner rows cannot be drawn (once per family).");
                     return 0;
                 }
-                int n = CompanyPlans.ShowPartnerRows(family, rowParent, row => m.Invoke(instance, new object[] { row }));
+                int n = CompanyPlans.ShowPartnerRows(family, rowParent, row => m.Invoke(instance, new object[] { row }), nativeRows);
                 if (n > 0 && buttonEntry != null) buttonEntry.SetAsLastSibling();   // the add button stays last
                 return n;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {family} overlay: {ex.Message}"); return 0; }
+        }
+
+        /// <summary>CROSS-HR-1b K3: the native list's OWN row record, (plan id -> row), snapshotted for the
+        /// union to adopt the rows the game drew itself.  HrManagersPlanList.SetUpPlanEntry :105 fills
+        /// `_entriesByPlanIds` (a Dictionary&lt;string, Transform&gt;) for EVERY row it builds, a shadow
+        /// included.  Taken BEFORE the overlay runs - the overlay calls that same SetUpPlanEntry, so its own
+        /// rows land in the dictionary too and must not be in the snapshot.  Null when the field is not
+        /// there: the adoption then simply does not happen.</summary>
+        private static System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string,
+            UnityEngine.Transform>> NativeEntryRows(object instance, string field)
+        {
+            try
+            {
+                if (instance == null) return null;
+                var f = AccessTools.Field(instance.GetType(), field);
+                var d = f?.GetValue(instance) as System.Collections.Generic.Dictionary<string, UnityEngine.Transform>;
+                if (d == null) return null;
+                return new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<string,
+                    UnityEngine.Transform>>(d);
+            }
+            catch { return null; }
         }
 
         private static readonly HashSet<string> _planRowWarned = new HashSet<string>();
@@ -9078,8 +9307,11 @@ namespace BigAmbitionsMP
             static void Postfix(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList __instance,
                                 UnityEngine.Transform ___entryTemplate, UnityEngine.Transform ___buttonEntry)
             {
+                // CROSS-HR-1b K3: the snapshot is an ARGUMENT, so it is taken before the overlay draws -
+                // it holds exactly the rows the NATIVE refresh built, shadows included.
                 OverlayPlanRows("hr", __instance, typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList),
-                                ___entryTemplate != null ? ___entryTemplate.parent : null, ___buttonEntry);
+                                ___entryTemplate != null ? ___entryTemplate.parent : null, ___buttonEntry,
+                                NativeEntryRows(__instance, "_entriesByPlanIds"));
             }
         }
 
@@ -10313,9 +10545,15 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    var cur = ___planUI != null ? ___planUI.currentPlan : null;
+                    string picked = PlanEditStringAt(__instance, "_hrManagerPlansIds", planIndex);
+                    // CROSS-HR-1b K2(b): a shadow's id must never be written into MY OWN plan's slot (:149).
+                    // MY OWN only: on an OVERLAY row the ids are that OWNER's own plans and the bind ROUTES
+                    // to the machine that runs them - that path is untouched, below.
+                    if (!CompanyPlans.IsOverlayPlan(cur) && CompanyPlans.IsShadowHrPlanId(picked))
+                    { LogShadowSkip("the headhunter replacement-slot bind", picked); return false; }
                     return !CompanyPlans.RoutePaneEdit("headhunter", "HR plan assignment",
-                               ___planUI != null ? ___planUI.currentPlan : null, "hrplan",
-                               PlanEditStringAt(__instance, "_hrManagerPlansIds", planIndex), slot);
+                               cur, "hrplan", picked, slot);
                 }
                 catch { return true; }
             }
@@ -10420,6 +10658,40 @@ namespace BigAmbitionsMP
         /// list is replaced with the registry's HR plans of THAT headquarters and every slot dropdown is
         /// re-optioned. SetOptions only sets state and redraws (UI.Elements/Dropdown.cs:304-323) - it does not
         /// raise onOptionSelected - so re-optioning after the native listeners are attached sends nothing.</summary>
+        /// <summary>CROSS-HR-1b K2(a): the shadow filter for the OWN-plan branch of the tab below.  False
+        /// when nothing had to be dropped and the native list stands.  `_hrManagerPlansIds` holds the ids in
+        /// the dropdown's own order with a leading null (decompile :94-98) and the names come from the tab's
+        /// own GetDropdownPlanName, so what goes back is exactly what native would have built had the
+        /// shadows never been in gi.hrManagerPlans - no new text of any kind.</summary>
+        private static bool StripShadowHrPlanIds(HeadhuntersAutomaticReplacementTab tab,
+                                                 out System.Collections.Generic.List<string> ids,
+                                                 out System.Collections.Generic.List<string> names,
+                                                 out int dropped)
+        {
+            ids = null; names = null; dropped = 0;
+            var f = AccessTools.Field(typeof(HeadhuntersAutomaticReplacementTab), "_hrManagerPlansIds");
+            var cur = f?.GetValue(tab) as System.Collections.Generic.List<string>;
+            if (cur == null) return false;
+            var kept = new System.Collections.Generic.List<string>();
+            foreach (var id in cur)
+            {
+                if (!string.IsNullOrEmpty(id) && CompanyPlans.IsShadowHrPlanId(id)) { dropped++; continue; }
+                kept.Add(id);
+            }
+            if (dropped == 0) return false;
+            var name = AccessTools.Method(typeof(HeadhuntersAutomaticReplacementTab), "GetDropdownPlanName");
+            names = new System.Collections.Generic.List<string>();
+            foreach (var id in kept)
+            {
+                string n = null;
+                try { n = name?.Invoke(tab, new object[] { id }) as string; } catch { }
+                names.Add(n ?? "");
+            }
+            ids = kept;
+            f.SetValue(tab, ids);
+            return true;
+        }
+
         [HarmonyPatch(typeof(HeadhuntersAutomaticReplacementTab), "SetUpHrManagerPlansList")]
         public static class Patch_HeadhunterHrPlanList_MergerOverlay
         {
@@ -10428,7 +10700,16 @@ namespace BigAmbitionsMP
                 try
                 {
                     var plan = ___planUI != null ? ___planUI.currentPlan : null;
-                    if (plan == null || !CompanyPlans.TryOverlayHrPlanOptions(plan, out var ids, out var names)) return;
+                    if (plan == null) return;
+                    System.Collections.Generic.List<string> ids, names;
+                    int dropped = 0;
+                    bool overlay = CompanyPlans.TryOverlayHrPlanOptions(plan, out ids, out names);
+                    // CROSS-HR-1b K2(a): on MY OWN headhunter plan the native list is EVERY entry of
+                    // gi.hrManagerPlans with no headquarters filter (decompile :95-97), so a partner's
+                    // SHADOW was offered here and the slot write at :149 would put its id in my own plan.
+                    // The shadows come out of the ids list and the slots are re-optioned off it, exactly as
+                    // the overlay branch does; nothing else about my own plan changes.
+                    if (!overlay && !StripShadowHrPlanIds(__instance, out ids, out names, out dropped)) return;
                     // the ids list is read back by index in SelectHrManagerPlan (PlanEditStringAt), so it is the
                     // one thing that MUST be replaced; the field type differs per list, hence reflection.
                     var f = AccessTools.Field(__instance.GetType(), "_hrManagerPlansIds");
@@ -10453,7 +10734,9 @@ namespace BigAmbitionsMP
                         d.SetOptions(names, false, ids.IndexOf(cur));
                         slot++;
                     }
-                    Plugin.Logger.LogInfo($"[Plans] headhunter automatic-replacement offered {ids.Count - 1} partner HR plan(s) on this headquarters.");
+                    Plugin.Logger.LogInfo(overlay
+                        ? $"[Plans] headhunter automatic-replacement offered {ids.Count - 1} partner HR plan(s) on this headquarters."
+                        : $"[Plans] headhunter automatic-replacement withheld {dropped} partner display copy(ies) from my own plan's choices.");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] headhunter hr-plan dropdown overlay: {ex.Message}"); }
             }

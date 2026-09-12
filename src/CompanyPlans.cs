@@ -66,7 +66,9 @@ namespace BigAmbitionsMP
         private static readonly HashSet<string> _stale = new(StringComparer.Ordinal);
 
         /// <summary>The four screen-layer families, in the order the tabs sit in.  Logistics is not here:
-        /// it keeps wave 4's tagged installed display copies.</summary>
+        /// it keeps wave 4's tagged installed display copies.  CROSS-HR-1: HR is now BOTH - it stays here
+        /// (the DTOs still arrive and still feed the detached rows) but where a SHADOW is installed for an
+        /// owner and headquarters the shadow is the row and the detached copy is not drawn (ShowPartnerRows).</summary>
         private static readonly string[] Families = { "pricing", "purchasing", "hr", "headhunter" };
 
         public static int OwnerCount => _byOwner.Count;
@@ -100,6 +102,7 @@ namespace BigAmbitionsMP
                 bool had = _byOwner.Remove(ownerPid);
                 _suspended.Remove(ownerPid);
                 DropRowsOf(ownerPid);
+                DropShadowRows(ownerPid);                    // CROSS-HR-1 S4: the shadows go with them
                 if (had) Plugin.Logger.LogInfo($"[Plans] cleared ({why}: '{ownerPid}')");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] clear '{ownerPid}': {ex.Message}"); }
@@ -109,7 +112,7 @@ namespace BigAmbitionsMP
         {
             if (_byOwner.Count == 0 && _rows.Count == 0) { _suspended.Clear(); return; }
             _byOwner.Clear(); _suspended.Clear(); _rows.Clear(); _rowOwner.Clear(); _refusalLogged.Clear(); _stale.Clear(); _drawn.Clear();
-            _rowInfo.Clear(); _seq.Clear(); _applied.Clear();
+            _rowInfo.Clear(); _seq.Clear(); _applied.Clear(); _shadowRows.Clear();   // CROSS-HR-1 S4
             _seqBase = NewSeqBase();                      // r2 MAJOR-2: a reload must never restart a sender's seq LOWER
             Plugin.Logger.LogInfo($"[Plans] cleared ({why})");
         }
@@ -123,6 +126,7 @@ namespace BigAmbitionsMP
             if (_suspended.Add(ownerPid))
             {
                 DropRowsOf(ownerPid);
+                DropShadowRows(ownerPid);                    // CROSS-HR-1 S4: the REAL plans replace the shadows
                 Plugin.Logger.LogInfo($"[Plans] cleared (suspended for '{ownerPid}': {why})");
             }
         }
@@ -227,6 +231,14 @@ namespace BigAmbitionsMP
 
                 var hr = bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI>(true);
                 if (hr != null && hr.gameObject.activeInHierarchy && hr.IsAssignEmployeesListOpen) return true;
+
+                // HQ-UNION-2 review (carried, CROSS-HR-1 S5): RefreshOpenTabsFor now rebuilds the LOGISTICS
+                // list on a partner feed as well, and LogisticsManagersPlanList.RefreshManagersList opens
+                // with logisticsManagerPlanUI.Hide() (decompile :94), which is gameObject.SetActive(false)
+                // (LogisticsManagerPlanUI.cs:589-593) - so an open logistics plan pane would be closed under
+                // the player's hand.  Its open state IS that gameObject's active state; the redraw waits.
+                var lg = bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI>(true);
+                if (lg != null && lg.gameObject.activeInHierarchy) return true;
 
                 var dd = UI.Elements.Dropdown.currentDropdown;
                 if (dd != null && dd.gameObject.activeInHierarchy)
@@ -337,7 +349,8 @@ namespace BigAmbitionsMP
         /// list).  Only partner rows are tinted - my own rows are mine on every card.  `setUp` is the native
         /// private SetUpPlanEntry; `rowParent` is the template's parent, whose newest children are the rows
         /// the builder created.</summary>
-        public static int ShowPartnerRows(string family, Transform rowParent, Action<object> setUp)
+        public static int ShowPartnerRows(string family, Transform rowParent, Action<object> setUp,
+                                          List<KeyValuePair<string, Transform>> nativeRows = null)
         {
             _drawn[family] = 0;                                  // U7: the record of this family starts empty every draw
             if (setUp == null) return 0;
@@ -351,7 +364,29 @@ namespace BigAmbitionsMP
                 if (_stale.Remove(owner + "|" + family)) DropRowsOf(owner, family);
                 bool tinted = PlayerColours.TryColourFor(owner, out var tint);
                 foreach (var hq in OwnerHqKeys(owner))
-                    foreach (var row in RowsFor(owner, hq, family))
+                {
+                    // CROSS-HR-1 S4: where this owner's HR plans are INSTALLED as SHADOWS, the shadow IS the
+                    // row.  On the shadow's OWN headquarters page the native builder already drew it
+                    // (HrManagersPlanList.RefreshManagersList :82-90 draws GetAssignedPlansForHeadquarters),
+                    // so the overlay adds it nowhere there or every row would appear twice - those rows are
+                    // ADOPTED instead (strip, tint, count: AdoptNativeShadowRows below, K3); on every OTHER
+                    // company headquarters page the native page filter hides it - exactly as it hid
+                    // logistics - so the union draws the INSTALLED object here, never the copy of it.
+                    // CROSS-HR-1b K4: the skip is per PLAN, not per (owner, headquarters) PAIR.  Where one
+                    // plan of a shadowed pair failed to install there is no shadow of it for native to draw
+                    // and the pair-wide skip drew it nowhere at all; its detached copy is drawn here.
+                    var shadows = ShadowPlansOf(owner, hq, family);
+                    List<object> toDraw;
+                    if (shadows == null) toDraw = RowsFor(owner, hq, family);
+                    else
+                    {
+                        var installed = new HashSet<string>(StringComparer.Ordinal);
+                        foreach (var s in shadows) { string sid = PlanIdOf(s); if (sid.Length > 0) installed.Add(sid); }
+                        toDraw = Same(hq, pageHq) ? new List<object>() : new List<object>(shadows);
+                        foreach (var copy in RowsFor(owner, hq, family))
+                            if (!installed.Contains(PlanIdOf(copy))) toDraw.Add(copy);
+                    }
+                    foreach (var row in toDraw)
                     {
                         int before = rowParent != null ? rowParent.childCount : 0;
                         try { setUp(row); shown++; }
@@ -360,8 +395,11 @@ namespace BigAmbitionsMP
                             refused++;
                             if (_refusalLogged.Add(family + "|" + owner))
                                 Plugin.Logger.LogWarning($"[Plans] a {family} row of '{owner}' could not be drawn: {ex.Message} (once per family and owner).");
-                            continue;
                         }
+                        // HQ-UNION-2 review (carried, CROSS-HR-1 S5): the builder may have ACTIVATED children
+                        // before it threw, and ReorderableList.InitializeItems enrols every active child that
+                        // still has a ReorderableListItem next frame - so the strip runs on whatever was
+                        // added, thrown or not.  It used to sit behind the catch's `continue`.
                         if (rowParent == null) continue;
                         for (int i = before; i < rowParent.childCount; i++)
                         {
@@ -369,6 +407,7 @@ namespace BigAmbitionsMP
                             if (tinted) TintRow(rowParent.GetChild(i), tint);
                         }
                     }
+                }
             }
             foreach (var plan in OwnOtherHqPlans(family, pageHq))
             {
@@ -379,14 +418,17 @@ namespace BigAmbitionsMP
                     refused++;
                     if (_refusalLogged.Add(family + "|own"))
                         Plugin.Logger.LogWarning($"[Plans] one of my own other-HQ {family} rows could not be drawn: {ex.Message} (once per family).");
-                    continue;
                 }
+                // S5, as above: strip whatever the builder added before it threw.
                 if (rowParent == null) continue;
                 for (int i = before; i < rowParent.childCount; i++) StripDragHandle(rowParent.GetChild(i));
             }
+            int adopted = AdoptNativeShadowRows(family, nativeRows);   // K3: the rows the game drew itself
+            shown += adopted;
             _drawn[family] = shown;                              // U7: what this family actually drew
             if (shown > 0 || own > 0)
-                Plugin.Logger.LogInfo($"[Plans] union: {shown} partner row(s) + {own} own other-HQ row(s) ({family}, page {pageHq})");
+                Plugin.Logger.LogInfo($"[Plans] union: {shown} partner row(s) + {own} own other-HQ row(s) ({family}, page {pageHq})"
+                    + (adopted > 0 ? $" - {adopted} of them drawn by the game's own list as shadows and adopted here" : ""));
             if (refused > 0) Plugin.Logger.LogInfo($"[Plans] {refused} {family} row(s) not drawn on '{pageHq}'.");
             return shown + own;
         }
@@ -450,16 +492,21 @@ namespace BigAmbitionsMP
         private static bool DrawUnionRow(object row, Transform rowParent, Action<object> setUp, string family, string kind)
         {
             int before = rowParent != null ? rowParent.childCount : 0;
+            bool drew = true;
             try { setUp(row); }
             catch (Exception ex)
             {
+                drew = false;
                 if (_refusalLogged.Add(family + "|" + kind))
                     Plugin.Logger.LogWarning($"[Plans] a {family} {kind} row could not be drawn: {ex.Message} (once per family and kind).");
-                return false;
             }
+            // HQ-UNION-2 review (carried, CROSS-HR-1 S5): the strip runs on whatever the builder added even
+            // when it threw - a half-built row that kept its ReorderableListItem is enrolled next frame and
+            // a drag on it would index the native list, which holds none of these rows.  It used to return
+            // from the catch, above the strip.
             if (rowParent != null)
                 for (int i = before; i < rowParent.childCount; i++) StripDragHandle(rowParent.GetChild(i));
-            return true;
+            return drew;
         }
 
         /// <summary>r2 MAJOR-1 (a): a partner row must never become DRAGGABLE.  ReorderableList.OnEnable and
@@ -689,6 +736,14 @@ namespace BigAmbitionsMP
                 trainingTarget = d.TrainingTarget,
             };
             SetId(pl, d.Id);
+            // CROSS-HR-1 S1: the agreement travels with the plan, so the DISPLAY copy shows the same
+            // insurance the owner sees (and HasActiveHealthInsurance answers the same, HrManagerPlan.cs:197-207).
+            if (d.HealthInsurancePlanType >= 0)
+                pl.healthInsurancePlan = new HealthInsurancePlan
+                {
+                    planType = (Entities.HealthInsurancePlanType)d.HealthInsurancePlanType,
+                    pricePerDayAndEmployee = d.PricePerDayAndEmployee,
+                };
             if (pl.assignedEmployees != null)
             {
                 pl.assignedEmployees.Clear();
@@ -758,8 +813,11 @@ namespace BigAmbitionsMP
         /// _rowOwner is emptied only on suspend, a stale rebuild or Clear, so a partner headquarters that
         /// stopped resolving left it full (SwallowPaneOpen would swallow a pane throw with no partner row on
         /// screen) and a PRICING-only partner armed the HR assign list's fail-closed branch.  Set by the two
-        /// union drivers per family (ShowPartnerRows, ShowLogisticsUnionRows), zeroed at the start of every
-        /// draw and on Clear.</summary>
+        /// union drivers per family (ShowPartnerRows, ShowLogisticsUnionRows) and zeroed at the start of
+        /// every draw.  CROSS-HR-1 S5, exact: ClearAll zeroes it only when it actually clears (its early
+        /// return, taken when nothing is held, leaves it) and ClearOwner never touches it - so a count can
+        /// outlive the feed that produced it until that family draws again, which is why every reader asks
+        /// only about the family whose draw it is inside.</summary>
         public static int PartnerRowsDrawn(string family)
             => family != null && _drawn.TryGetValue(family, out var n) ? n : 0;
 
@@ -1142,6 +1200,145 @@ namespace BigAmbitionsMP
 
         /// <summary>Row object -> what a routed edit needs to address it.  Reference identity, like _rowOwner.</summary>
         private static readonly Dictionary<object, RowInfo> _rowInfo = new(ReferenceComparer.Instance);
+
+        /// <summary>CROSS-HR-1 S4: owner -> that owner's SHADOW plan objects (the real elements of
+        /// gi.hrManagerPlans that CompanyLists installed under "display:&lt;pid&gt;").  They are registered in
+        /// _rowOwner/_rowInfo so IsOverlayPlan is true for them and EVERY HR pane prefix routes the edit
+        /// unchanged - the smaller of the two changes the brief offered, because it needs no per-prefix
+        /// predicate.  They are deliberately NOT put in _rows: that cache is what the overlay DRAWS and a
+        /// shadow is drawn by the game's own list.  This list is what lets the drop be exact.</summary>
+        private static readonly Dictionary<string, List<object>> _shadowRows = new(StringComparer.Ordinal);
+
+        /// <summary>CROSS-HR-1 S4.  Replace-on-each-feed, exactly like the install itself: called from
+        /// CompanyLists.Apply immediately after InstallListsForDisplay and before the registry's redraw.</summary>
+        public static void RegisterShadowRows(string ownerPid)
+        {
+            if (string.IsNullOrEmpty(ownerPid)) return;
+            DropShadowRows(ownerPid);
+            var held = new List<object>();
+            try
+            {
+                string tag = MergerAbsence.DisplayOwnerTag(ownerPid);
+                foreach (var e in MergerAbsence.InstalledListItems)
+                {
+                    if (e.Item == null || !string.Equals(e.List, "hrManagerPlans", StringComparison.Ordinal)
+                        || !string.Equals(e.Owner, tag, StringComparison.Ordinal)) continue;
+                    string id = (e.Item as HrManagerPlan)?.id ?? "";
+                    if (id.Length == 0) continue;
+                    _rowOwner[e.Item] = ownerPid;
+                    _rowInfo[e.Item] = new RowInfo { Owner = ownerPid, Family = "hr", PlanId = id, Hq = KeyOf(HqOfPlan(e.Item)) };
+                    held.Add(e.Item);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] shadow rows of '{ownerPid}': {ex.Message}"); }
+            if (held.Count > 0)
+            {
+                _shadowRows[ownerPid] = held;
+                Plugin.Logger.LogInfo($"[Plans] {held.Count} shadow HR row(s) of '{ownerPid}' route their edits.");
+            }
+        }
+
+        /// <summary>CROSS-HR-1 S4: forget one owner's shadow registrations (the objects themselves are the
+        /// installer's to lift - RemoveInstalledForOwner, which CompanyLists calls on the same paths).</summary>
+        private static void DropShadowRows(string ownerPid)
+        {
+            if (string.IsNullOrEmpty(ownerPid) || !_shadowRows.TryGetValue(ownerPid, out var held)) return;
+            foreach (var o in held) { if (o == null) continue; _rowOwner.Remove(o); _rowInfo.Remove(o); }
+            _shadowRows.Remove(ownerPid);
+        }
+
+        /// <summary>CROSS-HR-1 S4: one owner's INSTALLED shadow plans of `family` at `hqKey`, or NULL when
+        /// that pair is not shadowed here (the caller then draws the detached rows as before).  Only HR is
+        /// installed as a shadow; the other three screen-layer families never are.  Read live off the
+        /// installer's own record, so an install lifted between feeds is seen immediately.</summary>
+        private static List<object> ShadowPlansOf(string owner, string hqKey, string family)
+        {
+            if (family != "hr" || string.IsNullOrEmpty(owner)) return null;
+            List<object> found = null;
+            try
+            {
+                string tag = MergerAbsence.DisplayOwnerTag(owner);
+                foreach (var e in MergerAbsence.InstalledListItems)
+                {
+                    if (e.Item == null || !string.Equals(e.List, "hrManagerPlans", StringComparison.Ordinal)
+                        || !string.Equals(e.Owner, tag, StringComparison.Ordinal)) continue;
+                    if (!Same(KeyOf(HqOfPlan(e.Item)), hqKey)) continue;
+                    (found ??= new List<object>()).Add(e.Item);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] shadow rows of '{owner}': {ex.Message}"); return null; }
+            return found;
+        }
+
+        /// <summary>The plan id of a row object: the registry's own record first (exact for a display copy
+        /// and for a registered shadow alike), then the object's own `id`.</summary>
+        private static string PlanIdOf(object row)
+        {
+            if (row == null) return "";
+            if (_rowInfo.TryGetValue(row, out var ri) && ri != null && !string.IsNullOrEmpty(ri.PlanId)) return ri.PlanId;
+            try { return (row as HrManagerPlan)?.id ?? ""; } catch { return ""; }
+        }
+
+        /// <summary>CROSS-HR-1b K3: on the shadow's OWN headquarters page the NATIVE list draws it
+        /// (HrManagersPlanList.RefreshManagersList :88-91 -> SetUpPlanEntry :96-105, which records every row
+        /// it builds in _entriesByPlanIds).  Those rows were getting NO drag strip, NO owner tint and no
+        /// place in the count, so PartnerRowsDrawn("hr") read 0 on the one page where all of that owner's HR
+        /// rows are present - and the fail-closed branch and the pane-throw swallow that ask it stood down
+        /// there.  The union ADOPTS them: same strip, same tint, same count, so a shadow looks and behaves
+        /// like the partner row it is.  Families whose caller hands over nothing are untouched.</summary>
+        private static int AdoptNativeShadowRows(string family, List<KeyValuePair<string, Transform>> nativeRows)
+        {
+            if (nativeRows == null) return 0;
+            int n = 0;
+            try
+            {
+                foreach (var kv in nativeRows)
+                {
+                    if (kv.Value == null) continue;
+                    string owner = ShadowOwnerOfPlanId(kv.Key);
+                    if (owner.Length == 0) continue;
+                    StripDragHandle(kv.Value);
+                    if (PlayerColours.TryColourFor(owner, out var tint)) TintRow(kv.Value, tint);
+                    n++;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {family} shadow rows on their own page: {ex.Message}"); }
+            return n;
+        }
+
+        /// <summary>The owner of a REGISTERED shadow plan id, or "" when that id is not a shadow here.</summary>
+        private static string ShadowOwnerOfPlanId(string planId)
+        {
+            if (string.IsNullOrEmpty(planId)) return "";
+            foreach (var kv in _shadowRows)
+            {
+                if (kv.Value == null) continue;
+                foreach (var o in kv.Value)
+                    if (o != null && _rowInfo.TryGetValue(o, out var ri) && ri != null
+                        && string.Equals(ri.PlanId, planId, StringComparison.Ordinal)) return kv.Key;
+            }
+            return "";
+        }
+
+        /// <summary>CROSS-HR-1b: does this HR plan id name a SHADOW on this machine?  Read live off the
+        /// game's own list and decided by the TAG alone (MergerAbsence.IsDisplayInstall), so an install
+        /// lifted between feeds is seen at once and an absence stand-in's REAL items answer false.</summary>
+        public static bool IsShadowHrPlanId(string planId)
+        {
+            if (string.IsNullOrEmpty(planId)) return false;
+            try
+            {
+                var list = SaveGameManager.Current?.hrManagerPlans;
+                if (list == null) return false;
+                foreach (var p in list)
+                {
+                    if (p == null || !string.Equals(p.id, planId, StringComparison.Ordinal)) continue;
+                    try { return MergerAbsence.IsDisplayInstall(p); } catch { return false; }
+                }
+            }
+            catch { }
+            return false;
+        }
 
         /// <summary>plan id -> the last edit seq this machine sent for it (E4).</summary>
         private static readonly Dictionary<string, int> _seq = new(StringComparer.Ordinal);

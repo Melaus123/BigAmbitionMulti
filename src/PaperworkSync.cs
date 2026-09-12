@@ -485,6 +485,10 @@ namespace BigAmbitionsMP
                             AssignedEmployees = pl.assignedEmployees == null
                                 ? new List<string>() : new List<string>(pl.assignedEmployees),
                             ReplaceAbsentEmployees = pl.replaceAbsentEmployees, TrainingTarget = pl.trainingTarget,
+                            // CROSS-HR-1 S1: a null agreement is carried as the -1 sentinel, never as
+                            // Bronze at price 0 (which would read as "insured" on the other machine).
+                            HealthInsurancePlanType = pl.healthInsurancePlan == null ? -1 : (int)pl.healthInsurancePlan.planType,
+                            PricePerDayAndEmployee  = pl.healthInsurancePlan == null ? 0f : pl.healthInsurancePlan.pricePerDayAndEmployee,
                         });
                     }
 
@@ -917,21 +921,30 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] lift of the previous set: {ex.Message}"); }
 
             // The installer works one address at a time out of a paperwork bundle, so the rows are handed
-            // back in exactly that shape.  Only the two families that are INSTALLED are filled; every other
-            // list on the bundle stays empty, so nothing else can be installed by accident.  PHASE 4c part 1:
-            // the payload also carries the four HEADQUARTERS plan families, and those are deliberately NOT
-            // put on this bundle - they go to CompanyPlans' screen-layer registry below, never into a game
-            // list (an installed HR/headhunter copy would run off the replicated employee and charge twice).
+            // back in exactly that shape.  Only the families that are INSTALLED are filled; every other list
+            // on the bundle stays empty, so nothing else can be installed by accident.  PHASE 4c part 1 kept
+            // all four HEADQUARTERS plan families OFF this bundle; CROSS-HR-1 S2 puts the HR family back on
+            // as the SHADOW PLAN, because a member's own worker can only carry a PARTNER's
+            // assignedHrManagerPlanId if the game's lookups on THIS machine resolve that plan out of
+            // gi.hrManagerPlans (health insurance HasHealthInsurance.cs:27-34, the absence replacement
+            // EmployeeHelper.cs:164-171, LowSkillComplaint.cs:30, EmployeeCellView.cs:71,
+            // EmployeeInstance.cs:845, the headhunter's assignedHrPlans HeadhunterHelper.cs:56-58).  The
+            // shadow is READ-ONLY here: CROSS-HR-1 S3 skips every native pass that would train, pay,
+            // unassign, delete or transfer through a display install, so nothing runs twice.  PRICING and
+            // HEADHUNTER stay off the bundle - neither has a cross-machine lookup to satisfy and an
+            // installed copy of either would still run off the replicated employee.
             var bundle = new BusinessPaperworkPayload();
             bundle.Lists.DeliveryContracts.AddRange(p.DeliveryContracts ?? new List<PwDeliveryContract>());
             bundle.Lists.LogisticsManagerPlans.AddRange(p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>());
+            bundle.Lists.HrManagerPlans.AddRange(p.HrManagerPlans ?? new List<PwHrPlan>());
 
             var addrs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var a in p.Addresses ?? new List<string>()) if (!string.IsNullOrEmpty(a)) addrs.Add(a);
             foreach (var d in bundle.Lists.DeliveryContracts) if (!string.IsNullOrEmpty(d?.BusinessAddressKey)) addrs.Add(d.BusinessAddressKey);
             foreach (var g in bundle.Lists.LogisticsManagerPlans) if (!string.IsNullOrEmpty(g?.HeadquartersAddressKey)) addrs.Add(g.HeadquartersAddressKey);
+            foreach (var h in bundle.Lists.HrManagerPlans) if (!string.IsNullOrEmpty(h?.HeadquartersAddressKey)) addrs.Add(h.HeadquartersAddressKey);   // CROSS-HR-1 S2
 
-            int installed = 0, skippedNotFlipped = 0, skippedSimulated = 0, nContracts = 0, nPlans = 0;
+            int installed = 0, skippedNotFlipped = 0, skippedSimulated = 0, nContracts = 0, nPlans = 0, nHr = 0;
             foreach (var a in addrs)
             {
                 // A display copy exists ONLY for a partner building the merger flipped onto this machine.
@@ -946,14 +959,20 @@ namespace BigAmbitionsMP
                     if (string.Equals(d?.BusinessAddressKey ?? "", a, StringComparison.OrdinalIgnoreCase)) nContracts++;
                 foreach (var g in bundle.Lists.LogisticsManagerPlans)
                     if (string.Equals(g?.HeadquartersAddressKey ?? "", a, StringComparison.OrdinalIgnoreCase)) nPlans++;
+                foreach (var h in bundle.Lists.HrManagerPlans)
+                    if (string.Equals(h?.HeadquartersAddressKey ?? "", a, StringComparison.OrdinalIgnoreCase)) nHr++;
             }
 
             _byOwner[p.OwnerPid] = p;
             RebuildOwnerMap();
             // 4c part 1 - AFTER the owner map: the registry's open-tab redraw asks TryOwnerOfAddress, which reads that map;
             // before it, the FIRST feed for an HQ new to the map could not redraw an open tab (re-check r2).
+            // CROSS-HR-1 S4, BEFORE the registry's redraw: the shadow plans ARE this owner's HR rows now, so
+            // they are registered for ROUTING (IsOverlayPlan turns true for them and RoutePaneEdit finds
+            // Owner/Family/PlanId/Hq), and the overlay stands down for the pairs they cover.
+            try { CompanyPlans.RegisterShadowRows(p.OwnerPid); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] shadow rows: {ex.Message}"); }
             try { CompanyPlans.Receive(p); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] registry update: {ex.Message}"); }
-            Plugin.Logger.LogInfo($"[CompanyLists] installed {nContracts} contracts, {nPlans} plans of '{p.OwnerPid}' (display copies; "
+            Plugin.Logger.LogInfo($"[CompanyLists] installed {nContracts} contracts, {nPlans} logistics plans, {nHr} hr plans of '{p.OwnerPid}' (display copies; "
                                 + $"{installed} item(s) in, {lifted} replaced, {skippedNotFlipped} address(es) not flipped here, {skippedSimulated} simulated here).");
             RefreshOpenScreens();
         }

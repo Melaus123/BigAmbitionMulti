@@ -1735,6 +1735,27 @@ namespace BigAmbitionsMP
             if (removedNegotiations.Count > 0 || removedReplacements.Count > 0)
                 Plugin.Logger.LogInfo($"[SynthStaff] stripped {removedNegotiations.Count} partner salary negotiation(s) + {removedReplacements.Count} headhunter replacement(s) for save ({when}); restore after serialize.");
 
+            // CROSS-HR-1b K1(c), the same choke point: an INSURANCE OFFER names its HR plan by id
+            // (Entities/HealthInsurancePlanOffer.hrManagerPlanId) and gi.healthInsurancePlanOffers rides the
+            // .hsg, so an offer minted here against a partner's SHADOW - by an older build, before the two
+            // guards in MPPatches closed that route - would write a partner's plan id into THIS save. The
+            // exact objects come out and go back in the restore below, as the negotiations do.
+            var removedInsuranceOffers = new List<Entities.HealthInsurancePlanOffer>();
+            try
+            {
+                var offers = SaveGameManager.Current?.healthInsurancePlanOffers;
+                if (offers != null)
+                    for (int i = offers.Count - 1; i >= 0; i--)
+                    {
+                        string oid = ""; try { oid = offers[i]?.hrManagerPlanId ?? ""; } catch { }
+                        if (oid.Length == 0 || !CompanyPlans.IsShadowHrPlanId(oid)) continue;
+                        removedInsuranceOffers.Add(offers[i]); offers.RemoveAt(i);
+                    }
+            }
+            catch (Exception ox) { Plugin.Logger.LogWarning($"[SynthStaff] insurance offer strip ({when}): {ox.Message}"); }
+            if (removedInsuranceOffers.Count > 0)
+                Plugin.Logger.LogInfo($"[SynthStaff] stripped {removedInsuranceOffers.Count} insurance offer(s) naming a partner's display copy for save ({when}); restore after serialize.");
+
             // MERGER PHASE 4b (PEOPLE) P4, the same choke point: a partner's relayed MESSAGES are display
             // copies too - they live in gi.Contacts, which nothing above walks - so they come out here and
             // go back in the restore below. A .hsg never carries another member's phone.
@@ -1763,6 +1784,11 @@ namespace BigAmbitionsMP
                         foreach (var rr in removedReplacements)
                             if (rr.Plan?.headhunterReplacementDataList != null && rr.Data != null
                                 && !rr.Plan.headhunterReplacementDataList.Contains(rr.Data)) rr.Plan.headhunterReplacementDataList.Add(rr.Data);
+                        // CROSS-HR-1b K1(c): the stripped insurance offers go back the same way.
+                        var goff = gback?.healthInsurancePlanOffers;
+                        if (goff != null)
+                            foreach (var o in removedInsuranceOffers)
+                                if (o != null && !goff.Contains(o)) goff.Add(o);
                     }
                     catch (Exception nx) { Plugin.Logger.LogWarning($"[SynthStaff] negotiation restore ({when}): {nx.Message}"); }
                     var gi = SaveGameManager.Current;

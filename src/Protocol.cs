@@ -3686,6 +3686,14 @@ namespace BigAmbitionsMP
         public List<string> AssignedEmployees { get; set; } = new();
         public bool   ReplaceAbsentEmployees { get; set; }
         public int    TrainingTarget         { get; set; }
+        // CROSS-HR-1 S1: the plan's HEALTH INSURANCE agreement travels with the plan, so a member's copy
+        // (the display row AND the installed shadow) answers HrManagerPlan.HasActiveHealthInsurance
+        // (decompile HrManagerPlan.cs:197-207) exactly as the owner's does.  Two ADDITIVE fields on an
+        // existing DTO: no new Op, no new MessageType, and ProtocolInfo.Version is deliberately NOT bumped
+        // (the dev line is unreleased).  Entities/HealthInsurancePlan.cs is exactly these two fields.
+        // -1 = "this plan has no insurance"; otherwise the int of Entities.HealthInsurancePlanType.
+        public int    HealthInsurancePlanType { get; set; } = -1;
+        public float  PricePerDayAndEmployee  { get; set; }
     }
 
     public class PwHeadhunterPlan

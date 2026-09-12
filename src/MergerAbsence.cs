@@ -842,6 +842,21 @@ namespace BigAmbitionsMP
                         FillStrings(item, "assignedEmployees", pl.AssignedEmployees);
                         SetField(item, "replaceAbsentEmployees", pl.ReplaceAbsentEmployees);
                         SetField(item, "trainingTarget", pl.TrainingTarget);
+                        // CROSS-HR-1 S1/S2: the SHADOW carries the owner's insurance agreement, so a member's
+                        // worker assigned to this partner plan reads insured through the game's own lookups
+                        // (HasHealthInsurance.cs:27-34 -> HrManagerPlan.HasActiveHealthInsurance :197-207,
+                        // which also needs the assignedEmployeeId above to resolve - the merger's injected
+                        // manager copy is what resolves it).  Nothing here may CHARGE for it:
+                        // HrManagerPlan.PayHealthInsurance runs only from HRManager.WorkDaily, and S3 skips
+                        // that for a display install.  Typed assignment, not SetField: healthInsurancePlan is
+                        // a public field of a CLASS type, not a value the reflective setter converts.
+                        if (pl.HealthInsurancePlanType >= 0
+                            && item is Buildings.Office.Headquarters.HrManagerPlan hrShadow)
+                            hrShadow.healthInsurancePlan = new Entities.HealthInsurancePlan
+                            {
+                                planType = (Entities.HealthInsurancePlanType)pl.HealthInsurancePlanType,
+                                pricePerDayAndEmployee = pl.PricePerDayAndEmployee,
+                            };
                         CheckInstalledId("hrManagerPlans", item, pl.Id);   // Q9
                         if (Install("hrManagerPlans", gi.hrManagerPlans as IList, item)) n++;
                     }
