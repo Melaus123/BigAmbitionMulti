@@ -58,6 +58,24 @@ namespace BigAmbitionsMP
 
         private static float _nextScan;
 
+        /// <summary>U3 PACING (user ruling 2026-09-12): a MyEmployees mass-assign moves N records in one
+        /// frame, so one scan used to send N legs at once and the host's SharedRateOk (10 per sender per
+        /// second) dropped the rest silently - copies left pointing at a shop that never adopted them.  The
+        /// scan now sends at most LegsPerScan per pass; a record past the budget is left EXACTLY as the
+        /// player set it, and the next pass (2 s later) re-detects it and sends it.  The 30 s in-flight
+        /// guard is keyed on a request that was actually sent, so a deferred record is not held by it.</summary>
+        private const int LegsPerScan = 6;
+        private static int _legsThisScan, _deferredThisScan;
+
+        /// <summary>True = this scan may still send a leg (and one is now booked).  False = over budget: the
+        /// caller must leave the record untouched.</summary>
+        private static bool TakeLeg()
+        {
+            if (_legsThisScan >= LegsPerScan) { _deferredThisScan++; return false; }
+            _legsThisScan++;
+            return true;
+        }
+
         /// <summary>MAIN THREAD (MPCanvasUI.Update). Detect own-employee assignments into flipped shops
         /// (→ record migration) and unsupported reassignments of injected partner staff (→ revert + toast).
         /// Schedules are NOT scanned here — they travel the validated SharedShopSchedule path (2026-09-10).</summary>
@@ -103,6 +121,7 @@ namespace BigAmbitionsMP
         private static void ScanAssignments(GameInstance gi)
         {
             if (gi.EmployeeInstances == null) return;
+            _legsThisScan = 0; _deferredThisScan = 0;      // U3: the per-scan leg budget
             var seenOwn = new HashSet<string>();
             foreach (var e in gi.EmployeeInstances)
             {
@@ -149,6 +168,7 @@ namespace BigAmbitionsMP
                 // the host holds, the destination adopts. The old "adopting-out ... on confirm" sender is
                 // retired (it was reached only from here, behind MergerFlip.IsFlipped - merged-only).
                 if (inFlight) continue;
+                if (!TakeLeg()) continue;                  // U3: over budget - the record stays as the player set it
                 _pendingAdopt[e.id] = Time.unscaledTime;
                 // U1: the FROM end is where this record was last seen, not what the dropdown has already
                 // written. Equal to the destination (first sight, or they were already standing there) means
@@ -163,6 +183,8 @@ namespace BigAmbitionsMP
                 foreach (var kv in _lastOwnAddr) if (!seenOwn.Contains(kv.Key)) (stale ??= new List<string>()).Add(kv.Key);
                 if (stale != null) foreach (var k in stale) _lastOwnAddr.Remove(k);
             }
+            if (_deferredThisScan > 0)
+                Plugin.Logger.LogInfo($"[Transfer] {_deferredThisScan} move(s) wait for the next scan ({LegsPerScan} per 2 s keeps under the host's cap).");
         }
 
         // ── MERGER PHASE 4b (PEOPLE) P2: EMPLOYEE MIXING ──────────────────────
@@ -229,6 +251,7 @@ namespace BigAmbitionsMP
             }
             if (target.Length == 0 || destOwner == owner)
             {
+                if (!TakeLeg()) return;                    // U3: over budget - nothing is written back, the next scan sends it
                 if (SharedShopStaff.CommitAssign(id, home, target))
                 {
                     _pendingTransfer[id] = ("", Time.unscaledTime, target);
@@ -245,6 +268,7 @@ namespace BigAmbitionsMP
             // CROSS-OWNER: the record itself has to move, and the HOST is the authority for the move
             // (T1). This machine only asks; it never tells the source to let go and it never posts the
             // record at the destination itself.
+            if (!TakeLeg()) return;                        // U3: over budget - the next scan sends it
             RequestTransfer(id, home, target);
         }
 

@@ -158,7 +158,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (string.IsNullOrEmpty(ownerPid)) return;
-                if (!PartnerHqOpen(out _, out var open) || open != ownerPid) return;
+                if (!CompanyHqPageOpen(out _, out _)) return;     // U1: every company HQ page shows this owner's rows
                 if (EditWindowOpen())
                 {
                     // HO-1a H5: a rebuild under an open list or dropdown closes it under the player's hand.
@@ -198,7 +198,7 @@ namespace BigAmbitionsMP
                 if (_pendingRedraw.Length == 0) return;
                 if (UnityEngine.Time.unscaledTime < _nextDeferredCheck) return;
                 _nextDeferredCheck = UnityEngine.Time.unscaledTime + 1f;
-                if (!PartnerHqOpen(out _, out var open) || open != _pendingRedraw) { _pendingRedraw = ""; return; }
+                if (!CompanyHqPageOpen(out _, out _)) { _pendingRedraw = ""; return; }
                 if (EditWindowOpen()) return;
                 string owner = _pendingRedraw;
                 _pendingRedraw = "";
@@ -290,41 +290,101 @@ namespace BigAmbitionsMP
             catch { hqKey = ""; ownerPid = ""; return false; }
         }
 
-        /// <summary>H1 DRIVER.  Build the partner rows of one family for the open headquarters and hand
-        /// each to the list's OWN row builder, then tint what that builder just added.  `setUp` is the
-        /// native private SetUpPlanEntry; `rowParent` is the template's parent, whose newest children are
-        /// the rows the builder created.</summary>
+        /// <summary>U1 (user ruling 2026-09-12, plan D37).  The BizMan page on screen is a COMPANY
+        /// headquarters: MINE (pageOwner = my pid, MergerFlip.TrulyMine) or a merged PARTNER's, decided
+        /// exactly as PartnerHqOpen decides it (flipped, not simulated here, a known owner, not suspended).
+        /// This is what drives the UNION row view, so EVERY company headquarters page shows EVERY company
+        /// headquarters' plans and nobody has to hop between cards.  PartnerHqOpen stays for the callers
+        /// that really mean "a PARTNER's page": RefuseEdit, RefuseRow, RefuseReorder and RoutePlanCreate;
+        /// SwallowPaneOpen and the assign-list fail-closed branch (MPPatches.cs, Patch_HrAssignList_MergerFilter)
+        /// use THIS predicate plus HasOverlayRows since HQ-UNION-1b.</summary>
+        public static bool CompanyHqPageOpen(out string pageHq, out string pageOwner)
+        {
+            pageHq = ""; pageOwner = "";
+            try
+            {
+                if (!MergerSync.IAmMember) return false;
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var biz = ui != null && ui.fullMenu != null && ui.fullMenu.bizMan != null ? ui.fullMenu.bizMan.business : null;
+                var reg = biz != null ? biz.buildingRegistration : null;
+                if (reg == null) return false;
+                if (reg.businessTypeName != "ba:businesstype_headquarters") return false;
+                bool rented; try { rented = reg.RentedByPlayer; } catch { return false; }
+                if (!rented) return false;
+                pageHq = GameStateReader.AddressKey(reg);
+                if (string.IsNullOrEmpty(pageHq)) { pageHq = ""; return false; }
+                if (MergerFlip.TrulyMine(reg)) { pageOwner = MPConfig.PlayerId; return true; }   // my own card
+                if (MergerAbsence.SimulatesHere(pageHq)) { pageHq = ""; return false; }
+                if (!CompanyLists.TryOwnerOfAddress(pageHq, out pageOwner) || string.IsNullOrEmpty(pageOwner)) { pageHq = ""; pageOwner = ""; return false; }
+                if (_suspended.Contains(pageOwner)) { pageHq = ""; pageOwner = ""; return false; }
+                if (!_byOwner.ContainsKey(pageOwner)) { pageHq = ""; pageOwner = ""; return false; }
+                return true;
+            }
+            catch { pageHq = ""; pageOwner = ""; return false; }
+        }
+
+        /// <summary>U1 DRIVER (the union).  Build the rows of one family for EVERY company headquarters
+        /// and hand each to the list's OWN row builder, then strip and tint what that builder just added.
+        /// Two kinds of row go in, and the difference is the whole point:
+        ///   * a CO-MEMBER's plan is a DISPLAY COPY (RowsFor, registered in _rowInfo/_rowOwner), so
+        ///     IsOverlayPlan is true and every edit on it ROUTES to the machine that runs it;
+        ///   * one of MY OWN other headquarters' plans is the REAL plan object out of the game's own lists,
+        ///     NEVER registered here, so IsOverlayPlan stays false and its edits run natively, exactly as
+        ///     they do on that headquarters' own page.
+        /// Neither kind is draggable (StripDragHandle: the native reorder indexes the PAGE headquarters'
+        /// list).  Only partner rows are tinted - my own rows are mine on every card.  `setUp` is the native
+        /// private SetUpPlanEntry; `rowParent` is the template's parent, whose newest children are the rows
+        /// the builder created.</summary>
         public static int ShowPartnerRows(string family, Transform rowParent, Action<object> setUp)
         {
             if (setUp == null) return 0;
-            if (!PartnerHqOpen(out var hq, out var owner)) return 0;
-            // r2 MINOR-4: the rebuild that replaces them is the moment the old row objects may go.
-            if (_stale.Remove(owner + "|" + family)) DropRowsOf(owner, family);
-            var plans = RowsFor(owner, hq, family);
-            if (plans.Count == 0) return 0;
-            bool tinted = PlayerColours.TryColourFor(owner, out var tint);
-            int shown = 0, refused = 0;
-            foreach (var row in plans)
+            if (!CompanyHqPageOpen(out var pageHq, out _)) return 0;
+            int shown = 0, own = 0, refused = 0;
+            foreach (var owner in new List<string>(_byOwner.Keys))
+            {
+                if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) continue;
+                if (_suspended.Contains(owner)) continue;        // standing in: that owner's REAL plans are installed here
+                // r2 MINOR-4: the rebuild that replaces them is the moment the old row objects may go.
+                if (_stale.Remove(owner + "|" + family)) DropRowsOf(owner, family);
+                bool tinted = PlayerColours.TryColourFor(owner, out var tint);
+                foreach (var hq in OwnerHqKeys(owner))
+                    foreach (var row in RowsFor(owner, hq, family))
+                    {
+                        int before = rowParent != null ? rowParent.childCount : 0;
+                        try { setUp(row); shown++; }
+                        catch (Exception ex)
+                        {
+                            refused++;
+                            if (_refusalLogged.Add(family + "|" + owner))
+                                Plugin.Logger.LogWarning($"[Plans] a {family} row of '{owner}' could not be drawn: {ex.Message} (once per family and owner).");
+                            continue;
+                        }
+                        if (rowParent == null) continue;
+                        for (int i = before; i < rowParent.childCount; i++)
+                        {
+                            StripDragHandle(rowParent.GetChild(i));
+                            if (tinted) TintRow(rowParent.GetChild(i), tint);
+                        }
+                    }
+            }
+            foreach (var plan in OwnOtherHqPlans(family, pageHq))
             {
                 int before = rowParent != null ? rowParent.childCount : 0;
-                try { setUp(row); shown++; }
+                try { setUp(plan); own++; }
                 catch (Exception ex)
                 {
                     refused++;
-                    if (_refusalLogged.Add(family + "|" + owner))
-                        Plugin.Logger.LogWarning($"[Plans] a {family} row of '{owner}' could not be drawn: {ex.Message} (once per family and owner).");
+                    if (_refusalLogged.Add(family + "|own"))
+                        Plugin.Logger.LogWarning($"[Plans] one of my own other-HQ {family} rows could not be drawn: {ex.Message} (once per family).");
                     continue;
                 }
                 if (rowParent == null) continue;
-                for (int i = before; i < rowParent.childCount; i++)
-                {
-                    StripDragHandle(rowParent.GetChild(i));
-                    if (tinted) TintRow(rowParent.GetChild(i), tint);
-                }
+                for (int i = before; i < rowParent.childCount; i++) StripDragHandle(rowParent.GetChild(i));
             }
-            if (shown > 0) Plugin.Logger.LogInfo($"[Plans] shown {shown} partner rows ({family}, {hq})");
-            if (refused > 0) Plugin.Logger.LogInfo($"[Plans] {refused} partner {family} row(s) of '{owner}' not drawn for '{hq}'.");
-            return shown;
+            if (shown > 0 || own > 0)
+                Plugin.Logger.LogInfo($"[Plans] union: {shown} partner row(s) + {own} own other-HQ row(s) ({family}, page {pageHq})");
+            if (refused > 0) Plugin.Logger.LogInfo($"[Plans] {refused} {family} row(s) not drawn on '{pageHq}'.");
+            return shown + own;
         }
 
         /// <summary>r2 MAJOR-1 (a): a partner row must never become DRAGGABLE.  ReorderableList.OnEnable and
@@ -398,6 +458,16 @@ namespace BigAmbitionsMP
         {
             var rows = new List<object>();
             if (!_byOwner.TryGetValue(owner, out var p) || p == null) return rows;
+            // HQ-UNION-1b (review MAJOR-2): the union draws every partner headquarters, not only the open one.
+            // A headquarters this machine cannot resolve would give its copies a null address, the dropdown
+            // rescope would not fire and a manager pick would name one of MY people (the page roster). Such
+            // rows are not drawn at all (logged once per owner and headquarters).
+            if (GameStatePatcher.FindRegistration(hqKey) == null)
+            {
+                if (_refusalLogged.Add("hq|" + owner + "|" + hqKey))
+                    Plugin.Logger.LogInfo($"[Plans] '{owner}' headquarters '{hqKey}' is not registered here - its rows are not drawn (a manager dropdown could not be scoped to it).");
+                return rows;
+            }
             switch (family)
             {
                 case "pricing":
@@ -433,6 +503,64 @@ namespace BigAmbitionsMP
                 _rowInfo[row] = new RowInfo { Owner = owner, Family = family, PlanId = id, Hq = hqKey };   // part 2a
             }
             into.Add(row);
+        }
+
+        /// <summary>U1: MY OWN other headquarters' REAL plans of one family - every headquarters I run
+        /// (MergerFlip.TrulyMine of its registration) whose key is not the page's.  These are the game's own
+        /// objects out of SaveGameManager.Current (pricingManagerPlans / importPartnerships / hrManagerPlans /
+        /// headhunterPlans), NOT display copies: they are never put in _rows/_rowOwner/_rowInfo, so
+        /// IsOverlayPlan stays false and every edit on them runs natively.  Wave 4's TAGGED DISPLAY installs
+        /// sit in the same lists and are a partner's rows, so they are excluded through the same test every
+        /// wave-4 predicate uses (MergerAbsence.IsDisplayInstall), as OwnCount does.</summary>
+        private static List<object> OwnOtherHqPlans(string family, string pageHq)
+        {
+            var mine = new List<object>();
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return mine;
+                System.Collections.IEnumerable src = null;
+                switch (family)
+                {
+                    case "pricing":     src = gi.pricingManagerPlans; break;
+                    case "purchasing":  src = gi.importPartnerships;  break;
+                    case "hr":          src = gi.hrManagerPlans;      break;
+                    case "headhunter":  src = gi.headhunterPlans;     break;
+                }
+                if (src == null) return mine;
+                var run = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                foreach (var o in src)
+                {
+                    if (o == null) continue;
+                    bool display; try { display = MergerAbsence.IsDisplayInstall(o); } catch { display = false; }
+                    if (display) continue;
+                    var hq = HqOfPlan(o);
+                    if (hq == null) continue;
+                    string key = KeyOf(hq);
+                    if (key.Length == 0 || Same(key, pageHq)) continue;      // the page's own plans are the native list's
+                    if (!run.TryGetValue(key, out var ok))
+                    {
+                        ok = false;
+                        try { var reg = BuildingHelper.GetBuildingRegistration(hq); ok = reg != null && MergerFlip.TrulyMine(reg); } catch { }
+                        run[key] = ok;
+                    }
+                    if (!ok) continue;                                       // a partner's headquarters, not one of mine
+                    mine.Add(o);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] own other-HQ {family} rows: {ex.Message}"); }
+            return mine;
+        }
+
+        /// <summary>The headquarters a REAL plan of any of the four families names (public field on all four:
+        /// HrManagerPlan.cs:16, PricingManagerPlan.cs:21, HeadhunterPlan.cs:23, ImportPartnership.cs:39).</summary>
+        private static Address HqOfPlan(object plan)
+        {
+            var pm = plan as PricingManagerPlan; if (pm != null) return pm.headquartersAddress;
+            var ip = plan as ImportPartnership;  if (ip != null) return ip.headquartersAddress;
+            var hr = plan as HrManagerPlan;      if (hr != null) return hr.headquartersAddress;
+            var hh = plan as HeadhunterPlan;     if (hh != null) return hh.headquartersAddress;
+            return null;
         }
 
         private static object BuildPricing(PwPricingPlan d)
@@ -546,6 +674,9 @@ namespace BigAmbitionsMP
         /// <summary>Is this plan object one of the DETACHED partner rows?  Reference identity, so a plan of
         /// this player's own is never mistaken for one.</summary>
         public static bool IsOverlayPlan(object plan) => plan != null && _rowOwner.ContainsKey(plan);
+
+        /// <summary>HQ-UNION-1b: are any partner rows registered right now (drawn on whichever company page)?</summary>
+        public static bool HasOverlayRows => _rowOwner.Count > 0;
 
         /// <summary>HO-1a H3.  WHOSE headquarters a display row belongs to, or "" when the plan is not one
         /// of the detached rows.  The assign list uses it to offer that company's own people only - the hole
@@ -1083,13 +1214,15 @@ namespace BigAmbitionsMP
         /// machine may not be able to resolve (an importer it does not know, an employee id that is not
         /// replicated); a throw inside the row's click delegate would leave the list mid-update and the tab
         /// unusable.  The finaliser swallows it, logs it once per family, and leaves the pane as it was - no
-        /// new on-screen text.  A throw on one of MY OWN plans is the game's own and is re-thrown.</summary>
+        /// new on-screen text.  HQ-UNION-1b (review MAJOR-1): since the union, a partner's row can sit on MY
+        /// OWN card too, so the test is "a company headquarters page with partner rows on it", not "a
+        /// partner's page"; only when NO partner row is drawn is a throw the game's own and re-thrown.</summary>
         public static Exception SwallowPaneOpen(string family, Exception ex)
         {
             try
             {
                 if (ex == null) return null;
-                if (!PartnerHqOpen(out var hq, out var owner)) return ex;      // my own headquarters: the game's own bug
+                if (!CompanyHqPageOpen(out var hq, out var owner) || _rowOwner.Count == 0) return ex;   // no partner row here: the game's own bug
                 if (_refusalLogged.Add("pane|" + family))
                     Plugin.Logger.LogWarning($"[Plans] the {family} pane could not open on a row of '{owner}' at '{hq}': {ex.Message} (once per family; the pane stays as it was).");
                 return null;
@@ -1102,7 +1235,7 @@ namespace BigAmbitionsMP
         private static void Refused(string family, string op, string planId, string why)
         {
             Plugin.Logger.LogWarning($"[Merger] plan edit refused ({family} {op} {planId}): {why}.");
-            try { if (PartnerHqOpen(out _, out var owner)) RefreshOpenTabsFor(owner); } catch { }
+            try { if (CompanyHqPageOpen(out _, out var owner)) RefreshOpenTabsFor(owner); } catch { }
         }
 
         /// <summary>The member's answer leg: the runner could not apply the edit.  The rows on screen are
@@ -1110,7 +1243,7 @@ namespace BigAmbitionsMP
         public static void ReceiveRefusal(string family, string planId, string reason)
         {
             Plugin.Logger.LogWarning($"[Merger] plan-edit-refused ({family} {planId}): {reason}.");
-            try { if (PartnerHqOpen(out _, out var owner)) RefreshOpenTabsFor(owner); } catch { }
+            try { if (CompanyHqPageOpen(out _, out var owner)) RefreshOpenTabsFor(owner); } catch { }
         }
 
         // -- the DTO of one temp row (the reverse of BuildPricing/BuildPurchasing/BuildHr/BuildHeadhunter) --

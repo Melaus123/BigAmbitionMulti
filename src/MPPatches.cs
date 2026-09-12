@@ -4,6 +4,7 @@ using Buildings;
 using Helpers;
 using GleyTrafficSystem;
 using Extensions;   // phase 4a: the game's own ToShortCurrencyFormat for the company figures
+using Localizor;    // U2: the string .GetLocalization() the four dropdown builders use
 
 namespace BigAmbitionsMP
 {
@@ -9250,6 +9251,199 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ══ U2 (user ruling 2026-09-12, plan D37) — THE MANAGER DROPDOWN FOLLOWS THE ROW'S HEADQUARTERS ══
+        //
+        // Native builds each private candidate roster from the PAGE address and the change handler indexes
+        // that same list: HrManagersPlanList.cs:168-177, PricingManagersPlanList.cs:174-191,
+        // PurchasingAgentsPlanList.cs:109-120 and HeadhuntersPlanList.cs:114-123 all filter
+        // `x.assignedAddress == InstanceBehavior<UIs>.Instance.fullMenu.bizMan.business.address`.
+        // A UNION row belongs to ANOTHER headquarters, so its manager has to be picked from THAT
+        // headquarters' staff: a partner's people exist here as injected copies whose assignedAddress is
+        // that headquarters (the roster sync), and for my own other headquarters the records are real.
+        // The postfixes below REBUILD the private list with the row's own address and the same skill test
+        // native uses, then re-set the dropdown exactly as native does — so both the native change handler
+        // and the mod's routing prefix (PlanEditEmployeeId) index the right person. A row that belongs to
+        // the page's own headquarters is untouched: the first test returns.
+
+        private static readonly HashSet<string> _dropdownRescoped = new HashSet<string>();
+
+        /// <summary>Does this row belong to a DIFFERENT headquarters than the page on screen?  Address
+        /// overloads `==` by VALUE (HQ-UNION-1b, review MINOR-1: a page-HQ plan whose Address object was
+        /// deserialised separately from business.address is still the same headquarters), so the test is
+        /// value equality, never reference identity.  Logged once per family per session.</summary>
+        private static bool RowHqOffPage(object rowHq, string family)
+        {
+            try
+            {
+                if (rowHq == null) return false;
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var biz = ui != null && ui.fullMenu != null && ui.fullMenu.bizMan != null ? ui.fullMenu.bizMan.business : null;
+                object page = biz != null ? biz.address : null;
+                if (page == null || ReferenceEquals(page, rowHq) || page.Equals(rowHq)) return false;
+                if (_dropdownRescoped.Add(family))
+                    Plugin.Logger.LogInfo($"[Plans] the {family} manager dropdown now follows the row's own headquarters (once per family).");
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>The private candidate list the native change handler indexes.</summary>
+        private static void SetPrivateList(object instance, string field, object people)
+        {
+            var f = AccessTools.Field(instance.GetType(), field);
+            if (f != null) f.SetValue(instance, people);
+        }
+
+        /// <summary>Native's second half: the "no manager assigned" pop-up's own dropdown is filled from the
+        /// SAME list (HrManagersPlanList.cs:176, PricingManagersPlanList.cs:190, HeadhuntersPlanList.cs:122,
+        /// PurchasingAgentsPlanList.cs:118).  Reflection, so the four UI types need not be named here.</summary>
+        private static void RescopePopUp(object instance, string uiField, object people)
+        {
+            try
+            {
+                if (instance == null) return;
+                var f = AccessTools.Field(instance.GetType(), uiField);
+                var ui = f != null ? f.GetValue(instance) : null;
+                if (ui == null) return;
+                var pf = AccessTools.Field(ui.GetType(), "noManagerAssignedPopUp");
+                var pop = pf != null ? pf.GetValue(ui) : null;
+                if (pop == null) return;
+                var m = AccessTools.Method(pop.GetType(), "SetUpEmployeeDropdown");
+                if (m != null) m.Invoke(pop, new object[] { people });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] no-manager pop-up dropdown: {ex.Message}"); }
+        }
+
+        private static UI.Elements.Dropdown ManagerDropdownOf(UnityEngine.Transform entry)
+        {
+            var t = entry != null ? entry.Find("ManagerDropdown") : null;
+            return t != null ? t.GetComponent<UI.Elements.Dropdown>() : null;
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList), "UpdateHrManagerDropdownForPlan")]
+        public static class Patch_HrDropdown_RowHq
+        {
+            static void Postfix(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList __instance,
+                                Buildings.Office.Headquarters.HrManagerPlan plan,
+                                UnityEngine.Transform selectedEntry)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || plan == null || selectedEntry == null) return;
+                    var hq = plan.headquartersAddress;
+                    if (!RowHqOffPage(hq, "hr")) return;
+                    var gi = SaveGameManager.Current;
+                    if (gi == null || gi.EmployeeInstances == null) return;
+                    var people = gi.EmployeeInstances.FindAll((Entities.EmployeeInstance x) =>
+                        x != null && x.assignedAddress == hq && x.HasSkill("ba:skill_hrmanager")
+                        && !gi.hrManagerPlans.Exists((Buildings.Office.Headquarters.HrManagerPlan y) => y.id != plan.id && y.assignedEmployeeId == x.id)
+                        && x.IsAssignedToAnyWorkShift());
+                    SetPrivateList(__instance, "_hrManagers", people);
+                    var opts = new System.Collections.Generic.List<string> { "common_unassigned".GetLocalization() };
+                    foreach (var x in people) opts.Add(x.GetEmployeeNameWithInfo());
+                    var dd = ManagerDropdownOf(selectedEntry);
+                    if (dd != null) dd.SetOptions(opts, localize: false, people.FindIndex((Entities.EmployeeInstance x) => x.id == plan.assignedEmployeeId) + 1);
+                    RescopePopUp(__instance, "hrManagerPlanUI", people);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] hr dropdown rescope: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList), "UpdatePricingManagerDropdownForPlan")]
+        public static class Patch_PricingDropdown_RowHq
+        {
+            // decompile PricingManagersPlanList.cs:174 — the second parameter is the ENTRY type, not a Transform,
+            // and the dropdown is reached through its own `ManagerDropdown` (:188).
+            static void Postfix(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList __instance,
+                                Buildings.Office.Headquarters.PricingManagerPlan plan,
+                                UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanListEntry selectedEntry)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || plan == null || selectedEntry == null) return;
+                    var hq = plan.headquartersAddress;
+                    if (!RowHqOffPage(hq, "pricing")) return;
+                    var gi = SaveGameManager.Current;
+                    if (gi == null || gi.EmployeeInstances == null) return;
+                    var people = gi.EmployeeInstances.FindAll((Entities.EmployeeInstance x) =>
+                        x != null && x.assignedAddress == hq && x.HasSkill("ba:skill_pricingmanager")
+                        && !Buildings.Office.Headquarters.PricingManagerHelper.IsEmployeeAssignedToOtherPlan(x.id, plan.id)
+                        && x.IsAssignedToAnyWorkShift());
+                    SetPrivateList(__instance, "_pricingManagers", people);
+                    var opts = new System.Collections.Generic.List<string> { "common_unassigned".GetLocalization() };
+                    foreach (var x in people) opts.Add(x.GetEmployeeNameWithInfo());
+                    var dd = selectedEntry.ManagerDropdown;
+                    if (dd != null) dd.SetOptions(opts, localize: false, people.FindIndex((Entities.EmployeeInstance x) => x.id == plan.assignedEmployeeId) + 1);
+                    RescopePopUp(__instance, "pricingManagerPlanUI", people);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] pricing dropdown rescope: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList), "UpdateHeadhunterDropdownForPlan")]
+        public static class Patch_HeadhunterDropdown_RowHq
+        {
+            static void Postfix(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList __instance,
+                                Buildings.Office.Headquarters.HeadhunterPlan plan,
+                                UnityEngine.Transform selectedEntry)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || plan == null || selectedEntry == null) return;
+                    var hq = plan.headquartersAddress;
+                    if (!RowHqOffPage(hq, "headhunter")) return;
+                    var gi = SaveGameManager.Current;
+                    if (gi == null || gi.EmployeeInstances == null) return;
+                    var people = gi.EmployeeInstances.FindAll((Entities.EmployeeInstance x) =>
+                        x != null && x.assignedAddress == hq && x.HasSkill("ba:skill_headhunter")
+                        && !gi.headhunterPlans.Exists((Buildings.Office.Headquarters.HeadhunterPlan y) => y.id != plan.id && y.assignedEmployeeId == x.id)
+                        && x.IsAssignedToAnyWorkShift());
+                    SetPrivateList(__instance, "_headhunters", people);
+                    var opts = new System.Collections.Generic.List<string> { "common_unassigned".GetLocalization() };
+                    foreach (var x in people) opts.Add(x.GetEmployeeNameWithInfo());
+                    var dd = ManagerDropdownOf(selectedEntry);
+                    if (dd != null) dd.SetOptions(opts, localize: false, people.FindIndex((Entities.EmployeeInstance x) => x.id == plan.assignedEmployeeId) + 1);
+                    RescopePopUp(__instance, "planUI", people);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] headhunter dropdown rescope: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList), "UpdatePurchasingAgentDropdownForPlan")]
+        public static class Patch_PurchasingDropdown_RowHq
+        {
+            // decompile PurchasingAgentsPlanList.cs:109-120: the agent's id field is `employeeInstanceId`, and
+            // the dropdown's interactability is re-applied here because native sets it AFTER SetOptions (:117).
+            static void Postfix(UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList __instance,
+                                Entities.ImportPartnership plan,
+                                UnityEngine.Transform selectedEntry)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || plan == null || selectedEntry == null) return;
+                    var hq = plan.headquartersAddress;
+                    if (!RowHqOffPage(hq, "purchasing")) return;
+                    var gi = SaveGameManager.Current;
+                    if (gi == null || gi.EmployeeInstances == null) return;
+                    var people = gi.EmployeeInstances.FindAll((Entities.EmployeeInstance x) =>
+                        x != null && x.assignedAddress == hq && x.HasSkill("ba:skill_purchasingagent")
+                        && !gi.importPartnerships.Exists((Entities.ImportPartnership y) => y.id != plan.id && y.employeeInstanceId == x.id)
+                        && x.IsAssignedToAnyWorkShift());
+                    SetPrivateList(__instance, "_purchasingAgents", people);
+                    var opts = new System.Collections.Generic.List<string> { "common_unassigned".GetLocalization() };
+                    foreach (var x in people) opts.Add(x.GetEmployeeNameWithInfo());
+                    var dd = ManagerDropdownOf(selectedEntry);
+                    if (dd != null)
+                    {
+                        dd.SetOptions(opts, localize: false, people.FindIndex((Entities.EmployeeInstance x) => x.id == plan.employeeInstanceId) + 1);
+                        dd.SetInteractable(Entities.DeliveryHelper.CanModifyContract(plan.nextDeliveryDay));
+                    }
+                    RescopePopUp(__instance, "purchasingAgentPlanUISettings", people);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] purchasing dropdown rescope: {ex.Message}"); }
+            }
+        }
+
         /// <summary>H4 (D20-8): ONE PRICING MANAGER PER NEIGHBOURHOOD, COMPANY-WIDE.
         /// `PricingManagerHelper.IsNeighborhoodSupervised(neighborhood, exceptPlanId)` (decompile :144-154)
         /// is `foreach (PricingManagerPlan plan in Plans) if (!(plan.id == exceptPlanId) &amp;&amp;
@@ -9579,7 +9773,9 @@ namespace BigAmbitionsMP
                     // HO-1c L4.8: a partner's HQ on screen with no resolvable pane plan FAILS CLOSED.  Falling to
                     // the own-plan rule there would offer this player's own people on a partner's row, which is
                     // the contamination H3 exists to stop.
-                    if (rowPlan == null && CompanyPlans.PartnerHqOpen(out _, out var openOwner) && openOwner.Length > 0)
+                    // HQ-UNION-1b (review MAJOR-3): a partner's row can be on MY OWN card too, so the test is the union
+                    // predicate plus "partner rows are drawn" - never the own-plan rule while a partner row could be showing.
+                    if (rowPlan == null && CompanyPlans.CompanyHqPageOpen(out _, out var openOwner) && openOwner.Length > 0 && CompanyPlans.HasOverlayRows)
                     {
                         int all = __instance.data.Count;
                         __instance.data = new List<UI.Smartphone.Apps.BizMan.HrManagers.HrManagerEmployeeModel>();
