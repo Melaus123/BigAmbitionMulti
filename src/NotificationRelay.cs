@@ -65,13 +65,45 @@ namespace BigAmbitionsMP
             // Helpers/ScheduleAutoFillerHelper.cs
             "bizman_schedule_auto_fill_notify",                                   // :94   businessName
             "bizman_schedule_auto_fill_notify_partial",                           // :94   businessName
+            // (bizman_schedule_auto_fill_notify_cancel is deliberately NOT here: ScheduleAutoFillerHelper.cs:58 is
+            //  autonomous, but BizManSchedule.cs:166 raises the SAME key from a button - it would toast a partner
+            //  for a click the member made.)
             // Helpers/PrivateDriverHelpers.cs
             "ba:private_driver_notification_unpaid",                              // :538  fee only
             // Entities/ContactsHelper.cs
-            "contacts_new_message",                                               // :113  sender only
-            "contacts_parking_tickets_received",                                  // :86   count only
             "employeehelper_notification_employee_amount_messaged_you",           // :96   count only
+            // ── MERGER PHASE 4d (R5): five more AUTONOMOUS company events ─────────────────────────────
+            // Buildings.Office.Headquarters/PricingManagerPlan.cs
+            "notifications_PricingManager_mispriced_items",                       // :195  employeeName + amount — drops at the owner gate until an employee->workplace resolve exists (decision pending, 4d)
+            // Helpers/RealEstateHelper.cs - the daily "a competitor bought your building" pass
+            "real_estate_building_sold_notification",                             // :132  address/price/amount
+            "real_estate_building_sold_notification_items_sold",                  // :132  + itemsAmount
+            // Entities/ImportPartnership.cs - the daily import deliveries (NotifyDeliveries)
+            "import_partnership_notification_shipment_arrived",                   // :436  name = the business
+            "import_partnership_notification_shipment_multiple",                  // :431  count only — never resolves (no name, no address): sits here per the roll-up convention, drops at the owner gate (4d review MINOR-4)
         };
+
+        /// <summary>4d R5: the keys 4d DROPPED from the list above - personal mail and personal parking tickets are
+        /// not company events (design read section E; D22). Kept as a named record so the removal is auditable.</summary>
+        private static readonly string[] Dropped4d = { "contacts_new_message", "contacts_parking_tickets_received" };
+
+        private static readonly string[] Added4d =
+        {
+            "notifications_PricingManager_mispriced_items", "real_estate_building_sold_notification",
+            "real_estate_building_sold_notification_items_sold", "import_partnership_notification_shipment_arrived",
+            "import_partnership_notification_shipment_multiple",
+        };
+
+        private static bool _deltaLogged;
+
+        /// <summary>One INFO pair, the first time a member's machine runs the gate - what 4d added and removed.</summary>
+        private static void LogDeltaOnce()
+        {
+            if (_deltaLogged) return;
+            _deltaLogged = true;
+            Plugin.Logger.LogInfo($"[Relay] key added {string.Join(", ", Added4d)}");
+            Plugin.Logger.LogInfo($"[Relay] key dropped {string.Join(", ", Dropped4d)}");
+        }
 
         /// <summary>The data fields the game uses for a business DISPLAY NAME, in the order they are
         /// tried. businessName comes first on purpose: the sick / retired pop-ups also carry "name",
@@ -127,6 +159,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!MergerSync.IAmMember) return;                                    // C4: inert without a merger
+                    LogDeltaOnce();                                                       // 4d R5: name the list change once
                     if (string.IsNullOrEmpty(headerKey) || !Allowed.Contains(headerKey)) return;
                     if (_applying) return;                                                // C3 own Show - never re-relay
                     Relay(notificationType, headerKey, notificationData, secondsToShow, notificationSound);
@@ -146,19 +179,42 @@ namespace BigAmbitionsMP
             if (gi == null) return;
 
             string name = FirstName(data);
-            if (string.IsNullOrEmpty(name)) { LogUnresolved(headerKey, ""); return; }
-
             string addressKey = "";
-            foreach (var reg in gi.BuildingRegistrations)
+            if (!string.IsNullOrEmpty(name))
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    string bn; try { bn = reg.BusinessName; } catch { continue; }
+                    if (!string.Equals(bn, name, StringComparison.Ordinal)) continue;
+                    if (!MergerFlip.TrulyMine(reg)) continue;
+                    addressKey = GameStateReader.AddressKey(reg);
+                    break;
+                }
+
+            // MERGER PHASE 4d (R5): some autonomous COMPANY events name no business at all - the real-estate
+            // "a competitor bought your building" pair carries a formatted ADDRESS instead (decompile
+            // Helpers/RealEstateHelper.cs:132 - address/price/amount/itemsAmount). Without this resolve those keys
+            // would sit in the allow-list and never travel. The building is mine if I rent it (the same TrulyMine
+            // test as above, so a company building still relays only from its real owner) or if it is in MY
+            // real-estate list, which the mod never fills with a partner's property (MPPatches.cs:175).
+            if (string.IsNullOrEmpty(addressKey) && data != null
+                && data.TryGetValue("address", out var formatted) && !string.IsNullOrEmpty(formatted))
             {
-                if (reg == null) continue;
-                string bn; try { bn = reg.BusinessName; } catch { continue; }
-                if (!string.Equals(bn, name, StringComparison.Ordinal)) continue;
-                if (!MergerFlip.TrulyMine(reg)) continue;
-                addressKey = GameStateReader.AddressKey(reg);
-                break;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    string fs; try { fs = Streets.AddressHelper.ToFormattedString(reg.Address); } catch { continue; }
+                    if (!string.Equals(fs, formatted, StringComparison.Ordinal)) continue;
+                    string k; try { k = GameStateReader.AddressKey(reg); } catch { break; }
+                    bool mine = MergerFlip.TrulyMine(reg);
+                    if (!mine && !MergerFlip.IsFlipped(k))
+                        try { mine = gi.realEstate != null && gi.realEstate.Exists(x => x != null && GameStateReader.AddressKey(x.address) == k); }
+                        catch { }
+                    if (mine) addressKey = k;
+                    break;
+                }
             }
-            if (string.IsNullOrEmpty(addressKey)) { LogUnresolved(headerKey, name); return; }
+            if (string.IsNullOrEmpty(addressKey)) { LogUnresolved(headerKey, string.IsNullOrEmpty(name) ? "(no business named)" : name); return; }
 
             var (day, hourOfDay) = GameStateReader.GetGameTime();
             var p = new NotificationRelayPayload
@@ -207,6 +263,7 @@ namespace BigAmbitionsMP
             {
                 if (!PayloadSane(p, "receiver")) return;
                 string dup = "bamp-relay-" + Fnv(p.HeaderKey + "|" + p.AddressKey + "|" + p.StampMinute);
+                RememberSender(dup, p.PlayerId);   // 4d R5: the renderer tints this toast in the sender's colour
                 float seconds = p.Seconds > 0f ? p.Seconds : 4f;
                 _applying = true;
                 try
@@ -218,6 +275,58 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[NotifyRelay] shown '{p.HeaderKey}' for '{p.AddressKey}' from '{p.PlayerId}'");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[NotifyRelay] ApplyRelayed: {ex.Message}"); }
+        }
+
+        // C5 ATTRIBUTION (MERGER PHASE 4d, R5) -------------------------------------------------
+        //
+        // D18 says COLOUR, never words: a relayed toast must read as a partner's event without the mod adding one
+        // character of text. The gateway cannot do that (it hands the game a key and a data table), so the one new
+        // surface is the RENDERER: NotificationsUI.PlayNotification (decompile UI.Notification/NotificationsUI.cs:95)
+        // receives the instantiated toast and the duplicateIdentifier, and names the toast GameObject after that id
+        // (:103). Every relayed toast already carries the mod's own "bamp-relay-…" id (ApplyRelayed), so the patch
+        // recognises its own copies by that id alone and tints the toast LABEL in the sending member's colour. A
+        // native toast has a different id (or none) and is never touched.
+
+        private static readonly Dictionary<string, string> _relaySender = new Dictionary<string, string>(StringComparer.Ordinal);
+        private static readonly Queue<string> _relaySenderOrder = new Queue<string>();
+
+        private static void RememberSender(string dup, string pid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(dup) || string.IsNullOrEmpty(pid)) return;
+                if (!_relaySender.ContainsKey(dup)) _relaySenderOrder.Enqueue(dup);
+                _relaySender[dup] = pid;
+                while (_relaySenderOrder.Count > 64) _relaySender.Remove(_relaySenderOrder.Dequeue());
+            }
+            catch { }
+        }
+
+        [HarmonyPatch(typeof(UI.Notification.NotificationsUI), "PlayNotification")]
+        private static class TintPatch
+        {
+            [HarmonyPostfix]
+            private static void Postfix(UnityEngine.CanvasGroup entry, string duplicateIdentifier)
+            {
+                try
+                {
+                    if (entry == null || string.IsNullOrEmpty(duplicateIdentifier)) return;
+                    if (!duplicateIdentifier.StartsWith("bamp-relay-", StringComparison.Ordinal)) return;
+                    if (!_relaySender.TryGetValue(duplicateIdentifier, out var pid)) return;
+                    if (!PlayerColours.TryColourFor(pid, out var c)) return;
+                    // The header label is the child the game itself writes into (:62, the "Text" language-change
+                    // component); its own "Text/Timestamp" child keeps the game's colour. 4d r2 (review MINOR-6): no
+                    // search wider than that child - the label is the TMP on "Text" itself, else the TextContainer
+                    // of "Text"'s own localisation component (the same route the residence row takes); a miss
+                    // leaves the toast plain rather than risk tinting the timestamp.
+                    var tr = entry.transform.Find("Text");
+                    var tmp = tr != null ? tr.GetComponent<TMPro.TMP_Text>() : null;
+                    if (tmp == null && tr != null)
+                        tmp = HousingMapCues.GetMember(tr.GetComponent<Localizor.LanguageChangeEvent.TextLocalizationComponent>(), "TextContainer") as TMPro.TMP_Text;
+                    if (tmp != null) tmp.color = c;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[NotifyRelay] toast tint: {ex.Message}"); }
+            }
         }
 
         /// <summary>FNV-1a, hex - a short stable id for the duplicate identifier (which the game uses

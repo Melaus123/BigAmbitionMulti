@@ -2982,6 +2982,11 @@ namespace BigAmbitionsMP
             sb.Append('|').Append(MergerSync.IAmMember ? 'M' : '-')
               .Append(MergerSync.IncomingFromPid).Append('/').Append(MergerSync.OutgoingToPid)
               .Append('/').Append(string.Join(",", MergerSync.MemberNames)).Append('|');
+            // 4d R3: the company row counts each member's cars, so the count belongs in the rebuild signature.
+            if (MergerSync.IAmMember)
+                foreach (var mp in MergerSync.MyMemberPidsOrdered)
+                    sb.Append(mp).Append(mp == me ? VehicleManager.LocalVehicleCount() : VehicleManager.GhostCountFor(mp)).Append(',');
+            sb.Append('|');
             foreach (var g in mine)
                 if (!g.Online) { sb.Append(g.Handle).Append(g.Name); foreach (var k in g.Kinds) sb.Append((int)k); sb.Append(';'); }
             string sig = sb.ToString();
@@ -3007,7 +3012,22 @@ namespace BigAmbitionsMP
                 // where the row used to list the roster; a host that sends no name falls back to it.
                 string coName = MergerSync.MyGroupDisplayName;
                 if (string.IsNullOrEmpty(coName)) coName = string.Join(", ", MergerSync.MemberNames);
-                AddPermRow(idx++, RowH, $"<b>Merged company</b>  <color={muted}>{coName}</color>",
+                // MERGER PHASE 4d (R3, D22): ONE COMPANY ROW in the keys panel. A merger is a superset of the
+                // three permissions, so the company's cars are not per-player keys any more — this row carries the
+                // company display name that already exists (no new wording) and, after it, every member in THEIR
+                // colour with the number of that member's vehicles this machine can see: mine from the local
+                // fleet, a partner's from the ghosts their keys reach here. The per-member rows below keep their
+                // greyed, inert toggles (D16) — nothing about the grant store changes.
+                var crow = new System.Text.StringBuilder();
+                crow.Append("<b>Merged company</b>  <color=").Append(muted).Append('>').Append(coName).Append("</color>");
+                foreach (var mp in MergerSync.MyMemberPidsOrdered)
+                {
+                    if (string.IsNullOrEmpty(mp)) continue;
+                    int cars = mp == me ? VehicleManager.LocalVehicleCount() : VehicleManager.GhostCountFor(mp);
+                    if (mp == me) crow.Append("  ").Append(mp).Append(' ').Append(cars);   // my own name keeps the panel's colour
+                    else crow.Append("  ").Append(PlayerColours.TagOpen(mp)).Append(mp).Append("</color> ").Append(cars);
+                }
+                AddPermRow(idx++, RowH, crow.ToString(),
                     ("Leave merger", grey, "merger", (byte)11, GrantKind.Vehicle));
             }
             if (!string.IsNullOrEmpty(MergerSync.IncomingFromPid))

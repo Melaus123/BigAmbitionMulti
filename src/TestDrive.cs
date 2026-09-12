@@ -1270,6 +1270,37 @@ namespace BigAmbitionsMP
                         : $"ERR relaymsg message='{rarg}': {rwhy}";
                 }
 
+                case "cues":
+                {
+                    // MERGER PHASE 4d (R6). Read-only. What the presentation layer is painting right now:
+                    // every COMPANY building this machine shows as its own because of the merger flip, with its
+                    // owner and that owner's colour, and every partner VEHICLE whose map pin is being kept alive
+                    // here. Nothing is written. r2 (review MAJOR-1; run 1's post-dissolve pass was VACUOUS — the
+                    // old non-member early return never looked at the pins): the pins are listed on EVERY answer —
+                    // a kept pin belongs to any drivable ghost (a direct key grant keeps one too) and the
+                    // post-dissolve check exists to prove they are GONE once membership ends. Only the residences
+                    // list is merger-only; the suffix still names a machine that is in no company.
+                    bool cmember = MergerSync.IAmMember;
+                    var cres = new System.Collections.Generic.List<string>();
+                    try
+                    {
+                        var cgi = SaveGameManager.Current;
+                        if (cmember && cgi?.BuildingRegistrations != null)
+                            foreach (var creg in cgi.BuildingRegistrations)
+                            {
+                                if (creg == null || !HousingMapCues.IsFlippedPartnerResidence(creg)) continue;
+                                string ckey = GameStateReader.AddressKey(creg);
+                                string cowner = PlayerColours.FlipProofOwner(ckey);
+                                cres.Add($"{ckey}:{(cowner.Length == 0 ? "?" : cowner)}:{PlayerColours.ColourNameOf(cowner)}");
+                            }
+                    }
+                    catch (Exception ex) { return $"ERR cues residences: {ex.Message}"; }
+                    var cpins = new System.Collections.Generic.List<string>();
+                    try { foreach (var cp in VehicleManager.KeptPins()) cpins.Add($"{cp.vid}:{cp.owner}"); }
+                    catch (Exception ex) { return $"ERR cues pins: {ex.Message}"; }
+                    return $"OK cues residences=[{string.Join(",", cres)}] pins=[{string.Join(",", cpins)}]" + (cmember ? "" : " (not in a company)");
+                }
+
                 case "poachmsg":
                 {
                     // r4 P1: the game builds NATIVE message buttons in exactly TWO places, and both are rival
@@ -1284,6 +1315,10 @@ namespace BigAmbitionsMP
                     int gpct = 5, gdays = 30;      // a LONG deadline, so an aborted run never loses the person to the poach
                     if (gtk.Length > 1 && gtk[1].Length > 0 && !int.TryParse(gtk[1], out gpct)) return "ERR usage: poachmsg <employeeId> [percent] [days]";
                     if (gtk.Length > 2 && gtk[2].Length > 0 && !int.TryParse(gtk[2], out gdays)) return "ERR usage: poachmsg <employeeId> [percent] [days]";
+                    // 4d MINOR: both numbers go straight into a REAL raise request on a real person, so a typo is
+                    // permanent - a negative percent writes a wage CUT and 0 days arms an immediate deadline.
+                    if (gpct  < 1 || gpct  > 100) return "ERR poachmsg percent must be 1..100";
+                    if (gdays < 1 || gdays > 365) return "ERR poachmsg days must be 1..365";
                     var gemp = FindEmployee(gempId);
                     if (gemp == null) return $"ERR no employee '{gempId}' on this machine";
                     bool ginj = false; try { ginj = MPRegisterSync.IsInjectedStaff(gempId); } catch { }

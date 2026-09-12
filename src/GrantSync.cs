@@ -104,12 +104,17 @@ namespace BigAmbitionsMP
             => !string.IsNullOrEmpty(ownerId) && Runtime(kind).TryGetValue(ownerId, out var set) && set.Count > 0;
 
         /// <summary>The owners who currently grant <paramref name="granteeId"/> a key of <paramref name="kind"/>
-        /// (sorted + joined) — a stable signature for detecting when the local player's access changed.</summary>
+        /// — direct grants PLUS merger co-members, the same union IsGranted reads — (sorted + joined): a stable
+        /// signature for detecting when the local player's access changed.
+        /// MERGER PHASE 4d r2 (review MAJOR-1): a merger forms and dissolves with ZERO grant-table writes, so a
+        /// table-only signature stayed constant across both edges and VehicleManager.OnGrantsChanged never respawned
+        /// the ghosts — an ex-partner's car stayed drivable and kept its coloured map pin after the dissolve.</summary>
         public static string GrantorSig(GrantKind kind, string granteeId)
         {
             if (string.IsNullOrEmpty(granteeId)) return "";
             var owners = new List<string>();
             foreach (var kv in Runtime(kind)) if (kv.Value.Contains(granteeId)) owners.Add(kv.Key);
+            foreach (var pid in MergerSync.CoMembersOf(granteeId)) if (!owners.Contains(pid)) owners.Add(pid);
             owners.Sort();
             return string.Join(";", owners);
         }

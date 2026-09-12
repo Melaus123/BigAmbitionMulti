@@ -166,7 +166,10 @@ namespace BigAmbitionsMP
             public Transform   LoadingPos;          // vehicleLoadingPosition (cargo-load spot), captured pre-strip
             public bool        OwnerUsing;          // fleet e.Driving — the OWNER is driving/pushing it RIGHT NOW (in-use arbitration)
             public bool        Service;             // 2026-09-02: a mirrored private-driver / arrival car (see ServiceCars) — not boardable, not borrowable, GhostTaxi-ridable
+            public PointOfInterest? Poi;             // 4d R2: the KEPT map pin of a car this member holds keys to (null = destroyed, the old behaviour)
+            public Color32     PinColour;            // 4d R2: the owner's colour, re-applied after the game repaints the pin on enter/exit
         }
+        private static float _nextPinPaint;   // 4d R2: throttle for the kept-pin re-tint
         private const float MaxVehicleExtrapolateSeconds = 0.3f;
         private const float VehicleSnapDistance          = 15f;
         // Last-seen signature of the owners who grant the local player a key — when it changes, ghosts
@@ -248,6 +251,55 @@ namespace BigAmbitionsMP
             string sig = rv.AppliedCargo ?? "";
             int bar = sig.IndexOf('|');
             return ParseCargoManifest(bar >= 0 ? sig.Substring(0, bar) : sig);
+        }
+
+        /// <summary>MERGER PHASE 4d (R3/R6): how many of <paramref name="ownerId"/>'s vehicles this machine
+        /// currently holds ghosts for — the cars that player's keys reach here. 0 for an unknown player.</summary>
+        public static int GhostCountFor(string ownerId)
+        {
+            int n = 0;
+            try
+            {
+                if (string.IsNullOrEmpty(ownerId)) return 0;
+                foreach (var kv in _remoteVehicles)
+                    if (kv.Value != null && !kv.Value.Service && kv.Value.OwnerId == ownerId) n++;
+            }
+            catch { }
+            return n;
+        }
+
+        /// <summary>MERGER PHASE 4d (R3): this machine's OWN vehicles — AllPlayerVehicles minus the mod's ghosts
+        /// (a drivable granted/company ghost stays registered there on purpose, so it must be discounted here).</summary>
+        public static int LocalVehicleCount()
+        {
+            int n = 0;
+            try
+            {
+                var list = VehicleHelper.AllPlayerVehicles;
+                if (list == null) return 0;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var vc = list[i];
+                    if (vc == null) continue;
+                    if (vc.GetComponentInParent<ModGhostMarker>() != null) continue;
+                    n++;
+                }
+            }
+            catch { }
+            return n;
+        }
+
+        /// <summary>MERGER PHASE 4d (R6): the partner map pins kept alive here — (vehicleId, owner).</summary>
+        public static System.Collections.Generic.List<(string vid, string owner)> KeptPins()
+        {
+            var list = new System.Collections.Generic.List<(string, string)>();
+            try
+            {
+                foreach (var kv in _remoteVehicles)
+                    if (kv.Value?.Poi != null) list.Add((kv.Key, kv.Value.OwnerId ?? ""));
+            }
+            catch { }
+            return list;
         }
 
         /// <summary>Vehicle cargo capacity (VehicleType.maxCargoCapacity) for the "Boxes: used/max" header;
@@ -1160,7 +1212,30 @@ namespace BigAmbitionsMP
             // poi?.SetHidden(true); a DESTROYED-but-non-null Unity object slips past the C# null-conditional
             // and NREs inside SetHidden (this aborted entry when driving a granted proxy). Nulling makes the
             // poi?.  and  if (poi != null)  checks in EnterVehicle skip cleanly.
-            try { if (vc.poi != null) { UnityEngine.Object.Destroy(vc.poi.gameObject); vc.poi = null; } } catch { }
+            //
+            // MERGER PHASE 4d (R2): a car the local player may DRIVE (a granted key or a company merger) keeps a
+            // LIVE pin in the owner's colour — a member could drive a partner's car but never find it. The NRE the
+            // destroy exists to prevent came from a DESTROYED-but-non-null poi, not from a poi: a live one takes
+            // EnterVehicle's poi?.SetHidden(true) / poi.SetBackground(...) (decompile VehicleController.cs:362,
+            // :371, :385, :417-419) exactly as the owner's own car does, and it hangs off THIS drivable ghost's
+            // controller, so the pin can never outlive the vehicle it points at. Non-drivable ghosts (visual
+            // look-alikes, service mirrors) are stripped to props and keep the old unconditional destroy.
+            PointOfInterest? keptPoi = null;
+            Color32 keptColour = default;
+            try
+            {
+                if (vc.poi != null)
+                {
+                    if (drivable && PlayerColours.TryColourFor(ownerId, out var pc))
+                    {
+                        keptPoi = vc.poi; keptColour = pc;
+                        keptPoi.SetBackground(pc);
+                        Plugin.Logger.LogInfo($"[Pins] kept partner pin {e.VehicleId} (owner '{ownerId}').");
+                    }
+                    else { UnityEngine.Object.Destroy(vc.poi.gameObject); vc.poi = null; }
+                }
+            }
+            catch { }
             // Destroy every gameplay component — after this the game no longer
             // sees a vehicle here, just a prop: no ownership, no ticket, no entry.
             // Capture the vehicle's sleep environment BEFORE stripping the controller — a passenger
@@ -1239,12 +1314,13 @@ namespace BigAmbitionsMP
                 $"{ownedBefore}→{ownedAfterSpawn}→{ownedAfterStrip}, poi='{poiName}', " +
                 $"{killed} gameplay component(s) destroyed.");
 
-            return FinishGhost(go, ownerId, e, pos, rot, loadingPos);
+            return FinishGhost(go, ownerId, e, pos, rot, loadingPos, keptPoi, keptColour);
         }
 
         /// <summary>The common tail of every ghost spawn (player body or, since A2 2026-09-02, the service look-alike):
         /// dev hierarchy dump, owner label, the ride hook for a service car, and the tracking record.</summary>
-        private static RemoteVehicle FinishGhost(GameObject go, string ownerId, VehicleEntry e, Vector3 pos, Quaternion rot, Transform? loadingPos)
+        private static RemoteVehicle FinishGhost(GameObject go, string ownerId, VehicleEntry e, Vector3 pos, Quaternion rot, Transform? loadingPos,
+                                                 PointOfInterest? keptPoi = null, Color32 keptColour = default)
         {
             try { if (go.GetComponent<ModGhostMarker>() == null) go.AddComponent<ModGhostMarker>(); } catch { }   // review MAJOR-1(b)
 #if BAMP_DEV
@@ -1267,6 +1343,8 @@ namespace BigAmbitionsMP
                 TargetPos  = pos,
                 TargetRot  = rot,
                 Service    = e.Service,
+                Poi        = keptPoi,
+                PinColour  = keptColour,
             };
         }
 
@@ -2351,8 +2429,9 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogError($"[Drive] TryDriveGhost '{vid}': {ex}"); return false; }
         }
 
-        /// <summary>The grant table changed: if the set of owners who grant ME a key changed, respawn ghosts
-        /// so a newly-granted car becomes drivable (or a revoked one inert) without a rejoin. MAIN THREAD.</summary>
+        /// <summary>The grant table OR the merger membership changed (4d r2: GrantSync.GrantorSig unions co-members):
+        /// if the set of owners who grant ME a key changed, respawn ghosts so a newly-granted (or newly-merged) car
+        /// becomes drivable (or a revoked / ex-partner one inert, its kept pin gone) without a rejoin. MAIN THREAD.</summary>
         public static void OnGrantsChanged()
         {
             try
@@ -2374,9 +2453,18 @@ namespace BigAmbitionsMP
             float k   = Mathf.Min(Time.deltaTime * 12f, 0.5f);
             float now = Time.unscaledTime;
             var cam = Camera.main;
+            // 4d R2: the game repaints a vehicle pin with its own flat colour whenever the car is entered, left or
+            // parked illegally (decompile VehicleController.cs:371, :417-419), so a kept partner pin is re-tinted
+            // here — once a second, never per frame.
+            bool repaintPins = now >= _nextPinPaint;
+            if (repaintPins) _nextPinPaint = now + 1f;
             foreach (var rv in _remoteVehicles.Values)
             {
                 if (rv.Go == null) continue;
+                if (repaintPins && rv.Poi != null)
+                {
+                    try { rv.Poi.SetBackground(rv.PinColour); } catch { rv.Poi = null; }
+                }
                 // Keep the owner-name label facing the camera ALWAYS — even while the ghost is being driven.
                 // (Must run before the position-skip below, or a driven/shared car's label freezes — bug 1,
                 // run-2026-06-29.)

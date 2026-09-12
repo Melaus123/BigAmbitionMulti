@@ -1,0 +1,155 @@
+{
+  "id": "T-P4D-CUES",
+  "title": "phase 4d presentation, two players: after the merge each machine paints the partner's residences in the OWNER's colour and keeps the partner's vehicle pins in the owner's colour (the cues verb lists both); the pins and tints go on dissolve; ends dissolved",
+  "preconditions": "Fixture save1 (the host melaus and Client1 each own residences and vehicles; Client1 audits 'veh 5'). Build 4d deployed. The map/phone rendering itself and the relayed-toast tint are review-verified (the rig drives no UI); the verb reads the mod's registries. Counts are reported, not asserted, except that at least one partner residence and one partner pin must be listed while merged and none after the dissolve.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "\\[Pins\\] .*(NRE|exception)",
+    "\\[Cues\\] .*exception"
+  ],
+  "oracles_report": [
+    "\\[Cues\\]",
+    "\\[Pins\\]",
+    "\\[Relay\\] key"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST P4D-CUES START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "cues",
+      "expect_result": "^OK cues residences=\\[\\] pins=\\[\\]",
+      "note": "INERT before the merge"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "the client's world needs to settle; vehicle ghosts and residence flips land on both machines"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "cues",
+      "expect_result": "^OK cues residences=\\[[^\\]]*:${clientPid}:[^\\]]*\\] pins=\\[[^\\]]*:${clientPid}[^\\]]*\\]",
+      "note": "host view: at least one of the client's residences tinted with the client's colour and at least one of the client's vehicle pins kept"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "cues",
+      "expect_result": "^OK cues residences=\\[[^\\]]*:${hostPid}:[^\\]]*\\] pins=\\[[^\\]]*:${hostPid}[^\\]]*\\]",
+      "note": "client view: the host's residences and pins"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "cues",
+      "expect_result": "^OK cues residences=\\[\\] pins=\\[\\]",
+      "note": "dissolved: tints and kept pins are gone"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 21,
+      "role": "both",
+      "cmd": "mark TEST P4D-CUES END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

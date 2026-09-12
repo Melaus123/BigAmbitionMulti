@@ -2459,6 +2459,126 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_RivalLeaderboardButton_SetUp_MergerWrap] {ex.Message}"); }
             }
         }
+
+        // ===== MERGER PHASE 4d (R4): the RIVALS DETAIL PANE =====
+        // The leaderboard row already wraps a company name (above). The DETAIL pane's own name field does not -
+        // SelectedRivalUI.ShowRival pushes data.entryName into the private `rivalNameField` (decompile
+        // UI.Smartphone.Apps.Rivals/SelectedRivalUI.cs:29 declares it, :117 sets it), so "A & B & C" clipped
+        // there exactly as the row did before 1-B. Same two-line fix, different field.
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Rivals.SelectedRivalUI), nameof(UI.Smartphone.Apps.Rivals.SelectedRivalUI.ShowRival))]
+        public static class Patch_SelectedRivalUI_ShowRival_MergerWrap
+        {
+            static void Postfix(TMPro.TextMeshProUGUI ___rivalNameField)
+            {
+                try
+                {
+                    if (___rivalNameField == null || !MergerSync.AnyGroup) return;   // inert with no merger anywhere
+                    ___rivalNameField.enableWordWrapping = true;
+                    ___rivalNameField.overflowMode = TMPro.TextOverflowModes.Ellipsis;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_SelectedRivalUI_ShowRival_MergerWrap] {ex.Message}"); }
+            }
+        }
+
+        // The detail pane's two tables list the company's buildings with no hint of WHOSE they are. D18: rows that
+        // clearly belong to another member are coloured; the two summary fields above them (business count, weekly
+        // income - SelectedRivalUI.cs:122-123) are SUMS and stay plain, as does each row's own money column.
+        // The owner comes from the model's Address through the flip-proof lookup, so a company building whose
+        // rival id the merger blanked still names its owner. Cells are RECYCLED, so every cell's own colours are
+        // captured once and restored on any row that is not another player's (SharedShopVisibility.cs:465-471).
+        private sealed class RivalRowColors { public UnityEngine.Color A, B, C; public bool Captured; }
+
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<
+            UI.Smartphone.Apps.Rivals.Tables.RivalBusinessesCellView, RivalRowColors> _rivalBizDefaults = new();
+
+        private static bool TryRowOwnerColour(Address address, out UnityEngine.Color c)   // Address lives in the GLOBAL namespace
+        {
+            c = UnityEngine.Color.white;
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return false;
+                string key = GameStateReader.AddressKey(address);
+                if (string.IsNullOrEmpty(key)) return false;
+                // 4d r2 (review MINOR-2): RealEstateCellView also draws the Market Insider list, and this helper is
+                // the one gate both tables share — so the tint is CO-MEMBER ONLY (D18: colour on the listed rows of
+                // another MEMBER). A non-merged session, and a non-member's building in any session, keep the game's
+                // own colours exactly as before 4d.
+                string owner = PlayerColours.FlipProofOwner(key);
+                if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return false;
+                if (!MergerSync.MergedRuntime(owner, MPConfig.PlayerId)) return false;
+                if (!PlayerColours.TryColourFor(owner, out var c32)) return false;
+                c = (UnityEngine.Color)c32;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Rivals.Tables.RivalBusinessesCellView),
+                      nameof(UI.Smartphone.Apps.Rivals.Tables.RivalBusinessesCellView.SetData))]
+        public static class Patch_RivalBusinessesCellView_SetData_OwnerTint
+        {
+            static void Postfix(UI.Smartphone.Apps.Rivals.Tables.RivalBusinessesCellView __instance,
+                                UI.Smartphone.Apps.Rivals.Tables.RivalBusinessesCellView.RivalBusinessModel data)
+            {
+                try
+                {
+                    if (__instance == null || data == null) return;
+                    var typeText = HousingMapCues.GetMember(__instance.businessType, "TextContainer") as TMPro.TMP_Text;
+                    var addrText = HousingMapCues.GetMember(__instance.address, "TextContainer") as TMPro.TMP_Text;
+                    var def = _rivalBizDefaults.GetOrCreateValue(__instance);
+                    if (!def.Captured)
+                    {
+                        def.A = __instance.businessName != null ? __instance.businessName.color : UnityEngine.Color.white;
+                        def.B = typeText != null ? typeText.color : UnityEngine.Color.white;
+                        def.C = addrText != null ? addrText.color : UnityEngine.Color.white;
+                        def.Captured = true;
+                    }
+                    bool paint = TryRowOwnerColour(data.Address, out var oc);
+                    if (__instance.businessName != null) __instance.businessName.color = paint ? oc : def.A;
+                    if (typeText != null) typeText.color = paint ? oc : def.B;
+                    if (addrText != null) addrText.color = paint ? oc : def.C;
+                    // weeklyIncome keeps the game's own red/white money colouring (D18: sums and money stay plain).
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_RivalBusinessesCellView_SetData_OwnerTint] {ex.Message}"); }
+            }
+        }
+
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<
+            UI.Smartphone.Apps.MarketInsider.RealEstateCellView, RivalRowColors> _realEstateDefaults = new();
+
+        // The rivals REAL-ESTATE table is the market-insider cell view (decompile
+        // UI.Smartphone.Apps.Rivals.Tables/RivalRealEstateTable.cs:10 - BaTable<RealEstateCellView, ...>), so this
+        // one patch covers both screens: a building nobody in the session owns resolves to no owner and the cell
+        // is restored to the colours it shipped with.
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.MarketInsider.RealEstateCellView),
+                      nameof(UI.Smartphone.Apps.MarketInsider.RealEstateCellView.SetData))]
+        public static class Patch_RealEstateCellView_SetData_OwnerTint
+        {
+            static void Postfix(UI.Smartphone.Apps.MarketInsider.RealEstateCellView __instance,
+                                UI.Smartphone.Apps.MarketInsider.RealEstateCellView.RealEstateModel data)
+            {
+                try
+                {
+                    if (__instance == null || data == null) return;
+                    var addrText = HousingMapCues.GetMember(__instance.address, "TextContainer") as TMPro.TMP_Text;
+                    var typeText = HousingMapCues.GetMember(__instance.buildingType, "TextContainer") as TMPro.TMP_Text;
+                    var def = _realEstateDefaults.GetOrCreateValue(__instance);
+                    if (!def.Captured)
+                    {
+                        def.A = addrText != null ? addrText.color : UnityEngine.Color.white;
+                        def.B = typeText != null ? typeText.color : UnityEngine.Color.white;
+                        def.C = __instance.totalSize != null ? __instance.totalSize.color : UnityEngine.Color.white;
+                        def.Captured = true;
+                    }
+                    bool paint = TryRowOwnerColour(data.Address, out var oc);
+                    if (addrText != null) addrText.color = paint ? oc : def.A;
+                    if (typeText != null) typeText.color = paint ? oc : def.B;
+                    if (__instance.totalSize != null) __instance.totalSize.color = paint ? oc : def.C;
+                    // estimatedValue and price keep the game's own colours (money stays plain).
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch_RealEstateCellView_SetData_OwnerTint] {ex.Message}"); }
+            }
+        }
         [HarmonyPatch]
         public static class Patch_RivalsHelper_GetAllRivalData
         {

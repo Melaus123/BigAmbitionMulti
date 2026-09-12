@@ -162,6 +162,18 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Warn("colour for", ex); c = HousingMapCues.SharedColor; return true; }
         }
 
+        /// <summary>4d R6: the NAME of a player's colour slot, for the read-out verbs ("teal" when no slot is
+        /// known, which is exactly the colour the surfaces fall back to).</summary>
+        internal static string ColourNameOf(string ownerPlayerId)
+        {
+            try
+            {
+                int slot = string.IsNullOrEmpty(ownerPlayerId) ? 0 : SlotOf(ownerPlayerId);
+                return slot > 0 ? ColourNames[(slot - 1) % PaletteSize] : "teal";
+            }
+            catch { return "teal"; }
+        }
+
         /// <summary>TMP rich-text opener in the owner's colour (the teal when the owner is unknown).</summary>
         internal static string TagOpen(string ownerPlayerId)
         {
@@ -200,13 +212,45 @@ namespace BigAmbitionsMP
             catch { return ""; }
         }
 
+        /// <summary>MERGER PHASE 4d (R1/R4) — THE FLIP-PROOF OWNER. The merger flip blanks businessOwnerRivalId
+        /// (MergerFlip.cs:135), so every tint that read that field yields "" on a company building. The owner of
+        /// such a key is named by the host's operator ledger (OwnerOfAddressKey, fed from
+        /// PermissionBuildingAccessPayload.Owners — MPServer.cs:5843, which covers OtherOwnedKeys = everything the
+        /// ledger says belongs to someone else, partner residences included); if that push has not arrived yet, the
+        /// identity the flip PARKED is the fallback. "" = no other-player owner is known for this key.</summary>
+        internal static string FlipProofOwner(string addressKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey)) return "";
+                string o = OwnerOfAddressKey(addressKey);
+                if (!string.IsNullOrEmpty(o)) return o;
+                return MergerFlip.ParkedRunner(addressKey);
+            }
+            catch (Exception ex) { Warn("flip-proof owner", ex); return ""; }
+        }
+
+        /// <summary>4d: colour of the flip-proof owner. FALSE when no other player owns the key (unknown, or it is
+        /// the local player's own) — a recycled cell must then RESTORE its captured default rather than paint.</summary>
+        internal static bool TryColourForOwnerOf(string addressKey, out Color32 c)
+        {
+            c = HousingMapCues.SharedColor;
+            try
+            {
+                string owner = FlipProofOwner(addressKey);
+                if (string.IsNullOrEmpty(owner)) return false;
+                return TryColourFor(owner, out c);
+            }
+            catch (Exception ex) { Warn("owner colour for key", ex); return false; }
+        }
+
         /// <summary>Colour for a building by its address key. No owner known → the old teal (true).</summary>
         internal static bool TryColourForAddressKey(string key, out Color32 c)
         {
             c = HousingMapCues.SharedColor;
             try
             {
-                string owner = OwnerOfAddressKey(key);
+                string owner = FlipProofOwner(key);   // 4d: a merger-flipped key's owner survives the blanked rival id
                 if (string.IsNullOrEmpty(owner)) { c = HousingMapCues.SharedColor; return true; }
                 return TryColourFor(owner, out c);
             }

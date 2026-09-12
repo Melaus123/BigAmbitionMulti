@@ -472,17 +472,69 @@ namespace BigAmbitionsMP
                     if (!def.Captured) { def.Name = __instance.businessName.color; def.Type = typeText != null ? typeText.color : Color.white; def.Captured = true; }
                     bool shared = false;
                     BuildingRegistration reg = null;   // 2026-09-05 colours: hoisted so the owner is still nameable below
+                    string cardAddr = "";
                     if (!data.IsRealEstate && data.Address != null)
                     {
                         try { reg = BuildingHelper.GetBuildingRegistration(data.Address); } catch { }
-                        shared = SharedShopSchedule.IsSharedShop(reg, AddrOf(reg));
+                        cardAddr = AddrOf(reg);
+                        // MERGER PHASE 4d (R4-3): IsSharedShop returns FALSE on a merger-flipped shop by design
+                        // (SharedShopSchedule.cs:84 — the merger is not the permission feature), so this card was
+                        // drawn in the member's own colours on every company shop. A flipped shop is a partner's
+                        // shop; tint it too, by the OWNER, never by the flip-blanked rival id (MergerFlip.cs:135).
+                        shared = SharedShopSchedule.IsSharedShop(reg, cardAddr) || MergerFlip.IsFlipped(cardAddr);
                     }
                     // 2026-09-05 colours: the shop's runner names the colour; unknown owner keeps the old teal.
-                    Color ownerTint = PlayerColours.TryColourFor(reg?.businessOwnerRivalId?.ToString() ?? "", out var c) ? (Color)c : Tint;
+                    // 4d: the flip-proof lookup answers for a company shop, whose rival id the flip blanked.
+                    string cardOwner = reg?.businessOwnerRivalId?.ToString() ?? "";
+                    if (string.IsNullOrEmpty(cardOwner)) cardOwner = PlayerColours.FlipProofOwner(cardAddr);
+                    Color ownerTint = PlayerColours.TryColourFor(cardOwner, out var c) ? (Color)c : Tint;
                     __instance.businessName.color = shared ? ownerTint : def.Name;
                     if (typeText != null) typeText.color = shared ? ownerTint : def.Type;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} card tint: {ex.Message}"); }
+            }
+        }
+
+        // ── MERGER PHASE 4d (R1): the phone's PRIVATE RESIDENCE list ─────────
+        //
+        // PrivateResidenceScrollerController.Load lists every RentedByPlayer residential building (decompile
+        // :12-15), so a partner's home is ALREADY in a member's list — the flip put it there and entry/sleep
+        // work (D22). It was indistinguishable from the member's own homes. Colour only, no wording (D18):
+        // the row's address + size take the OWNER's colour. Cells are recycled, so the prefab's own colours are
+        // captured once per cell and restored on every non-company row (the pattern above, :465-471).
+
+        private sealed class ResidenceRowColors { public Color Addr; public Color Size; public bool Captured; }
+        private static readonly ConditionalWeakTable<PrivateResidenceCellView, ResidenceRowColors> _residenceDefaults = new();
+
+        [HarmonyPatch(typeof(PrivateResidenceCellView), nameof(PrivateResidenceCellView.SetData))]
+        public static class Patch_PrivateResidenceCellView_SetData_OwnerTint
+        {
+            static void Postfix(PrivateResidenceCellView __instance, PrivateResidenceCellView.PrivateResidenceModel data)
+            {
+                try
+                {
+                    if (__instance == null || data == null) return;
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    // address is a TextLocalizationComponent (Localizor — un-referenced): reach its TextContainer
+                    // by reflection, exactly as the card tint above does.
+                    var addrText = HousingMapCues.GetMember(__instance.address, "TextContainer") as TMPro.TMP_Text;
+                    var sizeText = __instance.size;
+                    var def = _residenceDefaults.GetOrCreateValue(__instance);
+                    if (!def.Captured)
+                    {
+                        def.Addr = addrText != null ? addrText.color : Color.white;
+                        def.Size = sizeText != null ? sizeText.color : Color.white;
+                        def.Captured = true;
+                    }
+                    string key = "";
+                    try { key = GameStateReader.AddressKey(data.Address); } catch { }
+                    bool company = !string.IsNullOrEmpty(key) && MergerFlip.IsFlipped(key);
+                    Color32 c32 = default;
+                    bool paint = company && PlayerColours.TryColourForOwnerOf(key, out c32);
+                    if (addrText != null) addrText.color = paint ? (Color)c32 : def.Addr;
+                    if (sizeText != null) sizeText.color = paint ? (Color)c32 : def.Size;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} residence row tint: {ex.Message}"); }
             }
         }
 

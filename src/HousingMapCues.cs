@@ -32,6 +32,23 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        /// <summary>MERGER PHASE 4d (R1) — a COMPANY building that reads as the member's own ONLY because the
+        /// merger flip set RentedByPlayer on it (MergerFlip.cs:131-137). Entry, sleep, fridge and wardrobe are
+        /// already correct for one (D22) — the single gap is paint: the native path claims it as this member's
+        /// building (CityBuildingController.UpdatePoi, decompile :762-781), so the cues below tint it in the
+        /// OWNER's colour instead. The "Shared" WORD is never applied to one: a merged member is an owner here,
+        /// not a guest (D22/D18 — colour only, wording kept).</summary>
+        internal static bool IsFlippedPartnerResidence(BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg == null || !reg.RentedByPlayer) return false;
+                if (!IsResidential(reg)) return false;   // R1 is the RESIDENCE cue set; a company SHOP's paint is not touched here
+                return MergerFlip.IsFlipped(GameStateReader.AddressKey(reg));
+            }
+            catch { return false; }
+        }
+
         /// <summary>Round-39c — ANY building shared with the local player: a granted residence OR a helper
         /// business (user 2026-07-07: business grant gave no map reference / POI / shared indication —
         /// the cues were residence-only). Drives the FIND-IT cues (POI tint + permanence + map filter);
@@ -40,7 +57,9 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (reg == null || reg.RentedByPlayer || reg.BuildingOwnedByPlayer) return false;
+                if (reg == null) return false;
+                if (IsFlippedPartnerResidence(reg)) return true;   // 4d R1: a company home — find-it cues in the owner's colour
+                if (reg.RentedByPlayer || reg.BuildingOwnedByPlayer) return false;
                 string k = GameStateReader.AddressKey(reg);
                 return GrantSync.CanEnterGranted(k) || GrantSync.IsHelperBusiness(k);
             }
@@ -56,15 +75,30 @@ namespace BigAmbitionsMP
             {
                 var cm = InstanceBehavior<CityManager>.Instance;
                 if (cm?.cityBuildingControllers == null) return;
-                int n = 0;
+                int n = 0, company = 0;
                 foreach (var cbc in cm.cityBuildingControllers)
                 {
                     if (cbc?.buildingRegistration == null) continue;
-                    try { if (IsSharedWithMe(cbc.buildingRegistration)) { cbc.UpdatePoi(); n++; } } catch { }
+                    try
+                    {
+                        if (!IsSharedWithMe(cbc.buildingRegistration)) continue;
+                        cbc.UpdatePoi(); n++;
+                        if (IsFlippedPartnerResidence(cbc.buildingRegistration)) company++;
+                    }
+                    catch { }
                 }
                 if (n > 0) Plugin.Logger.LogInfo($"[Housing] map: tinted {n} shared building POI(s) (residences + helper businesses).");
+                if (company > 0) Plugin.Logger.LogInfo($"[Cues] tinted {company} residences");   // 4d R6
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] RefreshSharedPois: {ex.Message}"); }
+        }
+
+        /// <summary>4d R6: residential is the building TYPE, not the business type (the residence list filters on
+        /// it — decompile PrivateResidenceScrollerController.cs:12-15).</summary>
+        internal static bool IsResidential(BuildingRegistration reg)
+        {
+            try { return reg != null && reg.GetBuildingType() == "ba:buildingtype_residential"; }
+            catch { return false; }
         }
 
         // Reflection get/set that tries a property then a field — TextLocalizationComponent (Localizor) isn't a
@@ -101,13 +135,24 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 var cbc = HousingMapCues.GetMember(__instance, "CityBuildingController") as CityBuildingController;
-                if (cbc == null || !HousingMapCues.IsSharedResidence(cbc.buildingRegistration)) return;
+                if (cbc == null) return;
+                var reg = cbc.buildingRegistration;
+                // 4d R1: a merger company building keeps the game's own status WORD (the member owns it) and only
+                // takes the owner's colour; a true guest residence keeps the "Shared" wording it has always had.
+                bool company = HousingMapCues.IsFlippedPartnerResidence(reg);
+                if (!company && !HousingMapCues.IsSharedResidence(reg)) return;
                 var label = HousingMapCues.GetMember(__instance, "openStateLabel");
                 if (label == null) return;
-                HousingMapCues.SetMember(label, "Prefix", HousingMapCues.SharedWord);
-                HousingMapCues.SetMember(label, "Key", "");
+                if (!company)
+                {
+                    HousingMapCues.SetMember(label, "Prefix", HousingMapCues.SharedWord);
+                    HousingMapCues.SetMember(label, "Key", "");
+                }
                 if (HousingMapCues.GetMember(label, "TextContainer") is TMP_Text tc)
-                { tc.text = HousingMapCues.SharedWord; tc.color = PlayerColours.TryColourForAddressKey(GameStateReader.AddressKey(cbc.buildingRegistration), out var c) ? c : HousingMapCues.SharedColor; }
+                {
+                    if (!company) tc.text = HousingMapCues.SharedWord;
+                    tc.color = PlayerColours.TryColourForAddressKey(GameStateReader.AddressKey(reg), out var c) ? c : HousingMapCues.SharedColor;
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] map-card status: {ex.Message}"); }
         }
@@ -144,8 +189,14 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 var reg = __instance?._currentCBC?.buildingRegistration;
-                if (!HousingMapCues.IsSharedResidence(reg)) return;
-                __result = new LabelInfo(HousingMapCues.SharedWord, PlayerColours.TryColourForAddressKey(GameStateReader.AddressKey(reg), out var c) ? c : HousingMapCues.SharedColor, localize: false);
+                bool company = HousingMapCues.IsFlippedPartnerResidence(reg);
+                if (!company && !HousingMapCues.IsSharedResidence(reg)) return;
+                Color32 col = PlayerColours.TryColourForAddressKey(GameStateReader.AddressKey(reg), out var c) ? c : HousingMapCues.SharedColor;
+                // 4d R1: colour only on a company building — the game's own label (key + arguments + localize) is
+                // rebuilt unchanged, so no wording is added (LabelInfo's fields are readonly, decompile LabelInfo.cs:5-18).
+                __result = company
+                    ? (__result == null ? __result : new LabelInfo(__result.key, __result.arguments, col, __result.localize))
+                    : new LabelInfo(HousingMapCues.SharedWord, col, localize: false);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] guest status label: {ex.Message}"); }
         }

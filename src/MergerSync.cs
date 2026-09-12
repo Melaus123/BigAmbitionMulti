@@ -266,6 +266,14 @@ namespace BigAmbitionsMP
             => !string.IsNullOrEmpty(a) && !string.IsNullOrEmpty(b) && a != b
                && _groupByPid.TryGetValue(a, out var ga) && _groupByPid.TryGetValue(b, out var gb) && ga == gb;
 
+        /// <summary>4d r2: every pid MergedRuntime pairs with <paramref name="pid"/> (same group, distinct) — the
+        /// grant signature unions these so a membership edge respawns the ghosts (GrantSync.GrantorSig).</summary>
+        public static IEnumerable<string> CoMembersOf(string pid)
+        {
+            if (string.IsNullOrEmpty(pid) || !_groupByPid.TryGetValue(pid, out var g)) yield break;
+            foreach (var kv in _groupByPid) if (kv.Key != pid && kv.Value == g) yield return kv.Key;
+        }
+
         /// <summary>ALL machines (host applies its own build; clients apply the broadcast). MAIN THREAD
         /// (may toast). Diff-based membership toasts so formation and dissolution are both announced.</summary>
         public static void ApplyState(MergerStatePayload p)
@@ -339,6 +347,11 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogInfo("[Merger] rivals list refresh (group model changed)");
                 GameStatePatcher.RefreshRivalLeaderboardIfVisible();
+                // 4d r2 (review MAJOR-1): a membership change moves the grant signature (GrantSync.GrantorSig unions
+                // co-members) — respawn the ghosts NOW, so an ex-partner's car stops being drivable and loses its
+                // kept pin and a new partner's gains both. Idempotent by signature: the host's own call at the end
+                // of RefreshGrantsAndBroadcast and the client's PermissionSnapshot apply then see no change.
+                VehicleManager.OnGrantsChanged();
             }
         }
 
