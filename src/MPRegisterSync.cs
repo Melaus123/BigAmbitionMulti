@@ -1695,6 +1695,46 @@ namespace BigAmbitionsMP
             // and go back in the restore below, exactly as the injected employee records do.
             var removedCandidates = CompanyCandidates.StripInjected("the save");
 
+            // M4 (found in the hands-on saves 2026-09-12), same choke point: an OPEN SALARY NEGOTIATION embeds the
+            // WHOLE EmployeeInstance (decompile AI.Employees.SalaryNegotiation/CandidateSalaryNegotiation.cs:18)
+            // and gi.candidateSalaryNegotiations (GameInstance.cs:187) is serialized - so a negotiation opened here
+            // for a partner's person wrote a full copy of THEIR employee into THIS .hsg. The exact objects come out
+            // and go back in the restore below, as the candidate and message copies do. Entities/
+            // HeadhunterReplacementData.cs:11 holds one too and rides gi.headhunterPlans (GameInstance.cs:220) into
+            // the save, so it is stripped the same way. (Employee.cs:23 and EmployeeStationController.cs:44 also
+            // hold one, but both are scene MonoBehaviours - nothing serializes them into the .hsg.)
+            var removedNegotiations = new List<AI.Employees.SalaryNegotiation.CandidateSalaryNegotiation>();
+            var removedReplacements = new List<(Buildings.Office.Headquarters.HeadhunterPlan Plan, Entities.HeadhunterReplacementData Data)>();
+            try
+            {
+                var gneg = SaveGameManager.Current;
+                var negs = gneg?.candidateSalaryNegotiations;
+                if (negs != null)
+                    for (int i = negs.Count - 1; i >= 0; i--)
+                    {
+                        string nid = ""; try { nid = negs[i]?.employeeInstance?.id ?? ""; } catch { }
+                        if (nid.Length == 0) continue;
+                        if (!_injectedStaff.ContainsKey(nid) && !CompanyCandidates.IsInjectedCandidate(nid)) continue;
+                        removedNegotiations.Add(negs[i]); negs.RemoveAt(i);
+                    }
+                if (gneg?.headhunterPlans != null)
+                    foreach (var plan in gneg.headhunterPlans)
+                    {
+                        var rl = plan?.headhunterReplacementDataList;
+                        if (rl == null) continue;
+                        for (int i = rl.Count - 1; i >= 0; i--)
+                        {
+                            string rid = ""; try { rid = rl[i]?.employeeInstance?.id ?? ""; } catch { }
+                            if (rid.Length == 0) continue;
+                            if (!_injectedStaff.ContainsKey(rid) && !CompanyCandidates.IsInjectedCandidate(rid)) continue;
+                            removedReplacements.Add((plan, rl[i])); rl.RemoveAt(i);
+                        }
+                    }
+            }
+            catch (Exception nx) { Plugin.Logger.LogWarning($"[SynthStaff] negotiation strip ({when}): {nx.Message}"); }
+            if (removedNegotiations.Count > 0 || removedReplacements.Count > 0)
+                Plugin.Logger.LogInfo($"[SynthStaff] stripped {removedNegotiations.Count} partner salary negotiation(s) + {removedReplacements.Count} headhunter replacement(s) for save ({when}); restore after serialize.");
+
             // MERGER PHASE 4b (PEOPLE) P4, the same choke point: a partner's relayed MESSAGES are display
             // copies too - they live in gi.Contacts, which nothing above walks - so they come out here and
             // go back in the restore below. A .hsg never carries another member's phone.
@@ -1712,6 +1752,19 @@ namespace BigAmbitionsMP
                     // then never go back. The guard stays for the employee/shift loops that do need it.
                     CompanyCandidates.RestoreInjected(removedCandidates, "the save");
                     restoreMessages();
+                    // M4: the negotiations and headhunter replacements go back here for the same P8 reason - they
+                    // do not touch gi.EmployeeInstances, so the employee null-guard below must not swallow them.
+                    try
+                    {
+                        var gback = SaveGameManager.Current;
+                        if (gback?.candidateSalaryNegotiations != null)
+                            foreach (var n in removedNegotiations)
+                                if (n != null && !gback.candidateSalaryNegotiations.Contains(n)) gback.candidateSalaryNegotiations.Add(n);
+                        foreach (var rr in removedReplacements)
+                            if (rr.Plan?.headhunterReplacementDataList != null && rr.Data != null
+                                && !rr.Plan.headhunterReplacementDataList.Contains(rr.Data)) rr.Plan.headhunterReplacementDataList.Add(rr.Data);
+                    }
+                    catch (Exception nx) { Plugin.Logger.LogWarning($"[SynthStaff] negotiation restore ({when}): {nx.Message}"); }
                     var gi = SaveGameManager.Current;
                     if (gi?.EmployeeInstances == null) return;
                     foreach (var emp in removedEmployees)
@@ -1790,12 +1843,18 @@ namespace BigAmbitionsMP
         /// staff stations in OTHER players' shops — they are NOT the local player's employees, and
         /// MyEmployees must not list them (RED ROC report, 2026-07-09: "many of my friend's customer
         /// service employees are showing"). Under a merger they ARE ours by contract (slice 5) —
-        /// resolve the shop's roster publisher and ask the merger.</summary>
+        /// resolve the bench owner (M2 2026-09-12) or, failing that, the shop's roster publisher, and ask the
+        /// merger.</summary>
         public static bool IsInjectedFromMergedPartner(string employeeId)
         {
             try
             {
                 if (!_injectedStaff.TryGetValue(employeeId ?? "", out var v)) return false;
+                // M2 2026-09-12: the BENCH memory first. An unassigned copy has an EMPTY addr, so the roster
+                // lookup below answered false and the MyEmployees filters dropped a co-member's bench people.
+                // _injectedOwner is written by ApplySharedPool (:2145 update, :2168 new) and DemoteToBench (:2245).
+                if (_injectedOwner.TryGetValue(employeeId ?? "", out var benchOwner)
+                    && !string.IsNullOrEmpty(benchOwner) && MergerSync.IsMemberPid(benchOwner)) return true;
                 lock (_rosterByAddr)
                     if (_rosterByAddr.TryGetValue(v.addr, out var r))
                         return MergerSync.IsMemberPid(r.pid);
@@ -2237,7 +2296,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (string.IsNullOrEmpty(ownerPid) || !GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, MPConfig.PlayerId)) return false;
+                if (string.IsNullOrEmpty(ownerPid) || !GrantSync.IsGranted(GrantKind.Business, ownerPid, MPConfig.PlayerId)) return false;   // M2 2026-09-12: the union — a co-member's person goes to the bench too
                 if (!_injectedStaff.TryGetValue(id, out var have) || have.inst == null) return false;
                 try { var fillReg = RegOfKey(have.addr); if (fillReg != null) UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AbortAutoFillForBusiness(fillReg); } catch { }
                 have.inst.assignedAddress = null;

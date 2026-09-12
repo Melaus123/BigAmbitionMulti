@@ -89,6 +89,47 @@ namespace BigAmbitionsMP
         /// the owner answers 'handled' for an id it has already run.</summary>
         private const float PressRetrySeconds = 30f;
         private static readonly HashSet<Contact> _createdHere = new();     // contacts a relay auto-created here
+
+        /// <summary>HO-1c L1: a relay-created contact -> the member whose message made it appear here.  Keyed by
+        /// the Contact OBJECT (contacts are keyed by NAME, and a colour must never touch that key).</summary>
+        private static readonly Dictionary<Contact, string> _relayOwner = new();
+        private static readonly Dictionary<string, string> _empOwnerByName = new();   // employee-contact id (a NAME) -> owner pid
+        private static float _empOwnerAt;
+
+        /// <summary>HO-1c L1: whose member's message created this contact here ("" = nobody's).  Also answers for
+        /// an EMPLOYEES contact whose id NAMES an injected partner employee: MPRegisterSync offers no name lookup
+        /// (only IsInjectedStaff/OwnerOfInjected, both by id), so the roster is scanned by character name - the id
+        /// a native employee contact carries (decompile ContactsApp.cs:739) - and the answer is cached for 5 s
+        /// because the contacts list rebinds its recycled rows on every scroll frame.</summary>
+        public static string OwnerOfRelayContact(Contact c)
+        {
+            try
+            {
+                if (c == null) return "";
+                if (_relayOwner.TryGetValue(c, out var pid) && !string.IsNullOrEmpty(pid)) return pid;
+                string cid = c.id ?? "";
+                if (cid.Length == 0 || c.category != ContactCategoryName.Employees) return "";
+                float now = UnityEngine.Time.unscaledTime;
+                if (now - _empOwnerAt > 5f) { _empOwnerByName.Clear(); _empOwnerAt = now; }
+                if (_empOwnerByName.TryGetValue(cid, out var cached)) return cached;
+                string found = "";
+                try
+                {
+                    var roster = Helpers.EmployeeHelper.GetEmployeeInstances();
+                    if (roster != null)
+                        foreach (var e in roster)
+                        {
+                            if (e == null || e.characterData == null || e.characterData.name != cid) continue;
+                            if (MPRegisterSync.IsInjectedStaff(e.id)) found = MPRegisterSync.OwnerOfInjected(e.id);
+                            break;
+                        }
+                }
+                catch { }
+                _empOwnerByName[cid] = found;
+                return found;
+            }
+            catch { return ""; }
+        }
         private static readonly List<string> _order = new();               // insertion order: the prune and the readout
         private static readonly HashSet<string> _logged = new();
         private static int _seq;
@@ -449,6 +490,10 @@ namespace BigAmbitionsMP
             catch (Exception cx) { Plugin.Logger.LogWarning($"{Tag} {mid}: contact '{p.ContactId}': {cx.GetType().Name}: {cx.Message}"); return; }
             if (contact == null) return;
             if (created) _createdHere.Add(contact);
+            // HO-1c L1: remember WHOSE message made this contact appear, so the contacts app can paint its name
+            // label in that member's colour (the patches in SharedShopStaff).  The payload's sending member is
+            // OwnerPid - the same field Track() stamps the copy with below.
+            if (!string.IsNullOrEmpty(p.OwnerPid)) _relayOwner[contact] = p.OwnerPid;
 
             // MINOR-4: contact.SendMessage runs CleanOldMessages (decompile Entities/Contact.cs:148-180),
             // which dequeues at 21 and, when the message it evicts is a NATIVE one carrying a contextAction,
@@ -1120,7 +1165,7 @@ namespace BigAmbitionsMP
                 if (gi?.Contacts != null)
                     foreach (var c in _createdHere)
                         if (c != null && (c.messagesQueue == null || c.messagesQueue.Count == 0)) gi.Contacts.Remove(c);
-                _copies.Clear(); _createdHere.Clear(); _mine.Clear(); _handled.Clear(); _order.Clear(); _pending.Clear();
+                _copies.Clear(); _createdHere.Clear(); _relayOwner.Clear(); _mine.Clear(); _handled.Clear(); _order.Clear(); _pending.Clear();
                 _insurance.Clear(); _insuranceByOffer.Clear(); _relayedOffers.Clear();   // r2 MINOR-9: D23's three tables die with the copies
                 if (n > 0) Plugin.Logger.LogInfo($"{Tag} dropped {n} relayed message copy(ies) ({why}).");
             }
@@ -1129,7 +1174,7 @@ namespace BigAmbitionsMP
 
         public static void Reset()
         {
-            _mine.Clear(); _copies.Clear(); _handled.Clear(); _createdHere.Clear(); _pending.Clear();
+            _mine.Clear(); _copies.Clear(); _handled.Clear(); _createdHere.Clear(); _relayOwner.Clear(); _pending.Clear();
             _order.Clear(); _logged.Clear(); _seq = 0; _applying = false;
             _insurance.Clear(); _insuranceByOffer.Clear(); _relayedOffers.Clear();   // r2 MINOR-9
         }

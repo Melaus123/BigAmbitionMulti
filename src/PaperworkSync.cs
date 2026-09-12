@@ -32,7 +32,13 @@ namespace BigAmbitionsMP
 
         private const float MinPublishInterval = 30f;   // while merely dirty
 
+        /// <summary>HO-1a H4.  A routed plan edit is a button somebody on another machine is WATCHING:
+        /// its bundle waits two seconds, not thirty.  It is an interval and not a one-shot precisely so a
+        /// burst COALESCES - twenty edits in a second still publish once, at the first tick past two.</summary>
+        private const float UrgentPublishInterval = 2f;
+
         private static bool  _dirty;
+        private static bool  _urgent;   // HO-1a H4: the dirt came from an edit a player is waiting on
         private static bool  _wasMember;
         private static float _nextTick;
         private static float _lastPublishAt = -999f;
@@ -41,6 +47,12 @@ namespace BigAmbitionsMP
         /// <summary>Set by the game's own mutation points (below) and by the day change.  Cheap and
         /// idempotent — the flush decides whether anything actually goes out.</summary>
         public static void MarkDirty() { _dirty = true; }
+
+        /// <summary>HO-1a H4.  Dirty AND urgent: the change answers a button pressed on a partner's
+        /// headquarters page, so the next bundle goes out at UrgentPublishInterval instead of thirty
+        /// seconds.  Every other mutation point stays on MarkDirty - a till order, a new day, an absent
+        /// member's books and the shared-tab writes have nobody watching a screen for them.</summary>
+        public static void MarkUrgent() { _dirty = true; _urgent = true; }
 
         // ── Tick (1 Hz, chained off the existing canvas pre-block via MPClient.TickWorldReadyGate) ──
 
@@ -60,7 +72,7 @@ namespace BigAmbitionsMP
                 if (!MergerSync.IAmMember)
                 {
                     // Dissolved / never merged: forget the edge so a later join publishes again.
-                    _wasMember = false; _dirty = false; _lastPublishedDay = -1;
+                    _wasMember = false; _dirty = false; _urgent = false; _lastPublishedDay = -1;
                     return;
                 }
 
@@ -74,6 +86,9 @@ namespace BigAmbitionsMP
                 int day = -1;
                 try { day = GameStateReader.GetGameTime().day; } catch { }
                 if (day > 0 && day != _lastPublishedDay) { Publish("day"); return; }
+
+                if (_dirty && _urgent && UnityEngine.Time.unscaledTime - _lastPublishAt >= UrgentPublishInterval)
+                { Publish("urgent"); return; }   // HO-1a H4
 
                 if (_dirty && UnityEngine.Time.unscaledTime - _lastPublishAt >= MinPublishInterval)
                     Publish("dirty");
@@ -106,7 +121,7 @@ namespace BigAmbitionsMP
                     // fit); the next day, or the next change once the interval passes, tries again.
                     if (p.Day != _lastPublishedDay)
                         Plugin.Logger.LogWarning($"[Paperwork] bundle REFUSED: {bytes} bytes > {MaxBundleBytes} cap ({why}) — nothing sent; the host's previously stored bundle stands.");
-                    _dirty = false; _lastPublishAt = UnityEngine.Time.unscaledTime;
+                    _dirty = false; _urgent = false; _lastPublishAt = UnityEngine.Time.unscaledTime;
                     _lastPublishedDay = p.Day;
                     return null;
                 }
@@ -121,7 +136,7 @@ namespace BigAmbitionsMP
                 else
                     return null;   // not in a session: nothing to publish to
 
-                _dirty = false;
+                _dirty = false; _urgent = false;
                 _lastPublishAt = UnityEngine.Time.unscaledTime;
                 _lastPublishedDay = p.Day;
                 Plugin.Logger.LogInfo($"[Paperwork] published day {p.Day}: {nBiz} businesses, "
@@ -807,7 +822,7 @@ namespace BigAmbitionsMP
 
         public static void Reset()
         {
-            _dirty = false; _wasMember = false; _lastPublishedDay = -1; _lastPublishAt = -999f;
+            _dirty = false; _urgent = false; _wasMember = false; _lastPublishedDay = -1; _lastPublishAt = -999f;
         }
 
         // ── Mutation points (the game's OWN events; no timers, no one-shot delays) ──

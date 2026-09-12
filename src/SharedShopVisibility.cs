@@ -600,7 +600,13 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (__instance == null || !IsSharedWarehouseEntry(warehouse)) return;
+                    // M3(d) 2026-09-12: a PARTNER's warehouse under a merger is not IsSharedWarehouseEntry (the
+                    // flip makes IsSharedShop false) and its rival id is blanked by the flip, so the row was listed
+                    // but left uncoloured. The flip table answers for it; the owner comes from the flip-proof source.
+                    if (__instance == null) return;
+                    string whAddr = ""; try { whAddr = AddrOf(warehouse); } catch { }
+                    bool whFlipped = whAddr.Length > 0 && MergerFlip.IsFlipped(whAddr);
+                    if (!whFlipped && !IsSharedWarehouseEntry(warehouse)) return;
                     var template = _fWarehouseEntry?.GetValue(__instance) as Transform;
                     var parent = template != null ? template.parent : null;
                     if (parent == null || parent.childCount == 0) return;
@@ -609,6 +615,7 @@ namespace BigAmbitionsMP
                     // 2026-09-05 colours: the same stamp IsSharedShop reads to decide this row is someone else's
                     // (reg.businessOwnerRivalId != MPConfig.PlayerId) names whose colour it gets.
                     string whOwner = ""; try { whOwner = warehouse?.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                    if (whOwner.Length == 0 && whAddr.Length > 0) whOwner = PlayerColours.FlipProofOwner(whAddr);   // M3(d): the flip blanked the stamp
                     Color whTint = PlayerColours.TryColourFor(whOwner, out var wc) ? (Color)wc : Tint;
                     int tinted = 0;
                     foreach (var t in row.GetComponentsInChildren<TMPro.TMP_Text>(true))
@@ -633,14 +640,21 @@ namespace BigAmbitionsMP
             var reg = page.buildingRegistration;
             string addr = AddrOf(reg);
             bool other  = IsOtherPlayersShop(reg, addr);
-            bool shared = other && SharedShopSchedule.IsSharedShop(reg, addr);
+            // M3(e) 2026-09-12: IsOtherPlayersShop is FALSE on a merger-flipped shop by design (:61), so a partner's
+            // business page kept the default type-label colour. A flipped key IS a partner's building; its owner
+            // comes from the flip-proof source, because the flip blanks businessOwnerRivalId.
+            bool flipped = !string.IsNullOrEmpty(addr) && MergerFlip.IsFlipped(addr);
+            bool shared = (other && SharedShopSchedule.IsSharedShop(reg, addr)) || flipped;
             // businessTypeLabel is a TextLocalizationComponent (Localizor, un-referenced) — reflection, as HousingMapCues.
             if (HousingMapCues.GetMember(_fTypeLabel?.GetValue(page), "TextContainer") is TMPro.TMP_Text labelText)
             {
                 _defaultTypeLabelColor ??= labelText.color;
-                labelText.color = shared
-                    ? (PlayerColours.TryColourFor(reg?.businessOwnerRivalId?.ToString() ?? "", out var pc) ? (Color)pc : Tint)   // 2026-09-05 colours
-                    : _defaultTypeLabelColor.Value;
+                Color? paint = null;
+                if (flipped && PlayerColours.TryColourForOwnerOf(addr, out var fc)) paint = (Color)fc;   // M3(e): flip-proof owner
+                // HO-1c L4.4: an owner this machine cannot name falls back to the label's OWN colour (paint stays
+                // null), never to the generic teal - a wrong colour reads as somebody else's shop.
+                else if (shared && PlayerColours.TryColourFor(reg?.businessOwnerRivalId?.ToString() ?? "", out var pc)) paint = (Color)pc;   // 2026-09-05 colours
+                labelText.color = paint ?? _defaultTypeLabelColor.Value;
             }
             SetButtonsCalling(page.transform, "OpenInEconoView", interactable: !other);
         }
@@ -821,6 +835,31 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} workstation row guard: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>M3(g)/(h) 2026-09-12: the schedule page's EMPLOYEE rows — the list a shop's staff tab shows —
+        /// carry a partner's colour (ScheduleEmployeeCellView.SetData -> SetBasicInfo, decompile
+        /// UI.Smartphone.Apps.BizMan.Schedule/ScheduleEmployeeCellView.cs:79 and :116-118). A rich-text tag, not a
+        /// component colour: this is a BaTableCellView, so the table repaints its child labels on every (re)bind
+        /// (the MyEmployees probe, SharedShopStaff.cs:726-733), and SetBasicInfo rewrites the text from the model
+        /// each pass — tags never stack and own rows need no restore.</summary>
+        /// <summary>HO-1c L4.1 (manager ruling 2026-09-12): IsFromRoutedOwner is a direct grant OR a co-member, so
+        /// a permission helper's copied staff are painted here too - which is what the MyEmployees row list has done
+        /// per owner since 2026-09-05; this surface now matches it.  Colour only.</summary>
+        [HarmonyPatch(typeof(ScheduleEmployeeCellView), nameof(ScheduleEmployeeCellView.SetData))]
+        public static class Patch_ScheduleEmployeeCellView_SetData_Tint
+        {
+            static void Postfix(ScheduleEmployeeCellView __instance, ScheduleEmployeeModel data)
+            {
+                try
+                {
+                    if (__instance == null || data == null || __instance.employeeNameLabel == null) return;
+                    string sid = data.employeeId ?? "";
+                    if (!SharedShopStaff.IsFromRoutedOwner(sid)) return;
+                    __instance.employeeNameLabel.text = PlayerColours.TagOpen(MPRegisterSync.OwnerOfInjected(sid)) + __instance.employeeNameLabel.text + "</color>";
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} schedule employee row tint: {ex.Message}"); }
             }
         }
     }

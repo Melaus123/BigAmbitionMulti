@@ -288,7 +288,7 @@ namespace BigAmbitionsMP
             if (Time.unscaledTime < _nextOwnerTick) return;
             _nextOwnerTick = Time.unscaledTime + OwnerTickSeconds;
             if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
-            if (!GrantSync.GrantsAnyone(GrantKind.Business, MPConfig.PlayerId)) { _poolSigSent = ""; return; }   // nobody to send it to — no walk, no message
+            if (!GrantSync.GrantsAnyone(GrantKind.Business, MPConfig.PlayerId) && !MergerSync.IAmMember) { _poolSigSent = ""; return; }   // nobody to send it to — no walk, no message (M2: co-members are somebody)
             var gi = SaveGameManager.Current;
             if (gi?.EmployeeInstances == null) return;
             var staff = new List<StaffInfo>();
@@ -321,13 +321,14 @@ namespace BigAmbitionsMP
 
         // ── receiver: the owner's bench arrives ──
 
-        /// <summary>MAIN THREAD. The bench of an owner — accepted only from an owner who directly grants me.</summary>
+        /// <summary>MAIN THREAD. The bench of an owner — accepted from an owner who holds me a Business key:
+        /// M2 (2026-09-12) a direct grant OR co-membership in the same company.</summary>
         public static void ApplyPool(SharedStaffPoolPayload p)
         {
             try
             {
                 if (p == null || string.IsNullOrEmpty(p.PlayerId) || p.PlayerId == MPConfig.PlayerId) return;
-                if (!GrantSync.IsGrantedDirect(GrantKind.Business, p.PlayerId, MPConfig.PlayerId))
+                if (!GrantSync.IsGranted(GrantKind.Business, p.PlayerId, MPConfig.PlayerId))   // M2: the union
                 {
                     if (_logged.Add("pool-nogrant|" + p.PlayerId))
                         Plugin.Logger.LogInfo($"{Tag} bench from '{p.PlayerId}' arrived but they share no shop with me — ignored.");
@@ -395,9 +396,9 @@ namespace BigAmbitionsMP
                     }
                     continue;
                 }
-                if (!GrantSync.IsGrantedDirect(GrantKind.Business, owner, MPConfig.PlayerId))
+                if (!GrantSync.IsGranted(GrantKind.Business, owner, MPConfig.PlayerId))   // M2: the union — a co-member's bench stays
                 {
-                    // The grant is gone (owner offline / revoked): their bench leaves my machine; roster copies keep
+                    // The grant is gone (owner offline / revoked / the company ended): their bench leaves my machine; roster copies keep
                     // their own lifecycle (the roster sync has always handled those).
                     if (MPRegisterSync.IsInjectedUnassigned(e.id)) { MPRegisterSync.DropInjectedStaff(e.id); refresh = true; }
                     _inflight.Remove(e.id);
@@ -726,7 +727,7 @@ namespace BigAmbitionsMP
                 {
                     if (__instance == null || data == null) return;
                     if (__instance.employeeName == null) return;
-                    bool grant = IsFromGrantOwner(data.employeeInstance?.id);
+                    bool grant = IsFromRoutedOwner(data.employeeInstance?.id);   // M3(a) 2026-09-12: every partner's person, grant OR co-member
                     // The colour lives INSIDE the text (a TMP rich-text tag), never on the label component:
                     // BaTable.GetCellView calls VisualizeSelected(false) right after SetData, and its SetTextColors
                     // paints every child label WHITE unless its colour is one the game itself uses (red/yellow/
@@ -746,6 +747,108 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>M3(a) 2026-09-12: the HR-manager PLAN assign lists use a DIFFERENT class with the same name
+        /// (UI.Smartphone.Apps.BizMan.HRManagers.EmployeeCellView, decompile :17/:36-38 — its own employeeName
+        /// label), so the list above never coloured them. Same body, same reason for a rich-text tag rather than a
+        /// component colour: it is a BaTableCellView (the table repaints child labels on every (re)bind) and native
+        /// SetData rewrites the text from the model each pass, so tags never stack and own rows need no restore.
+        /// HO-1c L4.1 (manager ruling 2026-09-12): IsFromRoutedOwner is a direct grant OR a co-member, so a
+        /// permission helper's copied staff are painted here too - which is exactly what the MyEmployees row list
+        /// has done per owner since 2026-09-05; this surface now matches it.  Colour only.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.EmployeeCellView), "SetData")]
+        public static class Patch_HrManagerEmployeeCellView_SetData_Tint
+        {
+            static void Postfix(UI.Smartphone.Apps.BizMan.HRManagers.EmployeeCellView __instance,
+                                UI.Smartphone.Apps.BizMan.HrManagers.HrManagerEmployeeModel data)
+            {
+                try
+                {
+                    if (__instance == null || data == null || __instance.employeeName == null) return;
+                    string hid = data.employeeId ?? "";
+                    if (!IsFromRoutedOwner(hid)) return;
+                    __instance.employeeName.text = PlayerColours.TagOpen(MPRegisterSync.OwnerOfInjected(hid)) + __instance.employeeName.text + "</color>";
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} HR plan row tint: {ex.Message}"); }
+            }
+        }
+
+        // ── HO-1c L1: A RELAY CONTACT WEARS ITS MEMBER'S COLOUR ──
+        // The message relay creates a partner's contact here (CompanyMessages.cs:451).  Contacts are keyed by
+        // NAME, so the colour goes on the name LABEL COMPONENT and never near the id.  The list row is a recycled
+        // BaTable cell (decompile ContactCellView.cs:30 SetData), so every bind either paints or RESTORES, with
+        // the default kept per label instance id.  INERT off a merger: nothing is a relay contact.
+        private static readonly System.Collections.Generic.Dictionary<int, UnityEngine.Color> _contactLabelHome = new();
+        private static readonly System.Collections.Generic.Dictionary<int, Entities.Contact> _contactOfCell = new();
+
+        private static void ContactPaint(TMPro.TMP_Text label, Entities.Contact c, bool restore)
+        {
+            if (label == null) return;
+            int lid = label.GetInstanceID();
+            if (!_contactLabelHome.TryGetValue(lid, out var home)) { home = label.color; _contactLabelHome[lid] = home; }
+            string owner = c != null ? CompanyMessages.OwnerOfRelayContact(c) : "";
+            if (owner.Length > 0 && owner != MPConfig.PlayerId && PlayerColours.TryColourFor(owner, out var col))
+            { label.color = (UnityEngine.Color)col; return; }
+            if (restore) label.color = home;   // a recycled row: what the last contact wore is not this one's
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Contacts.ContactCellView), "SetData")]
+        public static class Patch_ContactCellView_SetData_Tint
+        {
+            static void Postfix(UI.Smartphone.Apps.Contacts.ContactCellView __instance,
+                                UI.Smartphone.Apps.Contacts.ContactModel data)
+            {
+                try
+                {
+                    if (__instance == null) return;
+                    var c = data != null ? data.contact : null;
+                    _contactOfCell[__instance.GetInstanceID()] = c;
+                    ContactPaint(__instance.nameText, c, restore: true);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} contact row tint: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>The row repaints its own name label on selection (decompile ContactCellView.cs:82-94 sets
+        /// nameText.color to white / black), which would wipe the member's colour the moment it is clicked.  The
+        /// contact is remembered per CELL instance by the bind above - the cell itself is not asked for it.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Contacts.ContactCellView), "VisualizeSelected")]
+        public static class Patch_ContactCellView_Selected_Tint
+        {
+            static void Postfix(UI.Smartphone.Apps.Contacts.ContactCellView __instance)
+            {
+                try
+                {
+                    if (__instance == null) return;
+                    _contactOfCell.TryGetValue(__instance.GetInstanceID(), out var c);
+                    ContactPaint(__instance.nameText, c, restore: false);   // native has just set its own colour
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} contact row select tint: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>The conversation header: SetUpHeader fills the "ContactName" label of the employee panel or of
+        /// the plain contact panel (decompile ContactsApp.cs:771 / :803-811).  Both are found by name and painted
+        /// or restored, so an own contact opened after a partner's shows its own colour.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Contacts.ContactsApp), "SetUpHeader")]
+        public static class Patch_ContactsHeader_Tint
+        {
+            static void Postfix(UI.Smartphone.Apps.Contacts.ContactsApp __instance, Entities.Contact contact)
+            {
+                try
+                {
+                    if (__instance == null) return;
+                    foreach (var t in __instance.GetComponentsInChildren<TMPro.TMP_Text>(true))
+                    {
+                        if (t == null) continue;
+                        bool named = t.gameObject.name == "ContactName"
+                                  || (t.transform.parent != null && t.transform.parent.name == "ContactName");
+                        if (named) ContactPaint(t, contact, restore: true);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} contact header tint: {ex.Message}"); }
+            }
+        }
+
         private static readonly System.Reflection.FieldInfo _fBonusButton = AccessTools.Field(typeof(MyEmployees), "payBonusButton");
         private static readonly System.Reflection.FieldInfo _fFireLabel   = AccessTools.Field(typeof(MyEmployees), "negativeActionButtonLabel");
         private static bool _fireGreyed;   // we only ever write the fire button's state back if WE changed it
@@ -760,6 +863,17 @@ namespace BigAmbitionsMP
                 try
                 {
                     bool grant = IsFromGrantOwner(employeeInstance?.id);
+                    // M3(b) 2026-09-12: the DETAILS page carries the owner's colour too — the same rich-text tag the
+                    // rows use. ShowEmployee rewrites employeeNameLabel.text from the instance on every open
+                    // (decompile UI.Smartphone.Apps.MyEmployees/MyEmployees.cs:328), so tags never stack and an own
+                    // employee needs no restore; the label is a plain TMP_Text on a page the table never repaints,
+                    // but the tag costs nothing and survives a repaint if one is ever added.
+                    // HO-1c L4.1 (manager ruling 2026-09-12): IsFromRoutedOwner is a direct grant OR a co-member,
+                    // so a permission helper's copied staff are painted here too - which is what the MyEmployees
+                    // row list has done per owner since 2026-09-05; this surface now matches it.  Colour only.
+                    string dId = employeeInstance?.id ?? "";
+                    if (IsFromRoutedOwner(dId) && __instance != null && __instance.employeeNameLabel != null)
+                        __instance.employeeNameLabel.text = PlayerColours.TagOpen(MPRegisterSync.OwnerOfInjected(dId)) + __instance.employeeNameLabel.text + "</color>";
                     if (grant && _fBonusButton?.GetValue(__instance) is Button bonus) bonus.interactable = false;   // own rows: the game sets it each time
                     if (!grant && !_fireGreyed) return;   // never touch a native button we have not greyed (single-player, candidates)
                     var label = _fFireLabel?.GetValue(__instance) as Component;

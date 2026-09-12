@@ -1666,8 +1666,59 @@ namespace BigAmbitionsMP
                     return $"OK train addr='{rnaddr}' employee='{arg}' cost={rncost.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} routed={rnrouted}";
                 }
 
+                case "planbulk":
+                {
+                    // HO-1c L3 rig lever. `planbulk <family> <planId> clear|fill|suggestall [n]` sends exactly the
+                    // ONE leg the bulk prefix sends off the temp row of a PARTNER's plan (IntValue = n for fill).
+                    // It writes nothing on this machine: the runner applies the op and the feed redraws the rows.
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    return CompanyPlans.TestDriveBulk(arg);
+                }
+
+                case "planlist":
+                {
+                    // HO-1c L3 rig lever. `planlist <family> <planId>` prints the DISPLAY copy's assignedEmployees
+                    // count and ids (hr) or its row count (the other families), so a run can assert the optimistic
+                    // mutate and the urgent feed that follows it. Read-only.
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    return CompanyPlans.TestDriveList(arg);
+                }
+
+                case "grants":
+                {
+                    // HO-1c L3 rig lever. The STORED grant table as this machine holds it (owner->grantee:kind),
+                    // so a run can assert the removal at merge. Read-only.
+                    if (arg.Length > 0) return "ERR usage: grants";
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    var glist = GrantSync.AllStoreEntries();
+                    if (glist == null || glist.Count == 0) return "OK grants 0";
+                    var gsb = new StringBuilder($"OK grants {glist.Count}");
+                    foreach (var g in glist) gsb.Append($" {g.Owner}->{g.Grantee}:{g.Kind}");
+                    return gsb.ToString();
+                }
+
+                case "bench":
+                {
+                    // HO-1c L3 rig lever. The injected BENCH copies here - a partner's employee with no assigned
+                    // address - as <id>:<owner>, so a run can assert that a partner's bench arrived. Read-only.
+                    if (arg.Length > 0) return "ERR usage: bench";
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    var blist = Helpers.EmployeeHelper.GetEmployeeInstances();
+                    var bsb = new StringBuilder();
+                    int bn = 0;
+                    if (blist != null)
+                        foreach (var be in blist)
+                        {
+                            if (be == null || be.assignedAddress != null) continue;
+                            if (!MPRegisterSync.IsInjectedStaff(be.id)) continue;
+                            bn++;
+                            bsb.Append($" {be.id}:{MPRegisterSync.OwnerOfInjected(be.id)}");
+                        }
+                    return $"OK bench {bn}" + bsb.ToString();
+                }
+
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|grants|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg)";
             }
         }
 

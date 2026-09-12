@@ -159,6 +159,14 @@ namespace BigAmbitionsMP
             {
                 if (string.IsNullOrEmpty(ownerPid)) return;
                 if (!PartnerHqOpen(out _, out var open) || open != ownerPid) return;
+                if (EditWindowOpen())
+                {
+                    // HO-1a H5: a rebuild under an open list or dropdown closes it under the player's hand.
+                    if (_pendingRedraw != ownerPid)
+                        Plugin.Logger.LogInfo($"[Plans] redraw for '{ownerPid}' DEFERRED - an edit window is open.");
+                    _pendingRedraw = ownerPid;                       // last writer wins: a redraw is a full rebuild
+                    return;
+                }
                 var ui = InstanceBehavior<UI.UIs>.Instance;
                 var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
                 if (bm == null) return;
@@ -170,6 +178,75 @@ namespace BigAmbitionsMP
                 if (n > 0) Plugin.Logger.LogInfo($"[Plans] redrew {n} open tab(s) for '{ownerPid}' - a newer feed arrived.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] redraw for '{ownerPid}': {ex.Message}"); }
+        }
+
+        /// <summary>HO-1a H5.  The owner whose redraw is waiting for the player to finish an edit; "" = none.</summary>
+        private static string _pendingRedraw = "";
+
+        /// <summary>HO-1c L4.9: SharedShopWorkTabs.Tick runs EVERY FRAME (MPCanvasUI.cs:813, no cadence gate) and
+        /// the state re-read below costs two GetComponentsInChildren sweeps plus reflection, so the check itself is
+        /// gated to 1 Hz here.</summary>
+        private static float _nextDeferredCheck;
+
+        /// <summary>H5, EVENTS OVER TIMERS.  Called from SharedShopWorkTabs.Tick (per frame; gated to 1 Hz here):
+        /// the deferred redraw waits on the AUTHORITATIVE UI state re-read here, never on a delay.  The pending
+        /// owner is cleared only when the rebuild actually ran, so no redraw is lost to a window that reopened.</summary>
+        public static void TickDeferredRedraw()
+        {
+            try
+            {
+                if (_pendingRedraw.Length == 0) return;
+                if (UnityEngine.Time.unscaledTime < _nextDeferredCheck) return;
+                _nextDeferredCheck = UnityEngine.Time.unscaledTime + 1f;
+                if (!PartnerHqOpen(out _, out var open) || open != _pendingRedraw) { _pendingRedraw = ""; return; }
+                if (EditWindowOpen()) return;
+                string owner = _pendingRedraw;
+                _pendingRedraw = "";
+                Plugin.Logger.LogInfo($"[Plans] deferred redraw for '{owner}' RUNS - the edit window closed.");
+                RefreshOpenTabsFor(owner);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] deferred redraw: {ex.Message}"); }
+        }
+
+        /// <summary>H5.  Is the player mid-edit on the headquarters page?  Three NATIVE states, no flag of our
+        /// own: HR's assign list (decompile HrManagerPlanUI.cs:74 `IsAssignEmployeesListOpen =>
+        /// assignEmployeesList.gameObject.activeInHierarchy`); any open dropdown (UI.Elements/Dropdown.cs:116
+        /// `public static Dropdown currentDropdown`, set :229 and nulled :276) whose panel is still showing
+        /// (:200 `optionsPanelParentRect.gameObject.activeSelf`); and purchasing's expanded product row, which
+        /// carries NO flag at all - its only readable state is the cell's own LayoutElement.minHeight, 200 while
+        /// open (PurchasingAgentProductCellView.cs:99) against 100 while closed (:140).</summary>
+        private static bool EditWindowOpen()
+        {
+            try
+            {
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
+                if (bm == null) return false;
+
+                var hr = bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI>(true);
+                if (hr != null && hr.gameObject.activeInHierarchy && hr.IsAssignEmployeesListOpen) return true;
+
+                var dd = UI.Elements.Dropdown.currentDropdown;
+                if (dd != null && dd.gameObject.activeInHierarchy)
+                {
+                    var f = typeof(UI.Elements.Dropdown).GetField("optionsPanelParentRect",
+                                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+                    var rect = f != null ? f.GetValue(dd) as RectTransform : null;
+                    if (rect != null && rect.gameObject.activeSelf) return true;
+                }
+
+                foreach (var cell in bm.GetComponentsInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductCellView>(false))
+                {
+                    if (cell == null) continue;
+                    var lf = cell.GetType().GetField("_layoutElement", BindingFlags.Instance | BindingFlags.NonPublic);
+                    object le = lf != null ? lf.GetValue(cell) : null;
+                    if (le == null) continue;
+                    var mh = le.GetType().GetProperty("minHeight");
+                    if (mh != null && mh.GetValue(le) is float h && h > 100f) return true;
+                }
+                return false;
+            }
+            catch { return false; }
         }
 
         private static int Rebuild(Component list, string method)
@@ -469,6 +546,16 @@ namespace BigAmbitionsMP
         /// <summary>Is this plan object one of the DETACHED partner rows?  Reference identity, so a plan of
         /// this player's own is never mistaken for one.</summary>
         public static bool IsOverlayPlan(object plan) => plan != null && _rowOwner.ContainsKey(plan);
+
+        /// <summary>HO-1a H3.  WHOSE headquarters a display row belongs to, or "" when the plan is not one
+        /// of the detached rows.  The assign list uses it to offer that company's own people only - the hole
+        /// that let a member drop the HOST's staff onto a CLIENT's plan (EmployeesScrollerController.cs:21-23
+        /// adds every local record without a plan, injected partner copies included).</summary>
+        public static string OwnerOfOverlayPlan(object plan)
+        {
+            try { return plan != null && _rowInfo.TryGetValue(plan, out var ri) && ri != null ? (ri.Owner ?? "") : ""; }
+            catch { return ""; }
+        }
 
         /// <summary>H3 (part 1) / the REFUSAL TAIL (part 2a): a commit on a partner's headquarters that could
         /// not be turned into a route - no plan id, no headquarters key, nobody running that headquarters.
@@ -860,7 +947,7 @@ namespace BigAmbitionsMP
         /// so the leg carries the plan as the player just left it.</summary>
         public static bool RoutePaneEdit(string family, string what, object plan, string op,
                                          string strValue = "", int intValue = 0, float number = 0f,
-                                         bool flag = false, Action<object> mutate = null)
+                                         bool flag = false, Action<object> mutate = null, string station = "")
         {
             try
             {
@@ -869,7 +956,7 @@ namespace BigAmbitionsMP
                 { Refused(family, op, "?", "the row is no longer in the registry"); return true; }
                 if (mutate != null) { try { mutate(plan); } catch (Exception mx) { Plugin.Logger.LogWarning($"[Plans] {family} {op} display: {mx.Message}"); } }
                 return Send(ri.Family, ri.PlanId, ri.Hq, ri.Owner, op, what, DtoOf(plan, ri.Family),
-                            strValue, intValue, number, flag);
+                            strValue, intValue, number, flag, station);   // HO-1a H6: StationId carries the warehouse key
             }
             catch (Exception ex)
             {
@@ -1133,7 +1220,9 @@ namespace BigAmbitionsMP
                 // row goes back to the registry's truth instead of waiting for the next fan-out.
                 if (!ok) { SendRefusal(p, _refusal.Length > 0 ? _refusal : $"{op}: the runner refused the edit"); return; }
                 SaveGameManager.MarkChange();
-                PaperworkSync.MarkDirty();
+                // HO-1a H4: a routed plan edit is a button somebody is WATCHING, so this bundle does not wait
+                // out the 30 s dirty interval - MarkUrgent publishes at 2 s, and a burst coalesces into one.
+                PaperworkSync.MarkUrgent();
                 Plugin.Logger.LogInfo($"[Merger] plan edit applied for '{p.AddressKey}' from '{p.PlayerId}' ({fam} {op}, plan {id}, seq {p.EditSeq}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED: {ex.Message}"); }
@@ -1204,6 +1293,32 @@ namespace BigAmbitionsMP
                 case "neighborhood":   pl.SetSupervisedNeighborhood(p.StrValue ?? ""); return true;
                 case "manualprice":    pl.ApplyManualPrice(p.StrValue ?? "", p.Estimate); return true;
                 case "suggestedprice": pl.ApplySuggestedPrice(p.StrValue ?? "", p.Estimate); return true;
+                case "suggestall":
+                {
+                    // HO-1a H1 / HO-1c L4.6: ApplySuggestedPrices (decompile :91-99) loops over its ApplyTargets -
+                    // the VISIBLE rows when PricingManagerHelper.Settings.applyOnlyToVisibleProducts (:40-49), else
+                    // every model - so replaying the runner's WHOLE cache priced more than the button did.  The
+                    // sender names its targets in StrValue ('|'-joined, as the purchasing bulk does) and the runner
+                    // prices only those it has a suggestion for; one it does not cache is skipped, never guessed.
+                    // The copy is taken because the loop walks it while the live plan is being written (not because
+                    // ApplySuggestedPrice edits the list - decompile PricingManagerPlan.cs:128-131 removes from
+                    // manuallyPricedItems only).
+                    var want = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var nm in (p.StrValue ?? "").Split('|')) if (nm.Length > 0) want.Add(nm);
+                    // HO-1d (re-review MINOR-3): the button always names its targets (the visible rows, or all); a
+                    // leg naming NONE prices nothing - otherwise an empty leg would price the whole cache (L4.6).
+                    if (want.Count == 0) { Plugin.Logger.LogInfo($"[Merger] pricing suggestall on plan '{id}': no items named - nothing applied."); return true; }
+                    var snap = pl.cachedSuggestions.GetRange(0, pl.cachedSuggestions.Count);
+                    int applied = 0, skipped = 0;
+                    foreach (var sg in snap)
+                    {
+                        if (sg == null) continue;
+                        if (!want.Contains(sg.itemName)) { skipped++; continue; }
+                        pl.ApplySuggestedPrice(sg.itemName, sg.suggestedMax); applied++;
+                    }
+                    Plugin.Logger.LogInfo($"[Merger] pricing suggestall on plan '{id}': {applied} applied, {skipped} skipped (not on the sender's screen), {want.Count} named.");
+                    return true;
+                }
                 case "manager":
                     if (InjectedHere(p.StrValue)) return RefuseInjected("pricing", op, id, p.StrValue);   // r2 MAJOR-3
                     pl.assignedEmployeeId = string.IsNullOrEmpty(p.StrValue) ? null : p.StrValue; return true;
@@ -1281,6 +1396,56 @@ namespace BigAmbitionsMP
                 case "agent":
                     if (InjectedHere(p.StrValue)) return RefuseInjected("purchasing", op, id, p.StrValue);   // r2 MAJOR-3
                     ip.employeeInstanceId = p.StrValue ?? ""; return true;
+                case "warehouse":
+                case "warehouseall":
+                {
+                    // HO-1a H6: PurchasingAgentProductCellView.ChangeAssignedWarehouse (decompile :248-251) and
+                    // the bulk PurchasingAgentProductsMassActionsUI.MassDesignateWarehouse (:103-118) both write
+                    // ImportProduct.assignedWarehouse and had no route at all - on a partner's plan they wrote
+                    // the display copy and were lost.  StationId carries the warehouse's address key ("" = none,
+                    // the native `index <= 0` branch); StrValue names the item, or every selected item joined by
+                    // '|' for the bulk.  Both are fields the payload already has - no protocol change.
+                    // HO-1c L4.11: native returns while a contract is ACTIVE (decompile
+                    // PurchasingAgentProductsMassActionsUI.cs:105-108), so the bulk must not re-warehouse a live
+                    // contract here either - the sender's prefix mirrors the same test.
+                    if (op == "warehouseall" && ip.isActive)
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (purchasing warehouseall): partnership '{id}' has an active contract here.");
+                        return Refuse("warehouseall: the contract is active here");
+                    }
+                    Address wh = null;
+                    if (!string.IsNullOrEmpty(p.StationId))
+                    {
+                        wh = AddrOf(p.StationId);
+                        if (wh == null)
+                        {
+                            Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (purchasing {op}): warehouse '{p.StationId}' is not registered here.");
+                            return Refuse($"{op}: warehouse '{p.StationId}' is not registered here");
+                        }
+                    }
+                    int hit = 0;
+                    foreach (var name in (p.StrValue ?? "").Split('|'))
+                    {
+                        if (name.Length == 0) continue;
+                        foreach (var pr in ip.products) if (pr != null && pr.itemName == name) { pr.assignedWarehouse = wh; hit++; }
+                    }
+                    if (hit == 0)
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (purchasing {op}): none of the named item(s) is on partnership '{id}' here.");
+                        return Refuse($"{op}: none of the named item(s) is on this partnership here");
+                    }
+                    Plugin.Logger.LogInfo($"[Merger] purchasing {op} on partnership '{id}': {hit} product(s) re-warehoused.");
+                    return true;
+                }
+                case "target":
+                {
+                    // H6: PurchasingAgentProductCellView.ChangeTarget (decompile :234-240) -> UpdateAmount, which
+                    // writes ImportProduct.amount; the rest of that body is label refresh with nothing to carry.
+                    string item = p.StrValue ?? "";
+                    foreach (var pr in ip.products) if (pr != null && pr.itemName == item) { pr.amount = p.IntValue; return true; }
+                    Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (purchasing target): item '{item}' is not on partnership '{id}' here.");
+                    return Refuse($"target: item '{item}' is not on this partnership here");
+                }
                 case "repeating": ip.isRepeatingOrder = p.BoolValue; return true;
                 case "autostock": ip.isTarget = p.BoolValue; return true;
                 case "urgent":    ip.nextDeliveryDay = gi.Day + 1; ip.isUrgentOrder = true; return true;
@@ -1318,28 +1483,83 @@ namespace BigAmbitionsMP
                 {
                     // The native pair, HrManagerPlanUI.cs:256-268, run here on THIS machine's REAL employee -
                     // which is what part 1 refused on the member (:261 tagged a local employee with a plan id
-                    // that exists in no list there).  An employee this machine does not hold is REFUSED: a
-                    // member's own employee joining a partner's HR plan is a TRANSFER first (build A's
-                    // host-held two-phase move), then this assign - in that order, never the other way.
+                    // that exists in no list there).
+                    //
+                    // HO-1a H2, A REMOVAL IS NEVER REFUSED.  Both guards used to sit ABOVE the assign/unassign
+                    // split, so taking a person OFF a plan was refused whenever the id was an injected copy of a
+                    // partner's staff (the usual case on a partner's headquarters) or no longer resolved here at
+                    // all - the player pressed the button and nothing happened, with a transfer demanded for an
+                    // edit that moves nobody.  Both now guard the ASSIGN branch only, which is the branch that
+                    // could persist a foreign id.  An UNASSIGN always runs: it drops the id from the list and,
+                    // where a record does exist here and carries this plan, clears the tag - harmless on a copy,
+                    // and the only way a stale id ever leaves the list.
                     string eid = p.StrValue ?? "";
                     if (eid.Length == 0) return Gone("hr", op, id);
                     EmployeeInstance emp = null; try { emp = EmployeeHelper.GetEmployeeById(eid); } catch { }
-                    if (emp == null)
-                    { Plugin.Logger.LogWarning($"[Merger] hr assign REFUSED for plan '{id}': employee '{eid}' is not on this machine (a cross-member assignment needs the host-held transfer first)."); return Refuse($"assign: employee '{eid}' is not on this machine"); }
-                    // r2 MAJOR-3: an INJECTED partner copy sits on the REAL roster here (MergerEmployeeSync.cs:796,
-                    // MPRegisterSync.cs:1374), so `emp != null` was never the test it looked like - a member's own
-                    // employee id resolved to the copy and both writes below would have persisted a FOREIGN id.
-                    if (InjectedHere(eid)) return RefuseInjected("hr", op, id, eid);
                     if (p.BoolValue)
                     {
+                        if (emp == null)
+                        { Plugin.Logger.LogWarning($"[Merger] hr assign REFUSED for plan '{id}': employee '{eid}' is not on this machine (a cross-member assignment needs the host-held transfer first)."); return Refuse($"assign: employee '{eid}' is not on this machine"); }
+                        // r2 MAJOR-3: an INJECTED partner copy sits on the REAL roster here (MergerEmployeeSync.cs:796,
+                        // MPRegisterSync.cs:1374), so `emp != null` was never the test it looked like - a member's own
+                        // employee id resolved to the copy and the two writes below would have persisted a FOREIGN id.
+                        if (InjectedHere(eid)) return RefuseInjected("hr", op, id, eid);
                         if (!pl.assignedEmployees.Contains(eid)) pl.assignedEmployees.Add(eid);
                         emp.assignedHrManagerPlanId = pl.id;
                     }
                     else
                     {
                         pl.assignedEmployees.Remove(eid);
-                        if (emp.assignedHrManagerPlanId == pl.id) emp.assignedHrManagerPlanId = null;
+                        if (emp != null && emp.assignedHrManagerPlanId == pl.id) emp.assignedHrManagerPlanId = null;
                     }
+                    return true;
+                }
+                case "clear":
+                {
+                    // HO-1a H1: HrManagerPlanUI.ClearAssignedEmployees (decompile :242-254) LOOPS
+                    // SetEmployeeAssigned(id, false, refreshData: false), so "unassign all" used to be one leg per
+                    // employee and the host's own per-sender cap (MPServer.SharedRateOk, ten work edits a second)
+                    // dropped most of the burst in silence.  One leg now; the runner replays the same pair on its
+                    // REAL roster, without the two UI calls at :252-253 that have no meaning off-screen.
+                    int cleared = 0;
+                    foreach (var one in new List<string>(pl.assignedEmployees))
+                    {
+                        pl.assignedEmployees.Remove(one);
+                        EmployeeInstance e = null; try { e = EmployeeHelper.GetEmployeeById(one); } catch { }
+                        if (e != null && e.assignedHrManagerPlanId == pl.id) e.assignedHrManagerPlanId = null;
+                        cleared++;
+                    }
+                    Plugin.Logger.LogInfo($"[Merger] hr clear on plan '{id}': {cleared} assignment(s) released.");
+                    return true;
+                }
+                case "fill":
+                {
+                    // HO-1a H1: HrManagerPlanUI.Fill (decompile :224-240) takes the first (MaxEmployees -
+                    // NumberOfAssignedEmployees) unassigned people off its own assignable list, again one
+                    // SetEmployeeAssigned per person.  One leg now, IntValue carrying the free count the sender
+                    // saw; the runner fills from its OWN eligible set - real records, unassigned, never an
+                    // injected copy of a partner's person (H3) - capped by its own plan's real free count.
+                    int free = pl.MaxEmployees - pl.NumberOfAssignedEmployees;
+                    if (p.IntValue > 0 && p.IntValue < free) free = p.IntValue;
+                    if (free <= 0) { Plugin.Logger.LogInfo($"[Merger] hr fill on plan '{id}': no free slot here."); return true; }
+                    int added = 0;
+                    foreach (var e in EmployeeHelper.GetEmployeeInstances())
+                    {
+                        if (added >= free) break;
+                        if (e == null || !string.IsNullOrEmpty(e.assignedHrManagerPlanId)) continue;   // native :233
+                        if (e.id == pl.assignedEmployeeId) continue;                                   // native :233
+                        if (InjectedHere(e.id)) continue;                                              // H3: our own people only
+                        // HO-1c L4.5: the no-argument GetEmployeeInstances() is the RAW roster (decompile
+                        // EmployeeHelper.cs:575-578; the mod filters the QueryInfo overload only), so the synthetic
+                        // duty stand-ins are in it - and they are not IsInjectedStaff.  A stand-in must never be
+                        // tagged with a plan id.
+                        if (MPRegisterSync.IsSyntheticDuty(e.id)) continue;
+                        if (pl.assignedEmployees.Contains(e.id)) continue;
+                        pl.assignedEmployees.Add(e.id);
+                        e.assignedHrManagerPlanId = pl.id;
+                        added++;
+                    }
+                    Plugin.Logger.LogInfo($"[Merger] hr fill on plan '{id}': {added} of {free} free slot(s) taken.");
                     return true;
                 }
                 case "insurance-accept":
@@ -1549,6 +1769,83 @@ namespace BigAmbitionsMP
                 bool routed = op == "add" ? RoutePlanCreateAt(fam, str.Trim())   // r2b: the HQ key is the argument (no pane on the rig)
                                           : RoutePaneEdit(fam, "planedit verb", row, op, str, iv, num, bv);
                 return $"OK planedit {fam} {id} {op} routed={routed}";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        // -- HO-1c L3: the `planbulk` / `planlist` rig levers ------------------
+
+        /// <summary>The row the two rig verbs address - the same registry lookup `planedit` uses.</summary>
+        private static object FindTestDriveRow(string fam, string id)
+        {
+            // T-HO1 run 3 (2026-09-12): a feed marks every family STALE (Receive) and the screen's ShowPartnerRows is
+            // what drops the stale rows before rebuilding - on the rig no screen is open, so the lever must do the
+            // same drop itself or it reads the row built from the PREVIOUS feed (assigned=33 after a clear the runner
+            // had applied and published urgently). The shipped screen path was never wrong; only the lever was.
+            foreach (var ownerPid in new List<string>(_byOwner.Keys))
+            {
+                foreach (var f in Families) if (_stale.Remove(ownerPid + "|" + f)) DropRowsOf(ownerPid, f);
+                MaterialiseRows(ownerPid);   // no screen on the rig
+            }
+            foreach (var kv in _rows)
+                if (kv.Value != null && _rowInfo.TryGetValue(kv.Value, out var q) && q.Family == fam && q.PlanId == id) return kv.Value;
+            return null;
+        }
+
+        /// <summary>HO-1c L3 (HO-1d: suggestall takes the item names).  `planbulk FAMILY PLANID clear|fill [n]|suggestall <item|item...>` - exactly the ONE leg the bulk
+        /// prefix sends off a partner's temp row (IntValue = the free count `fill` carries).  Writes nothing here:
+        /// no display mutate is passed, so only the runner's answer changes anything.</summary>
+        public static string TestDriveBulk(string arg)
+        {
+            try
+            {
+                var a = (arg ?? "").Trim().Split(new[] { ' ' }, 4, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 3) return "ERR usage: planbulk <family> <planId> clear|fill [n]|suggestall <item|item...>";
+                string fam = a[0].ToLowerInvariant(), id = a[1], op = a[2].ToLowerInvariant();
+                if (op != "clear" && op != "fill" && op != "suggestall")
+                    return "ERR usage: planbulk <family> <planId> clear|fill [n]|suggestall <item|item...>";
+                int n = 0; string names = "";
+                if (op == "suggestall") { names = a.Length > 3 ? a[3].Trim() : ""; if (names.Length == 0) return "ERR suggestall needs the item names the button would send: <item|item...>"; }
+                else if (a.Length > 3) int.TryParse(a[3].Trim(), out n);
+                object row = FindTestDriveRow(fam, id);
+                if (row == null) return $"ERR no {fam} row '{id}' in the registry here";
+                bool routed = RoutePaneEdit(fam, "planbulk verb", row, op, names, n);
+                return $"OK planbulk {fam} {id} {op}{(op == "fill" ? " n=" + n : "")} routed={routed}";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        /// <summary>HO-1c L3.  `planlist FAMILY PLANID` - the DISPLAY copy's assigned employees (hr: the count and
+        /// the ids) or its row count (every other family), so a rig run can assert the optimistic mutate and the
+        /// urgent feed that follows it.  Read-only.</summary>
+        public static string TestDriveList(string arg)
+        {
+            try
+            {
+                var a = (arg ?? "").Trim().Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 2) return "ERR usage: planlist <family> <planId>";
+                string fam = a[0].ToLowerInvariant(), id = a[1].Trim();
+                object row = FindTestDriveRow(fam, id);
+                if (row == null) return $"ERR no {fam} row '{id}' in the registry here";
+                if (row is Buildings.Office.Headquarters.HrManagerPlan hp)
+                {
+                    var ids = hp.assignedEmployees ?? new List<string>();
+                    return $"OK planlist hr {id} assigned={ids.Count}" + (ids.Count > 0 ? " " + string.Join(",", ids) : "");
+                }
+                foreach (var member in new[] { "cachedSuggestions", "products", "manuallyPricedItems", "candidates" })
+                {
+                    object v = null;
+                    try
+                    {
+                        var t = row.GetType();
+                        var pi = t.GetProperty(member);
+                        var fi = pi == null ? t.GetField(member) : null;
+                        v = pi != null ? pi.GetValue(row) : (fi != null ? fi.GetValue(row) : null);
+                    }
+                    catch { }
+                    if (v is System.Collections.ICollection col) return $"OK planlist {fam} {id} {member}={col.Count}";
+                }
+                return $"OK planlist {fam} {id} rows=unknown";
             }
             catch (Exception ex) { return "ERR " + ex.Message; }
         }

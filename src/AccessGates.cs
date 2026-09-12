@@ -335,13 +335,31 @@ namespace BigAmbitionsMP
         // native empty branches disable the controls (MovingServiceContractSettings.cs:93-97,
         // InteriorInstallationFirmDesignSettings.cs:114-117).
         //
-        // INERT without a merger: IsForeignPlayerBusiness can only be true here if a merger's presentation flip
+        // INERT without a merger: PartnerShop (below) can only be true here if a merger's presentation flip
         // put the partner's registrations back, because the helper postfix on
         // BuildingHelper.GetPlayerBuildingRegistrations (MPPatches.cs ~:5537-5544) has already removed foreign
         // registrations before these filters ever run. All five targets are private, so string method names as
         // the constructor gates do; every postfix is wrapped in try/catch and leaves __result alone on failure.
 
         private static readonly HashSet<string> _pickerNarrowLogged = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>M6 (2026-09-12): "this registration is a PARTNER's shop". IsForeignPlayerBusiness ALONE is false
+        /// under a merger — the presentation flip PARKS the runner stamp and leaves the registration's rival id empty
+        /// (GameStatePatcher.cs:5184-5192, `reg.businessOwnerRivalId = flipped ? "" : newBusinessOwner;`) — which is
+        /// exactly the case these five dialogs were built for, so the flip table (and the absence simulation, where
+        /// this machine runs an absent member's shop) answer for it instead.</summary>
+        private static bool PartnerShop(BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg == null) return false;
+                if (GameStatePatcher.IsForeignPlayerBusiness(reg)) return true;
+                string key = GameStateReader.AddressKey(reg);
+                if (string.IsNullOrEmpty(key)) return false;
+                return (MergerFlip.FlippedCount > 0 && MergerFlip.IsFlipped(key)) || MergerAbsence.SimulatesHere(key);
+            }
+            catch { return false; }
+        }
 
         /// <summary>One log line per dialog per session - one line per dropped registration would be chatty.</summary>
         private static void LogPickerOnce(string dialogType)
@@ -361,7 +379,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!__result || !GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) return;
+                    if (!__result || !PartnerShop(buildingRegistration)) return;   // M6: the flip parks the stamp
                     __result = false;
                     LogPickerOnce("MovingService");
                 }
@@ -376,7 +394,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!__result || !GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) return;
+                    if (!__result || !PartnerShop(buildingRegistration)) return;   // M6: the flip parks the stamp
                     __result = false;
                     LogPickerOnce("MovingService");
                 }
@@ -391,7 +409,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!__result || !GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) return;
+                    if (!__result || !PartnerShop(buildingRegistration)) return;   // M6: the flip parks the stamp
                     __result = false;
                     LogPickerOnce("InteriorInstallationFirm");
                 }
@@ -406,7 +424,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!__result || !GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) return;
+                    if (!__result || !PartnerShop(buildingRegistration)) return;   // M6: the flip parks the stamp
                     __result = false;
                     LogPickerOnce("RecruitmentAgency");
                 }
@@ -426,7 +444,7 @@ namespace BigAmbitionsMP
                 {
                     if (__result == null || __result.Count == 0) return;
                     int before = __result.Count;
-                    __result.RemoveAll(r => GameStatePatcher.IsForeignPlayerBusiness(r));
+                    __result.RemoveAll(r => PartnerShop(r));   // M6: the flip parks the stamp
                     if (__result.Count != before) LogPickerOnce("DeliveryContract");
                 }
                 catch { }

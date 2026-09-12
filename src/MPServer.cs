@@ -5928,8 +5928,9 @@ namespace BigAmbitionsMP
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
                 // Merger guard (2026-09-11): refuse a grant change between two members of the SAME company --
-                // a stale or crafted client cannot flip a grant under a merger. No store write; the stored
-                // grant is untouched and resumes when the merger ends.
+                // a stale or crafted client cannot flip a grant under a merger. No store write: M1 (2026-09-12)
+                // already REMOVED the grants between co-members at merge time and nothing restores them at
+                // unmerge, so this only refuses a NEW grant between co-members.
                 if (!string.IsNullOrEmpty(p.GranteeId) && MergerSync.MergedRuntime(senderPid, p.GranteeId))
                 {
                     Plugin.Logger.LogWarning($"[Merger] grant edit from '{senderPid}' for co-member '{p.GranteeId}' refused (merger overrides the three permissions)");
@@ -5967,8 +5968,8 @@ namespace BigAmbitionsMP
             if (!_running || string.IsNullOrEmpty(granteePid)) return;
             // Merger guard (user ruling 2026-09-11): the merger is a superset of the three permissions and
             // overrides them, so a grant between two members of the SAME company is refused here -- defence in
-            // depth behind the hub's disabled toggles. The stored grant is left exactly as it is (it resumes
-            // when the merger ends); only the change is refused.
+            // depth behind the hub's disabled toggles. M1 (2026-09-12): the grants between co-members were
+            // REMOVED at merge time and nothing restores them at unmerge, so this refuses only a NEW grant.
             if (MergerSync.MergedRuntime(MPConfig.PlayerId, granteePid))
             {
                 Plugin.Logger.LogWarning($"[Merger] grant change for co-member '{granteePid}' refused (merger overrides the three permissions)");
@@ -5986,6 +5987,7 @@ namespace BigAmbitionsMP
         {
             if (!_running || string.IsNullOrEmpty(granteeStable)) return;
             // D16 r2: same rule as the online row - a co-member who left this session is still merged with me.
+            // (M1 2026-09-12: their stored grants were removed at merge time; this refuses only a new one.)
             string offPid = PidOfStable(granteeStable);
             if (offPid.Length > 0 && MergerSync.MergedRuntime(MPConfig.PlayerId, offPid))
             {
@@ -6227,6 +6229,27 @@ namespace BigAmbitionsMP
                     }
                     // Durable roster names: NOT the pid (that is what made MemberNames read as ids).
                     GrantSync.NoteName(a, DisplayNameFor(fromPid)); GrantSync.NoteName(b, DisplayNameFor(actorPid));
+                    // M1 (user ruling 2026-09-12): the merger REPLACES the three permissions, it is not added to
+                    // them - so every STORED grant between the future co-members is removed HERE, before the
+                    // membership commit below, and nothing brings it back at unmerge. The future member set is
+                    // the members of both groups plus the two actors (StableId space, MergerSync.StoreGroups).
+                    // The branch tails below both call RefreshGrantsAndBroadcast() after the commit, which is
+                    // what republishes the runtime table these removals just changed; the next coordinated save
+                    // then persists their absence (MPSaveCoordinator.cs:3641-3643 builds the manifest from
+                    // GrantSync.AllStoreEntries(), and the restore at :386-395 only re-adds what the file holds).
+                    var futureMembers = new HashSet<string> { a, b };
+                    if (gA != "" && MergerSync.StoreGroups.TryGetValue(gA, out var mSetA)) foreach (var s in mSetA) futureMembers.Add(s);
+                    if (gB != "" && MergerSync.StoreGroups.TryGetValue(gB, out var mSetB)) foreach (var s in mSetB) futureMembers.Add(s);
+                    int grantsRemoved = 0;
+                    foreach (var ownerStable in futureMembers)
+                        foreach (var granteeStable in futureMembers)
+                        {
+                            if (ownerStable == granteeStable) continue;
+                            foreach (var gk in GrantSync.StoreKindsFor(ownerStable, granteeStable))
+                            { GrantSync.StoreSet(gk, ownerStable, granteeStable, false); grantsRemoved++; }
+                        }
+                    if (grantsRemoved > 0)
+                        Plugin.Logger.LogInfo($"[Merger] permissions removed between the new co-members: {grantsRemoved} grant(s) (the merger replaces them; nothing comes back at unmerge).");
                     // D4-3 UNION, one host call, no observer can see a member in two groups: neither side in a
                     // company mints a pair; one side in a company takes the other in; BOTH in companies merges
                     // them into the OLDER group (its id, its founder, its join order first) and pools the wallets.
@@ -6666,8 +6689,28 @@ namespace BigAmbitionsMP
         // ── Shared-shop slice 3: the owner's bench + routed assignment edits ──
         private static readonly Dictionary<string, SharedStaffPoolPayload> _sharedPoolByOwner = new();   // owner pid → last bench (replayed to newly granted players)
 
-        /// <summary>HOST (main thread): an owner's bench — cache it, hand it to every connected player holding a DIRECT
-        /// Business grant from that owner (and to the host itself when granted). Never broadcast.</summary>
+        /// <summary>HO-1c L2(b): which OTHER player's published bench holds this employee id ("" = none, or only
+        /// the asker's own).  A bench is dropped when its owner leaves (:1773), so an answer also means that
+        /// player is here to take the release leg.</summary>
+        private static string BenchOwnerOf(string employeeId, string exceptPid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(employeeId)) return "";
+                foreach (var kv in _sharedPoolByOwner)
+                {
+                    if (kv.Key == exceptPid || kv.Value == null || kv.Value.Staff == null) continue;
+                    foreach (var s in kv.Value.Staff)
+                        if (s != null && s.Id == employeeId) return kv.Key;
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        /// <summary>HOST (main thread): an owner's bench — cache it, hand it to every connected player who holds a
+        /// Business key from that owner — M2 (2026-09-12): a direct grant OR co-membership, the same union the rest of
+        /// the bench pipeline now reads — and to the host itself when it holds one. Never broadcast.</summary>
         public static void HostRouteSharedStaffPool(SharedStaffPoolPayload p, string senderPid)
         {
             try
@@ -6681,10 +6724,10 @@ namespace BigAmbitionsMP
                 {
                     foreach (var pid in new List<string>(_peerNames.Values))
                     {
-                        if (pid == senderPid || !GrantSync.IsGrantedDirect(GrantKind.Business, senderPid, pid)) continue;
+                        if (pid == senderPid || !GrantSync.IsGranted(GrantKind.Business, senderPid, pid)) continue;   // M2: the union — a co-member holds the key too
                         SendToPid(pid, MessageEnvelope.Create(MessageType.SharedStaffPool, senderPid, p)); sent++;
                     }
-                    if (senderPid != MPConfig.PlayerId && GrantSync.IsGrantedDirect(GrantKind.Business, senderPid, MPConfig.PlayerId)) { SharedShopStaff.ApplyPool(p); sent++; }
+                    if (senderPid != MPConfig.PlayerId && GrantSync.IsGranted(GrantKind.Business, senderPid, MPConfig.PlayerId)) { SharedShopStaff.ApplyPool(p); sent++; }   // M2: the union
                 }
                 if (sent > 0) Plugin.Logger.LogInfo($"[SharedShop] bench of '{senderPid}' ({p.Staff?.Count ?? 0}) handed to {sent} permitted player(s).");
             }
@@ -7291,6 +7334,26 @@ namespace BigAmbitionsMP
                         if (fromOwner != senderPid && !GrantSync.IsGranted(GrantKind.Business, fromOwner, senderPid))
                         { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{senderPid}' does not hold the source '{from}'."); return; }
                         src = RouteTargetFor(from, fromOwner);
+                    }
+                    else
+                    {
+                        // HO-1c L2(b): an empty from-end is usually the asker's own record - but a member may now
+                        // place a copy off a PARTNER's bench, and the OWNER holds that record.  The published
+                        // bench says whose it is, and that player becomes the source runner, so the release leg
+                        // goes to them.  The asker's own bench still answers "" here and is refused below as the
+                        // ordinary routed assign it is.
+                        string benchOwner = BenchOwnerOf(p.EmployeeId ?? "", senderPid);
+                        // HO-1d (re-review MAJOR-1): the same source check the named-from branch makes above - the
+                        // asker must hold that owner's bench (a co-member, or a helper the owner granted), or a
+                        // stale/crafted leg naming any published bench id would make the host order a release.
+                        if (benchOwner.Length > 0 && benchOwner != senderPid
+                            && !GrantSync.IsGranted(GrantKind.Business, benchOwner, senderPid))
+                        { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{senderPid}' does not hold '{benchOwner}' bench."); return; }
+                        if (benchOwner.Length > 0)
+                        {
+                            src = benchOwner;
+                            Plugin.Logger.LogInfo($"[Transfer] {tid}: '{p.EmployeeId}' stands on '{benchOwner}' bench - they release, not '{senderPid}'.");
+                        }
                     }
                     string dst = RouteTargetFor(to, toOwner);
                     if (src.Length == 0 || dst.Length == 0)

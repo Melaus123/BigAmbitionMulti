@@ -189,7 +189,15 @@ namespace BigAmbitionsMP
             // A DIRECT Business grant has its own, older pipeline (SharedShopStaff's assignment scan); this
             // branch is for merger copies only, so the two can never both route the same change.
             if (GrantSync.IsGrantedDirect(GrantKind.Business, owner, MPConfig.PlayerId)) return;
-            if (home.Length == 0) return;                                              // a bench copy is not a merger record
+            // HO-1c L2 2026-09-12: a BENCH copy of a CO-MEMBER's employee can now be placed.  bench -> the SAME
+            // owner's shop takes the routed-assign branch below (CommitAssign with an empty home; the owner's own
+            // applier places them off its bench).  bench -> ANOTHER member's shop asks for a host-held transfer
+            // whose SOURCE is the OWNER, not the asker: the host reads its published bench and points the release
+            // leg there (MPServer.cs:7345), instead of the plain "string src = senderPid;" (MPServer.cs:7328)
+            // that made the asker the source; "one machine runs both ends" (MPServer.cs:7356) still refuses the
+            // requester's OWN bench.  A bench copy of a NON-member is a direct grant's view - that pipeline is
+            // untouched, so it stays put.
+            if (home.Length == 0 && !MergerSync.IsMemberPid(owner)) return;             // not a merger record
 
             if (_pendingTransfer.TryGetValue(id, out var f))
             {
@@ -224,7 +232,7 @@ namespace BigAmbitionsMP
                 if (SharedShopStaff.CommitAssign(id, home, target))
                 {
                     _pendingTransfer[id] = ("", Time.unscaledTime, target);
-                    Plugin.Logger.LogInfo($"[Transfer] '{id}' stays with '{owner}': routed {(target.Length == 0 ? "unassign" : "assign")} '{home}' -> '{(target.Length == 0 ? "bench" : target)}'.");
+                    Plugin.Logger.LogInfo($"[Transfer] '{id}' stays with '{owner}': routed {(target.Length == 0 ? "unassign" : "assign")} '{(home.Length == 0 ? "bench" : home)}' -> '{(target.Length == 0 ? "bench" : target)}'.");
                 }
                 else
                 {

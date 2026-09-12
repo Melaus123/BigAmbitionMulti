@@ -9142,8 +9142,10 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    return !CompanyPlans.RoutePaneEdit("pricing", "manager assignment", plan, "manager",
-                               PlanEditEmployeeId(__instance, "_pricingManagers", pricingManagerIndex));
+                    string who = PlanEditEmployeeId(__instance, "_pricingManagers", pricingManagerIndex);
+                    // H4: the runner's own write, mirrored on the DISPLAY copy so the dropdown settles at once.
+                    return !CompanyPlans.RoutePaneEdit("pricing", "manager assignment", plan, "manager", who, 0, 0f, false, row =>
+                    { var pl = row as Buildings.Office.Headquarters.PricingManagerPlan; if (pl != null) pl.assignedEmployeeId = string.IsNullOrEmpty(who) ? null : who; });
                 }
                 catch { return true; }
             }
@@ -9159,8 +9161,10 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    return !CompanyPlans.RoutePaneEdit("hr", "manager assignment", plan, "manager",
-                               PlanEditEmployeeId(__instance, "_hrManagers", hrManagerIndex));
+                    string who = PlanEditEmployeeId(__instance, "_hrManagers", hrManagerIndex);
+                    // H4: the runner's own write, mirrored on the DISPLAY copy so the dropdown settles at once.
+                    return !CompanyPlans.RoutePaneEdit("hr", "manager assignment", plan, "manager", who, 0, 0f, false, row =>
+                    { var pl = row as Buildings.Office.Headquarters.HrManagerPlan; if (pl != null) pl.assignedEmployeeId = string.IsNullOrEmpty(who) ? null : who; });
                 }
                 catch { return true; }
             }
@@ -9175,8 +9179,10 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    return !CompanyPlans.RoutePaneEdit("headhunter", "manager assignment", plan, "manager",
-                               PlanEditEmployeeId(__instance, "_headhunters", headhunterIndex));
+                    string who = PlanEditEmployeeId(__instance, "_headhunters", headhunterIndex);
+                    // H4: the runner's own write, mirrored on the DISPLAY copy so the dropdown settles at once.
+                    return !CompanyPlans.RoutePaneEdit("headhunter", "manager assignment", plan, "manager", who, 0, 0f, false, row =>
+                    { var pl = row as Buildings.Office.Headquarters.HeadhunterPlan; if (pl != null) pl.assignedEmployeeId = string.IsNullOrEmpty(who) ? null : who; });
                 }
                 catch { return true; }
             }
@@ -9191,8 +9197,10 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    return !CompanyPlans.RoutePaneEdit("purchasing", "agent assignment", plan, "agent",
-                               PlanEditEmployeeId(__instance, "_purchasingAgents", purchasingAgentIndex));
+                    string who = PlanEditEmployeeId(__instance, "_purchasingAgents", purchasingAgentIndex);
+                    // H4: the runner's own write, mirrored on the DISPLAY copy so the dropdown settles at once.
+                    return !CompanyPlans.RoutePaneEdit("purchasing", "agent assignment", plan, "agent", who, 0, 0f, false, row =>
+                    { var pl = row as Entities.ImportPartnership; if (pl != null) pl.employeeInstanceId = who ?? ""; });
                 }
                 catch { return true; }
             }
@@ -9330,10 +9338,237 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    string eid = employeeId ?? "";
+                    // HO-1a H4: the native pair (decompile HrManagerPlanUI.cs:258-267) on the DISPLAY copy, so
+                    // the row answers the click at once instead of at the next bundle.  A refusal redraws it back.
                     return !CompanyPlans.RoutePaneEdit("hr", "SetEmployeeAssigned", ____currentPlan, "assign",
-                               employeeId ?? "", 0, 0f, assigned);
+                               eid, 0, 0f, assigned, row =>
+                    {
+                        // HO-1c L4.8: the display copy's LIST only.  Tagging the employee RECORD is the very
+                        // save-contamination the note above names - it is this machine's own record, and a refused
+                        // assign never rolled it back.  The assign list stays truthful without the tag because the
+                        // H3 Load postfix drops an unassigned model that is already on the row plan's list.
+                        var pl = row as Buildings.Office.Headquarters.HrManagerPlan;
+                        if (pl == null || eid.Length == 0) return;
+                        if (assigned) { if (!pl.assignedEmployees.Contains(eid)) pl.assignedEmployees.Add(eid); }
+                        else pl.assignedEmployees.Remove(eid);
+                    });
                 }
                 catch { return true; }
+            }
+        }
+
+        // ── HO-1a H1/H3/H4 SHARED READS ON THE HR PANE ──
+
+        /// <summary>The pane's own assignable-employee table: decompile HrManagerPlanUI.cs:231 reads
+        /// `assignableEmployeesScrollerController.data`, and :238/:252 reload it after a bulk button.</summary>
+        private static UI.Smartphone.Apps.BizMan.HRManagers.EmployeesScrollerController MergerHrScroller(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI ui)
+        {
+            try
+            {
+                if (ui == null) return null;
+                var f = ui.GetType().GetField("assignableEmployeesScrollerController",
+                            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                          | System.Reflection.BindingFlags.Public);
+                return f != null ? f.GetValue(ui) as UI.Smartphone.Apps.BizMan.HRManagers.EmployeesScrollerController : null;
+            }
+            catch { return null; }
+        }
+
+        private static UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI MergerHrPane()
+        {
+            try
+            {
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
+                return bm != null ? bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI>(true) : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>decompile HrManagerPlanUI.cs:72 `private HrManagerPlan _currentPlan;`.</summary>
+        private static Buildings.Office.Headquarters.HrManagerPlan MergerHrCurrentPlan(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI ui)
+        {
+            try
+            {
+                if (ui == null) return null;
+                var f = ui.GetType().GetField("_currentPlan", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                return f != null ? f.GetValue(ui) as Buildings.Office.Headquarters.HrManagerPlan : null;
+            }
+            catch { return null; }
+        }
+
+        private static Entities.EmployeeInstance MergerEmployee(string employeeId)
+        { try { return string.IsNullOrEmpty(employeeId) ? null : EmployeeHelper.GetEmployeeById(employeeId); } catch { return null; } }
+
+        /// <summary>The two UI calls the native bulk bodies end with (decompile HrManagerPlanUI.cs:238-239 and
+        /// :252-253).  Skipping the native body means running them here, or the pane keeps showing the old
+        /// list and the old counter after the player pressed the button.</summary>
+        private static void MergerHrPaneRedraw(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI ui, Buildings.Office.Headquarters.HrManagerPlan pl)
+        {
+            try
+            {
+                if (ui == null || pl == null) return;
+                var sc = MergerHrScroller(ui);
+                if (sc != null) sc.Load(pl.EmployeeInstances, true, pl.assignedEmployeeId);
+                var m = ui.GetType().GetMethod("SetUpBasicData",
+                            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic
+                          | System.Reflection.BindingFlags.Public);
+                // HO-1c L4.7: SetUpBasicData takes ONE optional parameter (decompile HrManagerPlanUI.cs:113
+                // `private void SetUpBasicData(List<EmployeeInstance> employees = null)`), and a default value is
+                // not filled in by reflection: invoking with no argument threw TargetParameterCountException into
+                // the catch below, so the counter and the averages stayed stale after every Fill / Clear.  It is
+                // the only reflective invoke the HO-1a hunks added.
+                if (m != null) m.Invoke(ui, new object[] { null });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] hr bulk redraw: {ex.Message}"); }
+        }
+
+        /// <summary>Whom Fill would take, in the NATIVE order and on the native test (decompile
+        /// HrManagerPlanUI.cs:231-236: off the assignable table, nobody already on a plan, never the plan's own
+        /// manager), capped at the free slot count.  H3 has already pruned that table to one company's people.</summary>
+        private static List<Entities.EmployeeInstance> MergerHrFillPicks(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI ui,
+                                                                        Buildings.Office.Headquarters.HrManagerPlan pl, int free)
+        {
+            var picks = new List<Entities.EmployeeInstance>();
+            try
+            {
+                var sc = MergerHrScroller(ui);
+                if (sc == null || sc.data == null) return picks;
+                foreach (var model in new List<UI.Smartphone.Apps.BizMan.HrManagers.HrManagerEmployeeModel>(sc.data))
+                {
+                    if (picks.Count >= free) break;
+                    if (model == null) continue;
+                    var e = MergerEmployee(model.employeeId);
+                    if (e == null || !string.IsNullOrEmpty(e.assignedHrManagerPlanId)) continue;
+                    if (e.id == pl.assignedEmployeeId) continue;
+                    if (MPRegisterSync.IsSyntheticDuty(e.id)) continue;   // HO-1c L4.5: a duty stand-in is not staff
+                    picks.Add(e);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] hr fill picks: {ex.Message}"); }
+            return picks;
+        }
+
+        // ── HO-1a H1: THE BULK BUTTONS TRAVEL AS ONE LEG ──
+        // Fill (decompile HrManagerPlanUI.cs:224-240) and ClearAssignedEmployees (:242-254) each LOOP
+        // SetEmployeeAssigned(..., refreshData: false), so the prefix above turned ONE button into one leg per
+        // employee - and the host's own per-sender cap (MPServer.SharedRateOk, ten work edits a second) dropped
+        // the rest of the burst in silence.  Each button is ONE leg now, with its own PlanOp.  The display copy
+        // is touched by writing the fields DIRECTLY: calling SetEmployeeAssigned here would re-enter the patched
+        // method and route a second leg per person, which is the bug itself.
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI), "ClearAssignedEmployees")]
+        public static class Patch_HrPaneClearAll_MergerGate
+        {
+            static bool Prefix(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI __instance,
+                               Buildings.Office.Headquarters.HrManagerPlan ____currentPlan)
+            {
+                try
+                {
+                    if (!CompanyPlans.IsOverlayPlan(____currentPlan)) return true;   // my own plan: native runs
+                    // HO-1c L4.10: native does nothing on an empty plan (decompile HrManagerPlanUI.cs:244), so
+                    // neither does this - an empty Clear spends no leg of the host's per-sender budget.
+                    if (____currentPlan.NumberOfAssignedEmployees == 0) return false;
+                    bool routed = CompanyPlans.RoutePaneEdit("hr", "ClearAssignedEmployees", ____currentPlan,
+                                     "clear", "", 0, 0f, false, row =>
+                    {
+                        var pl = row as Buildings.Office.Headquarters.HrManagerPlan;
+                        if (pl == null) return;
+                        pl.assignedEmployees.Clear();   // HO-1c L4.8: the display list only, never an employee record
+                    });
+                    if (routed) MergerHrPaneRedraw(__instance, ____currentPlan);
+                    return !routed;
+                }
+                catch { return true; }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI), "Fill")]
+        public static class Patch_HrPaneFill_MergerGate
+        {
+            static bool Prefix(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI __instance,
+                               Buildings.Office.Headquarters.HrManagerPlan ____currentPlan)
+            {
+                try
+                {
+                    if (!CompanyPlans.IsOverlayPlan(____currentPlan)) return true;
+                    int free = ____currentPlan.MaxEmployees - ____currentPlan.NumberOfAssignedEmployees;
+                    if (free <= 0) return false;                      // native :226-229 does nothing either
+                    var picks = MergerHrFillPicks(__instance, ____currentPlan, free);
+                    bool routed = CompanyPlans.RoutePaneEdit("hr", "Fill", ____currentPlan, "fill",
+                                     "", free, 0f, false, row =>
+                    {
+                        var pl = row as Buildings.Office.Headquarters.HrManagerPlan;
+                        if (pl == null) return;
+                        foreach (var e in picks)                                   // HO-1c L4.8: the display list only
+                            if (!pl.assignedEmployees.Contains(e.id)) pl.assignedEmployees.Add(e.id);
+                    });
+                    if (routed) MergerHrPaneRedraw(__instance, ____currentPlan);
+                    return !routed;
+                }
+                catch { return true; }
+            }
+        }
+
+        // ── HO-1a H3: THE ASSIGN LIST OFFERS THAT COMPANY'S ELIGIBLE PEOPLE ONLY ──
+        // EmployeesScrollerController.Load (decompile :15-27) builds `data` from the plan's own instances and
+        // then, with includeUnassignedEmployees, from EVERY local record without a plan (:21-23).  On a merged
+        // machine that second sweep sweeps up the INJECTED copies of a partner's staff - which is how the
+        // host's people came to be offered on a client's plan - and on a partner's display copy it offers this
+        // player's OWN people, whom that company cannot employ until the host-held transfer has moved them.
+        // The postfix prunes `data` to the one eligible set and reloads through the class's own scroller
+        // (:26 `scroller.ReloadData()`).  The cell toggle stays live; there is simply nobody wrong to toggle.
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.EmployeesScrollerController), "Load")]
+        public static class Patch_HrAssignList_MergerFilter
+        {
+            private static readonly HashSet<string> _hrListFailClosed = new();   // HO-1c L4.8: one warning per owner
+
+            static void Postfix(UI.Smartphone.Apps.BizMan.HRManagers.EmployeesScrollerController __instance)
+            {
+                try
+                {
+                    if (!MergerSync.IAmMember || __instance == null || __instance.data == null) return;
+                    var rowPlan = MergerHrCurrentPlan(MergerHrPane());
+                    string owner = CompanyPlans.OwnerOfOverlayPlan(rowPlan);
+                    // HO-1c L4.8: a partner's HQ on screen with no resolvable pane plan FAILS CLOSED.  Falling to
+                    // the own-plan rule there would offer this player's own people on a partner's row, which is
+                    // the contamination H3 exists to stop.
+                    if (rowPlan == null && CompanyPlans.PartnerHqOpen(out _, out var openOwner) && openOwner.Length > 0)
+                    {
+                        int all = __instance.data.Count;
+                        __instance.data = new List<UI.Smartphone.Apps.BizMan.HrManagers.HrManagerEmployeeModel>();
+                        if (__instance.scroller != null) __instance.scroller.ReloadData();
+                        if (_hrListFailClosed.Add(openOwner))
+                            Plugin.Logger.LogWarning($"[Plans] assign list: '{openOwner}' headquarters is open but the pane's plan is unknown here - all {all} row(s) dropped (fail closed).");
+                        return;
+                    }
+                    var onPlan = rowPlan != null && rowPlan.assignedEmployees != null ? rowPlan.assignedEmployees : null;
+                    var keep = new List<UI.Smartphone.Apps.BizMan.HrManagers.HrManagerEmployeeModel>();
+                    int dropped = 0;
+                    foreach (var model in __instance.data)
+                    {
+                        if (model == null) continue;
+                        bool eligible = owner.Length == 0
+                              ? !MPRegisterSync.IsInjectedStaff(model.employeeId)            // my own plan: my own people
+                                && !MPRegisterSync.IsSyntheticDuty(model.employeeId)          // HO-1c L4.5: never a duty stand-in
+                              : MPRegisterSync.OwnerOfInjected(model.employeeId) == owner;    // a partner's row: theirs
+                        // HO-1c L4.8: the mutates no longer tag the employee RECORD, so somebody added to the
+                        // display list still arrives here through native's unassigned sweep (decompile
+                        // EmployeesScrollerController.cs:21-23).  The list half already shows them as assigned.
+                        bool onRow = onPlan != null && onPlan.Contains(model.employeeId);
+                        if (eligible && onRow && !model.assigned) { dropped++; continue; }
+                        if (eligible && onRow && owner.Length > 0) model.assigned = true;      // a partner's row: the list is the truth
+                        if (eligible) keep.Add(model); else dropped++;
+                    }
+                    if (dropped == 0) return;
+                    __instance.data = keep;
+                    if (__instance.scroller != null) __instance.scroller.ReloadData();
+                    Plugin.Logger.LogInfo($"[Plans] assign list: {dropped} dropped, {keep.Count} offered"
+                                        + (owner.Length == 0 ? " - my own company's people only." : $" - '{owner}' people only."));
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] assign list filter: {ex.Message}"); }
             }
         }
 
@@ -9373,8 +9608,11 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    string hood = newNeighborhood ?? "";
                     return !CompanyPlans.RoutePaneEdit("pricing", "ChangeNeighborhood", ____currentPlan,
-                               "neighborhood", newNeighborhood ?? "");
+                               "neighborhood", hood, 0, 0f, false, row =>
+                    // H4: the native write, PricingManagerPlanUI.cs:119 -> PricingManagerPlan.cs:72.
+                    { var pl = row as Buildings.Office.Headquarters.PricingManagerPlan; if (pl != null) pl.SetSupervisedNeighborhood(hood); });
                 }
                 catch { return true; }
             }
@@ -9401,11 +9639,78 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    string item = itemName ?? "";
                     return !CompanyPlans.RoutePaneEdit("pricing", "apply manual price", __instance,
-                               "manualprice", itemName ?? "", 0, price);
+                               "manualprice", item, 0, price, false, row =>
+                    // H4: only the MANUALLY-PRICED tag (PricingManagerPlan.cs:29) can be mirrored on a copy.
+                    // The rest of the native body is ReapplyPriceWhereSold -> SetPrice on the supervised
+                    // STORE (:145-156), a live retail price on a shop this machine may itself run - a display
+                    // copy must never reach it, so the price figure waits for the runner's own bundle.
+                    { var pl = row as Buildings.Office.Headquarters.PricingManagerPlan;
+                      if (pl != null && item.Length > 0) pl.manuallyPricedItems.Add(item); });
                 }
                 catch { return true; }
             }
+        }
+
+        // HO-1a H1: the mass button.  PricingManagerProductsScrollerController.ApplySuggestedPrices
+        // (decompile :91-99) loops ApplySuggestedPrice over every row on screen, so on a partner's plan it
+        // used to be one leg per row and the host's per-sender cap dropped most of them.  ONE leg now; the
+        // runner replays it from its own cached suggestions.  NO display mutate: the only write this button
+        // makes is the live retail price on the supervised store (PricingManagerPlan.cs:145-156), which a
+        // display copy must not reach - the figures arrive with the runner's urgent bundle (H4).
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerProductsScrollerController), "ApplySuggestedPrices")]
+        public static class Patch_PricingApplyAll_MergerGate
+        {
+            static bool Prefix(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerProductsScrollerController __instance)
+            {
+                try
+                {
+                    var pl = MergerPricingPlan();
+                    if (!CompanyPlans.IsOverlayPlan(pl)) return true;
+                    // HO-1c L4.6: native prices its ApplyTargets only - the VISIBLE rows while
+                    // PricingManagerHelper.Settings.applyOnlyToVisibleProducts is set, else every model (decompile
+                    // :40-49) - so the runner replaying its whole cache priced more than the button.  The target
+                    // item names travel joined by '|' in StrValue, exactly as the purchasing bulk sends its list,
+                    // and the private property is read by reflection as the H6 prefix reads its own.
+                    var names = new List<string>();
+                    try
+                    {
+                        var prop = typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerProductsScrollerController)
+                                   .GetProperty("ApplyTargets", System.Reflection.BindingFlags.Instance
+                                              | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+                        if (prop != null && prop.GetValue(__instance) is System.Collections.IEnumerable rows)
+                            foreach (var r in rows)
+                            {
+                                string nm = "";
+                                try { nm = (r as UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerProductModel)?.Suggestion?.itemName ?? ""; } catch { }
+                                if (nm.Length > 0 && !names.Contains(nm)) names.Add(nm);
+                            }
+                    }
+                    catch (Exception rx) { Plugin.Logger.LogWarning($"[Merger] pricing suggestall targets: {rx.Message}"); }
+                    if (names.Count == 0) return true;   // nothing on screen to price: native loops nothing either
+                    return !CompanyPlans.RoutePaneEdit("pricing", "ApplySuggestedPrices", pl, "suggestall",
+                               string.Join("|", names), names.Count);
+                }
+                catch { return true; }
+            }
+        }
+
+        /// <summary>decompile PricingManagerPlanUI.cs:24 `private PricingManagerPlan _currentPlan;` - the
+        /// scroller is told its rows, never its plan, so the pane is where the plan on screen lives.</summary>
+        private static Buildings.Office.Headquarters.PricingManagerPlan MergerPricingPlan()
+        {
+            try
+            {
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
+                var pane = bm != null ? bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerPlanUI>(true) : null;
+                if (pane == null) return null;
+                var f = pane.GetType().GetField("_currentPlan", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                return f != null ? f.GetValue(pane) as Buildings.Office.Headquarters.PricingManagerPlan : null;
+            }
+            catch { return null; }
         }
 
         [HarmonyPatch(typeof(Buildings.Office.Headquarters.PricingManagerPlan), "ApplySuggestedPrice")]
@@ -9464,12 +9769,150 @@ namespace BigAmbitionsMP
                     if (!Ops.TryGetValue(name, out var op)) return true;
                     if (Confirmed.Contains(name))
                     { CompanyPlans.ArmConfirmRoute("purchasing", ____currentImportPartnership, op, name); return true; }
-                    return !CompanyPlans.RoutePaneEdit("purchasing", name, ____currentImportPartnership, op);
+                    return !CompanyPlans.RoutePaneEdit("purchasing", name, ____currentImportPartnership, op,
+                               "", 0, 0f, false, row =>
+                    {
+                        // H4: the flags the native bodies set (PurchasingAgentPlanUI.cs:249-251, :267-269) on the
+                        // DISPLAY copy.  `end` and `urgent` go through the confirmation fold above, which hands
+                        // the route to HudConfirm and has no display leg of its own; `delete` is the row leaving
+                        // a list this detached copy is not in, so neither can be mirrored here.
+                        var ip = row as Entities.ImportPartnership;
+                        if (ip == null) return;
+                        if (op == "start")  ip.isActive = true;
+                        if (op == "cancel") { ip.isActive = false; ip.isUrgentOrder = false; }
+                    });
                 }
                 catch { return true; }
             }
 
             static void Finalizer() { try { CompanyPlans.DisarmConfirmRoute(); } catch { } }
+        }
+
+        // ── HO-1a H6: THE PURCHASING PRODUCT ROW ──
+        // ChangeAssignedWarehouse (decompile PurchasingAgentProductCellView.cs:248-251), ChangeTarget (:234-240)
+        // and the bulk MassDesignateWarehouse (PurchasingAgentProductsMassActionsUI.cs:103-118) had NO prefix at
+        // all: on a partner's plan each wrote the DETACHED display copy and was lost at the next feed.  All
+        // three route now.  The bulk is ONE leg - the selected item names joined by '|' in StrValue, the
+        // warehouse in StationId, both fields the payload already carries, so no protocol change.
+        // HO-1c L4.12: StationId is NOT free on every other mergerplanedit path - it also carries a refusal's
+        // addressee (CompanyPlans.cs:1252, read at MPServer.cs:8515) and the purchasing `create` importer
+        // (CompanyPlans.cs:1317).  The uses are disjoint: the host's forward branch gates on the "refused" op,
+        // and `create` is its own op, so the warehouse key can never be read as either.
+
+        /// <summary>decompile PurchasingAgentPlanUI.cs:55 `private ImportPartnership _currentImportPartnership;`
+        /// - the product row and the mass-action bar both hang off that one pane.</summary>
+        private static Entities.ImportPartnership MergerPurchasingPlan()
+        {
+            try
+            {
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
+                var pane = bm != null ? bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentPlanUI>(true) : null;
+                if (pane == null) return null;
+                var f = pane.GetType().GetField("_currentImportPartnership", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                return f != null ? f.GetValue(pane) as Entities.ImportPartnership : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>decompile PurchasingAgentProductCellView.cs:56 `private PurchasingAgentProductModel _data;`.</summary>
+        private static UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductModel MergerCellModel(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductCellView cell)
+        {
+            try
+            {
+                if (cell == null) return null;
+                var f = cell.GetType().GetField("_data", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                return f != null ? f.GetValue(cell) as UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductModel : null;
+            }
+            catch { return null; }
+        }
+
+        private static void MergerSetWarehouse(object row, string itemList, BuildingRegistration wh)
+        {
+            var ip = row as Entities.ImportPartnership;
+            if (ip == null || ip.products == null) return;
+            foreach (var name in (itemList ?? "").Split('|'))
+            {
+                if (name.Length == 0) continue;
+                foreach (var pr in ip.products) if (pr != null && pr.itemName == name) pr.assignedWarehouse = wh != null ? wh.Address : null;
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductCellView), "ChangeAssignedWarehouse")]
+        public static class Patch_PurchasingWarehouse_MergerGate
+        {
+            static bool Prefix(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductCellView __instance, int index)
+            {
+                try
+                {
+                    var ip = MergerPurchasingPlan();
+                    if (!CompanyPlans.IsOverlayPlan(ip)) return true;
+                    var data = MergerCellModel(__instance);
+                    if (data == null || data.productRef == null) return true;
+                    string item = data.productRef.itemName ?? "";
+                    var reg = index > 0 && data.warehouses != null && index - 1 < data.warehouses.Count
+                            ? data.warehouses[index - 1] : null;                       // native :250 `index <= 0` = none
+                    string key = reg != null ? GameStateReader.AddressKey(reg) : "";
+                    return !CompanyPlans.RoutePaneEdit("purchasing", "ChangeAssignedWarehouse", ip, "warehouse",
+                               item, 0, 0f, false, row => MergerSetWarehouse(row, item, reg), key);
+                }
+                catch { return true; }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductCellView), "ChangeTarget")]
+        public static class Patch_PurchasingTarget_MergerGate
+        {
+            static bool Prefix(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductCellView __instance, int newTarget)
+            {
+                try
+                {
+                    var ip = MergerPurchasingPlan();
+                    if (!CompanyPlans.IsOverlayPlan(ip)) return true;
+                    var data = MergerCellModel(__instance);
+                    if (data == null || data.productRef == null) return true;
+                    string item = data.productRef.itemName ?? "";
+                    return !CompanyPlans.RoutePaneEdit("purchasing", "ChangeTarget", ip, "target",
+                               item, newTarget, 0f, false, row =>   // H4: native :236 -> ImportProduct.amount
+                    {
+                        var p2 = row as Entities.ImportPartnership;
+                        if (p2 == null || p2.products == null) return;
+                        foreach (var pr in p2.products) if (pr != null && pr.itemName == item) pr.amount = newTarget;
+                    });
+                }
+                catch { return true; }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductsMassActionsUI), "MassDesignateWarehouse")]
+        public static class Patch_PurchasingMassWarehouse_MergerGate
+        {
+            private static readonly System.Reflection.PropertyInfo _pMassContractActive =
+                typeof(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductsMassActionsUI)
+                .GetProperty("IsContractActive", System.Reflection.BindingFlags.Static
+                           | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+
+            static bool Prefix(BuildingRegistration warehouse)
+            {
+                try
+                {
+                    var ip = MergerPurchasingPlan();
+                    if (!CompanyPlans.IsOverlayPlan(ip)) return true;
+                    // HO-1c L4.11: native returns while the contract is ACTIVE (decompile
+                    // PurchasingAgentProductsMassActionsUI.cs:105-108) - a private STATIC property, so reflection
+                    // reads it without an instance.  Skipping the body and sending nothing is what native does.
+                    try { if (_pMassContractActive != null && _pMassContractActive.GetValue(null) is bool act && act) return false; } catch { }
+                    var names = new List<string>();
+                    foreach (var pr in UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductsMassActionsUI.massActionSelectedProducts)
+                        if (pr != null && !string.IsNullOrEmpty(pr.itemName) && !names.Contains(pr.itemName)) names.Add(pr.itemName);
+                    if (names.Count == 0) return true;                                 // native :109 loops nothing
+                    string list = string.Join("|", names);
+                    string key = warehouse != null ? GameStateReader.AddressKey(warehouse) : "";
+                    return !CompanyPlans.RoutePaneEdit("purchasing", "MassDesignateWarehouse", ip, "warehouseall",
+                               list, names.Count, 0f, false, row => MergerSetWarehouse(row, list, warehouse), key);
+                }
+                catch { return true; }
+            }
         }
 
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentPlanUI), "OnRepeatingOrderToggleValueChanged")]
@@ -9480,7 +9923,8 @@ namespace BigAmbitionsMP
                 try
                 {
                     return !CompanyPlans.RoutePaneEdit("purchasing", "repeating order", ____currentImportPartnership,
-                               "repeating", "", 0, 0f, value);
+                               "repeating", "", 0, 0f, value, row =>   // H4
+                    { var ip = row as Entities.ImportPartnership; if (ip != null) ip.isRepeatingOrder = value; });
                 }
                 catch { return true; }
             }
@@ -9494,7 +9938,8 @@ namespace BigAmbitionsMP
                 try
                 {
                     return !CompanyPlans.RoutePaneEdit("purchasing", "auto stock", ____currentImportPartnership,
-                               "autostock", "", 0, 0f, value);
+                               "autostock", "", 0, 0f, value, row =>   // H4
+                    { var ip = row as Entities.ImportPartnership; if (ip != null) ip.isTarget = value; });
                 }
                 catch { return true; }
             }

@@ -1135,9 +1135,16 @@ namespace BigAmbitionsMP
                 // the way the My Employees rows do it (SharedShopStaff.cs:733-736).
                 if (__instance.massActionToggle != null)
                     __instance.massActionToggle.interactable = claimant.Length == 0 || claimant == MPConfig.PlayerId;
-                if (claimant.Length == 0) return;
+                // M3(c) 2026-09-12, HO-1c L4.3 (manager ruling 2026-09-12): a candidate is ALWAYS painted in its
+                // ORIGIN owner's colour (the pool's owner, CompanyCandidates.OwnerOfCandidate :86) - every player
+                // has their own colour, and the CLAIM is already shown by the disabled toggle above.  The claimant
+                // HO-1d (re-review MAJOR-2): OwnerOfCandidate answers only for INJECTED partner-pool candidates,
+                // so "" means MY OWN candidate - never painted, whoever claimed it (own rows stay the game's colour).
+                string origin = CompanyCandidates.OwnerOfCandidate(id);
+                if (origin.Length == 0 || origin == MPConfig.PlayerId) return;
+                string painter = origin;
                 if (__instance.employeeName != null)
-                    __instance.employeeName.text = PlayerColours.TagOpen(claimant) + __instance.employeeName.text + "</color>";
+                    __instance.employeeName.text = PlayerColours.TagOpen(painter) + __instance.employeeName.text + "</color>";
             }
             catch { }
         }

@@ -2149,6 +2149,11 @@ namespace BigAmbitionsMP
                 _nextCardPoll = Time.unscaledTime + PollSeconds;
                 try { PollCards(); } catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} card poll: {ex.Message}"); }
             }
+            // HO-1a H5: the headquarters redraw a partner's feed asked for, held back while an assign
+            // list, a dropdown or an expanded product row was open under the player's hand.  It re-reads
+            // that authoritative UI state HERE, on the tick that already exists - never on a delay.
+            try { CompanyPlans.TickDeferredRedraw(); } catch { }
+
             if (_renderCards && _whList != null && _whList.gameObject.activeInHierarchy)
             {
                 _renderCards = false;
@@ -3045,10 +3050,17 @@ namespace BigAmbitionsMP
                     for (int i = 0; i < __result.Count; i++)
                     {
                         _mkPickerRegs.Add(__result[i]);
-                        if (SharedAddrOf(__result[i], out _))
+                        if (SharedAddrOf(__result[i], out var pkAddr))
                         {
                             string ow = ""; try { ow = __result[i]?.businessOwnerRivalId?.ToString() ?? ""; } catch { }
                             _mkPickerShared[i] = ow;   // 2026-09-05 colours: whose shop this row is
+                        }
+                        else if (pkAddr.Length > 0 && MergerFlip.IsFlipped(pkAddr))
+                        {
+                            // M3(f) 2026-09-12: a merger-flipped partner shop is not "shared" (the flip parks the
+                            // runner stamp and blanks businessOwnerRivalId), so its picker row carried no colour.
+                            // Flip-proof owner, the same source the business card uses.
+                            _mkPickerShared[i] = PlayerColours.FlipProofOwner(pkAddr);
                         }
                     }
                 }
