@@ -1273,6 +1273,33 @@ namespace BigAmbitionsMP
                     return $"OK claim addr-less candidate='{cid}' origin='{(cowner.Length > 0 ? cowner : "mine")}' mode='{(cmode.Length > 0 ? cmode : "ask")}' sent={csent} heldBy='{CompanyCandidates.ClaimantOf(cid)}'";
                 }
 
+                case "negotiations":
+                {
+                    // NEGO-ORPHAN: what StripOrphanNegotiations would take now - the salary negotiations whose embedded
+                    // person is a PARTNER's copy here (injected staff or candidate).  Counts only, nothing is removed;
+                    // the test is the strip's own (MPRegisterSync.IsStrippableNegotiation), so the lever and the strip
+                    // cannot disagree.  Off a merged session no copy exists, so the answer is orphan=0.
+                    int ngTotal = 0, ngOrphan = 0;
+                    var ngIds = new StringBuilder();
+                    try
+                    {
+                        var ngGi = SaveGameManager.Current;
+                        if (ngGi == null) return "ERR no world loaded";   // r1 MINOR-2
+                        var ngNegs = ngGi.candidateSalaryNegotiations;
+                        if (ngNegs != null)
+                            foreach (var ngNeg in ngNegs)
+                            {
+                                ngTotal++;
+                                if (!MPRegisterSync.IsStrippableNegotiation(ngNeg)) continue;
+                                string ngId = ""; try { ngId = ngNeg?.employeeInstance?.id ?? ""; } catch { }
+                                ngOrphan++;
+                                if (ngOrphan <= 12) { if (ngIds.Length > 0) ngIds.Append(", "); ngIds.Append(ngId.Length > 0 ? ngId : "(no id)"); }
+                            }
+                    }
+                    catch (Exception ngEx) { return $"ERR negotiations: {ngEx.Message}"; }
+                    return $"OK negotiations total={ngTotal} orphan={ngOrphan} [{ngIds}{(ngOrphan > 12 ? ", ..." : "")}]";
+                }
+
                 case "messages":
                 {
                     // Phase 4b (people) P4: the relayed phone AS THIS MACHINE SEES IT - the copies of a
@@ -1795,7 +1822,7 @@ namespace BigAmbitionsMP
                 }
 
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|hrtag|hrplanof|planown|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|hrtag|hrplanof|planown|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg|negotiations)";
             }
         }
 

@@ -10204,8 +10204,11 @@ namespace BigAmbitionsMP
         /// <summary>Whom Fill would take, in the NATIVE order and on the native test (decompile
         /// HrManagerPlanUI.cs:231-236: off the assignable table, nobody already on a plan, never the plan's own
         /// manager), capped at the free slot count.  H3 has already pruned that table to one company's people,
-        /// and CROSS-HR-3 A1 widened it to a co-member's COPIES - which CROSS-HR-3b B1 skips here, so Fill takes
-        /// this save's OWN people on both kinds of plan, exactly as the routed fill applier does.</summary>
+        /// and CROSS-HR-3 A1 widened it to a co-member's COPIES.  FILL-PREFER (user ruling 2026-09-12): those
+        /// copies are no longer skipped here - CROSS-HR-3b B1's blanket skip is retired.  The plan owner's OWN
+        /// people come first, in the table's order, and a co-member's copies take the slots that REMAIN, which is
+        /// the one rule the routed fill applier now follows too.  An injected copy of somebody who is merely a
+        /// business grantee is not a company member and is still no pick of ours.</summary>
         private static List<Entities.EmployeeInstance> MergerHrFillPicks(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI ui,
                                                                         Buildings.Office.Headquarters.HrManagerPlan pl, int free)
         {
@@ -10214,7 +10217,9 @@ namespace BigAmbitionsMP
             {
                 var sc = MergerHrScroller(ui);
                 if (sc == null || sc.data == null) return picks;
-                foreach (var model in new List<UI.Smartphone.Apps.BizMan.HrManagers.HrManagerEmployeeModel>(sc.data))
+                var rows = new List<UI.Smartphone.Apps.BizMan.HrManagers.HrManagerEmployeeModel>(sc.data);
+                for (int pass = 0; pass < 2 && picks.Count < free; pass++)
+                foreach (var model in rows)
                 {
                     if (picks.Count >= free) break;
                     if (model == null) continue;
@@ -10222,7 +10227,9 @@ namespace BigAmbitionsMP
                     if (e == null || !string.IsNullOrEmpty(e.assignedHrManagerPlanId)) continue;
                     if (e.id == pl.assignedEmployeeId) continue;
                     if (MPRegisterSync.IsSyntheticDuty(e.id)) continue;   // HO-1c L4.5: a duty stand-in is not staff
-                    if (MPRegisterSync.IsInjectedStaff(e.id)) continue;   // CROSS-HR-3b B1: a copy is not mine to fill with
+                    bool co = CompanyPlans.CoMemberCopyHere(e.id);
+                    // FILL-PREFER: pass 0 takes my own people, pass 1 a co-member's copies for the slots left over.
+                    if (pass == 0 ? MPRegisterSync.IsInjectedStaff(e.id) : !co) continue;
                     picks.Add(e);
                 }
             }
@@ -10275,10 +10282,13 @@ namespace BigAmbitionsMP
                     if (!CompanyPlans.IsOverlayPlan(____currentPlan))
                     {
                         // CROSS-HR-3b B1: MY OWN plan.  A1 put a co-member's copies on the assignable list, so
-                        // native's Fill (decompile HrManagerPlanUI.cs:224-240) would sweep them up; the ROUTED
-                        // fill applier takes own people only (H3), and one rule holds on both kinds of plan.
+                        // native's Fill (decompile HrManagerPlanUI.cs:224-240) would sweep them up in table order.
+                        // FILL-PREFER (user ruling 2026-09-12) retires "own people only (H3)" for a fill: the picks
+                        // are my OWN people first and a co-member's copies only in the slots that REMAIN, which is
+                        // the rule the routed fill applier follows too, so one rule holds on both kinds of plan.
                         // SetEmployeeAssigned is native's own public method (decompile :256), so the list/tag
-                        // pair is exactly native's - and the B1 postfix sends nothing for my own people.
+                        // pair is exactly native's - and the B1 postfix sends the tag leg for each co-member copy
+                        // it assigns, nothing for my own people.
                         if (!MergerSync.IAmMember) return true;      // off a merger nothing is injected: native runs
                         int ownFree = ____currentPlan.MaxEmployees - ____currentPlan.NumberOfAssignedEmployees;
                         if (ownFree <= 0) return false;              // native :226-229 does nothing either

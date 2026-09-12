@@ -1,0 +1,205 @@
+{
+  "id": "T-FILLNEGO",
+  "title": "two small efforts, two players: (NEGO-ORPHAN) at world-ready the client strips the OPEN plain salary negotiations that name the host's people - persons the client's save does not hold (completed history and rival/poach negotiations stay) - and the `negotiations` lever answers orphan=0 afterwards; (FILL-PREFER) from the client, the host's own HR plan is cleared and then filled: the host takes its own untagged people first and partners' copies only for the slots that remain, and the log says how many of each; ends dissolved, NO save",
+  "preconditions": "Fixture save1: the client's save (guid-98109fa1...) carries 85 salary negotiations embedding copies of the host's people (run 1 of this scenario, 11:45; F-2026-09-12-AC), which become injected copies on the client once the merger's roster feeds land - the only moment their provenance is certain. The host's save carries 101 dead rival/poach negotiations and native lingering offers that MUST stay. The host's HR plan rmlmTjTjkUW32wGIoRLCGw== on its HQ 15 ba:street_fifthavenue is a partner row on the client (`planbulk` addresses partner rows). Build FILL-PREFER + NEGO-ORPHAN deployed. The co-member pass of the fill fires only when the host's untagged own people are fewer than the plan's free slots - this fixture may not reach it (the run reports the counts either way). FIXTURE HYGIENE: NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "hostPlan": "rmlmTjTjkUW32wGIoRLCGw=="
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "hr assign REFUSED",
+    "mis-route",
+    "REFUSED: HR plan",
+    "UNDONE - the owner",
+    "orphan negotiation strip"
+  ],
+  "oracles_report": [
+    "\\[Merger\\] hr fill on plan",
+    "\\[Merger\\] hr clear on plan",
+    "\\[CrossHR\\] hr tag SET leg",
+    "\\[SynthStaff\\] stripped .* partner-copy"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "note": "NEGO-ORPHAN (re-cut after review r2): nothing is stripped at world-ready any more - a partner's copy is only recognisable once the partner's people have landed; see step 12"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST FILLNEGO START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "c",
+      "cmd": "negotiations",
+      "expect_result": "^OK negotiations total=\\d+ orphan=0",
+      "note": "before any partner copy lands the lever answers orphan=0 on both machines (a save's own negotiations are never counted)"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "negotiations",
+      "expect_result": "^OK negotiations total=\\d+ orphan=0",
+      "note": "before any partner copy lands the lever answers orphan=0 on both machines (a save's own negotiations are never counted)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[SynthStaff\\] stripped [1-9]\\d* partner-copy salary negotiation\\(s\\) at (roster-apply|bench-apply) '",
+          "within_s": 45
+        }
+      ],
+      "note": "NEGO-ORPHAN: the host's staff copies land on the client during the settle wait, and the leaked negotiations naming them go from the running session (asserted from this step's mark because the line is raised during the next wait)"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "both worlds settle: the client's staff copies land on the host; the host's HR plan lands on the client as a display row"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "negotiations",
+      "expect_result": "^OK negotiations total=\\d+ orphan=0",
+      "note": "after the strip nothing naming a partner's copy remains on the client"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "planlist hr ${hostPlan}",
+      "expect_result": "^OK planlist hr ${hostPlan} assigned=\\d+",
+      "capture": {
+        "before": "assigned=(\\d+)"
+      }
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "planbulk hr ${hostPlan} clear",
+      "expect_result": "^OK planbulk hr ${hostPlan} clear routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] hr clear on plan '${hostPlan}': \\d+ assignment\\(s\\) released",
+          "within_s": 10
+        }
+      ],
+      "note": "the host's plan is emptied on the host (routed bulk clear)"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "planbulk hr ${hostPlan} fill",
+      "expect_result": "^OK planbulk hr ${hostPlan} fill n=\\d+ routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] hr fill on plan '${hostPlan}': \\d+ own \\+ \\d+ co-member of [1-9]\\d* free slot\\(s\\) taken\\.",
+          "within_s": 10
+        }
+      ],
+      "note": "FILL-PREFER: the host fills its own plan - own untagged people first, partners' copies for whatever slots remain (the log carries both counts)"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "planlist hr ${hostPlan}",
+      "expect_result": "^OK planlist hr ${hostPlan} assigned=[1-9]\\d*",
+      "note": "the display copy on the client follows the runner's fill"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved; NO save"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 24,
+      "role": "both",
+      "cmd": "mark TEST FILLNEGO END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

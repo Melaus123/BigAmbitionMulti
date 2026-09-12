@@ -2075,29 +2075,40 @@ namespace BigAmbitionsMP
                     // HO-1a H1: HrManagerPlanUI.Fill (decompile :224-240) takes the first (MaxEmployees -
                     // NumberOfAssignedEmployees) unassigned people off its own assignable list, again one
                     // SetEmployeeAssigned per person.  One leg now, IntValue carrying the free count the sender
-                    // saw; the runner fills from its OWN eligible set - real records, unassigned, never an
-                    // injected copy of a partner's person (H3) - capped by its own plan's real free count.
+                    // saw; the runner fills from its own roster, capped by its own plan's real free count.
+                    //
+                    // FILL-PREFER (user ruling 2026-09-12): the H3 rule that a fill took THIS save's own people
+                    // only is RETIRED here.  A fill takes the plan owner's OWN eligible people FIRST, in the
+                    // roster's order, and when free slots REMAIN it takes a CO-MEMBER's copies (CROSS-HR-3 A2
+                    // already lets one sit on this plan) until the plan is full.  Each co-member add lists the id
+                    // and tags the copy here, then sends the one write that matters to the machine holding the
+                    // REAL record, exactly as `case "assign"` does.  An injected copy of a NON-member is still no
+                    // pick of ours.  Off a merger nothing is injected, so the second pass finds nobody.
                     int free = pl.MaxEmployees - pl.NumberOfAssignedEmployees;
                     if (p.IntValue > 0 && p.IntValue < free) free = p.IntValue;
                     if (free <= 0) { Plugin.Logger.LogInfo($"[Merger] hr fill on plan '{id}': no free slot here."); return true; }
-                    int added = 0;
-                    foreach (var e in EmployeeHelper.GetEmployeeInstances())
-                    {
-                        if (added >= free) break;
-                        if (e == null || !string.IsNullOrEmpty(e.assignedHrManagerPlanId)) continue;   // native :233
-                        if (e.id == pl.assignedEmployeeId) continue;                                   // native :233
-                        if (InjectedHere(e.id)) continue;                                              // H3: our own people only
-                        // HO-1c L4.5: the no-argument GetEmployeeInstances() is the RAW roster (decompile
-                        // EmployeeHelper.cs:575-578; the mod filters the QueryInfo overload only), so the synthetic
-                        // duty stand-ins are in it - and they are not IsInjectedStaff.  A stand-in must never be
-                        // tagged with a plan id.
-                        if (MPRegisterSync.IsSyntheticDuty(e.id)) continue;
-                        if (pl.assignedEmployees.Contains(e.id)) continue;
-                        pl.assignedEmployees.Add(e.id);
-                        e.assignedHrManagerPlanId = pl.id;
-                        added++;
-                    }
-                    Plugin.Logger.LogInfo($"[Merger] hr fill on plan '{id}': {added} of {free} free slot(s) taken.");
+                    int ownAdded = 0, coAdded = 0;
+                    for (int pass = 0; pass < 2 && ownAdded + coAdded < free; pass++)
+                        foreach (var e in EmployeeHelper.GetEmployeeInstances())
+                        {
+                            if (ownAdded + coAdded >= free) break;
+                            if (e == null || !string.IsNullOrEmpty(e.assignedHrManagerPlanId)) continue;   // native :233
+                            if (e.id == pl.assignedEmployeeId) continue;                                   // native :233
+                            bool co = CoMemberCopyHere(e.id);
+                            // pass 0 = my own real records; pass 1 = a co-member's copies, for the slots left over.
+                            if (pass == 0 ? InjectedHere(e.id) : !co) continue;
+                            // HO-1c L4.5: the no-argument GetEmployeeInstances() is the RAW roster (decompile
+                            // EmployeeHelper.cs:575-578; the mod filters the QueryInfo overload only), so the synthetic
+                            // duty stand-ins are in it - and they are not IsInjectedStaff.  A stand-in must never be
+                            // tagged with a plan id.
+                            if (MPRegisterSync.IsSyntheticDuty(e.id)) continue;
+                            if (pl.assignedEmployees.Contains(e.id)) continue;
+                            pl.assignedEmployees.Add(e.id);
+                            e.assignedHrManagerPlanId = pl.id;
+                            if (co) { coAdded++; SendHrTag(e.id, pl.id, false, "joined this HR plan by fill"); }
+                            else ownAdded++;
+                        }
+                    Plugin.Logger.LogInfo($"[Merger] hr fill on plan '{id}': {ownAdded} own + {coAdded} co-member of {free} free slot(s) taken.");
                     return true;
                 }
                 case "insurance-accept":

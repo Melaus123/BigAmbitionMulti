@@ -1562,6 +1562,66 @@ namespace BigAmbitionsMP
             return removed;
         }
 
+        /// <summary>NEGO-ORPHAN (user ruling 2026-09-12, re-cut after reviews r1/r2): the ONE test the live-session
+        /// strip and the `negotiations` verb share.  A salary negotiation EMBEDS a whole EmployeeInstance; before
+        /// commit 033e705 a negotiation opened for a PARTNER's person wrote that copy into this save.  The only
+        /// PROVENANCE this machine can be sure of is the registry: the person is an injected partner copy here
+        /// (IsInjectedStaff) or an injected partner candidate (CompanyCandidates.IsInjectedCandidate) - the very
+        /// test the save-time M4 block uses.  No list-based guess: an id in no list can also be native's own
+        /// lingering offer (a candidate that expired, a worker who quit or was fired - EmployeeHelper.cs:245/:260,
+        /// EmployeeInstance.cs:833 - none of which closes the negotiation, and ContactsApp :679-693 still lets the
+        /// player accept it), or a rival/poach negotiation whose target lives in no list by design.  Those stay.</summary>
+        internal static bool IsStrippableNegotiation(AI.Employees.SalaryNegotiation.CandidateSalaryNegotiation? n)
+        {
+            try
+            {
+                string eid = n?.employeeInstance?.id ?? "";
+                if (eid.Length == 0) return false;
+                return IsInjectedStaff(eid) || CompanyCandidates.IsInjectedCandidate(eid);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>LIVE-SESSION strip, the complement of the M4 block in StripSyntheticsForSave: that block keeps a
+        /// partner's copy out of every save (and puts the objects back after serialising, so the running session
+        /// still holds them); this one drops the same negotiations from the running session for good, the moment
+        /// a partner's copies have landed (the roster and bench applies), so a leaked OPEN offer can no longer be
+        /// acted on here (accepting it would mint a duplicate real record).  A save written before 033e705 is
+        /// therefore clean in memory as soon as that partner's people arrive, and clean on disk at the next save.
+        /// Value-based and idempotent: nothing to take = nothing logged.  Never runs off a session (the applies
+        /// do not).</summary>
+        public static int StripOrphanNegotiations(string when)
+        {
+            int n = 0;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return 0;
+                var ids = new List<string>();
+                var negs = gi.candidateSalaryNegotiations;
+                if (negs != null)
+                    for (int i = negs.Count - 1; i >= 0; i--)
+                    {
+                        if (!IsStrippableNegotiation(negs[i])) continue;
+                        string nid = ""; try { nid = negs[i]?.employeeInstance?.id ?? ""; } catch { }
+                        ids.Add(nid.Length > 0 ? nid : "(no id)");
+                        negs.RemoveAt(i); n++;
+                    }
+                // Headhunter replacement data is NOT walked here (review r1): a replacement embeds a person built for
+                // the plan; the save-time M4 block strips the injected ones at every save.
+                if (n > 0)
+                {
+                    int cap = ids.Count > 12 ? 12 : ids.Count;
+                    string shown = string.Join(", ", ids.GetRange(0, cap).ToArray()) + (ids.Count > 12 ? ", ..." : "");
+                    Plugin.Logger.LogWarning($"[SynthStaff] stripped {n} partner-copy salary negotiation(s) at {when} - each named a "
+                                           + $"partner's person that is only a copy here (leaked into this save before 033e705; the save "
+                                           + $"cleaner drops them from disk, this drops them from the running session): {shown}");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] orphan negotiation strip ({when}): {ex.Message}"); }
+            return n;
+        }
+
         /// <summary>REPAIR ("New Text" field report, 2026-07-09): remove WorkShifts whose employeeId
         /// carries our BAMP_DUTY_ prefix but has NO matching employee record anywhere in the roster.
         /// Creation vector: schedule auto-fill runs on a BACKGROUND thread (ScheduleAutoFillerHelper:
@@ -1702,7 +1762,10 @@ namespace BigAmbitionsMP
             // and go back in the restore below, as the candidate and message copies do. Entities/
             // HeadhunterReplacementData.cs:11 holds one too and rides gi.headhunterPlans (GameInstance.cs:220) into
             // the save, so it is stripped the same way. (Employee.cs:23 and EmployeeStationController.cs:44 also
-            // hold one, but both are scene MonoBehaviours - nothing serializes them into the .hsg.)
+            // hold one, but both are scene MonoBehaviours - nothing serializes them into the .hsg.)  Its LOAD-side
+            // complement is StripOrphanNegotiations above (the live-session strip, run when a partner's copies land):
+            // this block keeps a partner's copy out of every save
+            // written from here, that one takes out what a save older than 033e705 already carries.
             var removedNegotiations = new List<AI.Employees.SalaryNegotiation.CandidateSalaryNegotiation>();
             var removedReplacements = new List<(Buildings.Office.Headquarters.HeadhunterPlan Plan, Entities.HeadhunterReplacementData Data)>();
             try
@@ -2143,6 +2206,7 @@ namespace BigAmbitionsMP
                     _rosterApplied[addr] = v.sig;
                     if (added + updated + gone.Count > 0)
                         Plugin.Logger.LogInfo($"[StaffRoster] applied '{addr}': +{added} ~{updated} -{gone.Count} (total injected {_injectedStaff.Count}).");
+                    if (added > 0) StripOrphanNegotiations("roster-apply '" + addr + "'");   // NEGO-ORPHAN: a partner's copies just landed - their leaked negotiations go
 
                     // If the local player is INSIDE this shop, prod every station to re-evaluate now
                     // (otherwise the native hourly re-evaluation picks the changes up).
@@ -2268,6 +2332,7 @@ namespace BigAmbitionsMP
                 _poolByOwner[ownerPid] = want;
                 if (added + updated + graced > 0)
                     Plugin.Logger.LogInfo($"[SharedShop] bench of '{ownerPid}' applied: +{added} ~{updated} (no longer listed: {graced}) — they can be placed in that owner's shared shops.");
+                if (added > 0) StripOrphanNegotiations("bench-apply '" + ownerPid + "'");   // NEGO-ORPHAN: bench copies landed - their leaked negotiations go
                 return added + updated > 0;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] ApplySharedPool: {ex.Message}"); return false; }
