@@ -807,6 +807,24 @@ namespace BigAmbitionsMP
                          + $" money={spgi.Money.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}";
                 }
 
+                case "dissolvecheck":
+                case "dissolverun":
+                {
+                    // DISSOLVE (2026-09-12): what the teardown WOULD change right now (dissolvecheck, count
+                    // only - nothing written and nothing logged), or a FORCED teardown (dissolverun) that
+                    // answers what it actually changed. Both run the SAME predicates. The ex-partner set is
+                    // built from the live merger surfaces - my co-members plus the owners of the injected
+                    // copies standing here - so the check is meaningful WHILE merged, which is the only state
+                    // worth testing; an empty set would read as "anyone who is not me" and the routine's own
+                    // live-membership guard would then answer zero to everything. Idempotent: a second run
+                    // answers all zeros.
+                    var dsvEx = MergerDissolve.LeverPartners();
+                    var dsv = verb == "dissolverun" ? MergerDissolve.RunCounted("lever", dsvEx)
+                                                    : MergerDissolve.Check(dsvEx);
+                    return $"OK {verb} logistics={dsv.Logistics} contracts={dsv.Contracts} hrlist={dsv.HrList}"
+                         + $" hrtag={dsv.HrTag} offers={dsv.Offers} copies={dsv.Copies}";
+                }
+
                 case "absence":
                 {
                     // Merger phase 3-B (B6). On the HOST the marks come from the live table; on any
@@ -1822,7 +1840,7 @@ namespace BigAmbitionsMP
                 }
 
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|hrtag|hrplanof|planown|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg|negotiations)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|hrtag|hrplanof|planown|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg|negotiations|dissolvecheck|dissolverun)";
             }
         }
 

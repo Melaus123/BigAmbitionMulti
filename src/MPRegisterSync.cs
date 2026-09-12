@@ -2379,6 +2379,61 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] DropBenchRecords: {ex.Message}"); }
         }
 
+        /// <summary>DISSOLVE (2026-09-12): every owner pid that has an injected copy standing here.</summary>
+        internal static List<string> InjectedOwners()
+        {
+            var owners = new List<string>();
+            try
+            {
+                foreach (var id in _injectedStaff.Keys)
+                {
+                    string o = OwnerOfInjected(id) ?? "";
+                    if (o.Length > 0 && !owners.Contains(o)) owners.Add(o);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] InjectedOwners: {ex.Message}"); }
+            return owners;
+        }
+
+        /// <summary>DISSOLVE (2026-09-12, narrowed after rig T-DISSOLVE run 2): drop every BENCH copy (an injected
+        /// record with no address) whose owner is one of <paramref name="owners"/> - an EMPTY set meaning every
+        /// bench copy, whoever owns it - and forget that owner's published bench so a later republish cannot
+        /// bring them back. ROSTER copies (a partner's shop staff, addressed) are NOT touched: they are the
+        /// world's staffing for that player's shops, merger or no merger, and the feed owns their lifecycle.
+        /// The grants that justified a bench are removed at accept and never come back, so an ex-partner's
+        /// bench copy has no reason to stay. Value-based: with nothing benched it counts 0 and writes
+        /// nothing. Returns how many (would) go.</summary>
+        internal static int DropBenchForOwners(HashSet<string> owners, bool apply, string why)
+        {
+            int n = 0;
+            try
+            {
+                if (owners == null) return 0;
+                var kill = new List<string>();
+                foreach (var kv in _injectedStaff)
+                {
+                    if (kv.Value.addr.Length > 0) continue;   // a roster copy staffs a partner's shop: not ours to drop
+                    string o = OwnerOfInjected(kv.Key) ?? "";
+                    if (owners.Count != 0 && !owners.Contains(o)) continue;
+                    // DISSOLVE fold c: with the EMPTY set ("anyone who is not me") a plain GRANTEE's bench is
+                    // legitimate - it stands on a direct Business grant, not on a company - so it stays.
+                    if (owners.Count == 0 && GrantSync.IsGrantedDirect(GrantKind.Business, o, MPConfig.PlayerId)) continue;
+                    kill.Add(kv.Key);
+                }
+                n = kill.Count;
+                if (!apply || n == 0) return n;
+                foreach (var id in kill) { RemoveInjectedStaff(id); _benchGrace.Remove(id); }
+                var pools = new List<string>();
+                foreach (var kv in _poolByOwner)
+                    if (owners.Count == 0 ? !GrantSync.IsGrantedDirect(GrantKind.Business, kv.Key, MPConfig.PlayerId)
+                                          : owners.Contains(kv.Key)) pools.Add(kv.Key);
+                foreach (var o in pools) _poolByOwner.Remove(o);
+                Plugin.Logger.LogInfo($"[SharedShop] dropped {n} bench {(n == 1 ? "copy" : "copies")} of {(owners.Count == 0 ? "every partner" : owners.Count + " ex-partner(s)")} ({why}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] DropBenchForOwners: {ex.Message}"); }
+            return n;
+        }
+
         private static BuildingRegistration? RegOfKey(string addressKey)
         {
             try

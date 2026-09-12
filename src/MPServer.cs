@@ -6396,6 +6396,16 @@ namespace BigAmbitionsMP
                                 foreach (var kv in StableIdByPlayer) if (kv.Value == mem) { mpid = kv.Key; break; }
                             if (mpid.Length > 0 && !exPids.Contains(mpid)) exPids.Add(mpid);
                         }
+                    // FOLD c C3 (r1 MINOR-3): the press list above must be pids (a press is held per pid), and
+                    // the stable -> pid reverse lookup only answers for a pid this session has seen, taking the
+                    // FIRST match - so a member who is offline, or who rejoined under a second pid, can be
+                    // missed. The merger store keeps STABLE ids, so the TRANSFER step below matches on those
+                    // instead: every stable in the group when the company dissolves, the leaver's alone when it
+                    // survives. Collected BEFORE StoreRemove, like exPids (lset is the store's own set).
+                    var exStables = new HashSet<string>(StringComparer.Ordinal);
+                    if (!dissolves) exStables.Add(s);
+                    else if (lset != null)
+                        foreach (var mem in lset) if (!string.IsNullOrEmpty(mem)) exStables.Add(mem);
 
                     MergerSync.StoreRemove(s);
                     foreach (var xp in exPids)
@@ -6405,6 +6415,65 @@ namespace BigAmbitionsMP
                     }
                     HostForgetCandidatesOf(actorPid);   // phase 4b (people) r2 (MINOR-9): their pool rows and claims leave with them
                     Plugin.Logger.LogInfo($"[Merger] '{actorPid}' left their merger group.");
+
+                    // DISSOLVE step 5 (2026-09-12, user ruling) - HOST ONLY. An OPEN employee transfer the
+                    // host is holding was authorised by a company that has just changed, so it must not land
+                    // on a machine that is no longer a co-member. Value-based and idempotent: a transfer
+                    // nobody has released yet has moved NOTHING and is simply cancelled (the entry is kept a
+                    // game day exactly as the deadline path keeps it, so a release still in the air finds it);
+                    // one the host is already holding goes HOME down the existing "return" leg. A transfer
+                    // that is already going back is left alone, and an adoption that already COMPLETED is a
+                    // real record on its new machine and is correct to keep - nothing here touches it.
+                    // Fold c: the sides are matched on STABLE ids, so an OFFLINE member's held transfers are
+                    // swept too. "Home" for an offline source is what RelayReturn already does - it hands the
+                    // record to whoever runs the from-address as a stand-in, and with nobody there it logs
+                    // "the host keeps '<employee>' until one of them is back" (:7687) and keeps holding it,
+                    // re-offered once a game hour by the transfers tick. There is no queue for an absent pid.
+                    int xBack = 0, xCancelled = 0;
+                    foreach (var xt in new List<HostTransfer>(_transfers.Values))
+                    {
+                        if (xt == null) continue;
+                        if (!exStables.Contains(StableOfPid(xt.SourcePid))
+                            && !exStables.Contains(StableOfPid(xt.DestPid))) continue;
+                        if (xt.Stage == "requested")
+                        {
+                            xt.Stage = "cancelled"; xt.Day = GameDayNow(); xt.Hour = GameHourNow();
+                            xCancelled++;
+                        }
+                        else if (xt.Stage == "adopting")
+                        {
+                            xt.Day = GameDayNow(); xt.Hour = GameHourNow();
+                            RelayReturn(xt);
+                            xBack++;
+                        }
+                    }
+                    if (xBack > 0 || xCancelled > 0)
+                        Plugin.Logger.LogInfo($"[Dissolve] transfers at leave: {xBack} held transfer(s) sent back to their source and "
+                                            + $"{xCancelled} un-released one(s) cancelled - the company that authorised them changed.");
+
+                    // DISSOLVE step 6 (D3) - HOST ONLY. An ABSENCE MARK is one member standing in for another
+                    // member's buildings while they are away; the moment that company changes the stand-in is
+                    // not a co-member of that owner any more, so the HAND-BACK runs NOW instead of waiting up
+                    // to 10 s for the reconcile's dead sweep (:835) to notice. HostDropMark IS the hand-back:
+                    // it drops the mark and sends the existing MergerHandover "Drop" leg, which is what makes
+                    // the stand-in lift the installed paperwork, give up the veil exception and hand the
+                    // promoted staff back (MergerAbsence.ApplyHandover -> UndoLocal) - no new message type.
+                    // Nothing has to be UPLOADED here: the stand-in's publishes were filed under the OWNER's
+                    // stable at every publish, so the host copy already is the owner's state, and the owner's
+                    // own return leg still runs when they come back. An OFFLINE owner is reached through their
+                    // simulator (their own pid is not in StableIdByPlayer, their stand-in's is).
+                    var deadMarks = new List<string>();
+                    foreach (var mk in MergerAbsence.Marks)
+                    {
+                        var mv = mk.Value;
+                        if (mv == null) continue;
+                        if (exPids.Contains(mv.OwnerPid) || exPids.Contains(mv.SimulatorPid)) deadMarks.Add(mk.Key);
+                    }
+                    foreach (var st in deadMarks)
+                        MergerAbsence.HostDropMark(st, "the company that made this stand-in was cancelled");
+                    if (deadMarks.Count > 0)
+                        Plugin.Logger.LogInfo($"[Dissolve] absence at leave: {deadMarks.Count} stand-in mark(s) handed back - "
+                                            + "the company that made them was cancelled.");
                     // r4: a dissolving company's offer (and one the leaver had out that nobody can answer any
                     // more) is retired by the validator AFTER the store change — a 3+ company keeps both.
                     PruneOffers("unanswerable after a member left the company");

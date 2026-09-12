@@ -1,0 +1,231 @@
+{
+  "id": "T-DISSOLVE",
+  "title": "merger cancel clean-up, two players: while merged, the host puts one of its own workers on the client's HR plan (a cross-member tag on the host's record, a partner id on the client's list) and the client holds the host's bench and roster copies; `dissolvecheck` shows the pending clean-up on both machines; the client leaves; both machines run the clean-up at the membership edge before the flip un-does itself; afterwards nothing cross-member remains: the tag is gone, the list entry is gone, no partner bench copies remain (roster copies that staff a partner's shops are the world's staffing and stay), `dissolvecheck` answers all zeros; ends dissolved, NO save",
+  "preconditions": "Fixture save1 (the host melaus, Client1). Build DISSOLVE-CLEANUP deployed (levers `dissolvecheck`, `dissolverun`; the routine at the membership edge). Logistics cross-deliveries and merger contracts are not created by any rig lever - those steps are review-verified only and count 0 here (the run reports the counts). FIXTURE HYGIENE: NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "plan": "oMg0Ie6U0iAKs859EUeIg==",
+    "hostShop": "6 ba:street_seventhstreet"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "hr assign REFUSED",
+    "mis-route",
+    "\\[Dissolve\\] .*: [a-z ]*(failed|exception|threw)",
+    "\\[Dissolve\\] .* failed"
+  ],
+  "oracles_report": [
+    "\\[Dissolve\\] ",
+    "\\[CrossHR\\] applied routed hrtag",
+    "\\[SharedShop\\] dropped .* bench"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        { "role": "h", "regex": "\\[Dissolve\\] logistics at first-state \\((state|world-ready)\\): [1-9]\\d* delivery destination\\(s\\) cancelled", "within_s": 120 },
+        { "role": "c", "regex": "\\[Dissolve\\] hr lists at first-state \\((state|world-ready)\\): [1-9]\\d* ex-partner worker\\(s\\) removed", "within_s": 120 }
+      ],
+      "note": "the AWAY-MEMBER SELF-HEAL on the fixture's own leftovers (fold d/e): before any merger, once each machine knows it is not a member AND its world is ready, the host cancels its delivery still aimed at a client building and the client drops the partner ids left on its HR plans by the hands-on session - whichever of the state and world-ready comes second runs it"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST DISSOLVE START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "both worlds settle: the host's staff and bench copies land on the client; the client's HR plan lands on the host as a display row"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "employees ${hostShop}",
+      "expect_result": "^OK [1-9]\\d* employee\\(s\\) @ '${hostShop}': ",
+      "capture": {
+        "hostEmp": "(?:: |; )([A-Za-z0-9]{20,22}==)\\|[^|;]*\\|assigned=${hostShop}\\|injected=False\\|"
+      },
+      "note": "a host person at the host's shop"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "planedit hr ${plan} assign ${hostEmp} true",
+      "expect_result": "^OK planedit hr ${plan} assign routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] applied routed hrtag on employee '${hostEmp}': plan '[^']*' -> '${plan}'",
+          "within_s": 15
+        }
+      ],
+      "note": "the cross-member arrangement to be cleaned: the client's plan lists the host's person; the host's record carries the client's plan id"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "hrplanof ${hostEmp}",
+      "expect_result": "^OK hrplanof employee='${hostEmp}' record=real owner='[^']*' plan='${plan}' resolves=shadow"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "bench",
+      "expect_result": "^OK bench [1-9]\\d* ",
+      "note": "the host's bench copies sit on the client"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=\\d+ contracts=\\d+ hrlist=\\d+ hrtag=[1-9]\\d* offers=\\d+ copies=\\d+",
+      "note": "the host would clear its tagged record"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=\\d+ contracts=\\d+ hrlist=[1-9]\\d* hrtag=\\d+ offers=\\d+ copies=[1-9]\\d*",
+      "note": "the client would drop the host's id from its plan and the host's BENCH copies (roster copies stay)"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "mark TEST DISSOLVE LEAVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Dissolve\\] hr tags at membership-edge: [1-9]\\d* own worker\\(s\\) un-tagged from an ex-partner's HR plan\\.",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[Dissolve\\] hr lists at membership-edge: [1-9]\\d* ex-partner worker\\(s\\) removed from this machine's own HR plans\\.",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[Dissolve\\] bench copies at membership-edge: [1-9]\\d* bench cop(y|ies) of an ex-partner's people dropped\\.",
+          "within_s": 15
+        }
+      ],
+      "note": "the membership edge runs the clean-up on both machines"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "sleep_s": 6,
+      "note": "the flip un-does itself (1 Hz) after the clean-up"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "hrplanof ${hostEmp}",
+      "expect_result": "^OK hrplanof employee='${hostEmp}' record=real owner='[^']*' plan='-?' resolves=(none|-)",
+      "note": "the tag is gone on the host"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "bench",
+      "expect_result": "^OK bench 0\\b",
+      "note": "no partner bench copies remain on the client (the host's shop staff copies stay - they are the world's staffing)"
+    },
+    {
+      "seq": 27,
+      "role": "both",
+      "cmd": "mark TEST DISSOLVE END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

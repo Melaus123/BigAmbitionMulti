@@ -85,7 +85,7 @@ namespace BigAmbitionsMP
         /// <summary>One transfer this machine STARTED and has not finished. It holds the live plan and
         /// destination objects so the phone report is raised by the game's own method on the real plan,
         /// and the withdrawn amounts so a remainder (or a give-back) goes home to the same warehouse.</summary>
-        private sealed class Pending
+        internal sealed class Pending
         {
             public string TransferId = "", PlanId = "", SourceKey = "", DestKey = "";
             public bool   IsExport;
@@ -97,7 +97,7 @@ namespace BigAmbitionsMP
             public readonly List<ItemAmountTarget>  NoStock = new();       // the native "no stock" rows
         }
 
-        private static readonly Dictionary<string, Pending> _pending = new();
+        internal static readonly Dictionary<string, Pending> _pending = new();
 
         /// <summary>Ids this machine has already started, so one delivery pass that runs twice inside a
         /// game hour starts ONE transfer (the id itself is the dedupe key - plan + destination + day +
@@ -785,7 +785,7 @@ namespace BigAmbitionsMP
 
         /// <summary>A transfer that ends before anything reached the destination: logged and dropped,
         /// with the native "no stock" rows still reported if the source had already collected any.</summary>
-        private static void Close(Pending t, string why)
+        internal static void Close(Pending t, string why)
         {
             Plugin.Logger.LogInfo($"[Cargo] transfer {t.TransferId} refused: {why}.");
             if (t.Withdrawn) RaiseReport(t, null);

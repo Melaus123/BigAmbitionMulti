@@ -585,6 +585,7 @@ namespace BigAmbitionsMP
             GameStatePatcher.HealStaleActiveVehicleId();   // round-68: BAMP_/unresolvable ActiveVehicleId = trapped-in-building + frozen-ghost poison
             MPRegisterSync.StripOrphanSyntheticEmployees("world-ready");   // clear duty-staff a prior save left behind
             MPRegisterSync.DemoteForeignAssignedStaff("world-ready");      // round-196: interrupted-transfer staff residue
+            MergerDissolve.HealIfPending("world-ready");   // DISSOLVE fold d: the heal armed by a first non-member state that landed before the world did
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
             OptionsGuard.PinClock("world-ready");   // OPTIONS-GUARD: a Game speed set before joining must not outrun the host clock
             MPSaveCoordinator.EnsurePortraitFolderForWorld("world-ready");   // DISK-JUNK backstop: the scene-loaded call bails while the session name is still unknown

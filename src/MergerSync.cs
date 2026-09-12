@@ -279,6 +279,25 @@ namespace BigAmbitionsMP
             foreach (var kv in _groupByPid) if (kv.Key != pid && kv.Value == g) yield return kv.Key;
         }
 
+        /// <summary>DISSOLVE (2026-09-12): has this machine had a merger state AT ALL in this SESSION? Until
+        /// it has, "I am not a member" is UNKNOWN rather than true. FOLD e: a SESSION fact - cleared only
+        /// with the session (DropOnDisconnect), never with a scene: a scene reset does not unlearn what the
+        /// host said, and the state that arrives during a load must still count once the world is there.</summary>
+        public static bool StateSeen { get; private set; }
+
+        /// <summary>FOLD d/e (re-checks of DISSOLVE): EVERY state that says "not a member" ARMS the
+        /// whole-world heal here, and MergerDissolve.HealIfPending runs it at whichever comes SECOND of
+        /// that state and world-ready, ONCE per world instance (HealedThisWorld). The state can land during
+        /// the load, before the world exists (a lobby joiner gets the host's load-time broadcast, a late
+        /// joiner the join replay), and for a fully dissolved company nothing ever re-sends it - so the arm
+        /// SURVIVES the scene reset that follows and the world-ready hook runs it. Cleared with the session.</summary>
+        public static bool HealPending { get; internal set; }
+
+        /// <summary>FOLD e: the whole-world heal ran for THIS world instance. Cleared with the scene, so a
+        /// second world load in the same session (the host's next hostload) heals again on ITS first
+        /// non-member state; cleared with the session.</summary>
+        public static bool HealedThisWorld { get; internal set; }
+
         /// <summary>ALL machines (host applies its own build; clients apply the broadcast). MAIN THREAD
         /// (may toast). Diff-based membership toasts so formation and dissolution are both announced.</summary>
         public static void ApplyState(MergerStatePayload p)
@@ -294,7 +313,30 @@ namespace BigAmbitionsMP
                     foreach (var pid in g.MemberPids ?? new List<string>())
                         if (!string.IsNullOrEmpty(pid)) byPid[pid] = g.GroupId;
                 }
+            // DISSOLVE (2026-09-12, user ruling): who was a co-member of MINE, read BEFORE the model is
+            // replaced. At this instant everything that IDENTIFIES an ex-partner is still standing - the
+            // flip still holds their buildings' parked runner and their HR shadows still classify a tag -
+            // because MergerFlip.Tick only un-flips on its next 1 Hz Update pass and THIS method runs on the
+            // MAIN THREAD off the message pump. So the teardown is driven from here, SYNCHRONOUSLY, before
+            // anything reconciles. A member who leaves and a member who is left behind both come through
+            // this one edge, and a 3+ company that survives one leave names only the leaver.
+            var wasCo = new HashSet<string>(CoMembersOf(MPConfig.PlayerId), System.StringComparer.Ordinal);
             _groupByPid = byPid; _groupInfo = info;
+            StateSeen = true;
+            var exPartners = new List<string>();
+            foreach (var was in wasCo)
+                if (!string.IsNullOrEmpty(was) && !MergedRuntime(MPConfig.PlayerId, was)) exPartners.Add(was);
+            // FOLD c C1 (2026-09-12): TWO edges, never both. The named one above; and the member who was
+            // OFFLINE when the company was cancelled, who has nothing to diff - their FIRST state of the
+            // session simply says "you are in no group". That is the instant this machine's membership
+            // becomes KNOWN. FOLD d/e: EVERY non-member state ARMS the empty-set ("anyone who is not me")
+            // sweep, and MergerDissolve.HealIfPending RUNS it at whichever comes second of the state and
+            // world-ready, once per world instance - the state usually lands during the load, before the
+            // world exists (the host's load-time broadcast, or a join replay), and for a fully dissolved
+            // company nothing re-sends it. Never while I am still a member. On a save that was never
+            // merged it is value-based and changes nothing.
+            if (exPartners.Count > 0) MergerDissolve.Run("membership-edge", exPartners);
+            else if (!IAmMember) { HealPending = true; MergerDissolve.HealIfPending("state"); }
             string sigAfter = GroupModelSignature(info);
             _sig = sigAfter;                                      // also invalidates the ForeignGroups cache
             // Phase 1-A r4: BOTH chips are DERIVED from the host's offer table, on every machine, on every
@@ -413,6 +455,12 @@ namespace BigAmbitionsMP
         /// goes. Idempotent - a second call with no state left is a no-op.</summary>
         public static void DropOnDisconnect(float heldSeconds)
         {
+            // FOLD f (re-check r3): the three SESSION facts clear even when no group exists - the fully dissolved
+            // world is exactly the case they serve, and the early return below would otherwise skip them, letting an
+            // arm raised in one session fire in the next.
+            StateSeen = false;        // the SESSION boundary - the next state is a FIRST state again
+            HealPending = false;      // nothing armed survives the session
+            HealedThisWorld = false;
             if (_groupByPid.Count == 0 && _groupInfo.Count == 0) return;
             _groupByPid = new Dictionary<string, string>();
             _groupInfo  = new Dictionary<string, MergerGroupInfo>();
@@ -438,6 +486,8 @@ namespace BigAmbitionsMP
             _groupInfo  = new Dictionary<string, MergerGroupInfo>();
             _sig = ""; _foreignSig = "\u0001";   // r2/R3+R5: model gone, cache invalid
             _wasMember = false;
+            HealedThisWorld = false;  // FOLD e: a new world instance heals again on its first non-member state;
+                                      // StateSeen and HealPending SURVIVE the scene (the state may have landed mid-load)
             _lastStatsPushDay = -1;   // B1: a new scene pushes again on the next state message
             IncomingFromPid = ""; OutgoingToPid = "";
         }

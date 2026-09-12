@@ -1,0 +1,31 @@
+{
+  "id": "T-DISSOLVE-PROBE",
+  "title": "probe (2026-09-12): on the HOST, what owner do the client's injected copies carry, and what does dissolvecheck count while merged; no assertions beyond OK; ends dissolved, NO save",
+  "preconditions": "Fixture save1. Build DISSOLVE-CLEANUP deployed. Diagnostic only.",
+  "instances": 2,
+  "vars": { "clientPid": "Client1", "hostPid": "melaus", "session": "save1", "clientShop": "3 ba:street_broadwaystreet" },
+  "oracles_absent": [ "NullReferenceException", "HarmonyException" ],
+  "oracles_report": [ "\\[SharedShop\\] InjectedOwners", "\\[Dissolve\\] " ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 4, "role": "both", "cmd": "mark TEST PROBE START", "expect_result": "OK MARK" },
+    { "seq": 5, "role": "h", "cmd": "merge propose ${clientPid}", "expect_result": "OK merge propose sent" },
+    { "seq": 6, "role": "h", "sleep_s": 1 },
+    { "seq": 7, "role": "c", "cmd": "merge accept", "expect_result": "OK merge accept sent" },
+    { "seq": 8, "role": "h", "sleep_s": 30 },
+    { "seq": 9, "role": "h", "cmd": "mergestatus", "expect_result": "member=True" },
+    { "seq": 10, "role": "h", "cmd": "bench", "expect_result": "^OK bench" },
+    { "seq": 11, "role": "h", "cmd": "employees ${clientShop}", "expect_result": "^OK", "capture": { "clientEmp": "(?:: |; )([A-Za-z0-9]{20,22}==)\\|[^|;]*\\|assigned=${clientShop}\\|injected=True\\|" } },
+    { "seq": 12, "role": "h", "cmd": "hrplanof ${clientEmp}", "expect_result": "^OK hrplanof" },
+    { "seq": 13, "role": "h", "cmd": "dissolvecheck", "expect_result": "^OK dissolvecheck" },
+    { "seq": 14, "role": "c", "cmd": "dissolvecheck", "expect_result": "^OK dissolvecheck" },
+    { "seq": 15, "role": "c", "cmd": "merge leave", "expect_result": "OK merge leave sent" },
+    { "seq": 16, "role": "h", "sleep_s": 6 },
+    { "seq": 17, "role": "h", "cmd": "hrplanof ${clientEmp}", "expect_result": "^OK hrplanof" },
+    { "seq": 18, "role": "h", "cmd": "dissolvecheck", "expect_result": "^OK dissolvecheck" },
+    { "seq": 19, "role": "h", "cmd": "mergestatus", "expect_result": "member=False" },
+    { "seq": 20, "role": "both", "cmd": "mark TEST PROBE END", "expect_result": "OK MARK" }
+  ]
+}
