@@ -1706,6 +1706,12 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    // PHASE 5 / P8 (2026-09-12): the candidate and message restores come FIRST. They do not
+                    // touch gi.EmployeeInstances, so the employee guard below was silently swallowing them on
+                    // any save where that list was null — a stripped partner candidate or phone message would
+                    // then never go back. The guard stays for the employee/shift loops that do need it.
+                    CompanyCandidates.RestoreInjected(removedCandidates, "the save");
+                    restoreMessages();
                     var gi = SaveGameManager.Current;
                     if (gi?.EmployeeInstances == null) return;
                     foreach (var emp in removedEmployees)
@@ -1725,8 +1731,6 @@ namespace BigAmbitionsMP
                             if (ReferenceEquals(day.workShifts[j], shift)) { present = true; break; }
                         if (!present) day.AddWorkShift(shift);
                     }
-                    CompanyCandidates.RestoreInjected(removedCandidates, "the save");
-                    restoreMessages();
                     if (removedEmployees.Count > 0)
                         Plugin.Logger.LogInfo($"[SynthStaff] restored {removedEmployees.Count} synthetic(s) after save ({when}).");
                 }

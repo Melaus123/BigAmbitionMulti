@@ -300,11 +300,13 @@ namespace BigAmbitionsMP
             // them back after, so a fork save that beats this drain still cannot write an absent owner's
             // paperwork into the player's own .hsg.
             try { GameStatePatcher.EnqueueOnMainThread(MergerAbsence.Reset); } catch { }
-            // PHASE 4b R10 (r2 re-check): OnDisconnected does NOT clear MergerSync._groupByPid (only a
-            // MergerState receive writes it), so IAmMember stays true after a drop and the feed's
+            // PHASE 4b R10 (r2 re-check): OnDisconnected does NOT clear MergerSync._groupByPid here (only a
+            // MergerState receive writes it), so IAmMember stays true at this point and the feed's
             // membership tick never fires its clear - a partner's rows would keep showing on a machine
             // that is no longer connected to anyone. Marshalled to the main thread exactly as the
             // absence reset above is; it touches tracking only, never any game state.
+            // D25 (2026-09-12): the merged-company VIEW itself now goes too, but only after a short
+            // GRACE armed below (MergerSync.ArmDropGrace) - a blip that reconnects keeps the company.
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyFeed.ClearAll("the connection dropped")); } catch { }
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyLists.ClearAll("the connection dropped")); } catch { }   // wave 4: no partner display copies without a session
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyCandidates.ClearAll("the connection dropped")); } catch { }   // phase 4b (people): same rule for the shared candidate copies
@@ -381,6 +383,10 @@ namespace BigAmbitionsMP
                 // player any more — an open page on one rebuilds itself (ruling 5). A reconnect re-pushes the set.
                 try { GrantSync.SetSharedManage(null); } catch { }
                 try { MPRegisterSync.DropBenchRecords("link lost"); } catch { }   // the owners' benches leave with the link
+                // D25 THE BLIP RULE (user 2026-09-12): a NON-voluntary drop starts the merged-company
+                // grace. A voluntary leave/quit is not armed - it ends at the scene boundary, which
+                // resets the runtime state outright (MergerSync.ResetSceneState).
+                if (!voluntary) { try { MergerSync.ArmDropGrace(why); } catch { } }
                 // Involuntary drop while IN-GAME → the MP session is over for this
                 // client.  Freeze + notice; the player can dismiss it and keep
                 // playing offline as an SP fork.  (IL2CPP in-game check must run

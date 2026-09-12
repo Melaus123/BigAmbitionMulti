@@ -2832,6 +2832,42 @@ namespace BigAmbitionsMP
             return simulated;
         }
 
+        /// <summary>PHASE 5 (D28/D29, 2026-09-12): the public form of OwnersIdentity, read by the merger
+        /// guards in MPPatches so the settings save on a flipped partner shop is owned by ONE body - the
+        /// routed patch below - instead of two prefixes racing for the same method.</summary>
+        internal static bool RoutesIdentityFor(BuildingRegistration reg, out string addr, out bool simulated)
+        {
+            addr = ""; simulated = false;
+            return reg != null && OwnersIdentity(reg, out addr, out simulated);
+        }
+
+        /// <summary>PHASE 5 (D30): is there a machine that would APPLY a routed op on this address right
+        /// NOW? The host's resolver answers directly; a client cannot see the roster, so a live session is
+        /// the best it knows (the host logs the refusal when nobody runs it). Re-read on every screen
+        /// refresh, so a runner coming back re-enables the control that was greyed while it was away.</summary>
+        internal static bool RunnerReachable(string addr)
+        {
+            if (string.IsNullOrEmpty(addr)) return false;
+            try
+            {
+                if (MPServer.IsRunning)
+                {
+                    string t = MPServer.RouteTargetFor(addr);
+                    return t.Length > 0 && t != MPConfig.PlayerId;
+                }
+            }
+            catch { return false; }
+            return MPClient.IsConnected;
+        }
+
+        /// <summary>D29 (user 2026-09-12): a LIVE company member may shut a partner shop down - it ROUTES to
+        /// the machine that runs it. A STAND-IN may not: running a shop in the owner's absence is not
+        /// permission to close it, so ruling 34's refusal stays for it (and for a permission helper, who is
+        /// not in the company at all).</summary>
+        internal static bool ShutdownRoutesFrom(string addr, bool simulated)
+            => !simulated && !string.IsNullOrEmpty(addr) && MergerSync.IAmMember
+               && MergerFlip.IsFlipped(addr) && RunnerReachable(addr);
+
         /// <summary>The Marketing tab on a shared shop: open the session so the carry lands and the poll runs.</summary>
         [HarmonyPatch(typeof(BizManMarketing), nameof(BizManMarketing.RefreshData))]
         public static class Patch_BizManMarketing_RefreshData_Session
@@ -3531,8 +3567,17 @@ namespace BigAmbitionsMP
                     // business, and native never touches these two controls — so greying without releasing
                     // left the helper's OWN shops unable to change type or shut down for the rest of the
                     // session (review M3).
-                    bool shared = OpenSession("settings");
-                    SetSettingsControlsInteractable(__instance, !shared);
+                    OpenSession("settings");
+                    // D30: keyed on the SAME predicate the refusal/route reads, and re-evaluated on every
+                    // refresh. OpenSession answers off InfoRead, which is deliberately FALSE on an address
+                    // this machine stands in for - so greying off it left a stand-in's Shutdown and type
+                    // control looking live while the patches below refused them.
+                    string gaddr = ""; bool gsim = false;
+                    var greg = OpenPageReg();
+                    bool identity = greg != null && OwnersIdentity(greg, out gaddr, out gsim);
+                    SetSettingsControlsInteractable(__instance,
+                        typeOk:     !identity,
+                        shutdownOk: !identity || ShutdownRoutesFrom(gaddr, gsim));
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} settings tab: {ex.Message}"); }
             }
@@ -3541,33 +3586,83 @@ namespace BigAmbitionsMP
         private static readonly System.Reflection.FieldInfo? _fTypeDropdown =
             AccessTools.Field(typeof(BizManSettings), "businessTypeDropdown");
 
-        private static void SetSettingsControlsInteractable(BizManSettings inst, bool interactable)
+        private static void SetSettingsControlsInteractable(BizManSettings inst, bool typeOk, bool shutdownOk)
         {
             // The dropdown is disabled through its own API, which also kills the search input: greying only
             // its Button leaves that field live, and typing in it re-opens the option panel.
-            try { if (_fTypeDropdown?.GetValue(inst) is UI.Elements.Dropdown dd) dd.SetInteractable(interactable); }
+            try { if (_fTypeDropdown?.GetValue(inst) is UI.Elements.Dropdown dd) dd.SetInteractable(typeOk); }
             catch { }
             // Shutdown is wired in the PREFAB, so it is found by the method its click calls — the project's
             // own way, which also says so once when it matches nothing rather than leaving a live-looking
             // control (a name guess would fail silently).
-            try { SharedShopVisibility.SetButtonsCallingPublic(inst.transform, "ShutdownBusiness", interactable); }
+            // D30 (2026-09-12): the two verdicts are no longer the same one. The business TYPE has no
+            // routable native method and stays refused on every building whose identity is not ours;
+            // Shutdown ROUTES for a live company member (D29) and is greyed only where the press would be
+            // refused - a stand-in, a permission helper, or a partner shop nobody is running right now.
+            try { SharedShopVisibility.SetButtonsCallingPublic(inst.transform, "ShutdownBusiness", shutdownOk); }
             catch { }
         }
 
+        /// <summary>PHASE 5 r2 (J3), the arming side. `BizManSettings.ShutdownBusiness` IS the game's own
+        /// confirmation wrapper: its whole body is `HudConfirm.Show(..., delegate { ... })` (decompile
+        /// BizManSettings.cs:364-381). Routing at the METHOD therefore fired on the FIRST click and the
+        /// player never saw the prompt. The address is armed here for exactly the length of that call, and
+        /// the shared HudConfirm wrapper takes it.</summary>
+        private static string _shutdownConfirmAddr = "";
+
+        /// <summary>THE WRAPPER'S SIDE (SharedShopStaff.Patch_HudConfirm_MassTrainWindow), exactly as the
+        /// purchasing end/urgent route works. Null = nothing armed, leave the dialog's own callback alone.
+        /// A delegate = use this INSTEAD, so the native callback - which tears the REPLICA down - never
+        /// runs, while the player still answers the game's own prompt. Taken once.</summary>
+        internal static Action TakeShutdownConfirmRoute()
+        {
+            string addr = _shutdownConfirmAddr;
+            if (addr.Length == 0) return null;
+            _shutdownConfirmAddr = "";
+            return () =>
+            {
+                try
+                {
+                    SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "mergershutdown" });
+                    Plugin.Logger.LogInfo($"[Merger] shutdown routed for '{addr}' - the machine that runs it closes the business.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] shutdown confirmed route: {ex.Message}"); }
+            };
+        }
+
         /// <summary>Ruling 34: a helper never changes the business type or shuts the shop down. The buttons
-        /// are greyed above; these are the blocks, because a greyed control is a courtesy and not a gate.</summary>
+        /// are greyed above; these are the blocks, because a greyed control is a courtesy and not a gate.
+        /// D29 (user 2026-09-12): a LIVE company member is the exception - their shutdown of a partner shop
+        /// ROUTES to the machine that runs it and is applied there with the game's own teardown. A STAND-IN
+        /// still may not (it merely runs the shop in the owner's absence), and neither may a permission
+        /// helper, who is not in the company at all.
+        /// r2 (J3): the ROUTE no longer replaces the method - it ARMS and lets the native body run, so the
+        /// game's own confirmation dialog appears and the send happens only when the player confirms it.</summary>
         [HarmonyPatch(typeof(BizManSettings), nameof(BizManSettings.ShutdownBusiness))]
         public static class Patch_BizManSettings_Shutdown_Blocked
         {
             static bool Prefix(BizManSettings __instance)
             {
+                _shutdownConfirmAddr = "";
                 var biz = __instance != null ? __instance.GetComponentInParent<BizManBusiness>() : null;
                 var reg = biz != null ? biz.buildingRegistration : null;
-                if (reg == null || !OwnersIdentity(reg, out var addr, out _)) return true;   // W3-0 r1 (F8): a simulator may run the shop, never close it
+                if (reg == null || !OwnersIdentity(reg, out var addr, out var simulated)) return true;   // W3-0 r1 (F8): a simulator may run the shop, never close it
+                if (ShutdownRoutesFrom(addr, simulated))
+                {
+                    _shutdownConfirmAddr = addr;
+                    return true;   // native reaches HudConfirm.Show; the wrapper swaps its delegate for the routed send
+                }
                 if (_logged.Add("st-shutdown|" + addr))
-                    Plugin.Logger.LogInfo($"{Tag} shutdown refused on shared '{addr}' — reserved for the merger (ruling 34).");
+                    Plugin.Logger.LogInfo(simulated
+                        ? $"[Merger] shutdown refused on '{addr}' - a stand-in runs this shop, it does not close it (D29)."
+                        : $"{Tag} shutdown refused on shared '{addr}' — reserved for the merger (ruling 34).");
                 return false;
             }
+
+            // The arming lives exactly as long as this method call: the native body reaches HudConfirm.Show
+            // inside it and the wrapper consumes the arming there. If it never got that far (an early native
+            // return), this clears it so a later dialog cannot pick up a stale address.
+            static void Postfix() { _shutdownConfirmAddr = ""; }
         }
 
         /// <summary>Save on a shared shop: route the rename and the logo instead of writing the replica.
@@ -4409,7 +4504,7 @@ namespace BigAmbitionsMP
 
         /// <summary>OPERATOR, MAIN THREAD (V2c). One whole logistics plan, REPLACE-BY-ID: the old plan object
         /// leaves gi.logisticsManagerPlans and the incoming one is built by the absence installer. The
-        /// cross-owner refusal already happened at the host (MPServer.PlanCrossesOwners) and on the member;
+        /// out-of-company refusal already happened at the host (MPServer.PlanCrossesCompanies) and on the member;
         /// this is the belt-and-braces re-check on the machine that will actually run the legs.
         /// WAVE 4 r2 (review MAJOR-3): the install is UNTAGGED only when the headquarters is TRULY MINE. On a
         /// STAND-IN it is tagged with the ABSENT OWNER's pid, exactly like the hand-over's own installs -
@@ -4447,6 +4542,181 @@ namespace BigAmbitionsMP
                                                            : $"tagged to the absent owner '{standIn}', so it leaves with them."));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>PHASE 5 / D27 (user 2026-09-12) - RUNNER, MAIN THREAD: end the rental of a building a
+        /// company member asked to give up. The interior sale and the deposit refund happen HERE, on the
+        /// owner's world, and the shared wallet absorbs the credit through the ordinary ChangeMoney forward
+        /// (D6) - the member never writes their replica.
+        ///
+        /// There is no routable native entry: BizManPresentation.OnTerminateContractConfirm (decompile
+        /// BizManPresentation.cs:624-708) is a PRIVATE INSTANCE method bound to the open BizMan page's
+        /// `bizManBusiness` field, and on the runner that page is not open. So the sequence is replayed with
+        /// the game's OWN methods, in NATIVE'S OWN ORDER.
+        /// r2 (J5, review MAJOR-3/4/5/6) - four corrections, each against the decompile:
+        ///  (a) the business LOGO FOLDER is deleted in the SOLD branch, where native deletes it (:643-646);
+        ///  (b) the FURNITURE and FOOD delivery contract sweeps native runs (:703-704) are replayed - they
+        ///      are native's own steps and BusinessHelper.ShutdownBusiness touches neither list;
+        ///  (c) both credits carry the ADDRESS (:650/:700 `ChangeMoneySafe(amount, info, null, address)`);
+        ///      the 2-argument form booked them unattributed;
+        ///  (d) BusinessHelper.ShutdownBusiness is NOT called. Native's terminate never calls it, and it
+        ///      does strictly more than native does here - unassigning employees, stripping the
+        ///      DeliveryContracts and licensing rows and running DeleteHQPlans on a headquarters. What
+        ///      native does instead is replayed below in its order: the closure figure (items + vehicles at
+        ///      the address + the deposit, :635-642), the logo folder, the furniture credit, the sold-branch
+        ///      notification, the item removals and vehicle deletes, the rental fields, the warehouse plan
+        ///      cancel and the businesstype_empty stamp (:683-690), the POI/map/guiders, the bare deposit
+        ///      credit when nothing was sold, the two contract sweeps and then the task completion, and the
+        ///      rented-building game event.
+        /// r3 (K2/K3/K4/K5, review 2026-09-12) - four more, each against the decompile:
+        ///  (e) the transaction `address` value is the FORMATTED address (:630-634), not the internal key;
+        ///  (f) the sold branch replays native's own notification (:651-662) on the runner - the game's own
+        ///      key and the game's own data, so the runner sees what a local terminate would show;
+        ///  (g) GlobalEvents.onBuildingRegistrationChange is NOT raised - native's terminate never raises it
+        ///      (only the shutdown path does, BizManSettings.cs:380);
+        ///  (h) the task completion runs AFTER both contract sweeps, where native's lazy query lands (:705).</summary>
+        private static void ApplyRoutedTerminate(BuildingRegistration reg, SharedWorkEditPayload p)
+        {
+            try
+            {
+                if (reg == null)
+                { Plugin.Logger.LogWarning($"[Merger] terminate-rental REFUSED for '{p.AddressKey}': no registration here."); return; }
+                if (!reg.RentedByPlayer)
+                { Plugin.Logger.LogWarning($"[Merger] terminate-rental REFUSED for '{p.AddressKey}': the building is not rented here."); return; }
+
+                var items = new List<BigAmbitions.Items.ItemInstance>();
+                try { if (reg.itemInstances != null) foreach (var ii in reg.itemInstances.Values) if (ii != null) items.Add(ii); }
+                catch { }
+                var vehicles = new List<VehicleInstance>();
+                try
+                {
+                    var vi = SaveGameManager.Current?.VehicleInstances;
+                    if (vi != null)
+                        foreach (var v in vi)
+                        {
+                            if (v == null) continue;
+                            bool here = false; try { here = v.Address == reg.Address; } catch { }
+                            if (here) vehicles.Add(v);
+                        }
+                }
+                catch { }
+
+                string name = reg.BusinessName ?? "";
+                // (e) native builds the label from Address.ToFormattedString() (:630-634); AddressKey is the
+                // internal "<number> <street key>" and would render raw in the transaction list.
+                string addrText = p.AddressKey;
+                try { addrText = Streets.AddressHelper.ToFormattedString(reg.Address); } catch { }
+                var data = new Dictionary<string, string> { { "address", addrText } };
+                bool sold = items.Count > 0 || vehicles.Count > 0;
+                float credit = 0f;
+                if (sold)
+                {
+                    foreach (var ii in items)    { try { credit += ii.GetSellingPrice(); } catch { } }
+                    foreach (var v in vehicles)  { try { credit += v.GetSellingPrice(); } catch { } }
+                    try { credit += reg.lastDeposit; } catch { }
+                    // (a) native deletes the logo folder HERE, inside the sold branch (decompile :643-646).
+                    try
+                    {
+                        string dir = LogoHelper.GetPlayerBusinessLogoPath(name);
+                        if (System.IO.Directory.Exists(dir)) System.IO.Directory.Delete(dir, true);
+                    }
+                    catch { }
+                    // (c) the ADDRESS goes with the credit, as native passes it (:648-650).
+                    GameManager.ChangeMoneySafe(credit, new TransactionInfo("ba:transaction_depositreturnfurniture", data), null, reg.Address);
+                    // (f) native shows its own sold notification HERE (:651-662) - same key, same two values.
+                    try
+                    {
+                        UI.Notification.Notifications.Show(UI.Notification.NotificationType.Success,
+                            "bizman_presentation_notification_itemsold",
+                            new Dictionary<string, string>
+                            {
+                                { "price", Extensions.GenericExtensions.ToShortCurrencyFormat(credit) },
+                                { "name",  addrText },
+                            });
+                    }
+                    catch { }
+                    foreach (var ii in items)   { try { reg.RemoveItemInstanceFromBuilding(ii); } catch { } }
+                    // Native passes a VehicleController only for a Hamptons HOUSE (decompile :670-675); a
+                    // rented business building is never one, so the plain delete is the same call.
+                    foreach (var v in vehicles) { try { v.Delete(null); } catch { } }
+                }
+
+                // The rental fields, then native's two type-dependent steps (:679-690). The building type is
+                // read off the registration (BuildingRegistration.GetBuildingType, decompile :203) - native
+                // reads the residential one off the open page's `building`, which the runner does not have.
+                reg.BusinessName = null;
+                reg.RentedByPlayer = false;
+                reg.AvailableForRent = true;
+                reg.takenOver = false;
+                string btype = ""; try { btype = reg.GetBuildingType() ?? ""; } catch { }
+                if (btype == "ba:buildingtype_warehouse")
+                { try { Buildings.Office.Headquarters.PurchasingAgentHelper.CancelPlansThatDeliverToAddress(reg.Address); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] terminate-rental purchasing plans '{p.AddressKey}': {ex.Message}"); } }
+                if (btype != "ba:buildingtype_residential") reg.businessTypeName = "ba:businesstype_empty";
+                InvalidateLogoCaches(name, name);
+                try { InstanceBehavior<CityManager>.Instance.FindCityBuildingController(reg.Address)?.UpdatePoi(); } catch { }
+                try { InstanceBehavior<UI.UIs>.Instance?.mapFilters.ApplyFilters(); } catch { }
+                try { UI.Guiders.GuidersManager.UpdateGuidersWithAddress(reg.Address); } catch { }
+                try { Helpers.RealEstateHelper.AddNoHomeModifierIfNeeded(); } catch { }
+                if (!sold)
+                {
+                    try { credit = reg.lastDeposit; } catch { }
+                    GameManager.ChangeMoneySafe(credit, new TransactionInfo("ba:transaction_depositreturn", data), null, reg.Address);
+                }
+                // (b)/(h) native's own tail (:702-705): BOTH delivery contract lists are swept and THEN the
+                // address's tasks are completed - native's task query is lazy and is not walked until
+                // InstantlyCompleteListOfTasks at :705, after both sweeps. Neither list is touched by
+                // BusinessHelper.ShutdownBusiness, and (g) native raises no registration-change event here.
+                try { SaveGameManager.Current.FurnitureDeliveryContracts.RemoveAll(x => x.toAddress == reg.Address); } catch { }
+                try { Buildings.BuildingTypes.Special.FoodDelivery.FoodDeliveryHelper.RemoveContractsForAddress(reg.Address); } catch { }
+                try
+                {
+                    var tasksUi = InstanceBehavior<UI.UIs>.Instance?.tasksUI;
+                    if (tasksUi != null)
+                    {
+                        var done = new List<Entities.TodoTask>();
+                        foreach (var t in SaveGameManager.Current.TodoTasks)
+                            if (t != null && t.address == reg.Address) done.Add(t);
+                        if (done.Count > 0) tasksUi.InstantlyCompleteListOfTasks(done);
+                    }
+                }
+                catch { }
+                try { GameEvent.Invoke("ba:gameevent_rentedbuilding"); } catch { }
+                SaveGameManager.MarkChange();
+                Plugin.Logger.LogInfo($"[Merger] terminate-rental applied for '{p.AddressKey}' from '{p.PlayerId}': "
+                                    + $"{items.Count} item(s) and {vehicles.Count} vehicle(s) sold, ${credit:N0} returned here (the shared wallet absorbs it).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] terminate-rental REFUSED for '{p.AddressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>PHASE 5 / D29 (user 2026-09-12) - RUNNER, MAIN THREAD: close a partner shop a LIVE company
+        /// member shut down. The game's own teardown does all of it (BusinessHelper.ShutdownBusiness,
+        /// decompile Helpers/BusinessHelper.cs:931 - the same call BizManSettings.ShutdownBusiness makes at
+        /// BizManSettings.cs:375); the rental itself is untouched, exactly as native leaves it.</summary>
+        private static void ApplyRoutedShutdown(BuildingRegistration reg, SharedWorkEditPayload p)
+        {
+            try
+            {
+                if (reg == null)
+                { Plugin.Logger.LogWarning($"[Merger] shutdown REFUSED for '{p.AddressKey}': no registration here."); return; }
+                string name = reg.BusinessName ?? "";
+                if (string.IsNullOrEmpty(name))
+                { Plugin.Logger.LogWarning($"[Merger] shutdown REFUSED for '{p.AddressKey}': no business runs here."); return; }
+                try
+                {
+                    string dir = LogoHelper.GetPlayerBusinessLogoPath(name);
+                    if (System.IO.Directory.Exists(dir)) System.IO.Directory.Delete(dir, true);
+                }
+                catch { }
+                Helpers.BusinessHelper.ShutdownBusiness(reg);
+                InvalidateLogoCaches(name, name);
+                try { InstanceBehavior<CityManager>.Instance.FindCityBuildingController(reg.Address)?.UpdatePoi(); } catch { }
+                try { InstanceBehavior<UI.UIs>.Instance?.mapFilters.ApplyFilters(); } catch { }
+                try { UI.Guiders.GuidersManager.UpdateGuidersWithAddress(reg.Address); } catch { }
+                try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+                SaveGameManager.MarkChange();
+                Plugin.Logger.LogInfo($"[Merger] shutdown applied for '{p.AddressKey}' from '{p.PlayerId}': '{name}' closed with the game's own teardown.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] shutdown REFUSED for '{p.AddressKey}': {ex.Message}"); }
         }
 
         // ═══════════════ owner-side edit apply ═══════════════
@@ -4493,6 +4763,11 @@ namespace BigAmbitionsMP
                 // own method, because those four families are screen-layer only on the member (an installed
                 // HR or headhunter copy would train, insure and recruit a second time).
                 if (p.Op == "mergerplanedit") { CompanyPlans.ApplyRouted(reg, p); return; }
+                // PHASE 5 (D27/D29, 2026-09-12): the two IDENTITY/DEED commitments a member can now make on
+                // a partner building. Like the wave-4 routes these are commitments on this machine's own
+                // state, not tab edits, so neither echoes a tab snapshot.
+                if (p.Op == "mergerterminate") { ApplyRoutedTerminate(reg, p); return; }
+                if (p.Op == "mergershutdown")  { ApplyRoutedShutdown(reg, p); return; }
 
                 bool applied; string echoTab;
                 if (p.Op == "rename" || p.Op == "logo")

@@ -3507,12 +3507,13 @@ namespace BigAmbitionsMP
             }
         }
 
-        // Merger slice 3 — DEED GUARD (TEMPORARY until deed ops are routed): terminating the rental
-        // contract of a FLIPPED (partner-owned) business would execute natively on the local REPLICA —
-        // items sold and deposit returned locally while the real owner keeps the business (Class 10
-        // divergence). The merger contract ALLOWS deed changes (user 2026-07-07, "this is ours"), so
-        // this becomes a ROUTED owner-side op in the next increment; until then block it rather than
-        // corrupt. Inert without a merger (FlippedCount == 0 short-circuit).
+        // Merger slice 3 — DEED GUARD, retired by PHASE 5 / D27 (user 2026-09-12): terminating the rental
+        // contract of a FLIPPED (partner-owned) business used to be blocked, because the native path sells
+        // the interior and refunds the deposit on the local REPLICA while the real owner keeps the building
+        // (Class 10 divergence). It now ROUTES instead: the member's confirm sends a `mergerterminate` op on
+        // the shared-work-edit carrier to the machine that RUNS the building, and the sale and the refund
+        // happen THERE, on the owner's world, with the shared wallet absorbing the credit (D6). Nothing is
+        // written on the replica here. Inert without a merger (FlippedCount == 0 short-circuit).
         [HarmonyPatch(typeof(BizManPresentation), "OnTerminateContractConfirm")]
         public static class Patch_BizMan_TerminateContract_MergerDeedGuard
         {
@@ -3526,19 +3527,38 @@ namespace BigAmbitionsMP
                     if (reg == null) return true;
                     string key = GameStateReader.AddressKey(reg);
                     if (!MergerFlip.IsFlipped(key)) return true;   // genuinely mine — native flow
-                    PassengerHud.Toast("Only the deed holder can terminate this rental (routed deed changes coming).");
-                    Plugin.Logger.LogInfo($"[Merger] deed guard: blocked local contract-termination of flipped '{key}'.");
-                    return false;
+                    // D27: a STAND-IN MAY run it. On the machine simulating an absent owner's businesses the
+                    // address is still flipped, but the lifted copy IS the live state and this machine is the
+                    // route target — the native path here is the owner's own path, so it runs unchanged.
+                    bool standIn = false; try { standIn = MergerAbsence.SimulatesHere(key); } catch { }
+                    if (standIn) return true;
+                    if (!MergerSync.IAmMember)
+                    {
+                        Plugin.Logger.LogInfo($"[Merger] terminate-rental refused for '{key}': this machine is not a company member.");
+                        return false;
+                    }
+                    if (!SharedShopWorkTabs.RunnerReachable(key))
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] terminate-rental refused for '{key}': nobody is running that building right now.");
+                        return false;
+                    }
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    { PlayerId = MPConfig.PlayerId, AddressKey = key, Op = "mergerterminate" });
+                    Plugin.Logger.LogInfo($"[Merger] terminate-rental routed for '{key}' — the machine that runs it sells the interior and returns the deposit there.");
+                    return false;   // the local screen closes with no native write; the owner's pushes carry the result back
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] deed guard: {ex.Message}"); return true; }
             }
         }
 
-        // Merger slice 3 — settings-save guard (same reasoning as the deed guard): BizManSettings.
-        // SaveBusinessInformation bundles rename + BUSINESS TYPE change (with employee unassignment)
-        // as inline UI logic — no native data-level method exists to route to, so a faithful routed
-        // version means reimplementing native flow (deferred). On a flipped replica it would only
-        // mutate the local copy and desync; block it plainly instead. Inert without a merger.
+        // Merger slice 3 — settings-save guard, narrowed by PHASE 5 / D28 (user 2026-09-12).
+        // BizManSettings.SaveBusinessInformation bundles rename + BUSINESS TYPE change (with employee
+        // unassignment) as inline UI logic. The RENAME and the LOGO are routed for a company member by
+        // SharedShopWorkTabs.Patch_BizManSettings_Save_Routed (ops `rename`/`logo`, the helper route reused),
+        // so where that body covers the address this guard steps aside — one owner for the method, instead of
+        // two prefixes racing to return false on it. The business TYPE stays refused: it has no routable
+        // data-level native method, the routed body drops it on the floor exactly as it does for a permission
+        // helper, and the dropdown itself is greyed (D30). Inert without a merger.
         [HarmonyPatch(typeof(BizManSettings), nameof(BizManSettings.SaveBusinessInformation))]
         public static class Patch_BizManSettings_Save_MergerGuard
         {
@@ -3551,6 +3571,7 @@ namespace BigAmbitionsMP
                     var reg = bm?.buildingRegistration;
                     if (reg == null) return true;
                     if (!MergerFlip.IsFlipped(GameStateReader.AddressKey(reg))) return true;
+                    if (SharedShopWorkTabs.RoutesIdentityFor(reg, out _, out _)) return true;   // D28: the routed body owns this save
                     PassengerHud.Toast("Only the deed holder can change business settings (for now).");
                     return false;
                 }
@@ -3928,22 +3949,48 @@ namespace BigAmbitionsMP
             return s == SetNone ? SetOwn : s;
         }
 
-        /// <summary>May this end go on that plan? Only inside one operating set, and never on a plan that is
-        /// somebody else's to edit. SetNone (clearing a row) is allowed on any plan we may edit at all.</summary>
-        private static bool EndFitsPlan(int planSet, int endSet)
-            => (planSet == SetOwn || planSet == SetSim) && (endSet == SetNone || endSet == planSet);
+        /// <summary>May this end go on that plan? The PLAN must still be one this machine may edit at all -
+        /// mine, or one I run for an absent owner. PHASE 5 r2 (J2): the END no longer has to sit in the
+        /// same operating set. Since 4c part 2b the leg gate hands a mixed-owner leg to the ROUTED CARGO
+        /// TRANSFER at delivery time, so a CO-MEMBER's building is a legal end; only an end outside the
+        /// company stays refused. SetNone (clearing a row) is allowed on any plan we may edit at all.</summary>
+        private static bool EndFitsPlan(int planSet, int endSet, string endKey)
+            => (planSet == SetOwn || planSet == SetSim)
+               && (endSet == SetNone || endSet == planSet || EndInCompany(endKey));
+
+        /// <summary>PHASE 5 r2 (J2): is this end a building of MY COMPANY? The company's address->owner map
+        /// (CompanyLists) answers for a PARTNER's building; MY OWN building is not in that map, so it is
+        /// checked against the registry instead - rented here and truly mine, while I am in a company.
+        /// Everything else - a non-member's building, an address this machine cannot place - is false, so
+        /// it stays refused exactly as before.</summary>
+        private static bool EndInCompany(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return false;
+            try
+            {
+                if (!MergerSync.IAmMember) return false;
+                if (CompanyLists.TryOwnerOfAddress(key, out var owner) && !string.IsNullOrEmpty(owner))
+                    return MergerSync.MergedRuntime(owner, MPConfig.PlayerId);
+                var reg = GameStatePatcher.FindRegistration(key);
+                return reg != null && reg.RentedByPlayer && MergerFlip.TrulyMine(reg);
+            }
+            catch { return false; }
+        }
 
         /// <summary>WAVE 4 (V2c): a TAGGED DISPLAY COPY of a partner's plan IS editable here — the native UI
-        /// mutates it in place and the mutation is then routed to the operator. What still cannot happen is a
-        /// MIXED plan: every end must belong to the same member as the plan's headquarters, which is what
-        /// CompanyLists' address->owner map answers. Refused until the routed cargo transfer of phase 4c
-        /// exists. `key` empty = clearing a row, always allowed.</summary>
+        /// mutates it in place and the mutation is then routed to the operator. PHASE 5 r2 (J2): an end that
+        /// belongs to ANOTHER MEMBER of the same company - my own building included - is allowed too, because
+        /// the routed cargo transfer of 4c part 2b moves the goods between the two machines at delivery time.
+        /// What stays refused is an end OUTSIDE the company, or one no map can place. `key` empty = clearing
+        /// a row, always allowed.</summary>
         private static bool RoutedEndFits(Buildings.Office.Headquarters.LogisticsManagerPlan plan, string key)
         {
             if (string.IsNullOrEmpty(key)) return true;
             string hq = ""; try { hq = GameStateReader.AddressKey(plan.headquartersAddress); } catch { }
-            if (!CompanyLists.TryOwnerOfAddress(hq, out var hqOwner)) return false;
-            return CompanyLists.TryOwnerOfAddress(key, out var endOwner) && endOwner == hqOwner;
+            if (!CompanyLists.TryOwnerOfAddress(hq, out var hqOwner) || string.IsNullOrEmpty(hqOwner)) return false;
+            if (CompanyLists.TryOwnerOfAddress(key, out var endOwner) && endOwner == hqOwner) return true;
+            // The plan's company must be MINE before a co-member's building counts as one of its ends.
+            return MergerSync.MergedRuntime(hqOwner, MPConfig.PlayerId) && EndInCompany(key);
         }
 
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList), "AddPlan")]
@@ -3983,15 +4030,15 @@ namespace BigAmbitionsMP
                     if (MergerFlip.FlippedCount == 0) return true;
                     string a = ""; try { a = GameStateReader.AddressKey(businessAddress); } catch { }
                     // WAVE 4 (V2c): on a tagged DISPLAY COPY the native mutation is allowed and the Postfix
-                    // routes the whole plan; only a cross-owner end is still refused.
+                    // routes the whole plan; only an end outside the company is still refused (r2 J2).
                     if (CompanyLists.IsDisplayPlan(____currentPlan))
                     {
                         if (RoutedEndFits(____currentPlan, a)) return true;
-                        Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{a}' - company building operated elsewhere, refused until the routed cargo transfer of phase 4c exists.");
+                        Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{a}' - that building is not part of this company.");
                         return false;
                     }
-                    if (EndFitsPlan(PlanSet(____currentPlan), OperatingSet(businessAddress))) return true;
-                    Plugin.Logger.LogWarning($"[Merger] logistics plan destination '{a}' refused - company building operated elsewhere (refused until the routed cargo transfer of phase 4c exists)");
+                    if (EndFitsPlan(PlanSet(____currentPlan), OperatingSet(businessAddress), a)) return true;
+                    Plugin.Logger.LogWarning($"[Merger] logistics plan destination '{a}' refused - that building is not part of this company.");
                     return false;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics plan-destination gate: {ex.Message}"); return true; }
@@ -4021,11 +4068,11 @@ namespace BigAmbitionsMP
                     if (CompanyLists.IsDisplayPlan(____currentPlan))
                     {
                         if (RoutedEndFits(____currentPlan, wk)) return true;   // the Postfix on LoadPlan routes it
-                        Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{wk}' - company building operated elsewhere, refused until the routed cargo transfer of phase 4c exists.");
+                        Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{wk}' - that building is not part of this company.");
                         return false;
                     }
-                    if (EndFitsPlan(PlanSet(____currentPlan), OperatingSet(reg))) return true;
-                    Plugin.Logger.LogWarning($"[Merger] logistics plan warehouse '{wk}' refused - company building operated elsewhere (refused until the routed cargo transfer of phase 4c exists)");
+                    if (EndFitsPlan(PlanSet(____currentPlan), OperatingSet(reg), wk)) return true;
+                    Plugin.Logger.LogWarning($"[Merger] logistics plan warehouse '{wk}' refused - that building is not part of this company.");
                     return false;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics plan-warehouse gate: {ex.Message}"); return true; }

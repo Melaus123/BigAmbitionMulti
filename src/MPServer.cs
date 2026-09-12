@@ -4609,7 +4609,7 @@ namespace BigAmbitionsMP
         /// </summary>
         public static GameVariablesDto Preset(string difficulty)
         {
-            var dto = new GameVariablesDto();   // carries the MP overrides (tutorial off, energy off)
+            var dto = new GameVariablesDto();   // carries the MP overrides (tutorial off by default, energy off)
             dto.Difficulty = (difficulty == "Easy" || difficulty == "Hard") ? difficulty : "Normal";
             try
             {
@@ -4635,7 +4635,8 @@ namespace BigAmbitionsMP
                     dto.ImporterUrgentFeeMultiplier     = ds.importerUrgentFeeMultiplier;
                     dto.ExportMultiplier                = ds.exportMultiplier;
                     dto.SellingMultiplier               = ds.sellingMultiplier;   // 1.0-new; LIVE under Custom
-                    // NOT ds.tutorialEnabled — MP keeps the tutorial off (story quests don't sync).
+                    // NOT ds.tutorialEnabled — off by default; a host world with it on carries it to the
+                    // session (D26, 2026-09-12), because the read-back below sends gv.tutorialEnabled on.
                     Plugin.Logger.LogInfo($"[Server] Difficulty preset '{dto.Difficulty}' from game asset: cash={dto.StartingMoney} rivals×{dto.RivalsDifficultyMultiplier:0.00}.");
                     return dto;
                 }
@@ -6354,7 +6355,31 @@ namespace BigAmbitionsMP
                         }
                     }
 
+                    // PHASE 5 / P7 (2026-09-12), narrowed by r2 (J7): a routed PRESS waiting on a partner must
+                    // never run after the company that authorised it changed. The peer-departure path already
+                    // forgets them (:1783); "leave" never did. WHOSE presses go depends on what the leave
+                    // does to the company: a 3+ company SURVIVES it, so only the LEAVER loses their pending
+                    // presses and the members who stay keep both their company and theirs; a leave that takes
+                    // the member count below two DISSOLVES the company, and then every member loses it.
+                    // Collected BEFORE the store changes, forgotten after it.
+                    var exPids = new List<string>();
+                    bool dissolves = !MergerSync.StoreGroups.TryGetValue(g0, out var lset) || lset.Count <= 2;
+                    if (!dissolves) exPids.Add(actorPid);
+                    else if (lset != null)
+                        foreach (var mem in lset)
+                        {
+                            string mpid = mem == MPConfig.StableId ? MPConfig.PlayerId : "";
+                            if (mpid.Length == 0)
+                                foreach (var kv in StableIdByPlayer) if (kv.Value == mem) { mpid = kv.Key; break; }
+                            if (mpid.Length > 0 && !exPids.Contains(mpid)) exPids.Add(mpid);
+                        }
+
                     MergerSync.StoreRemove(s);
+                    foreach (var xp in exPids)
+                    {
+                        GameStatePatcher.EnqueueOnMainThread(() => HostForgetPressesOf(xp));
+                        Plugin.Logger.LogInfo($"[Merger] presses forgotten for '{xp}' — their company changed on leave ({(dissolves ? "the company dissolved" : "they left it")}).");
+                    }
                     HostForgetCandidatesOf(actorPid);   // phase 4b (people) r2 (MINOR-9): their pool rows and claims leave with them
                     Plugin.Logger.LogInfo($"[Merger] '{actorPid}' left their merger group.");
                     // r4: a dissolving company's offer (and one the leaver had out that nobody can answer any
@@ -8477,8 +8502,11 @@ namespace BigAmbitionsMP
                 // 24/27) - a plan lives on one. The contract creation (a shop) and the sell-all (a warehouse)
                 // keep the address check: neither has any business on an excluded address (r2 minor c - the
                 // code used to skip it for all three while this comment already said otherwise).
+                // PHASE 5 (D27/D29, 2026-09-12): the deed and identity commitments ride the same envelope
+                // and the same MEMBERSHIP-ONLY gate — a permission helper never terminates a rental or shuts
+                // a shop down (ruling 34), whatever grant they hold.
                 bool w4 = p.Op == "mergercontract" || p.Op == "mergersellall" || p.Op == "mergerplan"
-                       || p.Op == "mergerplanedit";
+                       || p.Op == "mergerplanedit" || p.Op == "mergerterminate" || p.Op == "mergershutdown";
                 if (w4 && !MergerSync.MergedRuntime(ownerPid, senderPid))
                 { Plugin.Logger.LogWarning($"[Merger] {p.Op} by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
                 // 4c part 2a (E4): the host SERIALISES plan edits per plan id. A second leg carrying a
@@ -8506,10 +8534,18 @@ namespace BigAmbitionsMP
                 if (w4 && p.Op == "mergerplan")
                 {
                     if (p.Plan == null) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}': the payload carried no plan."); return; }
-                    if (PlanCrossesOwners(p.Plan, out var xwhy))
-                    { Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{p.AddressKey}' (plan {p.Plan.Id}): {xwhy} — a two-machine goods movement, refused until the routed cargo transfer of phase 4c exists."); return; }
+                    if (PlanCrossesCompanies(p.Plan, out var xwhy))
+                    { Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{p.AddressKey}' (plan {p.Plan.Id}): {xwhy} — an end outside the company that owns the plan."); return; }
                 }
-                if (p.Op != "mergerplan" && !SharedWorkAddressAllowed(p.AddressKey, MergerSync.MergedRuntime(ownerPid, senderPid)))
+                // PHASE 5 r2 (J1): the two DEED/IDENTITY ops skip this exclusion exactly as "mergerplan" does.
+                // SharedWorkAddressAllowed is a WORK-TAB predicate: it answers false for a WAREHOUSE (which
+                // carries no businessTypeName), for empty premises and for a headquarters. Ending the rental
+                // of an EMPTY building is the commonest terminate there is, and a warehouse is a business the
+                // game lets its owner shut down, so both were being dropped here. These two act on the
+                // TENANCY and on the BUSINESS itself, not on a work tab, and every other gate still holds:
+                // the membership check above, RouteTargetFor below, and the runner's own refusals.
+                bool skipAddrGate = p.Op == "mergerplan" || p.Op == "mergerterminate" || p.Op == "mergershutdown";
+                if (!skipAddrGate && !SharedWorkAddressAllowed(p.AddressKey, MergerSync.MergedRuntime(ownerPid, senderPid)))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                 string wtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
                 if (wtarget.Length == 0)
@@ -8520,7 +8556,9 @@ namespace BigAmbitionsMP
                 if (wtarget == senderPid) return;
                 if (w4)
                 {
-                    if (p.Op == "mergercontract")      Plugin.Logger.LogInfo($"[Merger] contract create routed to '{wtarget}' for '{p.AddressKey}'");
+                    if (p.Op == "mergerterminate")     Plugin.Logger.LogInfo($"[Merger] terminate-rental routed to '{wtarget}' for '{p.AddressKey}'");
+                    else if (p.Op == "mergershutdown") Plugin.Logger.LogInfo($"[Merger] shutdown routed to '{wtarget}' for '{p.AddressKey}'");
+                    else if (p.Op == "mergercontract") Plugin.Logger.LogInfo($"[Merger] contract create routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergersellall")  Plugin.Logger.LogInfo($"[Merger] sell-all routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergerplanedit") Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' ({p.Family} {p.PlanOp}, plan {p.PlanId}, seq {p.EditSeq})");
                     else                               Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' (plan {p.Plan?.Id})");
@@ -8932,10 +8970,14 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] join replay: {ex.Message}"); }
         }
 
-        /// <summary>HOST: does this plan cross an OWNER boundary? Its warehouse/factory end and every
-        /// destination must belong to ONE member in the rental ledger. Wave 4 refuses a mixed plan at the
-        /// EDIT, exactly as S3 refuses the mixed LEG - until phase 4c's routed cargo transfer exists.</summary>
-        private static bool PlanCrossesOwners(PwLogisticsPlan plan, out string why)
+        /// <summary>HOST: does this plan reach OUTSIDE ONE COMPANY? Its warehouse/factory end and every
+        /// destination must belong to one member, or to CO-MEMBERS of one merged company - the same rule
+        /// CargoEndsAreOneCompany applies to a single leg. PHASE 5 r2 (J2): a MIXED-OWNER plan is no longer
+        /// refused. Since 4c part 2b the leg gate hands a mixed-owner leg to the routed cargo transfer at
+        /// DELIVERY time, so the plan that creates it may be written; what stays refused is an end owned by
+        /// somebody who is NOT in the company. An end the rental ledger does not know is skipped, as it
+        /// always was: it is nobody's rented building, so there is nothing there to reach.</summary>
+        private static bool PlanCrossesCompanies(PwLogisticsPlan plan, out string why)
         {
             why = "";
             if (plan == null) return false;
@@ -8945,7 +8987,8 @@ namespace BigAmbitionsMP
                 if (!BuildingOwners.TryGetValue(key, out var o) || string.IsNullOrEmpty(o)) continue;
                 string pid = o == "host" ? MPConfig.PlayerId : o;
                 if (first.Length == 0) { first = pid; firstKey = key; continue; }
-                if (pid != first) { why = $"'{firstKey}' is run by '{first}' and '{key}' by '{pid}'"; return true; }
+                if (pid != first && !MergerSync.MergedRuntime(pid, first))
+                { why = $"'{firstKey}' is run by '{first}' and '{key}' by '{pid}', who are not in one company"; return true; }
             }
             return false;
         }

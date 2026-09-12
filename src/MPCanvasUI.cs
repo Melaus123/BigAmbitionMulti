@@ -804,6 +804,7 @@ namespace BigAmbitionsMP
             MPPerf.End("Pre.C", _sub);
             _sub = MPPerf.Begin(); CustomerPuppets.Tick(); MPPerf.End("Puppets", _sub);   // round-41: simulator election (host) + puppet stream/render (both-inside shops)
             _sub = MPPerf.Begin();
+            MergerSync.TickDropGrace();  // D25: drop the merged-company view when a disconnect outlives the grace
             MergerFlip.Tick();           // merger slice 3: ownership-flip reconcile (1 Hz) + host state push (10s)
             MergerEmployeeSync.Tick();   // merger slice 5: schedule write-back scan on flipped shops (2s)
             SharedShopSchedule.Tick();   // shared-shop management (Business PERMISSION feature, NOT the merger): edit scan + editing sessions (2s)
@@ -3002,10 +3003,9 @@ namespace BigAmbitionsMP
             string muted = _hubNative ? "#8795A0" : "#9AA3B2";
 
             // Merger slice 1 — company header rows above the key list.
-            // DEV-ONLY until the merger campaign ships (user 2026-07-07: next release lands before the
-            // feature is ready). The entire merger stack is inert without the UI: no button → no
-            // proposal → no state → every merger patch is a pass-through (the inertness contract, §13).
-#if BAMP_DEV
+            // PHASE 5 (2026-09-12): the DEV gate is gone - these rows compile in every configuration.
+            // The merger stack stays inert until someone presses one: no button → no proposal → no
+            // state → every merger patch is a pass-through (the inertness contract, §13).
             if (MergerSync.IAmMember)
             {
                 // Phase 1-A (D3): the company's OWN name (founder first, then the others in join order)
@@ -3036,7 +3036,6 @@ namespace BigAmbitionsMP
                     ("Accept",  purple, "merger", (byte)9,  GrantKind.Vehicle),
                     ("Decline", grey,   "merger", (byte)10, GrantKind.Vehicle));
             }
-#endif
 
             // Each row: the player + a Vehicle key toggle and a Housing key toggle (purple = granted).
             var onlineNames = new HashSet<string>(players);
@@ -3054,8 +3053,7 @@ namespace BigAmbitionsMP
                 var cv = coMerged ? grey : gv ? purple : grey;
                 var ch = coMerged ? grey : gh ? purple : grey;
                 var cb = coMerged ? grey : gb ? purple : grey;
-#if BAMP_DEV
-                // Merger chip (DEV-ONLY until the campaign ships): member of MY company → static
+                // Merger chip: member of MY company → static
                 // "Merged"; my proposal pending on THIS player → "Cancel offer" (act 12 withdraws — host
                 // arms a re-propose cooldown so withdraw/re-propose can't be used to spam notifications).
                 // r4: both offer fields are DERIVED from the host's broadcast offer table, never set here;
@@ -3075,12 +3073,6 @@ namespace BigAmbitionsMP
                     ("Housing",  ch, "pid:" + pl, (byte)6, GrantKind.Housing),
                     ("Business", cb, "pid:" + pl, (byte)6, GrantKind.Business),
                     mchip);
-#else
-                AddPermRow(idx++, RowH, pl,
-                    ("Vehicle",  cv, "pid:" + pl, (byte)6, GrantKind.Vehicle),
-                    ("Housing",  ch, "pid:" + pl, (byte)6, GrantKind.Housing),
-                    ("Business", cb, "pid:" + pl, (byte)6, GrantKind.Business));
-#endif
             }
             // Offline grantees (not in the live roster) — same two toggles, by StableId handle.
             foreach (var g in mine)
@@ -6996,7 +6988,7 @@ namespace BigAmbitionsMP
         /// <summary>Toggles the game's own navigation blocker so typing in chat
         /// doesn't drive the player.  Reuses PlayerController.SetNavigationBlocker —
         /// the same registry the game uses for Map/PurchaseUI/etc.  HelpSystem is
-        /// chosen because it's unused in multiplayer (tutorial off), so it won't
+        /// chosen because it's off by default in multiplayer, so it won't
         /// collide with the game's own blockers.</summary>
         private void SyncChatNavBlock(bool want)
         {
@@ -7397,7 +7389,8 @@ namespace BigAmbitionsMP
             SettingsBoolRow(ct, ref y, "Disable vehicle fuel", "Your vehicles never consume fuel.",
                             () => _hostSettings.DisableVehicleFuel, v => _hostSettings.DisableVehicleFuel = v);
             }   // end !loadMode (round-53)
-            // Tutorial is forced OFF in multiplayer (story quests desync), so it's not exposed here.
+            // Tutorial is off by default; a host world with it on carries it to the session
+            // (D26, 2026-09-12). Not exposed here - the host world's own setting decides.
 
             y -= SGAP;
             var closeGO = MakeGO("Close", ct);

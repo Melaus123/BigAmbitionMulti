@@ -1159,14 +1159,24 @@ namespace BigAmbitionsMP
                 try { shape = Newtonsoft.Json.JsonConvert.SerializeObject(dto); } catch { shape = ""; }
                 if (shape.Length > 0 && _lastSentPlan.TryGetValue(dto.Id ?? "", out var was) && was == shape) return;   // nothing changed
 
-                // Every end of a routed plan must belong to the SAME member as its headquarters. A mixed plan
-                // is a two-machine goods movement — refused until the routed cargo transfer of phase 4c exists.
+                // Every end of a routed plan must belong to the SAME COMPANY as its headquarters. PHASE 5 r2
+                // (J2): a CO-MEMBER's building - my own included - is a legal end now, because since 4c part
+                // 2b the leg gate hands the mixed-owner leg it makes to the ROUTED CARGO TRANSFER at delivery
+                // time. This is the MEMBER's own send-path check, the third of the three (picker, here, host):
+                // leaving it on "same member" would have let the picker accept an end this then refused to
+                // send. An end outside the company, or one the maps cannot place, is still refused here.
                 if (!TryOwnerOfAddress(dto.HeadquartersAddressKey, out var hqOwner)) return;
+                bool hqIsMyCompany = MergerSync.MergedRuntime(hqOwner, MPConfig.PlayerId);
                 foreach (var key in EndKeys(dto))
                 {
-                    if (TryOwnerOfAddress(key, out var endOwner) && endOwner == hqOwner) continue;
+                    if (TryOwnerOfAddress(key, out var endOwner) && !string.IsNullOrEmpty(endOwner)
+                        && (endOwner == hqOwner || MergerSync.MergedRuntime(endOwner, hqOwner))) continue;
+                    // Not in the partner map: my OWN building is the one legal case, and only inside the
+                    // company that owns the plan.
+                    var ereg = GameStatePatcher.FindRegistration(key);
+                    if (hqIsMyCompany && ereg != null && ereg.RentedByPlayer && MergerFlip.TrulyMine(ereg)) continue;
                     Plugin.Logger.LogWarning($"[Merger] plan REFUSED cross-owner for '{dto.HeadquartersAddressKey}' (plan {dto.Id}): "
-                                           + $"'{key}' is not run by '{hqOwner}' — company building operated elsewhere, refused until the routed cargo transfer of phase 4c exists.");
+                                           + $"'{key}' is not run by '{hqOwner}' or a co-member of theirs — an end outside the company.");
                     return;
                 }
                 if (shape.Length > 0) _lastSentPlan[dto.Id ?? ""] = shape;

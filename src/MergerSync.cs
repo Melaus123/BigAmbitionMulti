@@ -360,6 +360,75 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ══ D25 (user 2026-09-12) — THE BLIP RULE ════════════════════════════════════════
+        // A member's merged-company VIEW drops on a disconnect, but only after a SHORT GRACE: a
+        // two-second hiccup on the wire must not dissolve the company on this screen and then rebuild
+        // it a moment later. OnDisconnected ARMS the grace (non-voluntary drops only); TickDropGrace
+        // is a recurring MAIN-THREAD check from MPCanvasUI.Update - an EVENT against the live
+        // connection state, never a one-shot delay that assumes the link is still down when it fires.
+        // Once the view is dropped IAmMember is false and every subsystem follows its OWN membership
+        // edge: MergerFlip.Tick un-flips the partner buildings (its desired set derives from the state
+        // cleared here), CompanyBooks.Tick clears the books overlay, the GrantSync union empties, the
+        // wallet and the feed/list/candidate/message overlays go inert. The reconnect's MergerState
+        // broadcast rebuilds all of it exactly as a first join does.
+        private const float GraceSeconds = 3f;
+        private static float _dropAt   = -1f;   // unscaledTime the link went down; -1 = no grace armed
+        private static float _blipTill = -1f;   // TEST LEVER ONLY (`blip`): treat the link as down until this time
+
+        /// <summary>MAIN THREAD. Arm the grace after a NON-VOLUNTARY disconnect. Idempotent: a second
+        /// arm while one stands keeps the first timestamp, so a noisy transport cannot extend it.</summary>
+        public static void ArmDropGrace(string why, float blipSeconds = -1f)
+        {
+            if (!IAmMember) return;                 // nothing to drop - inert outside a merger
+            if (_dropAt >= 0f) return;              // already counting
+            _dropAt = UnityEngine.Time.unscaledTime;
+            _blipTill = blipSeconds >= 0f ? _dropAt + blipSeconds : -1f;
+            Plugin.Logger.LogInfo($"[Merger] view held for {GraceSeconds:0} s after a disconnect ({why}).");
+        }
+
+        /// <summary>MAIN THREAD, every frame from MPCanvasUI.Update (two float reads when nothing is
+        /// armed). Cancels on a reconnect inside the grace, drops the view when the link is still
+        /// down after it.</summary>
+        public static void TickDropGrace()
+        {
+            if (_dropAt < 0f) return;
+            float now = UnityEngine.Time.unscaledTime;
+            // The rig's `blip` lever stands in for the transport loss (MPClient has no re-connectable
+            // loss seam: OnDisconnected stops the poll loop and no host address is kept for a rejoin).
+            bool linked = _blipTill >= 0f ? now >= _blipTill
+                                          : (MPServer.IsRunning || MPClient.IsConnected);
+            if (linked)
+            {
+                _dropAt = -1f; _blipTill = -1f;
+                Plugin.Logger.LogInfo("[Merger] view kept - reconnected inside the grace");
+                return;
+            }
+            if (now - _dropAt < GraceSeconds) return;
+            float held = now - _dropAt;
+            _dropAt = -1f; _blipTill = -1f;
+            DropOnDisconnect(held);
+        }
+
+        /// <summary>MAIN THREAD. The grace expired with the link still down: the merged-company view
+        /// goes. Idempotent - a second call with no state left is a no-op.</summary>
+        public static void DropOnDisconnect(float heldSeconds)
+        {
+            if (_groupByPid.Count == 0 && _groupInfo.Count == 0) return;
+            _groupByPid = new Dictionary<string, string>();
+            _groupInfo  = new Dictionary<string, MergerGroupInfo>();
+            _sig = ""; _foreignSig = "\u0001";
+            _wasMember = false;
+            _lastStatsPushDay = -1;
+            IncomingFromPid = ""; OutgoingToPid = "";
+            Plugin.Logger.LogInfo($"[Merger] view dropped after a {heldSeconds:0} s disconnect");
+            // The two subsystems that do NOT hang off the membership edge: the rivals list folds per
+            // call off the state just cleared (so an OPEN leaderboard must be told), and the routed
+            // cargo transfer keeps per-leg client state that can never complete without a session.
+            try { GameStatePatcher.RefreshRivalLeaderboardIfVisible(); } catch { }
+            try { VehicleManager.OnGrantsChanged(); } catch { }   // the union just emptied - respawn the ghosts
+            try { CargoTransfer.ResetSession(); } catch { }
+        }
+
         /// <summary>SCENE-scoped reset (mirrors GrantSync.ResetSceneState): runtime + local UI state die
         /// with the scene and rebuild from the store (host) or the host broadcast (client). The durable
         /// store's lifecycle is session boundaries, not scene transitions.</summary>

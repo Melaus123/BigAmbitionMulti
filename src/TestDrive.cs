@@ -722,6 +722,56 @@ namespace BigAmbitionsMP
                     return $"OK sell-all routed for '{waddr}' at quote {squote} (the runner sells only if its own total still equals it)";
                 }
 
+                case "blip":
+                {
+                    // MERGER PHASE 5 (P11, D25) - TEST LEVER. The transport has NO re-connectable loss seam:
+                    // OnDisconnected stops the poll loop and MPClient keeps no host address to rejoin with, so
+                    // a real drop cannot be undone from the rig. This drives the seam the drop ARMS instead -
+                    // the very MergerSync.ArmDropGrace the non-voluntary disconnect path calls - with the link
+                    // read as down for N seconds. Nothing about the socket is touched.
+                    //   `blip`   -> the link stays down: the view DROPS after the 3 s grace.
+                    //   `blip 1` -> back inside the grace: the view is KEPT.
+                    //   `blip 6` -> back after it: dropped at 3 s, rebuilt by the next MergerState.
+                    if (!MergerSync.IAmMember) return "ERR not in a merged company here";
+                    float bsecs = 99f;
+                    if (arg.Length > 0 && !float.TryParse(arg, System.Globalization.NumberStyles.Float,
+                                                          System.Globalization.CultureInfo.InvariantCulture, out bsecs))
+                        return "ERR usage: blip [seconds]";
+                    MergerSync.ArmDropGrace("test lever", bsecs);
+                    return $"OK blip armed: the link reads as down for {bsecs:0.#} s - watch [Merger] view dropped / view kept";
+                }
+
+                case "terminate":
+                {
+                    // MERGER PHASE 5 (P11, D27) - TEST LEVER. Sends the leg the member's terminate CONFIRM
+                    // sends. Address keys are TWO tokens ('46 ba:street_fourthstreet'), like every other lever.
+                    // Nothing is written here: the runner sells the interior and returns the deposit there.
+                    var targs = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (targs.Length < 2) return "ERR usage: terminate <num> <ba:street_x>";
+                    string taddr = targs[0] + " " + targs[1];
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (!MergerSync.IAmMember) return "ERR not in a merged company here";
+                    if (!MergerFlip.IsFlipped(taddr)) return $"ERR '{taddr}' is not a merger-flipped company building here";
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    { PlayerId = MPConfig.PlayerId, AddressKey = taddr, Op = "mergerterminate" });
+                    return $"OK terminate-rental routed for '{taddr}' (the runner sells the interior and returns the deposit)";
+                }
+
+                case "shutdown":
+                {
+                    // MERGER PHASE 5 (P11, D29) - TEST LEVER. Sends the leg a LIVE member's Shutdown press
+                    // sends. A stand-in is refused by the patch, not here, so the rig can drive both cases.
+                    var shargs = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (shargs.Length < 2) return "ERR usage: shutdown <num> <ba:street_x>";
+                    string shaddr = shargs[0] + " " + shargs[1];
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (!MergerSync.IAmMember) return "ERR not in a merged company here";
+                    if (!MergerFlip.IsFlipped(shaddr)) return $"ERR '{shaddr}' is not a merger-flipped company building here";
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    { PlayerId = MPConfig.PlayerId, AddressKey = shaddr, Op = "mergershutdown" });
+                    return $"OK shutdown routed for '{shaddr}' (the runner closes the business with the game's own teardown)";
+                }
+
                 case "spend":
                 {
                     // MERGER PHASE 4b (r4) - TEST LEVER. The world can go minutes without producing a

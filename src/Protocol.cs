@@ -1623,7 +1623,13 @@ namespace BigAmbitionsMP
         // v22 (2026-09-10): new message BusinessChangeBatch=206 (burst fix). A v21 peer drops it as
         //      "Unknown message type" and would miss every swept business change and the join delta;
         //      mixed sessions refuse at Hello per the freeze rule.
-        public const int Version = 22;
+        // v23 (2026-09-12, merger phase 5): the merger campaign leaves the dev gate — the TEN types the
+        //      campaign added under 22 (207-216: NotificationRelay through CargoTransfer, Protocol.cs:208-217;
+        //      MergerRequest itself is 148, :174)
+        //      are now reachable in every build, and phase 5 adds two Ops on the existing shared-work-edit
+        //      carrier (mergerterminate, mergershutdown — no new message type). A v22 peer would drop the
+        //      merger traffic as "Unknown message type"; mixed sessions refuse at Hello per the freeze rule.
+        public const int Version = 23;
     }
 
     /// <summary>Sent by client on connect.</summary>

@@ -718,7 +718,23 @@ namespace BigAmbitionsMP
                     var page = _fPresBiz?.GetValue(__instance) as BizManBusiness;
                     var reg = page?.buildingRegistration;
                     bool other = IsOtherPlayersShop(reg, AddrOf(reg));
-                    SetButtonsCalling(__instance.transform, "TerminateContract", interactable: !other);
+                    // D30 / r3 K1 - ONE writer for the terminate button state. A merger-flipped address is
+                    // never `other` (see IsOtherPlayersShop), so for it the verdict is the ROUTABILITY one:
+                    // the same predicate the route itself reads, re-evaluated on every page populate, so a
+                    // runner coming back re-enables the button. BOTH states are written every time - the
+                    // BizMan page is one shared prefab instance serving every building. Inert without a
+                    // merger: with FlippedCount == 0 the shared-shop verdict stands untouched.
+                    bool termOk = !other;
+                    if (!other && reg != null && MergerFlip.FlippedCount > 0)
+                    {
+                        string fkey = AddrOf(reg);
+                        if (MergerFlip.IsFlipped(fkey))
+                        {
+                            bool standIn = false; try { standIn = MergerAbsence.SimulatesHere(fkey); } catch { }
+                            termOk = standIn || (MergerSync.IAmMember && SharedShopWorkTabs.RunnerReachable(fkey));
+                        }
+                    }
+                    SetButtonsCalling(__instance.transform, "TerminateContract", interactable: termOk);
                     SetButtonsCalling(__instance.transform, "SendBuyBuildingOffer", interactable: !other);
                     if (other && __instance.showEmployeesButton != null) __instance.showEmployeesButton.SetActive(false);
                     if (other && !SharedShopSchedule.IsSharedShop(reg, AddrOf(reg))) ShopValuation.Request(AddrOf(reg));   // H-BIZ-1 (review #5): a SHARED shop shows the "mine" view (tenancy raised for OnEnable) — nothing to fill

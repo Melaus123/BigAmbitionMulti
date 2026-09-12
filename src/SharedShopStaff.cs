@@ -1020,6 +1020,10 @@ namespace BigAmbitionsMP
                     // D2: a partner's `end` / `urgent` - the game's own dialog, this machine's own write REPLACED.
                     Action routed = null;
                     try { routed = CompanyPlans.TakeConfirmRoute(); } catch { }
+                    // PHASE 5 r2 (J3): the same swap for a partner shop's SHUTDOWN. BizManSettings
+                    // .ShutdownBusiness is itself the confirm wrapper, so the route has to be taken here or
+                    // the player never sees the game's prompt.
+                    if (routed == null) { try { routed = SharedShopWorkTabs.TakeShutdownConfirmRoute(); } catch { } }
                     if (routed != null) { onConfirmAction = routed; return; }
                     bool train = _massTrainArming;
                     bool purge = false;
