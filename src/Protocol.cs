@@ -2155,6 +2155,17 @@ namespace BigAmbitionsMP
         /// </summary>
         [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
         public List<float> Colors { get; set; }
+        /// <summary>TRAFFIC-SMOOTH S3 (2026-09-12): the car's TRUE velocity in CENTIMETRES/second
+        /// (VehicleComponent.GetVelocity() = its rigidbody velocity), so the client no longer has to
+        /// derive it from two packet positions. Additive: an older host sends none and the client
+        /// falls back to the derived value. Zero (= the default, omitted from the JSON) means
+        /// "unknown / standing still" — both lead the client to the same derived path.</summary>
+        [Newtonsoft.Json.JsonProperty(DefaultValueHandling = Newtonsoft.Json.DefaultValueHandling.Ignore)]
+        public int    Vx { get; set; }
+        [Newtonsoft.Json.JsonProperty(DefaultValueHandling = Newtonsoft.Json.DefaultValueHandling.Ignore)]
+        public int    Vy { get; set; }
+        [Newtonsoft.Json.JsonProperty(DefaultValueHandling = Newtonsoft.Json.DefaultValueHandling.Ignore)]
+        public int    Vz { get; set; }
     }
 
     /// <summary>
@@ -2166,6 +2177,11 @@ namespace BigAmbitionsMP
         public List<TrafficCarDto> Cars { get; set; } = new();
         /// <summary>Host's unscaled clock at sample time (see VehicleFleetPayload.T).</summary>
         public float T { get; set; }
+        /// <summary>TRAFFIC-SMOOTH S1 (2026-09-12): monotonic per-send counter. The traffic stream rides the
+        /// UNRELIABLE lane, where a packet may arrive late or twice; the client drops any snapshot whose Seq
+        /// is not greater than the last one it accepted. Additive — an older host leaves it 0 and the client
+        /// then never drops (today's behaviour on a reliable-ordered lane).</summary>
+        public long Seq { get; set; }
     }
 
     /// <summary>One parked vehicle in a host parked-vehicle snapshot.

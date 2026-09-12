@@ -53,13 +53,22 @@ namespace BigAmbitionsMP
             public Vector3       TargetPos;
             public Quaternion    TargetRot = Quaternion.identity;
             public List<float>?  LastColors;          // last applied body colours
-            // Dead reckoning: chase a target EXTRAPOLATED along the car's
-            // measured velocity, so the ghost never sits still between 10 Hz
-            // snapshots.  (Plain lerp-to-last-target made cars move in stints
-            // at low client FPS — reach target, freeze, jump on next packet.)
+            // Velocity of the NEWEST state: the host's own rb.velocity when the packet carries one (S3),
+            // else derived from two packet positions as before (an older host).  Used to interpolate
+            // between the two buffered states and to dead-reckon when the buffer runs dry.
             public Vector3       Velocity;
             public float         TargetAt;            // CLIENT unscaled time TargetPos arrived
             public float         HostT;               // HOST sample time of TargetPos (packet stamp)
+            // S4 (2026-09-12): the PREVIOUS received state. Rendering runs PlaybackDelay behind the newest
+            // stamp, so the normal case is an interpolation between these two known poses — no chasing of
+            // an extrapolated point, which is what made ghosts jerk when a 5 Hz packet landed late.
+            public Vector3       PrevPos;
+            public Quaternion    PrevRot = Quaternion.identity;
+            public Vector3       PrevVel;
+            public float         PrevHostT;
+            public bool          HasPrev;
+            public bool          HasVel;
+            public bool          HasPrevVel;
             public Collider[]?   Solids;              // MINOR-7 (2026-09-02): non-trigger colliders cached at spawn (shove belt)
             public Rigidbody?    Body;                // cached ROOT rigidbody — driven via MovePosition so the
                                                       //   kinematic ghost acts as a solid obstacle (2026-06-16)
@@ -78,6 +87,109 @@ namespace BigAmbitionsMP
         // Don't predict further than this past the last packet — a stopped or
         // turning car otherwise overshoots while we wait for fresh data.
         private const float MaxExtrapolateSeconds = 0.3f;
+
+        // ── S4: buffered interpolation (2026-09-12) ───────────────────────────
+        /// <summary>How far BEHIND the newest host stamp ghosts are rendered. Fold d (re-check of fold c):
+        /// the buffer holds exactly TWO states (previous, newest), so the delay must be AT MOST the 0.2 s
+        /// (5 Hz) broadcast interval - at exactly the interval, render time sits on the previous stamp when a
+        /// packet lands and reaches the newest stamp when the next one does, so u runs 0..1 over the whole
+        /// cycle. A LONGER delay (fold c's 0.25) put render time BEFORE the previous stamp for the first
+        /// 50 ms of every cycle: u clamped to 0 and the target jumped forward a quarter span on every
+        /// arrival (a 5 Hz ripple). Arrival jitter around this value costs only a few ms of either a held
+        /// pose or a smooth dead-reckon. A three-state buffer would allow a longer delay; not needed.</summary>
+        private const float PlaybackDelay   = 0.20f;
+        /// <summary>Chase rate for the host→client clock offset estimate (per applied snapshot).</summary>
+        private const float ClockOffsetLerp = 0.05f;
+        /// <summary>How much BACKWARD motion a single frame may apply to a ghost. A late packet that would
+        /// pull it back is spread over the following frames instead of snapping it.</summary>
+        private const float RewindEpsilon   = 0.05f;
+        private static float _clockOffset;          // clientUnscaledTime - hostT, smoothed
+        private static bool  _haveClockOffset;
+
+        // S1 client side: the stale/out-of-order guard for the unreliable lane.
+        private static readonly object _seqLock = new();
+        private static long _seqLast;
+        private static long _seqDropped;
+        private static bool _seqDropLogged;
+        private static bool _sawOutOfOrder;
+
+#if BAMP_DEV
+        // S4 jitter (REDEFINED fold c): the CORRECTION an arriving packet implies at the CURRENT render
+        // time — i.e. the jerk the player actually sees — for ghosts within 60 m, rolling 10 s window.
+        private const float JitterWindowSeconds = 10f;
+        private const float JitterNearSq        = 3600f;   // 60 m
+        private static readonly List<(float t, float err)> _jitter = new();
+#endif
+
+        /// <summary>S1: called on the NETWORK thread as each snapshot arrives (MPClient.HandleTrafficSnapshot)
+        /// — before the coalescing enqueue, so a stale packet can never win newest-wins. Seq 0 = an older host
+        /// that stamps none: nothing to guard, always accept.</summary>
+        internal static bool AcceptSnapshotSeq(long seq)
+        {
+            if (seq <= 0) return true;
+            lock (_seqLock)
+            {
+                if (seq <= _seqLast)
+                {
+                    // A far-lower seq is a NEW host stream (rejoin / host restart), not a stale packet.
+                    if (_seqLast - seq > 100) { _seqLast = seq; return true; }
+                    _seqDropped++;
+                    _sawOutOfOrder = true;
+                    if (!_seqDropLogged)
+                    {
+                        _seqDropLogged = true;
+                        Plugin.Logger.LogInfo($"[TrafficSync] dropped a stale traffic snapshot (seq {seq} <= {_seqLast}). " +
+                                              "Further drops are counted only (TestDrive 'traffic').");
+                    }
+                    return false;
+                }
+                _seqLast = seq;
+                return true;
+            }
+        }
+
+        /// <summary>S5 lever data: last seq (sent on the host, accepted on the client), stale drops, lane.</summary>
+        public static long LastTrafficSeq        => MPServer.IsRunning ? _trafficSeq : _seqLast;
+        public static long StaleSnapshotsDropped => _seqDropped;
+        /// <summary>The host knows what its transport did; a client can only say "unreliable" once it has
+        /// actually seen an out-of-order packet (a reliable-ordered lane never delivers one).</summary>
+        public static string TrafficLane => MPServer.IsRunning
+            ? (_laneUnreliable ? "unreliable" : "reliable")
+            : (_sawOutOfOrder ? "unreliable" : "unknown");
+
+        /// <summary>S5: rolling render-vs-truth error. False = this build keeps no window (release).</summary>
+        public static bool GhostJitterStats(out int samples, out float mean, out float max)
+        {
+            samples = 0; mean = 0f; max = 0f;
+#if BAMP_DEV
+            float now = Time.unscaledTime;
+            _jitter.RemoveAll(s => now - s.t > JitterWindowSeconds);
+            foreach (var s in _jitter) { samples++; mean += s.err; if (s.err > max) max = s.err; }
+            if (samples > 0) mean /= samples;
+            return true;
+#else
+            return false;
+#endif
+        }
+
+        /// <summary>S5: clears the jitter window.</summary>
+        public static void GhostJitterReset()
+        {
+#if BAMP_DEV
+            _jitter.Clear();
+#endif
+        }
+
+        /// <summary>Cubic Hermite between two states with their velocities (tangents already scaled by the
+        /// span), so a turning car follows its arc instead of cutting the corner a straight lerp would.</summary>
+        private static Vector3 Hermite(Vector3 p0, Vector3 m0, Vector3 p1, Vector3 m1, float u)
+        {
+            float u2 = u * u, u3 = u2 * u;
+            return (2f * u3 - 3f * u2 + 1f) * p0
+                 + (u3 - 2f * u2 + u) * m0
+                 + (-2f * u3 + 3f * u2) * p1
+                 + (u3 - u2) * m1;
+        }
 
         // Client view culling for traffic ghosts: only embody cars near OUR
         // player (the stream covers cars around every player).  Spawn inside
@@ -345,6 +457,9 @@ namespace BigAmbitionsMP
         {
             public int Index; public string Model = ""; public List<float> Colors = new();
             public Vector3 Pos; public Quaternion Rot;
+            /// <summary>S3 (2026-09-12): the car's TRUE velocity, straight off the same VehicleComponent
+            /// this row was built from (GetVelocity() = its rigidbody velocity, m/s).</summary>
+            public Vector3 Vel;
         }
 
         private static readonly List<MasterCar> _masterScratch = new();
@@ -390,7 +505,12 @@ namespace BigAmbitionsMP
                         _carColors[index] = new CarColorEntry { Model = model, Pos = pos, Colors = colors };
                     }
 
-                    _masterScratch.Add(new MasterCar { Index = index, Model = model, Colors = colors, Pos = pos, Rot = rot });
+                    // S3: the velocity comes from the SAME VehicleComponent whose transform this row
+                    // sampled (vc above) — rb.velocity, so a braking or turning car is honest on the wire
+                    // instead of being back-derived by the client from two quantized positions.
+                    Vector3 vel = default;
+                    try { vel = vc.GetVelocity(); } catch { }
+                    _masterScratch.Add(new MasterCar { Index = index, Model = model, Colors = colors, Pos = pos, Rot = rot, Vel = vel });
                 }
             }
             catch (Exception ex)
@@ -408,6 +528,18 @@ namespace BigAmbitionsMP
         // (the round-281 rule at MPServer.cs: per-peer state dies with the connection).
         private static readonly Dictionary<string, Dictionary<int, object>> _peerSentIdentity = new();
 
+        // S1 (2026-09-12): the traffic stream left the shared reliable-ordered channel.
+        private static long  _trafficSeq;                // monotonic stamp on every snapshot the host sends
+        private static bool  _laneUnreliable;            // what the transport actually did with the last send
+        // c3 (2026-09-12): the lane line is EDGE-TRIGGERED, not once-per-session. The first snapshot of a
+        // session is small enough to fit under the MTU, so a once-only line always read "unreliable" while
+        // every later over-MTU send falls back to the reliable stream. Capped so a flapping link can't spam.
+        private static int   _laneLogState;              // 0 = none yet, 1 = unreliable, 2 = reliable
+        private static int   _laneLogLines;
+        private const  int   LaneLogMaxLines = 6;
+        private const  float IdentityReassertSeconds = 5f;
+        private static float _identityReassertAt = -999f;
+
         /// <summary>Review B1/MIN-3: drop a departed (or teleported/reloaded) peer's traffic state, and
         /// force the next lights beat to a FULL re-assert so the newcomer starts from truth.</summary>
         public static void ForgetPeer(string playerId)
@@ -423,6 +555,14 @@ namespace BigAmbitionsMP
             if (peers.Count == 0) return;
             float now = Time.unscaledTime;
             float r2 = HostSendRadius * HostSendRadius;
+            // S1: identity (Model+Colors) rides only when this peer has not seen the slot's occupant — and on
+            // the unreliable lane THAT packet can be lost, leaving the client unable to spawn the slot at all
+            // (ApplySnapshot skips a car with no known identity). Cheapest cover, and smaller than a client
+            // "unknown slot" request (no new message type, no client→host traffic, no per-slot bookkeeping):
+            // re-assert identity for every in-range slot once every IdentityReassertSeconds, so a lost
+            // identity packet costs at most that long — one identity burst per peer per 5 s.
+            bool idReassert = now - _identityReassertAt >= IdentityReassertSeconds;
+            if (idReassert) _identityReassertAt = now;
             var livePids = new HashSet<string>();
             foreach (var (link, pid) in peers)
             {
@@ -439,23 +579,41 @@ namespace BigAmbitionsMP
                 }
                 if (!_peerSentIdentity.TryGetValue(pid, out var sent))
                     _peerSentIdentity[pid] = sent = new Dictionary<int, object>();
-                var snap = new TrafficSnapshotPayload { T = now };
+                var snap = new TrafficSnapshotPayload { T = now, Seq = ++_trafficSeq };
                 foreach (var mc in master)
                 {
                     // No known position (player still spawning) → uncullled full feed, identity-gated.
                     if (havePos && (mc.Pos - anchor).sqrMagnitude > r2) { sent.Remove(mc.Index); continue; }
-                    bool needIdentity = !sent.TryGetValue(mc.Index, out var tok) || !ReferenceEquals(tok, mc.Colors);
+                    bool needIdentity = idReassert || !sent.TryGetValue(mc.Index, out var tok) || !ReferenceEquals(tok, mc.Colors);
                     var dto = new TrafficCarDto
                     {
                         Index = mc.Index,
                         X = Mathf.RoundToInt(mc.Pos.x * 100f), Y = Mathf.RoundToInt(mc.Pos.y * 100f), Z = Mathf.RoundToInt(mc.Pos.z * 100f),
                         Qx = Mathf.RoundToInt(mc.Rot.x * 10000f), Qy = Mathf.RoundToInt(mc.Rot.y * 10000f),
                         Qz = Mathf.RoundToInt(mc.Rot.z * 10000f), Qw = Mathf.RoundToInt(mc.Rot.w * 10000f),
+                        // S3: velocity in cm/s (0 = standing still / unknown — the client derives then).
+                        Vx = Mathf.RoundToInt(mc.Vel.x * 100f), Vy = Mathf.RoundToInt(mc.Vel.y * 100f),
+                        Vz = Mathf.RoundToInt(mc.Vel.z * 100f),
                     };
                     if (needIdentity) { dto.Model = mc.Model; dto.Colors = mc.Colors; sent[mc.Index] = mc.Colors; }
                     snap.Cars.Add(dto);
                 }
-                MPServer.SendTrafficSnapshotTo(link, snap);
+                bool laneOk = MPServer.SendTrafficSnapshotTo(link, snap);
+                _laneUnreliable = laneOk;
+                int laneState = laneOk ? 1 : 2;
+                if (laneState != _laneLogState)
+                {
+                    _laneLogState = laneState;
+                    if (_laneLogLines < LaneLogMaxLines)
+                    {
+                        _laneLogLines++;
+                        Plugin.Logger.LogInfo(laneOk
+                            ? $"[TrafficSync] snapshots on the unreliable lane (seq-guarded); " +
+                              $"identity re-send every {IdentityReassertSeconds:0}s."
+                            : $"[TrafficSync] snapshots on the reliable lane (over-MTU on this link, " +
+                              $"ReliableUnordered stream; seq-guarded); identity re-send every {IdentityReassertSeconds:0}s.");
+                    }
+                }
             }
             // Review B1: ALWAYS prune (the old "only when shrunk" gate skipped equal-count swaps, and
             // the empty-peers early-return above means the last disconnect is handled by ForgetPeer).
@@ -722,9 +880,16 @@ namespace BigAmbitionsMP
             if (snap == null) return;
             if (SaveGameManager.Current == null) return;
             if (!ClientGhostApplyEnabled) return;     // CLAUDE-DIAGNOSTIC kill-switch
-            if (!MPWorldReady.CanMaterialize) return; // round-188: 10 Hz stream — a drop is recurrence-covered
+            if (!MPWorldReady.CanMaterialize) return; // round-188: 5 Hz stream — a drop is recurrence-covered
             try
             {
+                // S4: keep one smoothed estimate of "what is the host's clock here, now", since render time
+                // is expressed in HOST stamps. A big step (host restart, a long stall) re-seeds it rather
+                // than crawling there over dozens of packets.
+                float off = Time.unscaledTime - snap.T;
+                if (!_haveClockOffset || Mathf.Abs(off - _clockOffset) > 1f) { _clockOffset = off; _haveClockOffset = true; }
+                else _clockOffset = Mathf.Lerp(_clockOffset, off, ClockOffsetLerp);
+
                 // View culling: ghosts only need to exist near OUR player — the
                 // host streams cars simulated around EVERY player, and the ~half
                 // near the other player are invisible from here.  Mirrors the
@@ -744,7 +909,10 @@ namespace BigAmbitionsMP
                     seen.Add(car.Index);
                     var pos = new Vector3(car.X * 0.01f, car.Y * 0.01f, car.Z * 0.01f);
                     var rot = new Quaternion(car.Qx * 0.0001f, car.Qy * 0.0001f, car.Qz * 0.0001f, car.Qw * 0.0001f);
-                    if (rot.x == 0f && rot.y == 0f && rot.z == 0f && rot.w == 0f) rot = Quaternion.identity;
+                    // Review MINOR-4: a degenerate quaternion KEEPS THE LAST ROTATION for this slot (the
+                    // packet no longer carries a separate yaw); a slot with no ghost yet has none — identity.
+                    if (rot.x == 0f && rot.y == 0f && rot.z == 0f && rot.w == 0f)
+                        rot = _ghosts.TryGetValue(car.Index, out var lastRotG) ? lastRotG.TargetRot : Quaternion.identity;
 
                     // T2: identity rides only when the HOST believes this peer needs it (first sight,
                     // recycle, radius re-entry). The slot cache bridges the packets in between.
@@ -794,21 +962,50 @@ namespace BigAmbitionsMP
                         g = new TrafficGhost { Go = go, Model = car.Model, TargetPos = pos, TargetRot = rot, TargetAt = Time.unscaledTime, HostT = snap.T };
                         g.Body = go.GetComponent<Rigidbody>();   // ROOT rb only (a child rb would teleport just that part)
                         try { var all = go.GetComponentsInChildren<Collider>(true); var sol = new List<Collider>(all.Length); foreach (var c in all) if (c != null && !c.isTrigger) sol.Add(c); g.Solids = sol.ToArray(); } catch { }
+                        // S3: a brand-new ghost already knows its speed when the host sent one — no need to
+                        // wait for a second packet before it can move between snapshots.
+                        if (car.Vx != 0 || car.Vy != 0 || car.Vz != 0)
+                        { g.Velocity = new Vector3(car.Vx * 0.01f, car.Vy * 0.01f, car.Vz * 0.01f); g.HasVel = true; }
                         _ghosts[car.Index] = g;
                     }
                     else
                     {
                         // Same live car, small inter-packet move (a big jump = slot reuse, respawned above).
-                        // Velocity from the HOST's packet stamp for smooth extrapolation between 10 Hz packets;
-                        // if two packets land in one client frame (tiny dt) keep the previous velocity (zeroing
-                        // it froze extrapolation = visible stutter).
+                        // S4: the state that WAS the newest becomes the previous one — rendering interpolates
+                        // between the two. S3: use the host's own velocity when the packet carries one; an
+                        // older host sends none, so derive it from the packet stamp delta exactly as before
+                        // (if two packets land in one client frame, tiny dt, keep the previous velocity —
+                        // zeroing it froze the motion = visible stutter).
                         float hdt = snap.T - g.HostT;
-                        if (hdt > 0.005f)
-                            g.Velocity = (pos - g.TargetPos) / hdt;
+                        g.PrevPos    = g.TargetPos;
+                        g.PrevRot    = g.TargetRot;
+                        g.PrevVel    = g.Velocity;
+                        g.PrevHostT  = g.HostT;
+                        g.HasPrevVel = g.HasVel;
+                        g.HasPrev    = true;
+                        if (car.Vx != 0 || car.Vy != 0 || car.Vz != 0)
+                        { g.Velocity = new Vector3(car.Vx * 0.01f, car.Vy * 0.01f, car.Vz * 0.01f); g.HasVel = true; }
+                        else if (hdt > 0.005f)
+                        { g.Velocity = (pos - g.TargetPos) / hdt; g.HasVel = true; }
                         g.TargetPos = pos;
                         g.TargetRot = rot;
                         g.TargetAt  = Time.unscaledTime;
                         g.HostT     = snap.T;
+#if BAMP_DEV
+                        // S4 jitter, REDEFINED (fold c): the visible CORRECTION this arrival implies. The
+                        // ghost is drawn PlaybackDelay behind the host clock, so nothing is ever rendered as
+                        // recently as snap.T — the old "truth at snap.T vs a render record within 50 ms"
+                        // definition could never sample anything (rig run 2: samples=0). Instead: the ghost
+                        // stands at P now, for render time rt; the NEW state implies a different point for
+                        // that SAME rt, and the gap is the jerk the player sees when the ghost is corrected.
+                        if (g.Go != null && haveMe && (pos - me).sqrMagnitude < JitterNearSq)
+                        {
+                            float rt = Time.unscaledTime - _clockOffset - PlaybackDelay;
+                            Vector3 implied = pos + g.Velocity * Mathf.Clamp(rt - snap.T, -MaxExtrapolateSeconds, MaxExtrapolateSeconds);
+                            _jitter.Add((Time.unscaledTime, (g.Go.transform.position - implied).magnitude));
+                            if (_jitter.Count > 4096) _jitter.RemoveRange(0, _jitter.Count - 4096);
+                        }
+#endif
                     }
 
                     // Apply body colours on spawn AND whenever they change (a car
@@ -1128,9 +1325,10 @@ namespace BigAmbitionsMP
             return go;
         }
 
-        /// <summary>Smooths each traffic ghost toward its networked transform —
-        /// chasing a target extrapolated along the car's measured velocity so
-        /// motion stays continuous between 10 Hz packets even at low FPS.</summary>
+        /// <summary>Smooths each traffic ghost toward its networked transform. S4 (2026-09-12): the pose is
+        /// taken from BUFFERED INTERPOLATION — each ghost is drawn PlaybackDelay behind the newest host stamp,
+        /// between the two states it has received, so motion stays continuous between 5 Hz packets even at low
+        /// FPS and a late packet no longer lands as a jerk. Only a dry buffer dead-reckons.</summary>
         private static void TickGhosts()
         {
             if (_ghosts.Count == 0) return;
@@ -1139,6 +1337,8 @@ namespace BigAmbitionsMP
             // uncapped factor saturates past ~70ms frames).
             float k   = Mathf.Min(Time.deltaTime * GhostLerp, 0.5f);
             float now = Time.unscaledTime;
+            // S4: the moment, ON THE HOST'S CLOCK, that this frame draws.
+            float renderT = now - _clockOffset - PlaybackDelay;
 #if BAMP_DEV
             var _pcDrift = PlayerHelper.PlayerController?.Character;
             Vector3 _ppDrift = _pcDrift != null ? _pcDrift.transform.position : new Vector3(1e9f, 1e9f, 1e9f);
@@ -1156,10 +1356,42 @@ namespace BigAmbitionsMP
                     if (_drift > _maxGhostDrift) { _maxGhostDrift = _drift; _maxGhostDriftKin = g.Body == null || g.Body.isKinematic; }
                 }
 #endif
-                float ahead = Mathf.Min(now - g.TargetAt, MaxExtrapolateSeconds);
-                var predicted = g.TargetPos + g.Velocity * ahead;
-                Vector3    smoothedPos = Vector3.Lerp(t.position, predicted, k);
-                Quaternion smoothedRot = Quaternion.Slerp(t.rotation, g.TargetRot, k);
+                // S4: normal case — render time lies between the two received states, so INTERPOLATE
+                // (Hermite on the two velocities when both are known, else linear) and Slerp the rotation on
+                // exactly the same schedule, instead of chasing an extrapolated point.
+                float ahead = 0f;
+                Vector3 desiredPos; Quaternion desiredRot;
+                if (_haveClockOffset && g.HasPrev && renderT < g.HostT && g.HostT - g.PrevHostT > 0.001f)
+                {
+                    float span = g.HostT - g.PrevHostT;
+                    float u    = Mathf.Clamp01((renderT - g.PrevHostT) / span);
+                    desiredPos = (g.HasVel && g.HasPrevVel)
+                        ? Hermite(g.PrevPos, g.PrevVel * span, g.TargetPos, g.Velocity * span, u)
+                        : Vector3.Lerp(g.PrevPos, g.TargetPos, u);
+                    desiredRot = Quaternion.Slerp(g.PrevRot, g.TargetRot, u);
+                }
+                else
+                {
+                    // Buffer dry (a lost or late packet), only one state so far, or no clock estimate yet:
+                    // dead-reckon from the newest state along its velocity, capped, rotation held at the
+                    // newest received one (never extrapolated).
+                    ahead = _haveClockOffset
+                        ? Mathf.Clamp(renderT - g.HostT, 0f, MaxExtrapolateSeconds)
+                        : Mathf.Min(now - g.TargetAt, MaxExtrapolateSeconds);
+                    desiredPos = g.TargetPos + g.Velocity * ahead;
+                    desiredRot = g.TargetRot;
+                }
+                Vector3    smoothedPos = Vector3.Lerp(t.position, desiredPos, k);
+                Quaternion smoothedRot = Quaternion.Slerp(t.rotation, desiredRot, k);
+                // S4: never REWIND a ghost. A late packet that would pull it backwards along its own heading
+                // keeps at most RewindEpsilon of that this frame; the rest is carried by the following frames
+                // (the target stands still, so the chase closes it smoothly) rather than snapping back.
+                {
+                    Vector3 mv  = smoothedPos - t.position;
+                    Vector3 dir = g.Velocity.sqrMagnitude > 0.01f ? g.Velocity.normalized : t.forward;
+                    float along = Vector3.Dot(mv, dir);
+                    if (along < -RewindEpsilon) smoothedPos -= dir * (along + RewindEpsilon);
+                }
 #if BAMP_DEV
                 Vector3 _pre = t.position;
 #endif
@@ -1206,6 +1438,13 @@ namespace BigAmbitionsMP
             foreach (var g in _ghosts.Values)
                 if (g.Go != null) { try { NotifyCollidersRemoved(g.Go, g.Solids); UnityEngine.Object.Destroy(g.Go); } catch { } }
             _ghosts.Clear();
+            // S1/S4: the next session is a new stream — a fresh host starts its Seq at 1 and its clock is
+            // unrelated to this one's, so neither may be carried across a disconnect.
+            lock (_seqLock) { _seqLast = 0; _seqDropped = 0; _seqDropLogged = false; _sawOutOfOrder = false; }
+            _haveClockOffset = false;
+#if BAMP_DEV
+            _jitter.Clear();
+#endif
         }
 
         // ── Citywide: traffic spawns around every player ──────────────────────

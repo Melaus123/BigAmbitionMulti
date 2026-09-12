@@ -140,6 +140,32 @@ namespace BigAmbitionsMP
                     return sb.ToString();
                 }
 
+                case "traffic":
+                {
+                    // TRAFFIC-SMOOTH S5 (2026-09-12): one line for the traffic stream's health.
+                    int ghosts = 0, hostcars = 0;
+                    try { ghosts = TrafficSync.ClientTrafficGhostCount; } catch { }
+                    try { if (MPServer.IsRunning) hostcars = TrafficSync.HostTrafficCount(); } catch { }
+                    return $"OK traffic role={Role} ghosts={ghosts} hostcars={hostcars} " +
+                           $"seq={TrafficSync.LastTrafficSeq} dropped={TrafficSync.StaleSnapshotsDropped} " +
+                           $"lane={TrafficSync.TrafficLane}";
+                }
+
+                case "ghostjitter":
+                {
+                    // TRAFFIC-SMOOTH S5 (redefined fold c): the position CORRECTION each arriving packet
+                    // implies at the current render time — the jerk the player sees — over a rolling 10 s
+                    // window, for ghosts within 60 m. Client-side; the window exists only in a dev build.
+                    if (string.Equals(arg, "reset", StringComparison.OrdinalIgnoreCase))
+                    { TrafficSync.GhostJitterReset(); return "OK ghostjitter reset"; }
+                    // Review MINOR-6: the BUILD test comes first — on a release build there is no window at
+                    // all, so "no ghosts" would be a misleading answer even when ghosts are absent too.
+                    if (!TrafficSync.GhostJitterStats(out int jn, out float jmean, out float jmax))
+                        return "ERR ghostjitter needs a dev build";
+                    if (TrafficSync.ClientTrafficGhostCount == 0) return "ERR no ghosts";
+                    return $"OK ghostjitter window=10s samples={jn} mean={jmean:F3} max={jmax:F3}";
+                }
+
                 case "ledgerdump":
                 {
                     if (!MPServer.IsRunning) return "ERR host only";

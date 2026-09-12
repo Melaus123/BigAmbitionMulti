@@ -1480,7 +1480,15 @@ namespace BigAmbitionsMP
         {
             var payload = env.GetPayload<TrafficSnapshotPayload>();
             if (payload == null) return;
-            GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.ApplySnapshot(payload));
+            // TRAFFIC-SMOOTH S1: the stream rides the UNRELIABLE lane now, so a packet can arrive late or
+            // twice — drop anything not newer than the last one accepted (Seq 0 = an older host that stamps
+            // none: never dropped). Done HERE, at arrival, so a stale packet cannot win the coalesce below.
+            if (!TrafficSync.AcceptSnapshotSeq(payload.Seq)) return;
+            // TRAFFIC-SMOOTH S2: newest-wins. GameStatePatcher.EnqueueOnMainThread(Action, coalesceKey)
+            // (:93, :95-110) replaces the queued action IN PLACE for the same key — so a burst of snapshots
+            // that lands while the 5 ms/frame drain is busy collapses to the newest one, instead of the
+            // client replaying a backlog of stale poses.
+            GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.ApplySnapshot(payload), "traffic");
         }
 
         private static void HandleTrafficLights(MessageEnvelope env)

@@ -8933,11 +8933,27 @@ namespace BigAmbitionsMP
         /// <summary>Broadcasts the host's AI-traffic snapshot to all clients.</summary>
         /// <summary>T2: the traffic stream is PER-PEER now (culled + identity-gated in TrafficSync);
         /// peers come from ConnectedClientPeers (review MIN-9 — named peers only).</summary>
-        public static void SendTrafficSnapshotTo(MPLink peer, TrafficSnapshotPayload payload)
+        /// <summary>TRAFFIC-SMOOTH S1 (2026-09-12): traffic snapshots — and ONLY those, lights stay
+        /// reliable — leave the shared reliable-ordered FIFO. Returns true when the snapshot really went
+        /// out unreliable (false = this transport fell back to reliable; LnlLink does that over MTU).</summary>
+        // Review MINOR-5: this sits inside the 5 Hz traffic loop, so one broken link used to log a warning
+        // per send. Cap the noise at 5 lines per session, then stay silent.
+        private static int _trafficSendWarns;
+
+        public static bool SendTrafficSnapshotTo(MPLink peer, TrafficSnapshotPayload payload)
         {
-            if (!_running || peer == null || payload == null) return;
-            try { peer.Send(MessageEnvelope.Create(MessageType.TrafficSnapshot, "host", payload)); }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] traffic snapshot → {peer.Describe}: {ex.Message}"); }
+            if (!_running || peer == null || payload == null) return false;
+            try { return peer.SendUnreliable(MessageEnvelope.Create(MessageType.TrafficSnapshot, "host", payload)); }
+            catch (Exception ex)
+            {
+                if (_trafficSendWarns < 5)
+                {
+                    _trafficSendWarns++;
+                    Plugin.Logger.LogWarning($"[Server] traffic snapshot → {peer.Describe}: {ex.Message}"
+                                           + (_trafficSendWarns == 5 ? " (further traffic-send warnings suppressed)" : ""));
+                }
+                return false;
+            }
         }
 
         /// <summary>Broadcasts the host's traffic-light states to all clients.</summary>

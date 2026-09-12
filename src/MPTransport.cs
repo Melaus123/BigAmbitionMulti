@@ -104,6 +104,18 @@ namespace BigAmbitionsMP
         public abstract void Disconnect(byte[] reason);
 
         public void Send(MessageEnvelope env) => Send(env.Serialize(), reliable: true);
+
+        /// <summary>TRAFFIC-SMOOTH S1 (2026-09-12): send a payload that is pure recurring state on the
+        /// UNRELIABLE lane, so a lost or delayed packet cannot stall everything queued behind it in the
+        /// one reliable-ordered FIFO. ONLY for streams where the next packet fully supersedes this one and
+        /// the receiver guards against stale/duplicate arrival (traffic snapshots: Seq-guarded). Returns
+        /// TRUE when the payload really went unreliable, FALSE when this transport had to fall back to a
+        /// reliable send (the caller reports the lane it actually got — see LnlLink's MTU limit).
+        /// The base is the plain unreliable send: SteamLink / SteamClientTransport both take an unreliable
+        /// message of any size (Steam fragments it and drops the whole message if a piece is lost).</summary>
+        public virtual bool SendUnreliable(byte[] data) { Send(data, reliable: false); return true; }
+
+        public bool SendUnreliable(MessageEnvelope env) => SendUnreliable(env.Serialize());
     }
 
     // ── Round-282: the paced lane ────────────────────────────────────────────
@@ -596,6 +608,37 @@ namespace BigAmbitionsMP
             var writer = new NetDataWriter();
             writer.Put(data);
             Peer.Send(writer, reliable ? DeliveryMethod.ReliableOrdered : DeliveryMethod.Unreliable);
+        }
+
+        /// <summary>TRAFFIC-SMOOTH S1: LiteNetLib CANNOT fragment an unreliable packet — SendInternal
+        /// throws TooBigPacketException once length + headerSize exceeds the peer's MTU for anything but
+        /// ReliableOrdered/ReliableUnordered (same library fact as the express-lane note above). So an
+        /// over-MTU snapshot falls back to the reliable lane rather than throwing into the send path, and
+        /// says so by returning false.</summary>
+        private const int UnreliableHeaderMargin = 16;   // LNL packet header + the length prefix, with slack
+
+        public override bool SendUnreliable(byte[] data)
+        {
+            int mtu = 0;
+            try { mtu = Peer.Mtu; } catch { }
+            if (mtu <= 0 || data.Length + UnreliableHeaderMargin > mtu)
+            {
+                // Fold b: an over-MTU snapshot goes RELIABLE UNORDERED, not ReliableOrdered. LiteNetLib keeps one
+                // channel object per (channelNumber, DeliveryMethod) - channels[channelNumber * 4 + method] - so
+                // ReliableUnordered on channel 0 is its OWN stream: a lost fragment of one snapshot never holds
+                // back the next one behind the ReliableOrdered stream every other mod message rides, which is the
+                // head-of-line stall the design read ranked as the dominant cause of ghost jerk. Fragmentation IS
+                // supported for ReliableUnordered (the express-lane note above: only Unreliable/Sequenced cannot
+                // fragment), and it needs no ChannelsCount change on either peer (method index within the default
+                // four slots), so an older peer receives it as today. Ordering is the receiver's Seq guard.
+                MPNetStats.NoteOut(data);
+                var w = new NetDataWriter();
+                w.Put(data);
+                Peer.Send(w, DeliveryMethod.ReliableUnordered);
+                return false;   // false = 'not the unreliable lane' (the lever and the host log name it 'reliable')
+            }
+            Send(data, reliable: false);
+            return true;
         }
         public override void Disconnect(byte[] reason)
         { try { Peer.Disconnect(reason); } catch { } }

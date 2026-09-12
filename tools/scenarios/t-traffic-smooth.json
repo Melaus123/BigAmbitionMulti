@@ -1,0 +1,133 @@
+{
+  "id": "T-TRAFFIC-SMOOTH",
+  "title": "traffic smoothing, two players, NO merger: the client stands near the host so the host streams cars around it; the traffic lever reports the lane and the seq on the host and the ghost count on the client; the client's ghost correction size at packet arrival over a 10 s window is measured twice 30 s apart (reported, and its max must stay under 2.5 m - a chord-cut corner at 12 m/s was up to 3.6 m before this build); no stale drops are expected on a loopback link; ends without leaving; NO save",
+  "preconditions": "Fixture save1 (the host melaus, Client1). Build TRAFFIC-SMOOTH deployed (dev build: the ghostjitter lever needs BAMP_DEV). The rig runs both instances on ONE machine over the LAN link, so the host's lane is 'reliable' (an over-MTU snapshot rides ReliableUnordered) - the unreliable lane is Steam-only and not rig-observable. The two avatars spawn at their own saved positions; the ghost count on the client is whatever cars the host streams around the client's own position (the host feeds Gley an area per player). FIXTURE HYGIENE: NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "TooBigPacketException",
+    "upload SKIPPED",
+    "\\[TrafficSync\\] .*(failed|exception|threw)",
+    "\\[LnlLink\\] .*(failed|exception)"
+  ],
+  "oracles_report": [
+    "\\[TrafficSync\\] snapshots on the",
+    "\\[TrafficSync\\] dropped a stale",
+    "\\[TrafficSync\\] Local traffic killed",
+    "traffic budget:"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TrafficSync\\] snapshots on the (unreliable|reliable) lane \\(seq-guarded\\); identity re-send every 5s\\.",
+          "within_s": 150
+        }
+      ],
+      "note": "the host names the lane once per session as soon as it streams"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 90,
+      "note": "both worlds load and settle; the host streams traffic around each player"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST TRAFFIC START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h ghosts=\\d+ hostcars=[1-9]\\d* seq=[1-9]\\d* dropped=\\d+ lane=(unreliable|reliable)",
+      "note": "the host has live cars and has stamped snapshots"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c ghosts=(\\d+) hostcars=\\d+ seq=[1-9]\\d* dropped=0 lane=\\S+",
+      "capture": {
+        "ghosts1": "ghosts=(\\d+)"
+      },
+      "note": "the client receives seq-stamped snapshots; no stale drops on loopback; ghost count REPORTED (depends on where the client stands)"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "ghostjitter reset",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "sleep_s": 12,
+      "note": "a full 10 s window of samples"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "ghostjitter",
+      "expect_result": "^OK ghostjitter window=10s samples=[1-9]\\d* mean=\\d+\\.\\d{3} max=([01]\\.\\d{3}|2\\.[0-4]\\d{2})$",
+      "note": "window 1: max correction at packet arrival (fold c metric) under 2.5 m (a chord-cut corner at 12 m/s was up to 3.6 m before); a client with NO ghosts nearby answers ERR and fails this step - that is the fixture's geography, not the build (see the note in preconditions) - samples must be > 0 (run 2 measured nothing with the old metric)"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "sleep_s": 30
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "ghostjitter",
+      "expect_result": "^OK ghostjitter window=10s samples=[1-9]\\d* mean=\\d+\\.\\d{3} max=([01]\\.\\d{3}|2\\.[0-4]\\d{2})$",
+      "note": "window 2, 30 s later: still under 2.5 m - samples must be > 0 (run 2 measured nothing with the old metric)"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c ghosts=\\d+ hostcars=\\d+ seq=[1-9]\\d* dropped=0 lane=\\S+",
+      "note": "still no stale drops after a minute"
+    },
+    {
+      "seq": 15,
+      "role": "both",
+      "cmd": "mark TEST TRAFFIC END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
