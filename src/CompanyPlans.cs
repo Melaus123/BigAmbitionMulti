@@ -108,7 +108,7 @@ namespace BigAmbitionsMP
         public static void ClearAll(string why)
         {
             if (_byOwner.Count == 0 && _rows.Count == 0) { _suspended.Clear(); return; }
-            _byOwner.Clear(); _suspended.Clear(); _rows.Clear(); _rowOwner.Clear(); _refusalLogged.Clear(); _stale.Clear();
+            _byOwner.Clear(); _suspended.Clear(); _rows.Clear(); _rowOwner.Clear(); _refusalLogged.Clear(); _stale.Clear(); _drawn.Clear();
             _rowInfo.Clear(); _seq.Clear(); _applied.Clear();
             _seqBase = NewSeqBase();                      // r2 MAJOR-2: a reload must never restart a sender's seq LOWER
             Plugin.Logger.LogInfo($"[Plans] cleared ({why})");
@@ -147,9 +147,10 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>r2 MINOR-4, THE REDRAW.  A feed arrived for an owner whose headquarters is the page on
-        /// screen: ask each of the four lists that is actually active to rebuild itself through its OWN
+        /// screen: ask each of the five lists that is actually active to rebuild itself through its OWN
         /// private refresh (PricingManagersPlanList.RefreshPlansList :90, HrManagersPlanList :82,
-        /// HeadhuntersPlanList :73 and PurchasingAgentsPlanList.RefreshManagersList :71) - the same seam
+        /// HeadhuntersPlanList :73, PurchasingAgentsPlanList.RefreshManagersList :71 and - U4 - the
+        /// LogisticsManagersPlanList.RefreshManagersList :87 the logistics union now hangs off) - the same seam
         /// SharedShopWorkTabs uses for the warehouse tabs.  Each rebuild runs the overlay postfix, which
         /// drops that family's stale rows and re-adds them from the new feed.  MAIN THREAD: the only caller
         /// is Receive, which CompanyLists already enqueues.</summary>
@@ -175,6 +176,7 @@ namespace BigAmbitionsMP
                 n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList>(true), "RefreshManagersList");
                 n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList>(true), "RefreshManagersList");
                 n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList>(true), "RefreshManagersList");
+                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList>(true), "RefreshManagersList");   // U4: logistics joined the union
                 if (n > 0) Plugin.Logger.LogInfo($"[Plans] redrew {n} open tab(s) for '{ownerPid}' - a newer feed arrived.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] redraw for '{ownerPid}': {ex.Message}"); }
@@ -297,7 +299,7 @@ namespace BigAmbitionsMP
         /// headquarters' plans and nobody has to hop between cards.  PartnerHqOpen stays for the callers
         /// that really mean "a PARTNER's page": RefuseEdit, RefuseRow, RefuseReorder and RoutePlanCreate;
         /// SwallowPaneOpen and the assign-list fail-closed branch (MPPatches.cs, Patch_HrAssignList_MergerFilter)
-        /// use THIS predicate plus HasOverlayRows since HQ-UNION-1b.</summary>
+        /// use THIS predicate plus PartnerRowsDrawn(family) since U7.</summary>
         public static bool CompanyHqPageOpen(out string pageHq, out string pageOwner)
         {
             pageHq = ""; pageOwner = "";
@@ -337,6 +339,7 @@ namespace BigAmbitionsMP
         /// the builder created.</summary>
         public static int ShowPartnerRows(string family, Transform rowParent, Action<object> setUp)
         {
+            _drawn[family] = 0;                                  // U7: the record of this family starts empty every draw
             if (setUp == null) return 0;
             if (!CompanyHqPageOpen(out var pageHq, out _)) return 0;
             int shown = 0, own = 0, refused = 0;
@@ -381,10 +384,82 @@ namespace BigAmbitionsMP
                 if (rowParent == null) continue;
                 for (int i = before; i < rowParent.childCount; i++) StripDragHandle(rowParent.GetChild(i));
             }
+            _drawn[family] = shown;                              // U7: what this family actually drew
             if (shown > 0 || own > 0)
                 Plugin.Logger.LogInfo($"[Plans] union: {shown} partner row(s) + {own} own other-HQ row(s) ({family}, page {pageHq})");
             if (refused > 0) Plugin.Logger.LogInfo($"[Plans] {refused} {family} row(s) not drawn on '{pageHq}'.");
             return shown + own;
+        }
+
+        /// <summary>U4 (HQ-UNION-2): the LOGISTICS half of the union.  This family is not drawn from the
+        /// screen-layer registry like the other four - a partner's plans are INSTALLED in the real
+        /// gi.logisticsManagerPlans as TAGGED DISPLAY COPIES (CompanyLists.Apply -> MergerAbsence
+        /// .InstallListsForDisplay under DisplayOwnerTag "display:&lt;pid&gt;", MergerAbsence.cs:479), so the
+        /// rows already exist on this machine; what hides them is the NATIVE PAGE FILTER
+        /// (LogisticsManagersPlanList.GetFilteredPlans :107-121 = LogisticsManagerHelper
+        /// .GetAssignedPlansForHeadquarters(the page's address) narrowed to the tab's isFactory flag).
+        /// This lifts that filter for the current tab: every plan whose headquarters is NOT the page's,
+        /// either a display copy (a PARTNER's row) or one of MY OWN other headquarters' real plans
+        /// (OwnOtherHqPlans, which excludes display copies and demands MergerFlip.TrulyMine, so its rows
+        /// are the game's own objects and edit natively).  No tint is applied here: a logistics row is
+        /// already painted in its owner's colour by Patch_LogisticsPlanEntry_PartnerTint, the postfix on
+        /// the entry's own Initialize, which resolves the owner from the plan's HEADQUARTERS
+        /// (CompanyLists.TryOwnerOfAddress) - the tag itself only says "display:&lt;pid&gt;" and
+        /// IsDisplayInstall answers yes/no, it does not hand the pid back.  Neither kind is draggable:
+        /// OnPlanReordered (:75-86) indexes GetFilteredPlans, which holds none of these rows.</summary>
+        public static int ShowLogisticsUnionRows(bool factory, Transform rowParent, Action<object> setUp)
+        {
+            _drawn["logistics"] = 0;
+            if (setUp == null) return 0;
+            if (!CompanyHqPageOpen(out var pageHq, out _)) return 0;
+            int shown = 0, own = 0, refused = 0;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.logisticsManagerPlans == null) return 0;
+                var partner = new List<object>();
+                foreach (var p in gi.logisticsManagerPlans)
+                {
+                    if (p == null || p.isFactory != factory) continue;
+                    bool display; try { display = MergerAbsence.IsDisplayInstall(p); } catch { display = false; }
+                    if (!display) continue;                                  // my own rows come from OwnOtherHqPlans
+                    var hq = HqOfPlan(p);
+                    if (hq == null) continue;
+                    string key = KeyOf(hq);
+                    if (key.Length == 0 || Same(key, pageHq)) continue;      // the page's own copies are the native list's
+                    partner.Add(p);
+                }
+                foreach (var row in partner) { if (DrawUnionRow(row, rowParent, setUp, "logistics", "partner")) shown++; else refused++; }
+                foreach (var o in OwnOtherHqPlans("logistics", pageHq))
+                {
+                    var lg = o as Buildings.Office.Headquarters.LogisticsManagerPlan;
+                    if (lg == null || lg.isFactory != factory) continue;     // one tab at a time, exactly as native filters
+                    if (DrawUnionRow(o, rowParent, setUp, "logistics", "own")) own++; else refused++;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics union: {ex.Message}"); }
+            _drawn["logistics"] = shown;
+            if (shown > 0 || own > 0)
+                Plugin.Logger.LogInfo($"[Plans] union: {shown} partner row(s) + {own} own other-HQ row(s) (logistics, page {pageHq})");
+            if (refused > 0) Plugin.Logger.LogInfo($"[Plans] {refused} logistics row(s) not drawn on '{pageHq}'.");
+            return shown + own;
+        }
+
+        /// <summary>U4: hand one row to the list's OWN builder and take the drag handle off whatever that
+        /// builder just added.  False = the builder threw and nothing was drawn (logged once per kind).</summary>
+        private static bool DrawUnionRow(object row, Transform rowParent, Action<object> setUp, string family, string kind)
+        {
+            int before = rowParent != null ? rowParent.childCount : 0;
+            try { setUp(row); }
+            catch (Exception ex)
+            {
+                if (_refusalLogged.Add(family + "|" + kind))
+                    Plugin.Logger.LogWarning($"[Plans] a {family} {kind} row could not be drawn: {ex.Message} (once per family and kind).");
+                return false;
+            }
+            if (rowParent != null)
+                for (int i = before; i < rowParent.childCount; i++) StripDragHandle(rowParent.GetChild(i));
+            return true;
         }
 
         /// <summary>r2 MAJOR-1 (a): a partner row must never become DRAGGABLE.  ReorderableList.OnEnable and
@@ -508,7 +583,7 @@ namespace BigAmbitionsMP
         /// <summary>U1: MY OWN other headquarters' REAL plans of one family - every headquarters I run
         /// (MergerFlip.TrulyMine of its registration) whose key is not the page's.  These are the game's own
         /// objects out of SaveGameManager.Current (pricingManagerPlans / importPartnerships / hrManagerPlans /
-        /// headhunterPlans), NOT display copies: they are never put in _rows/_rowOwner/_rowInfo, so
+        /// headhunterPlans, and since U4 logisticsManagerPlans), NOT display copies: they are never put in _rows/_rowOwner/_rowInfo, so
         /// IsOverlayPlan stays false and every edit on them runs natively.  Wave 4's TAGGED DISPLAY installs
         /// sit in the same lists and are a partner's rows, so they are excluded through the same test every
         /// wave-4 predicate uses (MergerAbsence.IsDisplayInstall), as OwnCount does.</summary>
@@ -526,6 +601,7 @@ namespace BigAmbitionsMP
                     case "purchasing":  src = gi.importPartnerships;  break;
                     case "hr":          src = gi.hrManagerPlans;      break;
                     case "headhunter":  src = gi.headhunterPlans;     break;
+                    case "logistics":   src = gi.logisticsManagerPlans; break;   // U4: the caller filters the tab
                 }
                 if (src == null) return mine;
                 var run = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
@@ -552,14 +628,16 @@ namespace BigAmbitionsMP
             return mine;
         }
 
-        /// <summary>The headquarters a REAL plan of any of the four families names (public field on all four:
-        /// HrManagerPlan.cs:16, PricingManagerPlan.cs:21, HeadhunterPlan.cs:23, ImportPartnership.cs:39).</summary>
+        /// <summary>The headquarters a REAL plan of any of the five families names (public field on all five:
+        /// HrManagerPlan.cs:16, PricingManagerPlan.cs:21, HeadhunterPlan.cs:23, ImportPartnership.cs:39 and
+        /// LogisticsManagerPlan.cs:36).</summary>
         private static Address HqOfPlan(object plan)
         {
             var pm = plan as PricingManagerPlan; if (pm != null) return pm.headquartersAddress;
             var ip = plan as ImportPartnership;  if (ip != null) return ip.headquartersAddress;
             var hr = plan as HrManagerPlan;      if (hr != null) return hr.headquartersAddress;
             var hh = plan as HeadhunterPlan;     if (hh != null) return hh.headquartersAddress;
+            var lg = plan as Buildings.Office.Headquarters.LogisticsManagerPlan; if (lg != null) return lg.headquartersAddress;   // U4
             return null;
         }
 
@@ -675,8 +753,18 @@ namespace BigAmbitionsMP
         /// this player's own is never mistaken for one.</summary>
         public static bool IsOverlayPlan(object plan) => plan != null && _rowOwner.ContainsKey(plan);
 
-        /// <summary>HQ-UNION-1b: are any partner rows registered right now (drawn on whichever company page)?</summary>
-        public static bool HasOverlayRows => _rowOwner.Count > 0;
+        /// <summary>U7 (HQ-UNION-2): how many PARTNER rows this family actually DREW on the page in its last
+        /// draw.  It replaces HasOverlayRows, which read the row CACHE and answered a different question:
+        /// _rowOwner is emptied only on suspend, a stale rebuild or Clear, so a partner headquarters that
+        /// stopped resolving left it full (SwallowPaneOpen would swallow a pane throw with no partner row on
+        /// screen) and a PRICING-only partner armed the HR assign list's fail-closed branch.  Set by the two
+        /// union drivers per family (ShowPartnerRows, ShowLogisticsUnionRows), zeroed at the start of every
+        /// draw and on Clear.</summary>
+        public static int PartnerRowsDrawn(string family)
+            => family != null && _drawn.TryGetValue(family, out var n) ? n : 0;
+
+        /// <summary>U7: family -> the partner rows that family drew in its last draw.</summary>
+        private static readonly Dictionary<string, int> _drawn = new Dictionary<string, int>(StringComparer.Ordinal);
 
         /// <summary>HO-1a H3.  WHOSE headquarters a display row belongs to, or "" when the plan is not one
         /// of the detached rows.  The assign list uses it to offer that company's own people only - the hole
@@ -1216,13 +1304,14 @@ namespace BigAmbitionsMP
         /// unusable.  The finaliser swallows it, logs it once per family, and leaves the pane as it was - no
         /// new on-screen text.  HQ-UNION-1b (review MAJOR-1): since the union, a partner's row can sit on MY
         /// OWN card too, so the test is "a company headquarters page with partner rows on it", not "a
-        /// partner's page"; only when NO partner row is drawn is a throw the game's own and re-thrown.</summary>
+        /// partner's page"; only when NO partner row is drawn is a throw the game's own and re-thrown.  U7:
+        /// "drawn" is now THIS family's last draw (PartnerRowsDrawn), not the family-agnostic row cache.</summary>
         public static Exception SwallowPaneOpen(string family, Exception ex)
         {
             try
             {
                 if (ex == null) return null;
-                if (!CompanyHqPageOpen(out var hq, out var owner) || _rowOwner.Count == 0) return ex;   // no partner row here: the game's own bug
+                if (!CompanyHqPageOpen(out var hq, out var owner) || PartnerRowsDrawn(family) == 0) return ex;   // no partner row of THIS family here: the game's own bug
                 if (_refusalLogged.Add("pane|" + family))
                     Plugin.Logger.LogWarning($"[Plans] the {family} pane could not open on a row of '{owner}' at '{hq}': {ex.Message} (once per family; the pane stays as it was).");
                 return null;

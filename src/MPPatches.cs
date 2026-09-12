@@ -8998,8 +8998,10 @@ namespace BigAmbitionsMP
         // ══ MERGER PHASE 4c PART 1 — THE HEADQUARTERS PLAN UNION VIEW (D20-6/D20-8, 2026-09-11) ══
         //
         // Open a merged PARTNER's headquarters and its five plan tabs show THAT headquarters' plans.
-        // Logistics already does this through wave 4's TAGGED INSTALLED display copies (its execution pass
-        // is guarded). The other FOUR families are drawn at the SCREEN LAYER only: the postfixes below hand
+        // Logistics' rows are already ON this machine as wave 4's TAGGED INSTALLED display copies (its
+        // execution pass is guarded); only the native page filter hid them, and U4 (HQ-UNION-2) lifts that
+        // in Patch_LogisticsPlanList_UnionRows below. The other FOUR families are drawn at the SCREEN LAYER
+        // only, because nothing of theirs may be installed here: the postfixes below hand
         // CompanyPlans' DETACHED row objects to the list's OWN private SetUpPlanEntry, so the rows are the
         // game's own rows, in the game's own order, with no new on-screen text — and nothing is ever added
         // to this machine's game lists (an installed HR/headhunter copy would train, insure and recruit
@@ -9092,6 +9094,59 @@ namespace BigAmbitionsMP
             {
                 OverlayPlanRows("headhunter", __instance, typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList),
                                 ___entryTemplate != null ? ___entryTemplate.parent : null, ___buttonEntry);
+            }
+        }
+
+
+        /// <summary>U4 (HQ-UNION-2): LOGISTICS JOINS THE UNION.  `RefreshManagersList` is private and takes no
+        /// argument (decompile LogisticsManagersPlanList.cs:87-105): it hides the plan pane, clears the entry
+        /// map, draws GetFilteredPlans() - the PAGE headquarters' plans of the current tab - puts the add
+        /// button last and calls reorderableList.Reinitialize().  The postfix appends the rows that filter
+        /// left out (CompanyPlans.ShowLogisticsUnionRows) through the list's OWN private SetUpPlanEntry
+        /// (:123-145), so they are the game's own rows with no new on-screen text.
+        /// Reinitialize is deliberately NOT called again: it is RunAfterOneFrame(InitializeItems)
+        /// (ReorderableList.cs:42-51), so the enrolment the NATIVE call armed runs NEXT frame, while
+        /// CompanyPlans.StripDragHandle takes the ReorderableListItem off every appended row with
+        /// DestroyImmediate in THIS frame - InitializeItems (:52-63) can never see one.
+        /// __state is `currentTab` AS IT WAS ON ENTRY: an empty tab makes native re-enter through
+        /// ChangeTab("Warehouse") (:91; ChangeTab :260-274 sets currentTab and calls RefreshManagersList
+        /// again), so the INNER call draws the union rows and the OUTER postfix must not draw them twice.
+        /// ___entryTemplate / ___buttonEntry = '___' + the exact field names (:26-27 `[SerializeField]
+        /// private LogisticsManagersPlanListEntry entryTemplate;`, :29-30 `[SerializeField] private Transform
+        /// buttonEntry;`); `currentTab` is `[HideInInspector] public string currentTab;` (:44-45) - PUBLIC, so
+        /// it is read directly and not by reflection.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList), "RefreshManagersList")]
+        public static class Patch_LogisticsPlanList_UnionRows
+        {
+            static void Prefix(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList __instance, out string __state)
+            {
+                __state = "";
+                try { if (__instance != null) __state = __instance.currentTab ?? ""; } catch { }
+            }
+
+            static void Postfix(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList __instance,
+                                UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanListEntry ___entryTemplate,
+                                UnityEngine.Transform ___buttonEntry, string __state)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return;                 // inert without a merger
+                    if (string.IsNullOrEmpty(__state)) return;                // the ChangeTab re-entry already drew them
+                    if (___entryTemplate == null) return;
+                    var listType = typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList);
+                    var m = AccessTools.Method(listType, "SetUpPlanEntry");
+                    if (m == null)
+                    {
+                        if (_planRowWarned.Add("logistics"))
+                            Plugin.Logger.LogWarning($"[Plans] logistics: SetUpPlanEntry is not on {listType.Name} - the union rows cannot be drawn (once per family).");
+                        return;
+                    }
+                    bool factory = __state.Equals("factory", StringComparison.OrdinalIgnoreCase);
+                    int n = CompanyPlans.ShowLogisticsUnionRows(factory, ___entryTemplate.transform.parent,
+                                                               row => m.Invoke(__instance, new object[] { row }));
+                    if (n > 0 && ___buttonEntry != null) ___buttonEntry.SetAsLastSibling();   // the add button stays last
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics overlay: {ex.Message}"); }
             }
         }
 
@@ -9267,10 +9322,12 @@ namespace BigAmbitionsMP
 
         private static readonly HashSet<string> _dropdownRescoped = new HashSet<string>();
 
-        /// <summary>Does this row belong to a DIFFERENT headquarters than the page on screen?  Address
-        /// overloads `==` by VALUE (HQ-UNION-1b, review MINOR-1: a page-HQ plan whose Address object was
-        /// deserialised separately from business.address is still the same headquarters), so the test is
-        /// value equality, never reference identity.  Logged once per family per session.</summary>
+        /// <summary>Does this row belong to a DIFFERENT headquarters than the page on screen?  The call
+        /// below is `page.Equals(rowHq)`, and Address compares BY VALUE there: the `Equals` OVERRIDE at
+        /// BigAmbitions.Items/Address.cs:40 (`operator ==` is the separate :80).  HQ-UNION-1b, review
+        /// MINOR-1: a page-HQ plan whose Address object was deserialised separately from business.address is
+        /// still the same headquarters, so the test is value equality, never reference identity.  Logged
+        /// once per family per session.</summary>
         private static bool RowHqOffPage(object rowHq, string family)
         {
             try
@@ -9441,6 +9498,45 @@ namespace BigAmbitionsMP
                     RescopePopUp(__instance, "purchasingAgentPlanUISettings", people);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] purchasing dropdown rescope: {ex.Message}"); }
+            }
+        }
+
+
+        /// <summary>U4 (c): the LOGISTICS manager dropdown follows the ROW's own headquarters.
+        /// `UpdateLogisticsManagerDropdownForPlan(LogisticsManagerPlan plan, LogisticsManagersPlanListEntry
+        /// selectedEntry)` is private (decompile LogisticsManagersPlanList.cs:159-166): it fills
+        /// `_logisticsManagers` from EmployeeInstances whose assignedAddress is the PAGE's address (:161),
+        /// sets the entry's own ManagerDropdown (:164) and fills the no-manager pop-up from the SAME list
+        /// (logisticsManagerPlanUI.noManagerAssignedPopUp.SetUpEmployeeDropdown, :165).  All three are redone
+        /// here with the row's headquarters and native's own test (the logistics skill, no other plan already
+        /// holding the manager, a work shift), so OnChangedLogisticsManager (:168-190), which indexes
+        /// `_logisticsManagers`, picks the right person.  A row of the page's own headquarters is untouched.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList), "UpdateLogisticsManagerDropdownForPlan")]
+        public static class Patch_LogisticsDropdown_RowHq
+        {
+            static void Postfix(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList __instance,
+                                Buildings.Office.Headquarters.LogisticsManagerPlan plan,
+                                UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanListEntry selectedEntry)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || plan == null || selectedEntry == null) return;
+                    var hq = plan.headquartersAddress;
+                    if (!RowHqOffPage(hq, "logistics")) return;
+                    var gi = SaveGameManager.Current;
+                    if (gi == null || gi.EmployeeInstances == null || gi.logisticsManagerPlans == null) return;
+                    var people = gi.EmployeeInstances.FindAll((Entities.EmployeeInstance x) =>
+                        x != null && x.assignedAddress == hq && x.HasSkill("ba:skill_logisticsmanager")
+                        && !gi.logisticsManagerPlans.Exists((Buildings.Office.Headquarters.LogisticsManagerPlan y) => y.id != plan.id && y.assignedEmployeeId == x.id)
+                        && x.IsAssignedToAnyWorkShift());
+                    SetPrivateList(__instance, "_logisticsManagers", people);
+                    var opts = new System.Collections.Generic.List<string> { "common_unassigned".GetLocalization() };
+                    foreach (var x in people) opts.Add(x.GetEmployeeNameWithInfo());
+                    var dd = selectedEntry.ManagerDropdown;
+                    if (dd != null) dd.SetOptions(opts, localize: false, people.FindIndex((Entities.EmployeeInstance x) => x.id == plan.assignedEmployeeId) + 1);
+                    RescopePopUp(__instance, "logisticsManagerPlanUI", people);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics dropdown rescope: {ex.Message}"); }
             }
         }
 
@@ -9775,7 +9871,9 @@ namespace BigAmbitionsMP
                     // the contamination H3 exists to stop.
                     // HQ-UNION-1b (review MAJOR-3): a partner's row can be on MY OWN card too, so the test is the union
                     // predicate plus "partner rows are drawn" - never the own-plan rule while a partner row could be showing.
-                    if (rowPlan == null && CompanyPlans.CompanyHqPageOpen(out _, out var openOwner) && openOwner.Length > 0 && CompanyPlans.HasOverlayRows)
+                    // U7: "drawn" is the HR family's OWN last draw (PartnerRowsDrawn("hr")), not the family-agnostic row
+                    // cache - a pricing-only partner, or one whose headquarters stopped resolving, no longer arms this.
+                    if (rowPlan == null && CompanyPlans.CompanyHqPageOpen(out _, out var openOwner) && openOwner.Length > 0 && CompanyPlans.PartnerRowsDrawn("hr") > 0)
                     {
                         int all = __instance.data.Count;
                         __instance.data = new List<UI.Smartphone.Apps.BizMan.HrManagers.HrManagerEmployeeModel>();
