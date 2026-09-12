@@ -1015,8 +1015,10 @@ namespace BigAmbitionsMP
                 // false = skip Gley's update (no spawn, no sim) on a pure client while suppression is on — UNLESS
                 // the client sim runs at zero ambient density (2026-09-02: ClientServiceSimEnabled), where Gley must
                 // tick so the client's own service cars drive; ambient spawning is prevented by the density clamp.
+                // TRAFFIC-APART P5: in LOCAL mode this client is far from every other player and runs its OWN
+                // ambient traffic, so Gley's update must tick here whatever the service-sim flag says.
                 return !(MPClient.IsClientInWorld && !MPServer.IsRunning && TrafficSync.ClientTrafficSuppressionEnabled
-                         && !TrafficSync.ClientServiceSimEnabled);
+                         && !TrafficSync.ClientServiceSimEnabled && !TrafficSync.ClientRunsLocalTraffic);
             }
         }
 
@@ -1036,8 +1038,12 @@ namespace BigAmbitionsMP
                     // (vanilla traffic, user ruling 2026-09-02). The mod's own re-assert calls pass 0 on clients only.
                     if (MPServer.IsRunning) { TrafficSync.GameDensityRequest = Math.Max(0, nrOfCars); return; }
                     if (!(MPClient.IsClientInWorld && !MPServer.IsRunning) || !TrafficSync.ClientServiceSimEnabled) return;
-                    if (nrOfCars != 0 && _logs++ < 3) Plugin.Logger.LogInfo($"[TrafficSync] client density request {nrOfCars} → 0 (ambient traffic is the host's; only service cars drive here).");
                     if (!TrafficSync.SelfDensityCall) TrafficSync.ClientGameDensityRequest = Math.Max(0, nrOfCars);   // H-SVC-116: the game's own number, kept for the offline hand-back
+                    // TRAFFIC-APART P5(i): in LOCAL mode the ambient traffic here is this machine's OWN, so the
+                    // game's number passes straight through. It is still recorded above - for the flip back to
+                    // ghost mode and for the offline hand-back.
+                    if (TrafficSync.ClientRunsLocalTraffic) return;
+                    if (nrOfCars != 0 && _logs++ < 3) Plugin.Logger.LogInfo($"[TrafficSync] client density request {nrOfCars} → 0 (ambient traffic is the host's; only service cars drive here).");
                     nrOfCars = 0;
                 }
                 catch { }
@@ -1079,12 +1085,15 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(Controllers.TurnstileBarrier), "OnTriggerExit")]
         public static class Patch_Turnstile_Exit_IgnoreGhosts { static bool Prefix(UnityEngine.Collider other) => !IsModGhostContact(other); }
 
-        /// <summary>Client sim at zero ambient density (2026-09-02): the client paints the HOST's light states
-        /// (TrafficSync.ApplyTrafficLights → Waypoint.stop), so Gley's local phase timer must never advance there.</summary>
+        /// <summary>Client sim at zero ambient density (2026-09-02): while the client paints the HOST's light states
+        /// (TrafficSync.ApplyTrafficLights → Waypoint.stop), Gley's local phase timer must never advance there.
+        /// TRAFFIC-APART P5(iv): in LOCAL mode nothing paints them - this client runs its own traffic, so it runs
+        /// its own phases too.</summary>
         [HarmonyPatch(typeof(IntersectionManager), nameof(IntersectionManager.UpdateIntersections))]
         public static class Patch_IM_UpdateIntersections_ClientSkip
         {
-            static bool Prefix() => !(MPClient.IsClientInWorld && !MPServer.IsRunning && TrafficSync.ClientTrafficSuppressionEnabled);   // false = skip on a pure client (MINOR-2: honours the F11 vanilla toggle)
+            static bool Prefix() => !(MPClient.IsClientInWorld && !MPServer.IsRunning && TrafficSync.ClientTrafficSuppressionEnabled
+                                      && !TrafficSync.ClientRunsLocalTraffic);   // false = skip on a pure client in GHOST mode (MINOR-2: honours the F11 vanilla toggle)
         }
         // ── (removed 2026-08-26) Patch_ClickSleep ─────────────────────────
         // Deleted by the patch-target audit. Broken two ways and inert a third: GameManager has NO

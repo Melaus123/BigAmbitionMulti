@@ -287,6 +287,7 @@ namespace BigAmbitionsMP
             // re-host in the same process otherwise inherits the previous world's identity maps
             // (previous world's MODELS painted onto new pool slots) and diffs against its lights.
             _peerSentIdentity.Clear();
+            _peerTraffic.Clear(); _peerTrafficPin.Clear();   // TRAFFIC-APART P7: the per-peer traffic mode is per world too
             _slotIdentity.Clear();
             _lightLastSent.Clear();
             _lightsFullSentAt = -999f;
@@ -298,6 +299,9 @@ namespace BigAmbitionsMP
             // Review #2 MINOR-4: the game's density request and the budget log memory are per world.
             GameDensityRequest = -1; _lastBudgetLogged = -1; _lastAreasLogged = -1;
             ClientGameDensityRequest = -1; SelfDensityCall = false; _pendingHandBack = false; _handBackWarned = false; _anchorIsGhost = false;
+            // TRAFFIC-APART P7: a new world starts in GHOST mode with no handover running, whatever the last one ended in.
+            ClientTrafficMode = ModeGhost; _handover = HandoverNone; _modeSeq = 0;
+            _modeDeferLogged = false; _localDensityIssued = false; _localDensityWaitLogged = false; _localDensityUninitLogged = false;
         }
 
         /// <summary>Role-based step — called each frame in-game.</summary>
@@ -546,7 +550,145 @@ namespace BigAmbitionsMP
         {
             if (string.IsNullOrEmpty(playerId)) return;
             _peerSentIdentity.Remove(playerId);
+            _peerTraffic.Remove(playerId); _peerTrafficPin.Remove(playerId);   // TRAFFIC-APART P7: its mode state goes with it
             _lightsFullSentAt = -999f;
+        }
+
+        // ── TRAFFIC-APART (user ruling 2026-09-12): a client far from everyone runs its OWN traffic ─────
+        //
+        // While a client is beyond 350 m from EVERY other player it runs its own local Gley ambient traffic; within
+        // 250 m of anyone the host's traffic rules (the ghosts). The HOST decides, per peer, on this same 0.2 s beat
+        // and says so with an explicit message; the client obeys and acks. No leader election: the host is the
+        // authority for any pair of players in range, two clients far from the host included.
+        internal const string ModeGhost = "ghost";
+        internal const string ModeLocal = "local";
+        private const float ModeFarMeters       = 350f;   // ghost -> local: the nearest other player is further than this
+        private const float ModeNearMeters      = 250f;   // local -> ghost: anyone is nearer than this (100 m hysteresis band)
+        private const float ModeReassertSeconds = 5f;     // the CURRENT mode is re-sent to every peer this often
+        private static float _modeReassertAt = -999f;
+
+        private sealed class PeerTraffic
+        {
+            public string Mode  = ModeGhost;   // new peers start in GHOST — today's behaviour
+            public int    Seq;                 // per-peer flip counter; an ack for an older Seq is a late ack, ignored
+            public bool   Acked = true;        // has the client confirmed THIS Seq?  Gates the local-mode cut-off below
+            public float  FlipAt;              // host unscaled time of the flip
+        }
+        private static readonly Dictionary<string, PeerTraffic> _peerTraffic = new();
+        /// <summary>P9 test seam: pid -> "local"/"ghost" pinned by `trafficmode force`. Absent = the distance rule.</summary>
+        private static readonly Dictionary<string, string> _peerTrafficPin = new();
+
+        /// <summary>The position the traffic rules judge a REMOTE player by: the ridden car when they are a passenger
+        /// (review M3 — their avatar is parked at the boarding door, which is not where they are), else the avatar
+        /// itself. A player INDOORS keeps their avatar at the building (RemotePlayerManager.GetPlayerPosition stays
+        /// valid while masked), and that is exactly the outside position to measure from. An unresolvable ride yields
+        /// no position at all rather than a wrong one.</summary>
+        private static bool TryGetPlayerAnchorPosition(string pid, out Vector3 pos)
+        {
+            pos = default;
+            if (PassengerSync.TryGetRide(pid, out var rideVid))
+                return VehicleManager.TryGetGhostPosition(rideVid, out pos);
+            return RemotePlayerManager.TryGetRemotePosition(pid, out pos);
+        }
+
+        /// <summary>The position the traffic rules judge the LOCAL player by — the same one UpdateTrafficAnchors feeds
+        /// Gley: the ridden car, else the live character outdoors, else the anchor pinned at the last outside position
+        /// while indoors.</summary>
+        private static bool LocalAnchorPosition(out Vector3 pos)
+        {
+            pos = default;
+            try
+            {
+                var rideAnchor = PassengerRide.RideAnchorTransform();
+                if (rideAnchor != null) { pos = rideAnchor.position; return true; }
+                var ch = PlayerHelper.PlayerController?.Character;
+                if (ch == null) return false;
+                bool inside = LocalInBuilding;
+                try { inside = BuildingManager.IsInsideBuilding; } catch { }
+                pos = (inside && _hasOutsidePos) ? _lastOutsidePos : ch.transform.position;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>TRAFFIC-APART P2: one verdict per connected peer, on the 0.2 s snapshot beat. The distance that
+        /// decides is to the NEAREST other player — the host's own anchor and every other client — with a 250/350 m
+        /// hysteresis band so a player walking the boundary cannot flap. A peer whose position (or everyone else's)
+        /// is unknown this beat keeps the mode it has: no verdict without evidence.</summary>
+        private static void EvaluatePeerTrafficModes(List<(MPLink peer, string playerId)> peers, Dictionary<string, Vector3> posByPid, float now)
+        {
+            bool reassert = now - _modeReassertAt >= ModeReassertSeconds;
+            if (reassert) _modeReassertAt = now;
+            bool haveHost = LocalAnchorPosition(out var hostPos);
+            foreach (var (link, pid) in peers)
+            {
+                if (link == null || string.IsNullOrEmpty(pid)) continue;
+                if (!_peerTraffic.TryGetValue(pid, out var pt)) _peerTraffic[pid] = pt = new PeerTraffic();
+
+                float nearest = float.PositiveInfinity;
+                if (posByPid.TryGetValue(pid, out var me))
+                {
+                    if (haveHost) nearest = Vector3.Distance(me, hostPos);
+                    foreach (var other in peers)
+                    {
+                        if (string.IsNullOrEmpty(other.playerId) || other.playerId == pid) continue;
+                        if (posByPid.TryGetValue(other.playerId, out var op)) nearest = Mathf.Min(nearest, Vector3.Distance(me, op));
+                    }
+                }
+
+                string want = pt.Mode;
+                if (_peerTrafficPin.TryGetValue(pid, out var pin) && !string.IsNullOrEmpty(pin)) want = pin;
+                else if (float.IsPositiveInfinity(nearest)) { }                                  // nothing to measure against this beat
+                else if (pt.Mode == ModeGhost) { if (nearest > ModeFarMeters) want = ModeLocal; }
+                else if (nearest <= ModeNearMeters) want = ModeGhost;
+
+                if (want != pt.Mode)
+                {
+                    string old = pt.Mode;
+                    pt.Mode = want; pt.Seq++; pt.Acked = false; pt.FlipAt = now;
+                    // P8: this peer is about to paint the host's lights again — make the next lights beat a FULL
+                    // broadcast so it starts from truth instead of waiting up to 10 s for the periodic re-assert.
+                    if (want == ModeGhost) _lightsFullSentAt = -999f;
+                    string d = float.IsPositiveInfinity(nearest) ? "unknown" : $"{nearest:F0} m";
+                    Plugin.Logger.LogInfo($"[TrafficSync] traffic mode for {pid}: {old} -> {want} (nearest other player {d}).");
+                    SendTrafficMode(link, pid, pt);
+                }
+                else if (reassert) SendTrafficMode(link, pid, pt);   // recurrence: covers the join race, a reconnect, a host restart, a lost message
+            }
+        }
+
+        private static void SendTrafficMode(MPLink link, string pid, PeerTraffic pt)
+        {
+            try { MPServer.SendTrafficModeTo(link, new TrafficModePayload { Mode = pt.Mode, Seq = pt.Seq }); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] traffic mode -> {pid}: {ex.Message}"); }
+        }
+
+        /// <summary>P4: the client confirms the mode named by Seq. An ack for a superseded flip is dropped.</summary>
+        public static void HostOnModeAck(string pid, TrafficModeAckPayload p)
+        {
+            if (p == null || string.IsNullOrEmpty(pid)) return;
+            if (!_peerTraffic.TryGetValue(pid, out var pt)) return;
+            if (pt.Acked || p.Seq != pt.Seq || p.Mode != pt.Mode) return;
+            pt.Acked = true;
+            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode for {pid}: {pt.Mode} in force after {Time.unscaledTime - pt.FlipAt:F1} s"
+                                + (pt.Mode == ModeLocal ? " - its snapshot stream and its traffic anchor stop now." : "."));
+        }
+
+        /// <summary>P9 test seam (`trafficmode force`): pin a peer's verdict, or hand it back to the distance rule
+        /// ("auto"). Returns how many connected peers matched. Nothing flips here — the next evaluator beat does it.</summary>
+        public static int HostForceTrafficMode(string who, string mode)
+        {
+            if (!MPServer.IsRunning || string.IsNullOrEmpty(who)) return 0;
+            bool all = string.Equals(who, "all", StringComparison.OrdinalIgnoreCase);
+            int n = 0;
+            foreach (var (link, pid) in MPServer.ConnectedClientPeers())
+            {
+                if (string.IsNullOrEmpty(pid)) continue;
+                if (!all && pid != who) continue;
+                n++;
+                if (mode == "auto") _peerTrafficPin.Remove(pid); else _peerTrafficPin[pid] = mode;
+            }
+            return n;
         }
 
         private static void BroadcastPerPeer(List<MasterCar> master)
@@ -564,19 +706,31 @@ namespace BigAmbitionsMP
             bool idReassert = now - _identityReassertAt >= IdentityReassertSeconds;
             if (idReassert) _identityReassertAt = now;
             var livePids = new HashSet<string>();
+            // TRAFFIC-APART P2: every player's position FIRST. The verdict for ONE peer needs the distance to EVERY
+            // other player, so the positions can no longer be resolved inside the send loop below.
+            var posByPid = new Dictionary<string, Vector3>();
             foreach (var (link, pid) in peers)
             {
                 if (link == null || string.IsNullOrEmpty(pid)) continue;
                 livePids.Add(pid);
-                bool havePos = RemotePlayerManager.TryGetRemotePosition(pid, out var anchor);
-                // Review M3: a PASSENGER's avatar is parked at the boarding door — anchor on the ridden
-                // car's ghost instead, else the rider crosses the city through empty streets. If the
-                // ghost is not resolvable here, send UNCULLED rather than wrong.
-                if (PassengerSync.TryGetRide(pid, out var rideVid))
-                {
-                    if (VehicleManager.TryGetGhostPosition(rideVid, out var ridePos)) { anchor = ridePos; havePos = true; }
-                    else havePos = false;
-                }
+                if (TryGetPlayerAnchorPosition(pid, out var ppos)) posByPid[pid] = ppos;
+            }
+            EvaluatePeerTrafficModes(peers, posByPid, now);
+
+            foreach (var (link, pid) in peers)
+            {
+                if (link == null || string.IsNullOrEmpty(pid)) continue;
+                // TRAFFIC-APART P3 — THE LOAD-BEARING GATE. A peer in LOCAL mode leaves the stream only once it has
+                // ACKED that mode. WHY THE ACK COMES FIRST: ApplySnapshot DESTROYS every ghost absent from a snapshot
+                // (:1021-1031, the absent-sweep). So the instant the host stops sending, that client's next apply
+                // — or its last one — removes every ghost it still holds at once: the total pop-out this whole design
+                // exists to avoid. The host therefore keeps streaming, AND keeps feeding that peer's traffic anchor
+                // (UpdateTrafficAnchors), while the client fades its ghosts out one by one off-screen; the ack ("my
+                // last ghost is gone") is what closes the tap. Nothing empty is sent in its place — an empty snapshot
+                // IS the pop-out. A flip back to GHOST re-opens stream and anchor IMMEDIATELY, no ack needed: in that
+                // direction the client has nothing to lose, it is only gaining cars back.
+                if (_peerTraffic.TryGetValue(pid, out var pmode) && pmode.Mode == ModeLocal && pmode.Acked) continue;
+                bool havePos = posByPid.TryGetValue(pid, out var anchor);
                 if (!_peerSentIdentity.TryGetValue(pid, out var sent))
                     _peerSentIdentity[pid] = sent = new Dictionary<int, object>();
                 var snap = new TrafficSnapshotPayload { T = now, Seq = ++_trafficSeq };
@@ -622,6 +776,14 @@ namespace BigAmbitionsMP
                 var stale = new List<string>();
                 foreach (var k in _peerSentIdentity.Keys) if (!livePids.Contains(k)) stale.Add(k);
                 foreach (var k in stale) _peerSentIdentity.Remove(k);
+            }
+            // TRAFFIC-APART P2: the per-peer mode state rides the SAME sweep as the identity map above.
+            // Review r1 MINOR-5: a count test misses a same-beat leave+join (one out, one in), which would hand the
+            // rejoined pid the departed one's stale Mode=local/Acked=true. The dictionary is tiny - scan it every beat.
+            {
+                List<string>? staleMode = null;
+                foreach (var k in _peerTraffic.Keys) if (!livePids.Contains(k)) (staleMode ??= new List<string>()).Add(k);
+                if (staleMode != null) foreach (var k in staleMode) { _peerTraffic.Remove(k); _peerTrafficPin.Remove(k); }
             }
         }
 
@@ -843,6 +1005,10 @@ namespace BigAmbitionsMP
         {
             if (payload == null) return;
             if (SaveGameManager.Current == null) return;
+            // TRAFFIC-APART P5(v): in LOCAL mode this client advances its OWN light phases
+            // (Patch_IM_UpdateIntersections_ClientSkip lets UpdateIntersections run again), so painting the host's
+            // states on top would fight its own timer. Dropped HERE, beside the reason, not at the MPClient dispatch.
+            if (ClientRunsLocalTraffic) return;
             try
             {
                 var im = TrafficManager.Instance?.intersectionManager;
@@ -881,6 +1047,10 @@ namespace BigAmbitionsMP
             if (SaveGameManager.Current == null) return;
             if (!ClientGhostApplyEnabled) return;     // CLAUDE-DIAGNOSTIC kill-switch
             if (!MPWorldReady.CanMaterialize) return; // round-188: 5 Hz stream — a drop is recurrence-covered
+            // TRAFFIC-APART P5(vi): in LOCAL mode a snapshot arriving BEFORE the ack still matters — the ghosts still
+            // here must keep MOVING (and the absent-sweep must keep working) while they fade out off-screen. Once the
+            // ack has gone the handover is over and the host's stream is closed, so a late snapshot is ignored whole.
+            if (ClientRunsLocalTraffic && _handover != HandoverToLocal) return;
             try
             {
                 // S4: keep one smoothed estimate of "what is the host's clock here, now", since render time
@@ -957,6 +1127,9 @@ namespace BigAmbitionsMP
 
                     if (g == null || g.Go == null)
                     {
+                        // TRAFFIC-APART P5(vi): never SPAWN a ghost while this client runs its own traffic — during
+                        // the handover the ghost population may only shrink. Existing ghosts keep updating below.
+                        if (ClientRunsLocalTraffic) { _ghosts.Remove(car.Index); continue; }
                         var go = SpawnTrafficGhost(car.Model, pos, rot);
                         if (go == null) { _ghosts.Remove(car.Index); continue; }
                         g = new TrafficGhost { Go = go, Model = car.Model, TargetPos = pos, TargetRot = rot, TargetAt = Time.unscaledTime, HostT = snap.T };
@@ -1627,6 +1800,10 @@ namespace BigAmbitionsMP
             try
             {
                 if (MPClient.IsConnected) return;                                   // review r2 #7: a live link means the clamp still rules
+                // TRAFFIC-APART P7: the offline fork is single player — leave no mode or half-finished handover
+                // behind, so a later session starts clean in ghost mode.
+                ClientTrafficMode = ModeGhost; _handover = HandoverNone; _modeSeq = 0;
+                _modeDeferLogged = false; _localDensityIssued = false; _localDensityWaitLogged = false; _localDensityUninitLogged = false;
                 if (!TrafficManager.HasInstance || !TrafficManager.IsInitialized) return;
                 var tm = TrafficManager.Instance;
                 // Review r2 #4: feed the LIVE character transform — vanilla parity (the game's single camera follows the
@@ -1725,8 +1902,27 @@ namespace BigAmbitionsMP
                         anchors.Add(hostChar.transform);
                     }
                 }
-                foreach (var t in RemotePlayerManager.GetRemotePlayerTransforms())
-                    if (t != null) anchors.Add(t);
+                // TRAFFIC-APART P3 / P5(iii): whose avatars still anchor traffic on THIS machine.
+                //  - HOST: a peer that has ACKED local mode is dropped, so CountPlayerAreas loses that area and the
+                //    budget below falls — Gley then RECYCLES the cars around that player at its own pace (one per
+                //    frame, DriveJob's own readiness test) instead of anything despawning them in a batch.
+                //    RemotePlayerManager hands out an ANONYMOUS transform list (:414) and has no pid->transform
+                //    accessor, and that file is not ours to edit, so the gated peers are matched by POSITION: both
+                //    accessors read the very same go.transform.position inside this one frame, so the float triples
+                //    are identical, not merely close.
+                //  - CLIENT in LOCAL mode: no remote avatar anchors anything here — this machine's traffic is its own
+                //    and follows its own player alone.
+                if (MPServer.IsRunning || !ClientRunsLocalTraffic)
+                {
+                    HashSet<Vector3>? gatedOut = null;
+                    if (MPServer.IsRunning)
+                        foreach (var kv in _peerTraffic)
+                            if (kv.Value.Mode == ModeLocal && kv.Value.Acked
+                                && RemotePlayerManager.TryGetRemotePosition(kv.Key, out var gpos))
+                                (gatedOut ??= new HashSet<Vector3>()).Add(gpos);
+                    foreach (var t in RemotePlayerManager.GetRemotePlayerTransforms())
+                        if (t != null && (gatedOut == null || !gatedOut.Contains(t.position))) anchors.Add(t);
+                }
                 if (anchors.Count == 0) return false;
 
                 // Round-199: single choke point — every anchor (local, ghost, ride,
@@ -1840,11 +2036,17 @@ namespace BigAmbitionsMP
 
                 if (index < 0)
                 {
+                    // TRAFFIC-APART P10: no behaviour change — only the reason is now told apart. In LOCAL mode the
+                    // hailed car IS this machine's own traffic and the game has already stopped it here, which is the
+                    // whole of it: nobody else can see that car, so there is nothing for the host to mirror.
                     if (_nonGhostHailLogs++ < 6)
-                        Plugin.Logger.LogInfo(
-                            $"[TrafficSync] hail on '{taxiGo.name}' is NOT a host-mirrored ghost - "
-                          + "not sending. It is a locally-spawned vehicle (e.g. a 1.0 private driver), "
-                          + "so the host has nothing to stop and its pool index means nothing there.");
+                        Plugin.Logger.LogInfo(ClientRunsLocalTraffic
+                            ? $"[TrafficSync] hail on '{taxiGo.name}' is this machine's OWN traffic (local mode) - "
+                            + "not sending. The game already stopped the car here, and no other player can see it, "
+                            + "so the host has nothing to mirror."
+                            : $"[TrafficSync] hail on '{taxiGo.name}' is NOT a host-mirrored ghost - "
+                            + "not sending. It is a locally-spawned vehicle (e.g. a 1.0 private driver), "
+                            + "so the host has nothing to stop and its pool index means nothing there.");
                     return;
                 }
                 MPClient.SendTaxiHail(index);
@@ -2168,12 +2370,109 @@ namespace BigAmbitionsMP
 
 #endif
 
+        // ── TRAFFIC-APART: the client half ───────────────────────────────────────────
+        //
+        // This machine runs EITHER the host's traffic (ghosts) or its own Gley ambient traffic — never both — and the
+        // host decides which (P2). The switch is a HANDOVER, not a cut: in each direction the outgoing traffic is
+        // kept until the incoming traffic is actually here, and every car that goes, goes off-screen. That is the
+        // whole point: crossing the boundary must never pop a street empty.
+        internal const string HandoverNone    = "none";
+        internal const string HandoverToLocal = "toLocal";
+        internal const string HandoverToGhost = "toGhost";
+        private  const float  HandoverCeilingSeconds = 20f;   // a fade still unfinished by then is cut short and logged
+        // Review r1 MAJOR-2 + rig run 1: a car 70 m away is a few pixels, but a car STOPPED in view - queued behind
+        // the player, at a red light - never goes off-screen at all. Run 1 showed exactly that: 18.1 s for the last
+        // ghost, and one local car that hit the 20 s ceiling. Distance retires those; the ceiling is the residual.
+        private  const float  HandoverRetireDistance = 70f;
+
+        /// <summary>Which traffic this machine runs: "ghost" (the host's) or "local" (its own). Ghost by default
+        /// — today's behaviour — and reset to it on leave (P7).</summary>
+        public  static string ClientTrafficMode { get; private set; } = ModeGhost;
+        /// <summary>True on a CLIENT that is running its OWN ambient traffic. Never true on the host (its traffic is
+        /// its own by definition, and every rule this gates is client-side).</summary>
+        public  static bool   ClientRunsLocalTraffic => !MPServer.IsRunning && ClientTrafficMode == ModeLocal;
+        /// <summary>P9: "none" / "toLocal" / "toGhost" — a fade is running while this is not "none".</summary>
+        public  static string ClientHandover => _handover;
+        private static int    _modeSeq;
+        private static string _handover = HandoverNone;
+        private static float  _handoverAt;
+        private static bool   _modeDeferLogged;
+        private static bool   _localDensityIssued;
+        private static bool   _localDensityWaitLogged;
+        private static bool   _localDensityUninitLogged;   // MINOR-3: "Gley not initialised yet" is said once per mode entry
+
+        /// <summary>P4: the host names the traffic this client is to run. A repeat (the host's 5 s re-assert) is a
+        /// no-op; a verdict that arrives before the world can materialize is NOT recorded, because that re-assert
+        /// brings it straight back and there is no traffic to hand over yet.</summary>
+        public static void ApplyTrafficMode(TrafficModePayload p)
+        {
+            try
+            {
+                if (p == null || MPServer.IsRunning) return;
+                string mode = p.Mode == ModeLocal ? ModeLocal : ModeGhost;
+                if (mode == ClientTrafficMode && p.Seq == _modeSeq) return;
+                if (!MPWorldReady.CanMaterialize)
+                {
+                    if (!_modeDeferLogged) { _modeDeferLogged = true; Plugin.Logger.LogInfo("[TrafficSync] traffic mode deferred: world not ready"); }
+                    return;
+                }
+                ClientTrafficMode = mode; _modeSeq = p.Seq; _handoverAt = Time.unscaledTime;
+                _handover = mode == ModeLocal ? HandoverToLocal : HandoverToGhost;
+                _nextClientSimBeat = 0f;                  // the handover starts on this frame's beat, not up to 1 s late
+                if (mode == ModeLocal) EnterLocalMode(); else EnterGhostMode();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] ApplyTrafficMode: {ex.Message}"); }
+        }
+
+        /// <summary>P5: far from everyone — wake this machine's own traffic brain. The ghosts still here are faded out
+        /// by the 1 s beat and only THEN acked, so the host keeps streaming them in the meantime.</summary>
+        private static void EnterLocalMode()
+        {
+            _localDensityIssued = false; _localDensityWaitLogged = false; _localDensityUninitLogged = false;
+            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: local (seq {_modeSeq}) - this client is far from every other player and takes over its own traffic; {_ghosts.Count} host ghost(s) fade out first.");
+        }
+
+        /// <summary>P6: someone is near again — the host's cars rule here. Acked IMMEDIATELY: in this direction there
+        /// is nothing on the host to protect, it simply resumes the stream (and a full lights broadcast). The local
+        /// ambient cars are kept until enough ghosts have arrived to replace them.</summary>
+        private static void EnterGhostMode()
+        {
+            var tm = TrafficManager.Instance;
+            if (tm != null) { SelfDensityCall = true; try { tm.SetTrafficDensity(0); } catch { } finally { SelfDensityCall = false; } }
+            _localDensityIssued = false; _localDensityWaitLogged = false; _localDensityUninitLogged = false;
+            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: ghost (seq {_modeSeq}) - another player is near; the host's traffic takes over and the local cars fade out as its ghosts arrive.");
+            MPClient.SendTrafficModeAck(ModeGhost, _modeSeq);
+        }
+
+        /// <summary>The client's 1 s traffic beat, as a MODE SWITCH (P5/P6): local mode runs this machine's own
+        /// traffic, ghost mode holds it at zero density and renders the host's. Order matters: local mode and the
+        /// fade back to ghost mode are both handled ABOVE the ClientServiceSimEnabled branch, so a flip fades in
+        /// either configuration and neither the zero re-assert nor the legacy kill ever sees an unfinished fade.</summary>
         private static void SuppressLocalTraffic()
         {
             if (!ClientTrafficSuppressionEnabled) return;
 
             var tm = TrafficManager.Instance;
             if (tm == null) return;
+
+            // MINOR-7 (review 2026-09-02): the density re-assert and the ambient sweep run on a 1 s beat (first pass
+            // immediately), not every frame — the density clamp patch is the event-driven source. Both modes share it.
+            float now = Time.unscaledTime;
+            bool beat = now >= _nextClientSimBeat;
+            if (beat) _nextClientSimBeat = now + 1f;
+
+            if (ClientRunsLocalTraffic) { TickLocalMode(tm, now, beat); return; }
+
+            // TRAFFIC-APART P6 / review r1 MAJOR-1: while the handover back to ghost mode runs, this beat FADES the
+            // local cars out instead. It sat inside the ClientServiceSimEnabled block, so with that kill-switch off
+            // the flip fell straight through to the legacy path below - every local car vanished at once and
+            // _handover was never cleared. Both configurations wait behind it now, so the street is never emptied
+            // before the host's ghosts have arrived to fill it.
+            if (_handover == HandoverToGhost)
+            {
+                if (!beat) return;
+                if (!TickGhostHandover(tm, now)) return;
+            }
 
             if (ClientServiceSimEnabled)
             {
@@ -2187,15 +2486,9 @@ namespace BigAmbitionsMP
                     tm.enabled = true;
                     Plugin.Logger.LogInfo("[TrafficSync] client traffic brain ON at zero ambient density — the client's own service cars drive natively; ambient traffic stays the host's.");
                 }
-                // MINOR-7 (review 2026-09-02): the density re-assert and the ambient sweep run on a 1 s beat
-                // (first pass immediately), not every frame — the density clamp patch is the event-driven source.
-                float nowSim = Time.unscaledTime;
-                if (nowSim >= _nextClientSimBeat)
-                {
-                    _nextClientSimBeat = nowSim + 1f;
-                    SelfDensityCall = true; try { tm.SetTrafficDensity(0); } catch { } finally { SelfDensityCall = false; }   // H-SVC-116: our own 0 is not the game's request
-                    try { ClearClientTrafficExceptServiceCars(tm); } catch { }
-                }
+                if (!beat) return;
+                SelfDensityCall = true; try { tm.SetTrafficDensity(0); } catch { } finally { SelfDensityCall = false; }   // H-SVC-116: our own 0 is not the game's request
+                try { ClearClientTrafficExceptServiceCars(tm); } catch { }
                 return;
             }
 
@@ -2229,6 +2522,183 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo("[TrafficSync] Local traffic killed (ClearTraffic + manager disabled).");
                 }
             }
+        }
+
+        /// <summary>P5: this machine's own traffic runs here. The density is the game's OWN last request (the clamp
+        /// patch passes it straight through in this mode and still records it); the budget block in
+        /// UpdateTrafficAnchors is host-only, so the density manager's max is set here as well.</summary>
+        private static void TickLocalMode(TrafficManager tm, float now, bool beat)
+        {
+            if (!tm.enabled)
+            {
+                tm.enabled = true; _clientTrafficKilled = false;
+                Plugin.Logger.LogInfo("[TrafficSync] client traffic brain ON at the game's own density - this client runs its OWN ambient traffic (local mode).");
+            }
+            if (!beat) return;
+
+            if (!_localDensityIssued)
+            {
+                if (ClientGameDensityRequest >= 0)
+                {
+                    // NOT under SelfDensityCall: this IS the game's own number going back in, so the clamp patch
+                    // recording it again is exactly right.
+                    try { tm.SetTrafficDensity(ClientGameDensityRequest); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] local mode: density {ClientGameDensityRequest} refused: {ex.Message}"); }
+                    // Review r1 MINOR-4: the host's budget block keeps a pool reserve for service cars (a summon +
+                    // an arrival car per player, :1963-1970); this machine carries ONE player, so the reserve is 2.
+                    // Same shape as UpdateTrafficAnchors - with no pool read (poolCount 0) the request stands.
+                    int poolCount = 0; try { poolCount = tm.trafficVehicles?.GetVehicleList()?.Count ?? 0; } catch { }
+                    const int reserve = 2;
+                    int cap = poolCount > reserve ? poolCount - reserve : poolCount;
+                    bool capped = poolCount > 0 && ClientGameDensityRequest > cap;
+                    int issue = capped ? Math.Min(ClientGameDensityRequest, cap) : ClientGameDensityRequest;
+                    try { tm.densityManager?.UpdateMaxCars(issue); } catch { }
+                    // Review r1 MINOR-3: TrafficManager.SetTrafficDensity is `if (initialized) densityManager
+                    // .UpdateMaxCars(...)` (decompile :631-637), so before Gley is initialised the number is dropped
+                    // on the floor. The latch waits for that; the next beat re-issues it.
+                    if (TrafficManager.IsInitialized)
+                    {
+                        _localDensityIssued = true;
+                        Plugin.Logger.LogInfo($"[TrafficSync] local mode: traffic density {ClientGameDensityRequest} (the game's own last request) is in force here{(capped ? $" (capped by the pool to {issue}: {poolCount} slots − {reserve} reserved)" : "")}.");
+                    }
+                    else if (!_localDensityUninitLogged)
+                    {
+                        _localDensityUninitLogged = true;
+                        Plugin.Logger.LogInfo($"[TrafficSync] local mode: Gley not initialised yet - density {ClientGameDensityRequest} re-issued on the next beat.");
+                    }
+                }
+                else if (!_localDensityWaitLogged)
+                {
+                    _localDensityWaitLogged = true;
+                    Plugin.Logger.LogInfo("[TrafficSync] local mode: the game has asked for no density yet - retrying on each beat until it does.");
+                }
+            }
+
+            if (_handover != HandoverToLocal) return;
+
+            // The fade: a ghost goes once it is OFF SCREEN, past the cull ring, or simply farther than
+            // HandoverRetireDistance - a car stopped in full view never goes off-screen and held run 1's last ack
+            // for 18.1 s - so nothing the player can really see is removed. The ack waits for the last one — that
+            // is what stops the host's stream.
+            Vector3 me = default; bool haveMe = false;
+            var rideT = PassengerRide.RideAnchorTransform();
+            if (rideT != null) { me = rideT.position; haveMe = true; }
+            else { try { me = PlayerHelper.GetPosition(); haveMe = true; } catch { } }
+            bool ceiling = now - _handoverAt >= HandoverCeilingSeconds;
+            var gone = new List<int>(); int forced = 0;
+            foreach (var kv in _ghosts)
+            {
+                var g = kv.Value;
+                if (g.Go == null) { gone.Add(kv.Key); continue; }
+                float d2   = haveMe ? (g.Go.transform.position - me).sqrMagnitude : 0f;
+                bool  far  = haveMe && d2 > GhostCullRadius * GhostCullRadius;
+                bool  away = haveMe && d2 > HandoverRetireDistance * HandoverRetireDistance;
+                if (far || away || !AnyRendererVisible(g.Go)) { gone.Add(kv.Key); continue; }
+                if (ceiling) { gone.Add(kv.Key); forced++; }
+            }
+            foreach (var k in gone) RetireGhost(k);
+            if (_ghosts.Count > 0) return;
+
+            if (forced > 0) Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: local - {forced} ghost(s) still on screen after {HandoverCeilingSeconds:F0} s, removed.");
+            else             Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: local (ghosts handed over in {now - _handoverAt:F1} s).");
+            _handover = HandoverNone;
+            MPClient.SendTrafficModeAck(ModeLocal, _modeSeq);
+        }
+
+        /// <summary>P6: the fade back. True once the local ambient cars are gone and the ordinary ghost-mode beat
+        /// (density 0 + the sweep) may resume. The local cars are KEPT until the host's ghosts are really here — half
+        /// the number the game asks for, capped — and then go as they leave the screen or fall farther than
+        /// HandoverRetireDistance away. Same spare list as
+        /// ClearClientTrafficExceptServiceCars: a routed car (presetPath) and the mod's service cars stay.</summary>
+        private static bool TickGhostHandover(TrafficManager tm, float now)
+        {
+            bool ceiling = now - _handoverAt >= HandoverCeilingSeconds;
+            // Review r1 MAJOR-2: _ghosts counts what is inside the 160 m cull ring, while the game's density request
+            // is a whole-neighbourhood number, so half of it can never arrive and the gate plateaus below it (rig run
+            // 1: 13 ghosts for a request of 18). Four ghosts in the ring already means "the host's cars are here".
+            int want = ClientGameDensityRequest > 0 ? Math.Min((ClientGameDensityRequest + 1) / 2, 4) : 0;
+            if (want > 0 && _ghosts.Count < want && !ceiling) return false;
+
+            // The same anchor ApplySnapshot uses: the ride anchor while riding, else the player body.
+            Vector3 me = default; bool haveMe = false;
+            var rideT = PassengerRide.RideAnchorTransform();
+            if (rideT != null) { me = rideT.position; haveMe = true; }
+            else { try { me = PlayerHelper.GetPosition(); haveMe = true; } catch { } }
+
+            // Fold c (re-check of fold b): the ceiling is the escape hatch, so under it the handover FINISHES no
+            // matter what - a car whose RemoveVehicle throws is counted and logged, never allowed to hold the
+            // handover open forever (local traffic beside the host's ghosts, no ack ever sent). Before the
+            // ceiling a failed removal is simply retried on the next beat. 'forced' counts only the cars that
+            // were still in view - a car already off-screen or far away would have gone regardless.
+            int left = 0, forced = 0, failed = 0;
+            var list = tm.trafficVehicles?.GetVehicleList();
+            if (list != null)
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var v = list[i];
+                    if (v == null || !v.gameObject.activeSelf) continue;
+                    if (v.presetPath != null) continue;
+                    if (ServiceCars.IsClientKept(v.gameObject)) continue;
+                    bool away = haveMe && (v.gameObject.transform.position - me).sqrMagnitude > HandoverRetireDistance * HandoverRetireDistance;
+                    bool inView = !away && AnyRendererVisible(v.gameObject);
+                    if (!ceiling && inView) { left++; continue; }
+                    try { tm.RemoveVehicle(v.gameObject); if (ceiling && inView) forced++; }
+                    catch { if (ceiling) failed++; else left++; }
+                }
+            if (left > 0) return false;
+
+            if (failed > 0) Plugin.Logger.LogWarning($"[TrafficSync] traffic mode: ghost - {failed} local car(s) could not be removed at the {HandoverCeilingSeconds:F0} s ceiling; handing over anyway.");
+            if (forced > 0) Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: ghost - {forced} local car(s) still on screen after {HandoverCeilingSeconds:F0} s, removed.");
+            else             Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: ghost (local cars handed over in {now - _handoverAt:F1} s).");
+            _handover = HandoverNone;
+            return true;
+        }
+
+        /// <summary>True while any renderer of this body is on screen. A body with NO renderers has nothing that can
+        /// pop out of view, so it counts as invisible and may go at once. Review r1 MINOR-7: Renderer.isVisible is
+        /// true for ANY camera - a reflection probe or a cutscene camera keeps a body "visible" - so this test alone
+        /// can pin a car forever; both callers OR it with the HandoverRetireDistance test, which is the cover.</summary>
+        private static bool AnyRendererVisible(GameObject? go)
+        {
+            try
+            {
+                if (go == null) return false;
+                var rs = go.GetComponentsInChildren<Renderer>(true);
+                if (rs == null || rs.Length == 0) return false;
+                foreach (var r in rs) if (r != null && r.isVisible) return true;
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>Destroys one traffic ghost through the same release path ApplySnapshot's own culling uses.</summary>
+        private static void RetireGhost(int index)
+        {
+            if (!_ghosts.TryGetValue(index, out var g)) return;
+            if (g.Go != null) { try { NotifyCollidersRemoved(g.Go, g.Solids); UnityEngine.Object.Destroy(g.Go); } catch { } }
+            _ghosts.Remove(index);
+        }
+
+        /// <summary>P9: active AMBIENT Gley cars on this machine — the same filter the client sweep uses below
+        /// (active, no preset path, not one of the mod's service cars).</summary>
+        public static int LocalAmbientCount()
+        {
+            int n = 0;
+            try
+            {
+                var list = TrafficManager.Instance?.trafficVehicles?.GetVehicleList();
+                if (list != null)
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var v = list[i];
+                        if (v == null || !v.gameObject.activeSelf) continue;
+                        if (v.presetPath != null) continue;
+                        if (ServiceCars.IsClientKept(v.gameObject)) continue;
+                        n++;
+                    }
+            }
+            catch { }
+            return n;
         }
 
         private static int _clientKeptLogged = -1;

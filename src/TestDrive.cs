@@ -143,12 +143,17 @@ namespace BigAmbitionsMP
                 case "traffic":
                 {
                     // TRAFFIC-SMOOTH S5 (2026-09-12): one line for the traffic stream's health.
-                    int ghosts = 0, hostcars = 0;
+                    // TRAFFIC-APART P9 (2026-09-12): plus WHICH traffic this machine runs (mode; "host" on the host),
+                    // how many ambient cars of its own are alive, and whether a handover is still fading.
+                    int ghosts = 0, hostcars = 0, localcars = 0;
                     try { ghosts = TrafficSync.ClientTrafficGhostCount; } catch { }
                     try { if (MPServer.IsRunning) hostcars = TrafficSync.HostTrafficCount(); } catch { }
+                    try { localcars = TrafficSync.LocalAmbientCount(); } catch { }
+                    string tmode = MPServer.IsRunning ? "host" : TrafficSync.ClientTrafficMode;
                     return $"OK traffic role={Role} ghosts={ghosts} hostcars={hostcars} " +
                            $"seq={TrafficSync.LastTrafficSeq} dropped={TrafficSync.StaleSnapshotsDropped} " +
-                           $"lane={TrafficSync.TrafficLane}";
+                           $"lane={TrafficSync.TrafficLane} mode={tmode} local={localcars} " +
+                           $"handover={TrafficSync.ClientHandover}";
                 }
 
                 case "ghostjitter":
@@ -586,6 +591,76 @@ namespace BigAmbitionsMP
                 // steal foreground.  Verbs replace the SendInput F-keys; the screenshot
                 // renders from INSIDE the game, so an unfocused (not minimized) window
                 // captures fine while the user keeps the machine. ──────────────────────
+                case "trafficmode":
+                {
+                    // TRAFFIC-APART P9 test seam: pin one peer's (or every peer's) traffic verdict, or hand it back to
+                    // the distance rule ("auto"). Nothing flips here - the host's own 0.2 s evaluator beat carries it out.
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    var tf = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (tf.Length != 3 || !string.Equals(tf[0], "force", StringComparison.OrdinalIgnoreCase))
+                        return "ERR usage: trafficmode force <pid|all> <local|ghost|auto>";
+                    string who = tf[1], forced = tf[2].ToLowerInvariant();
+                    if (forced != "local" && forced != "ghost" && forced != "auto")
+                        return "ERR usage: trafficmode force <pid|all> <local|ghost|auto>";
+                    int matched = TrafficSync.HostForceTrafficMode(who, forced);
+                    if (matched == 0) return $"ERR no connected peer matches '{who}'";
+                    return $"OK trafficmode {who} {forced}";
+                }
+
+                case "tp":
+                {
+                    // TRAFFIC-APART P9 test seam: move the LOCAL player with the GAME's own teleport
+                    // (PlayerHelper.Teleport(Transform) -> navmeshAgent.Warp), so a rig step can put two players far
+                    // apart - or back together - without driving there. A temporary GameObject carries the target
+                    // because that is the only signature the game exposes; it is destroyed straight after.
+                    var ap = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    UnityEngine.Vector3 target;
+                    if (ap.Length == 3
+                        && float.TryParse(ap[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float tx)
+                        && float.TryParse(ap[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float ty)
+                        && float.TryParse(ap[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float tz))
+                        target = new UnityEngine.Vector3(tx, ty, tz);
+                    else if (ap.Length == 1)
+                    {
+                        UnityEngine.Vector3? known = null;
+                        try
+                        {
+                            // The host tracks its peers' bodies; a client tracks every OTHER player's, the host's included.
+                            if (MPServer.IsRunning) { if (RemotePlayerManager.TryGetRemotePosition(ap[0], out var rp)) known = rp; }
+                            else known = RemotePlayerManager.GetPlayerPosition(ap[0]);
+                        }
+                        catch { }
+                        if (known == null) return $"ERR no known position for '{ap[0]}'";
+                        target = known.Value;
+                    }
+                    else return "ERR usage: tp <pid> | tp <x> <y> <z>";
+
+                    try { if (BuildingManager.IsInsideBuilding) return "ERR inside a building"; } catch { }
+                    try { if (Helpers.VehicleHelper.IsInsideVehicle()) return "ERR in a vehicle"; } catch { }
+
+                    // Review r1 MINOR-6: Tick already runs ON THE MAIN THREAD (MPCanvasUI.cs:699; see the comment at
+                    // the foot of this file), so the warp happens here and now. The enqueued version replied OK before
+                    // anything had happened; the reply below is the player's position read BACK after the warp.
+                    UnityEngine.GameObject? probe = null;
+                    try
+                    {
+                        probe = new UnityEngine.GameObject("BAMP_TpTarget");
+                        probe.transform.position = target;
+                        var pc = Helpers.PlayerHelper.PlayerController;
+                        probe.transform.rotation = pc != null ? pc.transform.rotation : UnityEngine.Quaternion.identity;
+                        Helpers.PlayerHelper.Teleport(probe.transform);
+                        Plugin.Logger.LogInfo($"[TestDrive] tp -> ({target.x:F0}, {target.y:F0}, {target.z:F0}).");
+                    }
+                    catch (Exception ex) { return $"ERR tp: {ex.Message}"; }
+                    finally { try { if (probe != null) UnityEngine.Object.Destroy(probe); } catch { } }
+
+                    UnityEngine.Vector3 at;
+                    try { at = Helpers.PlayerHelper.GetPosition(); }
+                    catch (Exception ex) { return $"ERR tp: the player's position is unreadable ({ex.Message})"; }
+                    if ((at - target).sqrMagnitude > 4f) return $"ERR tp: player still at {at.x:F0} {at.y:F0} {at.z:F0}";
+                    return $"OK tp {at.x:F0} {at.y:F0} {at.z:F0}";
+                }
+
                 case "enterbuilding":
                 {
                     if (arg.Length == 0) return "ERR address key required (e.g. '29 ba:street_thirdstreet')";

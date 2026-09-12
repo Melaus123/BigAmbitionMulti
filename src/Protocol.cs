@@ -48,6 +48,8 @@ namespace BigAmbitionsMP
         TaxiHail        = 37,  // Client → Host: "I'm hailing traffic taxi N — stop it"
         TrafficLights   = 38,  // Host → All: traffic-light intersection states
         ParkedSnapshot  = 39,  // Host → All: world parked-vehicle snapshot (lots + street parking)
+        TrafficMode     = 23,  // Host → one Client: which traffic THAT client runs — "local" (its own Gley; it is far from every other player) or "ghost" (the host's cars)
+        TrafficModeAck  = 24,  // Client → Host: the mode named by Seq is really in force here now (its handover finished) — the host gates that peer's stream on this
 
         // Player appearance
         PlayerAppearance = 32, // Client → Host: this player's character appearance
@@ -2182,6 +2184,29 @@ namespace BigAmbitionsMP
         /// is not greater than the last one it accepted. Additive — an older host leaves it 0 and the client
         /// then never drops (today's behaviour on a reliable-ordered lane).</summary>
         public long Seq { get; set; }
+    }
+
+    /// <summary>TRAFFIC-APART P1 (2026-09-12): Host -> ONE client. Which traffic that client runs: "local" (it is
+    /// beyond 350 m from every other player, so it runs its OWN Gley ambient traffic) or "ghost" (someone is within
+    /// 250 m, so the host's cars rule). Seq is the host's per-peer flip counter, echoed back in the ack so a late
+    /// ack for a superseded flip is ignored. Additive: an older peer logs "unknown message type" and stays in ghost
+    /// mode, which is exactly today's behaviour.</summary>
+    public class TrafficModePayload
+    {
+        /// <summary>"local" or "ghost".</summary>
+        public string Mode { get; set; } = "ghost";
+        /// <summary>The host's per-peer flip counter this message belongs to.</summary>
+        public int    Seq  { get; set; }
+    }
+
+    /// <summary>TRAFFIC-APART P1: Client -> Host. "That mode is in force here now." The host keeps STREAMING that
+    /// peer's snapshots and keeps feeding its traffic anchor until this arrives for a "local" flip, because
+    /// ApplySnapshot destroys every ghost absent from a snapshot - stopping the stream first would pop every car
+    /// off that client's screen at once.</summary>
+    public class TrafficModeAckPayload
+    {
+        public string Mode { get; set; } = "ghost";
+        public int    Seq  { get; set; }
     }
 
     /// <summary>One parked vehicle in a host parked-vehicle snapshot.

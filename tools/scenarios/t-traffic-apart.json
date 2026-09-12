@@ -1,0 +1,156 @@
+{
+  "id": "T-TRAFFIC-APART",
+  "title": "traffic apart, two players, NO merger: the host decides per peer which traffic that client runs - beyond 350 m from everyone the client runs its OWN Gley traffic, within 250 m of anyone the host's ghosts rule. The lever is forced through both flips so the fixture's geography cannot decide the test: local (own cars, no ghosts), then back to ghost (ghosts, no own cars), then released to the distance rule with the client teleported onto the host, which must settle in ghost mode. Both handovers must FADE, and the two 20 s ceiling lines are now REPORTED rather than failures: a car stopped in full view (queued, at a red light) never goes off-screen, so the 70 m retire rule is the cover and the ceiling is only the residual - the manager reads the count; ends without leaving; NO save",
+  "preconditions": "Fixture save1 (the host melaus, Client1). Build TRAFFIC-APART deployed (dev build: the traffic / trafficmode / tp levers are BAMP_DEV only). The rig runs both instances on ONE machine over the LAN link. The two avatars spawn at their own saved positions, so the INITIAL verdict depends on how far apart the fixture puts them - step 7 records it and accepts either. FIXTURE HYGIENE: NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "TooBigPacketException",
+    "upload SKIPPED",
+    "\\[TrafficSync\\] .*(failed|exception|threw)",
+    "\\[LnlLink\\] .*(failed|exception)",
+    "\\[TrafficSync\\] traffic mode: ghost - \\d+ local car\\(s\\) could not be removed"
+  ],
+  "oracles_report": [
+    "\\[TrafficSync\\] traffic mode: local - \\d+ ghost\\(s\\) still on screen after \\d+ s, removed\\.",
+    "\\[TrafficSync\\] traffic mode: ghost - \\d+ local car\\(s\\) still on screen after \\d+ s, removed\\.",
+    "\\[TrafficSync\\] traffic mode for \\S+: (ghost|local) -> (local|ghost)",
+    "\\[TrafficSync\\] traffic mode for \\S+: (ghost|local) in force after",
+    "\\[TrafficSync\\] traffic mode: local \\(ghosts handed over in",
+    "\\[TrafficSync\\] traffic mode: ghost \\(local cars handed over in",
+    "\\[TrafficSync\\] local mode: traffic density",
+    "traffic budget:"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TrafficSync\\] snapshots on the (unreliable|reliable) lane \\(seq-guarded\\); identity re-send every 5s\\.",
+          "within_s": 150
+        }
+      ],
+      "note": "the host names the lane once per session as soon as it streams"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 90,
+      "note": "both worlds load and settle; the host evaluates a mode for the peer on its 0.2 s beat"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST TRAFFIC APART START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c ghosts=\\d+ hostcars=\\d+ seq=[1-9]\\d* dropped=\\d+ lane=\\S+ mode=(local|ghost) local=\\d+ handover=none",
+      "capture": {
+        "mode0": "mode=(local|ghost)"
+      },
+      "note": "the INITIAL verdict is the fixture's geography - either is legal, it is only recorded; no handover may still be running a minute and a half in"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "trafficmode force ${clientPid} local",
+      "expect_result": "^OK trafficmode ${clientPid} local"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "the ghosts fade off-screen, the client acks, its own Gley traffic fills back in at the game's own density"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c ghosts=0 hostcars=\\d+ seq=\\d+ dropped=\\d+ lane=\\S+ mode=local local=[1-9]\\d* handover=none",
+      "note": "local mode really in force: this machine's own ambient cars are alive, no host ghost is left, and the handover finished (the 20 s ceiling line is reported, not fatal - the manager reads its count)"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "trafficmode force ${clientPid} ghost",
+      "expect_result": "^OK trafficmode ${clientPid} ghost"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "longer on purpose: the host's refill is at most ONE car per frame and only at an off-screen waypoint (Gley DensityManager), and the client's own cars only go as they leave the screen"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c ghosts=[1-9]\\d* hostcars=\\d+ seq=[1-9]\\d* dropped=\\d+ lane=\\S+ mode=ghost local=0 handover=none",
+      "note": "ghost mode really back: the host's cars are here, this machine's own ambient cars are gone, handover finished"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "trafficmode force ${clientPid} auto",
+      "expect_result": "^OK trafficmode ${clientPid} auto"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "tp ${hostPid}",
+      "expect_result": "^OK tp -?\\d+ -?\\d+ -?\\d+",
+      "note": "standing on the host: the distance rule must hold the client in ghost mode"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 45
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=ghost local=0 handover=none",
+      "note": "standing on the host, the nearest other player is metres away - far inside the 250 m ring - so the distance rule holds the client in ghost mode, agreeing with the forced verdict it replaced"
+    },
+    {
+      "seq": 18,
+      "role": "both",
+      "cmd": "mark TEST TRAFFIC APART END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

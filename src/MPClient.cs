@@ -817,6 +817,10 @@ namespace BigAmbitionsMP
                     HandleTrafficLights(env);
                     break;
 
+                case MessageType.TrafficMode:
+                    HandleTrafficMode(env);
+                    break;
+
                 case MessageType.ParkedSnapshot:
                     HandleParkedSnapshot(env);
                     break;
@@ -1496,6 +1500,16 @@ namespace BigAmbitionsMP
             var payload = env.GetPayload<TrafficLightsPayload>();
             if (payload == null) return;
             GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.ApplyTrafficLights(payload));
+        }
+
+        /// <summary>TRAFFIC-APART P4: the host tells this client which traffic to run. NOT coalesced - the host
+        /// re-asserts the current mode every 5 s and TrafficSync treats a repeat as a no-op, so there is nothing
+        /// here that a newer message could usefully replace.</summary>
+        private static void HandleTrafficMode(MessageEnvelope env)
+        {
+            var payload = env.GetPayload<TrafficModePayload>();
+            if (payload == null) return;
+            GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.ApplyTrafficMode(payload));
         }
 
         private static void HandleParkedSnapshot(MessageEnvelope env)
@@ -2311,6 +2325,15 @@ namespace BigAmbitionsMP
             if (!IsConnected) return;
             Send(MessageEnvelope.Create(MessageType.TaxiHail, MPConfig.PlayerId,
                 new TaxiHailPayload { PlayerId = MPConfig.PlayerId, TaxiIndex = taxiIndex }));
+        }
+
+        /// <summary>TRAFFIC-APART P5/P6: tells the host that the named mode is really in force here - for a
+        /// "local" flip the host only then stops streaming this client's snapshots and drops its traffic anchor.</summary>
+        public static void SendTrafficModeAck(string mode, int seq)
+        {
+            if (!IsConnected) return;
+            Send(MessageEnvelope.Create(MessageType.TrafficModeAck, MPConfig.PlayerId,
+                new TrafficModeAckPayload { Mode = mode, Seq = seq }));
         }
 
         /// <summary>Sends the local player's vehicle fleet to the host for relay.</summary>

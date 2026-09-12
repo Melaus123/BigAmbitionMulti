@@ -2298,6 +2298,16 @@ namespace BigAmbitionsMP
                     HandleTaxiHail(env);
                     break;
 
+                case MessageType.TrafficModeAck:
+                {
+                    // TRAFFIC-APART P4: the sender is the connection's VERIFIED identity (bound at Hello) - the
+                    // payload names no player, so there is nothing here to spoof and nothing for SenderIs to check.
+                    var tma = env.GetPayload<TrafficModeAckPayload>();
+                    if (tma != null)
+                        GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.HostOnModeAck(senderPid, tma));
+                    break;
+                }
+
                 case MessageType.PlayerAppearance:
                     HandleClientAppearance(senderPid, env);
                     break;
@@ -8952,6 +8962,21 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning($"[Server] traffic snapshot → {peer.Describe}: {ex.Message}"
                                            + (_trafficSendWarns == 5 ? " (further traffic-send warnings suppressed)" : ""));
                 }
+                return false;
+            }
+        }
+
+        /// <summary>TRAFFIC-APART P1/P2: the per-peer traffic MODE, RELIABLE and addressed to one peer. The
+        /// snapshot lane above is unreliable on purpose (a lost pose costs nothing - the next one is 0.2 s away),
+        /// but a lost mode message would leave that client running the wrong traffic until the host's 5 s
+        /// re-assert, so this rides the reliable lane and the re-assert is the belt, not the braces.</summary>
+        public static bool SendTrafficModeTo(MPLink peer, TrafficModePayload payload)
+        {
+            if (!_running || peer == null || payload == null) return false;
+            try { peer.Send(MessageEnvelope.Create(MessageType.TrafficMode, "host", payload).Serialize(), reliable: true); return true; }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Server] traffic mode -> {peer.Describe}: {ex.Message}");
                 return false;
             }
         }
