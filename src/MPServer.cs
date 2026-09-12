@@ -4838,6 +4838,40 @@ namespace BigAmbitionsMP
                         return;
                     }
 
+                    // (3) RIVAL-FAIR-2 R3c: the building belongs to a rival whose war is ON.  The
+                    // game's own gate is CLIENT-SIDE (BizManPresentation.cs:542-555 / :755-768 reads
+                    // GetSpecialRivalState(...).isActive before it even sends the rent message, and shows
+                    // the game's own notification_cannot_rent_building_owned_by_rival), and it reads the
+                    // LOCAL specialRivalStates - which only R3 keeps current.  This is the authority's
+                    // own copy of the same test, through the EXISTING deny path and its existing reason
+                    // plumbing (DenyReason travels to MPClient.HandleRentDeny :1422-1432, which logs it
+                    // and rolls the optimistic local rent back - no new on-screen text).
+                    // NOTE (corrected): the field native reads here is `buildingOwnerRivalId`
+                    // (BuildingRegistration.cs:113) - who owns the BUILDING.  It DOES exist; the earlier
+                    // note claiming otherwise was wrong.  `businessOwnerRivalId` (:115) is a different
+                    // thing: the rival RUNNING the shop inside the building (a rival's shop may sit in a
+                    // building another rival owns), and the mod also stamps PLAYER pids into that field -
+                    // so it is the wrong field for this gate and would deny rents it should not.
+                    try
+                    {
+                        var rivalReg = GameStatePatcher.FindRegistration(req.AddressKey);
+                        if (BigAmbitions.Rivals.RivalsHelper.IsFeatureEnabled && rivalReg != null && !rivalReg.BuildingOwnedByPlayer)
+                        {
+                            var buildingRival = BigAmbitions.Rivals.RivalsHelper.GetSpecialRival(rivalReg.buildingOwnerRivalId);
+                            string activeRivalId = "";
+                            try { activeRivalId = buildingRival?.rivalData?.id ?? ""; } catch { }
+                            if (buildingRival != null && activeRivalId.Length > 0
+                                && BigAmbitions.Rivals.RivalsHelper.GetSpecialRivalState(activeRivalId)?.isActive == true)
+                            {
+                                req.DenyReason = "owned by an active rival";
+                                Send(peer, MessageEnvelope.Create(MessageType.RentDeny, "host", req));
+                                Plugin.Logger.LogInfo($"[RivalSync] rent of '{req.AddressKey}' by '{senderPid}' refused at the host: the building's rival '{activeRivalId}' is active.");
+                                return;
+                            }
+                        }
+                    }
+                    catch (Exception rvx) { Plugin.Logger.LogWarning($"[RivalSync] rent rival gate for '{req.AddressKey}': {rvx.Message}"); }
+
                     // Grant it — to the CONNECTION's verified player, never a payload claim.
                     BuildingOwners[req.AddressKey] = senderPid;
                     req.OwnerPlayerId = senderPid;
@@ -9551,6 +9585,10 @@ namespace BigAmbitionsMP
                     }
                 }
 
+                // RIVAL-FAIR-2 R3: the host's own rival STATE rides the identity snapshot, so a
+                // joiner is current the moment it lands.  Null-safe on the other side (older host = null).
+                snap.States = BuildRivalStates();
+
                 // Inject every human player as a "rival" entry so receivers
                 // can resolve "owned by [player X]" lookups.  Includes the host
                 // itself so the host's own PlayerId resolves on every client.
@@ -9594,6 +9632,87 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BuildRivalsSnapshot: {ex.Message}"); }
             return snap;
+        }
+
+        /// <summary>RIVAL-FAIR-2 R3: the local gi.specialRivalStates as the wire carries it.  A pure
+        /// reader - it runs on a client too, which is what lets the `rivalsig` lever compare the two
+        /// machines.  completedTimelineEntryIds / sentMessageKeys are deliberately not carried: they are
+        /// the HOST's timeline bookkeeping and a client runs no timeline.</summary>
+        public static List<CbRivalState> BuildRivalStates()
+        {
+            var list = new List<CbRivalState>();
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.specialRivalStates == null) return list;
+                foreach (var st in gi.specialRivalStates)
+                {
+                    if (st == null || string.IsNullOrEmpty(st.rivalId)) continue;
+                    var row = new CbRivalState { RivalId = st.rivalId, IsActive = st.isActive, IsDefeated = st.isDefeated };
+                    if (st.defenseStates != null)
+                        foreach (var d in st.defenseStates)
+                        {
+                            if (d == null) continue;
+                            var cb = new CbDefense { Mechanic = (int)d.defensiveMechanic, Aggression = (int)d.aggression };
+                            try { if (d.timestamp != null) { cb.Day = d.timestamp.Day; cb.Hour = d.timestamp.Hour; cb.Minute = d.timestamp.Minute; } } catch { }
+                            if (d.affectedItems != null) foreach (var s in d.affectedItems) if (!string.IsNullOrEmpty(s)) cb.Items.Add(s);
+                            if (d.affectedEmployeeIds != null) foreach (var s in d.affectedEmployeeIds) if (!string.IsNullOrEmpty(s)) cb.EmployeeIds.Add(s);
+                            row.Defenses.Add(cb);
+                        }
+                    list.Add(row);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalSync] BuildRivalStates: {ex.Message}"); }
+            return list;
+        }
+
+        /// <summary>RIVAL-FAIR-2 R3: rivalId | active | defeated | defense count + timestamps.  Two
+        /// machines that agree on this agree on the rival state that matters.</summary>
+        public static string RivalStateSignature() => SignatureOf(BuildRivalStates());
+
+        /// <summary>The signature deliberately covers rivalId | active | defeated | defense COUNT plus
+        /// each defense's timestamp + mechanic - NOT aggression and NOT affectedItems/EmployeeIds.
+        /// Native AddDefenseState only ever APPENDS a defense, never mutates one in place, so count +
+        /// per-defense timestamp/mechanic already identifies the list exactly; the mutable-looking
+        /// fields would only add drift-noise to a divergence check.  The full state (aggression and
+        /// items included) still travels: the join snapshot carries BuildRivalStates in full.</summary>
+        private static string SignatureOf(List<CbRivalState> states)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var r in states)
+            {
+                sb.Append(r.RivalId).Append('|').Append(r.IsActive ? '1' : '0').Append(r.IsDefeated ? '1' : '0')
+                  .Append('|').Append(r.Defenses.Count);
+                foreach (var d in r.Defenses)
+                    sb.Append(':').Append(d.Day).Append('.').Append(d.Hour).Append('.').Append((int)d.Minute).Append('.').Append(d.Mechanic);
+                sb.Append(';');
+            }
+            return sb.ToString();
+        }
+
+        private static string _lastRivalStateSig = "";
+
+        /// <summary>RIVAL-FAIR-2 R3: publish the host's rival state when it CHANGES.  The payload carries
+        /// States only - Rivals / WholesaleIds / ImportIds stay empty - because the identity half of the
+        /// snapshot reseeds the client's ClientRivalNames, ClientPlayerRoster and the slot-exact
+        /// PendingRivalIdQueue, and re-running that on every hourly sweep would churn caches that must be
+        /// written once at join.  The client's apply recognises the states-only shape and touches nothing
+        /// else.</summary>
+        public static void PublishRivalStateIfChanged(string why)
+        {
+            try
+            {
+                if (!IsRunning) return;
+                var states = BuildRivalStates();
+                string sig = SignatureOf(states);
+                if (sig == _lastRivalStateSig) return;
+                _lastRivalStateSig = sig;
+                Broadcast(MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", new RivalsSnapshotPayload { States = states }));
+                int k = 0, m = 0;
+                foreach (var r in states) { if (r.IsActive) k++; m += r.Defenses.Count; }
+                Plugin.Logger.LogInfo($"[RivalSync] host rival state published: {states.Count} rival(s), {k} active, {m} defense(s) ({why}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalSync] publish: {ex.Message}"); }
         }
 
         public static void SendRivalsSnapshotTo(MPLink peer)

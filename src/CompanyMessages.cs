@@ -216,6 +216,10 @@ namespace BigAmbitionsMP
             if (!MergerSync.IAmMember) return null;
             if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return null;
             if (IsRelayedCopy(msg)) return null;                          // a copy that arrived here
+            // RIVAL-FAIR-2 R2: a RIVAL's contact is not a company contact.  Its news travels by the
+            // NEIGHBOURHOOD rule from OnRivalContactSend (the PREFIX on the same gateway), and this is
+            // the single path - relaying it here as well would deliver a co-member two copies.
+            try { if (contact.category == ContactCategoryName.Rivals) return null; } catch { }
 
             string addressKey = OwnedContactAddress(contact, out string why, out string personId);
             if (why != null)
@@ -355,13 +359,10 @@ namespace BigAmbitionsMP
         ///       RecruitmentCampaigns while it sends (RecruitmentHelper.RunHourly:38 removes the finished ones
         ///       only AFTER the FinishCampaign pass at :36), and campaigns are per-machine save state, so
         ///       exactly ONE machine ever raises it - no dedupe beyond the never-relay-a-relay rule above.
-        ///   (b) RIVAL NEWS (P4).  The three special messages of BigAmbitions.Rivals/RivalDefenseHelper (:100,
-        ///       :151, :191) are drained by RivalTimeline.CompleteEntry (:245-249) onto the RIVAL's contact
-        ///       through this very gateway, carrying isSpecialMessage - which the payload already has a field
-        ///       for (IsSpecial), so the copy arrives special too.  The whole rival timeline is HOST-ONLY in
-        ///       this mod (Patch_RivalsHelper_CheckRivalTimelines_SkipOnClient, MPPatches.cs:1656), so the host
-        ///       is the only machine that can raise them and a member can never raise a duplicate.  It is
-        ///       world news about no one's address, so it travels with an empty address key.
+        ///   (b) RIVAL NEWS - MOVED (RIVAL-FAIR-2 R2, user ruling 2026-09-12).  Rival news no longer travels
+        ///       by company membership at all: it travels by the NEIGHBOURHOOD rule, from the ONE path
+        ///       OnRivalContactSend below, and this ownership route ignores every Rivals contact (RelayNow
+        ///       returns at the category test).  There is therefore no double delivery to a co-member.
         /// Returns the address key to travel under, or null with a reason.</summary>
         private static string ForeignContactRelayAddress(Contact contact, TextMessage msg, out string why)
         {
@@ -399,14 +400,6 @@ namespace BigAmbitionsMP
                     { why = reg == null ? "that campaign's shop is not known here" : "that campaign hires for a partner's shop"; return null; }
                     return shopKey;
                 }
-            }
-
-            if (key == "ba:messagetype_impacted_products"
-             || key == "ba:messagetype_rivals_businesses_opened"
-             || key == "ba:messagetype_rivals_attempting_to_poach")
-            {
-                if (!MPServer.IsRunning) { why = "rival news is raised on the host only"; return null; }
-                return "";
             }
 
             return null;
@@ -480,7 +473,11 @@ namespace BigAmbitionsMP
             var gi = SaveGameManager.Current;
             if (gi == null) return;
             if (string.IsNullOrEmpty(p.OwnerPid) || p.OwnerPid == MPConfig.PlayerId) return;
-            if (!MergerSync.MergedRuntime(p.OwnerPid, MPConfig.PlayerId))
+            // RIVAL-FAIR-2 R2: rival news is addressed by the NEIGHBOURHOOD rule at the host, which has
+            // already decided this machine is a recipient - it is not company traffic, so the co-member
+            // gate below must not refuse it.
+            bool rivalNews = (p.Kind ?? "") == "rivalnews";
+            if (!rivalNews && !MergerSync.MergedRuntime(p.OwnerPid, MPConfig.PlayerId))
             {
                 if (_logged.Add("nomember|" + p.OwnerPid))
                     Plugin.Logger.LogInfo($"{Tag} a message from '{p.OwnerPid}' arrived but we are not in one company - ignored.");
@@ -571,10 +568,7 @@ namespace BigAmbitionsMP
             // OwnerPid - the same field Track() stamps the copy with below.
             // POPUPS-1 review MINOR-3: the rival news keys are WORLD news relayed from the host - the rival's
             // contact is nobody's, so it carries no member colour.
-            bool worldNews = p.MessageKey == "ba:messagetype_impacted_products"
-                          || p.MessageKey == "ba:messagetype_rivals_businesses_opened"
-                          || p.MessageKey == "ba:messagetype_rivals_attempting_to_poach";
-            if (!string.IsNullOrEmpty(p.OwnerPid) && !worldNews) _relayOwner[contact] = p.OwnerPid;
+            if (!string.IsNullOrEmpty(p.OwnerPid) && !rivalNews) _relayOwner[contact] = p.OwnerPid;
 
             // MINOR-4: contact.SendMessage runs CleanOldMessages (decompile Entities/Contact.cs:148-180),
             // which dequeues at 21 and, when the message it evicts is a NATIVE one carrying a contextAction,
@@ -592,6 +586,8 @@ namespace BigAmbitionsMP
             if (lateHandled)
                 Plugin.Logger.LogInfo($"{Tag} {mid}: the copy arrived for a message already handled here - shown read, with no buttons.");
             Plugin.Logger.LogInfo($"{Tag} {mid}: '{p.MessageKey}' from '{p.OwnerPid}' shown on '{contact.id}' ({ad.contextButtonData.Count} button(s)).");
+            if (rivalNews)
+                Plugin.Logger.LogInfo($"[RivalNews] '{p.MessageKey}' from rival '{p.RivalId}' delivered on contact '{contact.id}'.");
         }
 
         /// <summary>A relayed copy's button was pressed here: ask the host to have the OWNER run it.</summary>
@@ -1149,6 +1145,207 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} ForgetMine: {ex.GetType().Name}: {ex.Message}"); }
         }
 
+        // ═══════════════════════════════════════════════════════════════════════════════════════
+        // RIVAL-FAIR-2 R2 - RIVAL NEWS BY THE NEIGHBOURHOOD RULE (user ruling 2026-09-12)
+        //
+        // A rival's message reaches EXACTLY the players who have a business in that rival's
+        // neighbourhood, and nobody else - a player who built there provoked the rival and hears its
+        // arrival; a player with a shop there feels the war and hears about it; a player with nothing
+        // there hears nothing, INCLUDING THE HOST.  Under a merger the company's businesses count for
+        // every member.
+        //
+        // WHY A PREFIX.  Every rival message funnels through the ONE gateway Contact.SendMessage
+        // (decompile Entities/Contact.cs:98-119): RivalsHelper.SendMessageToPlayer (:592, after the
+        // monologue), SendMessageWithoutNotification (:615), and the specials that
+        // RivalDefenseHelper.SpecialMessagesTmpQueue (:20) drains through RivalTimeline.CompleteEntry
+        // (:249).  By the time a POSTFIX runs the message is already in the contact's queue, so the
+        // host's own copy can only be SUPPRESSED from a prefix that returns false - and the relay is
+        // sent from that same prefix, so suppressing never loses the message for anyone else.
+        //
+        // THE BOOKKEEPING SURVIVES SUPPRESSION (confirmed): `sentMessageKeys` is written by the CALLER
+        // after SendMessage returns - RivalsHelper.cs:592-598 inside the monologue callback and
+        // :615-621 - never by SendMessage itself.  A suppressed send still marks the key, so the rival
+        // never re-sends it.
+        //
+        // NOT RELAYED: `ba:messagetype_rivals_attempting_to_poach` (poaching is OFF in MP,
+        // MPRivalFairness.Patch_NoPoachingInMP) and the rent refusal, whose key is the rival's own
+        // `rentBuildingMessageKey` field (SendRentBuildingMessage, RivalsHelper.cs:539-542) - that one
+        // fires LOCALLY on whoever clicked and is the clicker's own message.
+        //
+        // THE COPY ARRIVES UNREAD (decision).  The host's copy of a monologue message is read:true
+        // because the host just watched the monologue (:592).  A client cannot play that monologue, so
+        // delivering the copy read would hide it entirely; it is delivered UNREAD so it toasts and
+        // badges like any other new message.  No new on-screen text: the copy carries the game's own
+        // localization key.
+        // ═══════════════════════════════════════════════════════════════════════════════════════
+
+        /// <summary>The last rivalnews decision, for the `rivalnews` rig lever only.</summary>
+        internal static int  LastRivalNewsCount;
+        internal static bool LastRivalNewsHostKept = true;
+        /// <summary>Rivals already reported as having no primary neighbourhood - one line each.</summary>
+        private static readonly HashSet<string> _noNeighbourhoodLogged = new HashSet<string>(StringComparer.Ordinal);
+        internal static void ResetRivalNewsProbe() { LastRivalNewsCount = 0; LastRivalNewsHostKept = true; }
+
+        /// <summary>HOST, on the gateway PREFIX.  Returns FALSE to suppress this machine's native copy.
+        /// Everything that is not a special rival's contact keeps its copy untouched.</summary>
+        internal static bool OnRivalContactSend(Contact contact, TextMessage msg, bool notify)
+        {
+            if (!MPServer.IsRunning) return true;            // client / single player: nothing to relay
+            if (_applying) return true;                      // a copy being re-raised here
+            if (contact == null || msg == null) return true;
+            if (msg.isFromPlayer) return true;
+            try { if (contact.category != ContactCategoryName.Rivals) return true; } catch { return true; }
+            if (IsRelayedCopy(msg)) return true;
+
+            string key = msg.messageKey ?? "";
+            if (key.Length == 0) return true;
+
+            // The rival contact's id IS the rival's name (RivalsHelper.GetRivalContact, :685-688:
+            // Contact.GetContact(rival.rivalData.rivalName, ContactCategoryName.Rivals, "rival")).
+            var rival = FindSpecialRivalByContactId(contact.id ?? "");
+            if (rival == null) return true;                  // a Rivals-category contact that is no special rival
+
+            string rivalId = "";
+            string nb = "";
+            try { rivalId = rival.rivalData?.id ?? ""; nb = rival.primaryNeighborhood ?? ""; } catch { }
+            if (nb.Length == 0)
+            {
+                // No neighbourhood = no set of recipients to compute.  Relaying on an empty
+                // neighbourhood would match nobody and suppress the host's copy too, destroying the
+                // message everywhere; leave the game's own delivery completely untouched instead.
+                try { if (_noNeighbourhoodLogged.Add(rivalId)) Plugin.Logger.LogInfo($"[RivalNews] rival '{rivalId}' has no primary neighbourhood - its news stays native."); } catch { }
+                return true;
+            }
+            if (key == "ba:messagetype_rivals_attempting_to_poach") return true;
+            try { if (key == (rival.rentBuildingMessageKey ?? "") && key.Length > 0) return true; } catch { }
+
+            var recipients = PlayersWithBusinessIn(nb);
+            bool hostKeeps = recipients.Contains(MPConfig.PlayerId);
+            if (recipients.Count == 0)
+            {
+                // A message must never be destroyed on EVERY machine.  With no recipient the relay
+                // sends nothing AND would suppress the host's native copy, so the text would exist
+                // nowhere - and the caller marks sentMessageKeys regardless, so it never comes back.
+                // Keep the host's copy as the single surviving one.
+                hostKeeps = true;
+                try { if (_noNeighbourhoodLogged.Add(rivalId + "|" + nb)) Plugin.Logger.LogInfo($"[RivalNews] no player has a business in '{nb}' - host copy kept (rival '{rivalId}'; logged once)."); } catch { }   // fold d: once per rival+neighbourhood, not per send
+            }
+
+            var p = new CompanyMessagePayload
+            {
+                PlayerId           = MPConfig.PlayerId,
+                Action             = "msg",
+                Kind               = "rivalnews",
+                RivalId            = rivalId,
+                Neighborhood       = nb,
+                MessageId          = "bamp-rivalnews-" + Fnv($"{rivalId}|{contact.id}|{key}|{++_seq}"),
+                OwnerPid           = MPConfig.PlayerId,
+                AddressKey         = "",                      // world news about no one's address
+                ContactId          = contact.id ?? "",
+                ContactCategory    = (int)contact.category,
+                ContactDescription = contact.description ?? "",
+                StreetName         = contact.streetName ?? "",
+                StreetNumber       = contact.streetNumber,
+                MessageKey         = key,
+                Data               = msg.messageData == null ? new Dictionary<string, string>() : new Dictionary<string, string>(msg.messageData),
+                IsSpecial          = msg.isSpecialMessage,
+                IsNewInteraction   = msg.isNewInteraction,
+                Notify             = true,                    // the client never saw the monologue - let it toast
+                StampMinute        = 0,
+            };
+
+            int n = 0;
+            var sent = new List<string>();
+            foreach (var pid in recipients)
+            {
+                if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) continue;
+                if (!MPServer.IsOnlinePid(pid)) continue;
+                try
+                {
+                    MPServer.SendToPid(pid, MessageEnvelope.Create(MessageType.CompanyMessages, "host", p));
+                    n++; sent.Add(pid);
+                }
+                catch (Exception sx) { Plugin.Logger.LogWarning($"[RivalNews] send to '{pid}': {sx.Message}"); }
+            }
+            LastRivalNewsCount = n; LastRivalNewsHostKept = hostKeeps;
+            Plugin.Logger.LogInfo($"[RivalNews] '{key}' from rival '{rivalId}' ({nb}): relayed to {n} player(s) [{string.Join(",", sent)}]; host copy {(hostKeeps ? "kept" : "suppressed")}.");
+            return hostKeeps;
+        }
+
+        private static BigAmbitions.Rivals.SpecialRival? FindSpecialRivalByContactId(string contactId)
+        {
+            if (string.IsNullOrEmpty(contactId)) return null;
+            try
+            {
+                var all = BigAmbitions.Rivals.RivalsHelper.GetSpecialRivals();
+                if (all != null)
+                    foreach (var r in all)
+                        if (r?.rivalData != null && r.rivalData.rivalName == contactId) return r;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>HOST: every session player with at least one NON-RESIDENTIAL rented registration in
+        /// this neighbourhood - plus, under a merger, every co-member of such a player.  A residence
+        /// carries no businessTypeName (MPServer.cs:8785), which is the same test the ownership sweeps
+        /// use (GameStatePatcher.cs:5764).  A CLIENT's shop reads RentedByPlayer == false on the host,
+        /// so it is found through GameStatePatcher.IsAnyPlayerBusiness and the host's ownership ledger.
+        /// INVARIANT (review r1): this scan runs from Contact.SendMessage only - never from inside a
+        /// tenancy raise.  The rival specials are drained in RivalTimeline.CompleteEntry's monologue
+        /// callback (decompile RivalTimeline.cs:243-250), which is outside ActivateLowDemand's frame,
+        /// so Patch_AiPass_TenancyRaise is down while this runs.  That matters: under the raise EVERY
+        /// client shop reads RentedByPlayer == true, the first branch below would claim them all for
+        /// the host, and every rival news item would be credited to the host alone.</summary>
+        private static List<string> PlayersWithBusinessIn(string neighborhood)
+        {
+            var direct = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations != null)
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null) continue;
+                        try
+                        {
+                            if (reg.Neighborhood != neighborhood) continue;
+                            string bt = reg.businessTypeName ?? "";
+                            if (bt.Length == 0 || bt == "ba:businesstype_empty") continue;   // a residence / empty premises
+                            if (reg.RentedByPlayer) { direct.Add(MPConfig.PlayerId); continue; }   // the HOST's own tenancy
+                            if (!GameStatePatcher.IsAnyPlayerBusiness(reg)) continue;             // AI / unowned
+                            string owner = "";
+                            try { if (MPServer.BuildingOwners.TryGetValue(GameStateReader.AddressKey(reg), out var o)) owner = o ?? ""; } catch { }
+                            if (owner.Length == 0) owner = reg.businessOwnerRivalId ?? "";        // the host stamps the pid there
+                            if (owner.Length > 0) direct.Add(owner);
+                        }
+                        catch { }
+                    }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] scan '{neighborhood}': {ex.Message}"); }
+
+            bool Qualifies(string pid)
+            {
+                if (string.IsNullOrEmpty(pid)) return false;
+                if (direct.Contains(pid)) return true;
+                foreach (var d in direct)
+                    try { if (MergerSync.MergedRuntime(d, pid)) return true; } catch { }
+                return false;
+            }
+
+            var outList = new List<string>();
+            if (Qualifies(MPConfig.PlayerId)) outList.Add(MPConfig.PlayerId);
+            try
+            {
+                var all = MPRestSync.AllPlayers();
+                if (all != null)
+                    foreach (var pid in all)
+                        if (!string.IsNullOrEmpty(pid) && pid != MPConfig.PlayerId && Qualifies(pid)) outList.Add(pid);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] roster: {ex.Message}"); }
+            return outList;
+        }
+
         public static bool IsRelayedCopy(TextMessage msg)
         {
             if (msg == null) return false;
@@ -1459,6 +1656,22 @@ namespace BigAmbitionsMP
         static void Postfix(Contact __instance, TextMessage textMessage, bool notify)
         {
             try { CompanyMessages.OnLocalMessage(__instance, textMessage, notify); } catch { }
+        }
+    }
+
+    /// <summary>RIVAL-FAIR-2 R2: the SAME gateway, as a PREFIX.  A postfix cannot un-add a message, so
+    /// the host's own copy of a rival's news can only be suppressed from here - and the relay to the
+    /// players who DO have a business in that rival's neighbourhood is sent from here too, so a
+    /// suppressed host copy never means a lost message.  Everything that is not a special rival's
+    /// contact returns true and is left exactly as the game raised it (the company relay's postfix
+    /// then handles it as before).</summary>
+    [HarmonyPatch(typeof(Contact), nameof(Contact.SendMessage))]
+    public static class Patch_Contact_SendMessage_RivalNews
+    {
+        static bool Prefix(Contact __instance, TextMessage textMessage, bool notify)
+        {
+            try { return CompanyMessages.OnRivalContactSend(__instance, textMessage, notify); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] gateway prefix: {ex.GetType().Name}: {ex.Message}"); return true; }
         }
     }
 }

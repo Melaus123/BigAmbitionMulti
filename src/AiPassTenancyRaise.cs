@@ -75,15 +75,19 @@ namespace BigAmbitionsMP
             return found;
         }
 
-        static void Prefix(System.Reflection.MethodBase __originalMethod)
+        /// <summary>RIVAL-FAIR-2 (2026-09-12): the raise half, as a REUSABLE call-scoped helper.
+        /// `why` names the caller and is the only thing that appears in a failure line, so this
+        /// pair's own behaviour around the two AI passes is unchanged.  Returns the number of
+        /// registrations THIS call raised (0 when nested - the outer call already holds them).
+        /// EVERY Begin must be answered by exactly one End, on the throwing path too.</summary>
+        internal static int Begin(string why)
         {
             try
             {
-                if (!MPServer.IsRunning) return;      // single player / client: vanilla, untouched
-                if (_depth++ != 0) return;            // nested: the outer call already raised
+                if (_depth++ != 0) return 0;          // nested: the outer call already raised
                 _raised.Clear();
                 var regs = SaveGameManager.Current?.BuildingRegistrations;
-                if (regs == null) return;
+                if (regs == null) return 0;
                 foreach (var reg in regs)
                 {
                     if (reg == null) continue;
@@ -94,12 +98,14 @@ namespace BigAmbitionsMP
                     try { reg.RentedByPlayer = true; } catch { continue; }
                     _raised.Add(reg);
                 }
-                if (_raised.Count > 0) LogOncePerDay(__originalMethod?.Name ?? "?", _raised.Count);
+                return _raised.Count;
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[AiRaise] prefix: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[AiRaise] {why}: {ex.Message}"); }
+            return 0;
         }
 
-        static Exception Finalizer(Exception __exception)
+        /// <summary>The lower half.  Lowers exactly what Begin raised, once the outermost call ends.</summary>
+        internal static void End()
         {
             try
             {
@@ -111,6 +117,29 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[AiRaise] finalizer: {ex.Message}"); }
+        }
+
+        /// <summary>How many of the currently raised registrations sit in one neighbourhood - the
+        /// honest count for a log line about a neighbourhood-scoped pass (the raise itself is
+        /// table-wide; the vanilla code does the neighbourhood filtering).</summary>
+        internal static int RaisedIn(string neighborhood)
+        {
+            int n = 0;
+            foreach (var reg in _raised)
+                try { if (reg != null && reg.Neighborhood == neighborhood) n++; } catch { }
+            return n;
+        }
+
+        static void Prefix(System.Reflection.MethodBase __originalMethod)
+        {
+            if (!MPServer.IsRunning) return;          // single player / client: vanilla, untouched
+            int raised = Begin("prefix");
+            if (raised > 0) LogOncePerDay(__originalMethod?.Name ?? "?", raised);
+        }
+
+        static Exception Finalizer(Exception __exception)
+        {
+            End();
             return __exception;   // never swallow the pass's exception
         }
 

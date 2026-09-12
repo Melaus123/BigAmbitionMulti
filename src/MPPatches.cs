@@ -2052,6 +2052,69 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>RIVAL-FAIR-2 R3b (2026-09-12): RivalDefenseHelper.RunHourly is the rival WAR clock —
+        /// it expires defenseStates whose timestamp is past and re-prices the rival's shops
+        /// (decompile :37-63). A client ran it locally, so a client could END a war the host is still
+        /// fighting. The host's expiry now reaches every machine through R3 (the rival-state publish)
+        /// and the rival's own retail prices through BusinessSync / MPPriceSync, so the client has
+        /// nothing to compute: skip it, exactly as the timeline sweep beside it is skipped.</summary>
+        [HarmonyPatch]
+        public static class Patch_RivalDefenseHelper_RunHourly_SkipOnClient
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var t = VehicleManager.FindGameType("BigAmbitions.Rivals.RivalDefenseHelper");
+                if (t == null) yield break;
+                foreach (var m in t.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                                             | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly))
+                    if (m.Name == "RunHourly")
+                        yield return m;
+            }
+
+            static bool Prefix()
+            {
+                if (!MPClient.IsClientInWorld) return true;
+                return false;   // silent, like the timeline skip above: hourly
+            }
+        }
+
+        /// <summary>RIVAL-FAIR-2 R3 (2026-09-12): the HOST recomputes its rival-state signature after
+        /// every method that can move it — the hourly timeline sweep and the per-neighbourhood check
+        /// (RivalsHelper.CheckRivalTimelines / CheckRivalTimeline, the same pair the skip patch above
+        /// binds), the defense clock (RivalDefenseHelper.RunHourly) and the two activations
+        /// (ActivatePriceReduction / ActivateLowDemand) — and publishes to every client when it differs
+        /// from the last sent. Host-only; a postfix, so it sees the state the call left behind (and it
+        /// still runs on a client whose prefix skipped the body, where IsRunning refuses it).</summary>
+        [HarmonyPatch]
+        public static class Patch_RivalState_PublishOnChange
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
+                                                       | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.DeclaredOnly;
+                var rh = VehicleManager.FindGameType("BigAmbitions.Rivals.RivalsHelper");
+                if (rh != null)
+                    foreach (var m in rh.GetMethods(F))
+                        if (m.Name == "CheckRivalTimelines" || m.Name == "CheckRivalTimeline")
+                            yield return m;
+                var dh = VehicleManager.FindGameType("BigAmbitions.Rivals.RivalDefenseHelper");
+                if (dh != null)
+                    foreach (var m in dh.GetMethods(F))
+                        if (m.Name == "RunHourly" || m.Name == "ActivatePriceReduction" || m.Name == "ActivateLowDemand")
+                            yield return m;
+            }
+
+            static void Postfix(System.Reflection.MethodBase __originalMethod)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning) return;
+                    MPServer.PublishRivalStateIfChanged(__originalMethod?.Name ?? "?");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalSync] publish hook: {ex.Message}"); }
+            }
+        }
+
         // ── Rivals leaderboard hooks (Phase 1d Wave 4: on-demand stats sync) ──
 
         /// <summary>

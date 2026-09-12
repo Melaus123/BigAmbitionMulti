@@ -458,6 +458,11 @@ namespace BigAmbitionsMP
         public string HandledBy          { get; set; } = "";   // handled: who pressed it
         public string TargetPid          { get; set; } = "";   // refused: the ONE presser the answer is for
         public string Reason             { get; set; } = "";   // refused: a short code (offline|gone|handled|nobutton|busy|unknown) - the words are built locally, nothing new on screen
+        // RIVAL-FAIR-2 R2 (2026-09-12), ADDITIVE - an older peer simply leaves them empty and the
+        // receiver's merger gate then applies exactly as before.
+        public string Kind               { get; set; } = "";   // "" = a company message; "rivalnews" = a rival's news by the NEIGHBOURHOOD rule (bypasses the co-member gate)
+        public string RivalId            { get; set; } = "";   // rivalnews: the SpecialRival whose contact raised it
+        public string Neighborhood       { get; set; } = "";   // rivalnews: that rival's primaryNeighborhood - the rule's scope
     }
 
     /// <summary>Shared-shop slice 4: ONE item's retail price at a shared shop, set by a permitted player. The native
@@ -3235,6 +3240,38 @@ namespace BigAmbitionsMP
         /// 4 duplicated identities + the last 4 ids never landing on the client).</summary>
         public List<string> WholesaleIds { get; set; } = new();
         public List<string> ImportIds    { get; set; } = new();
+
+        /// <summary>RIVAL-FAIR-2 R3 (2026-09-12): the HOST's gi.specialRivalStates, so every machine
+        /// holds the host's rival state.  NULL = absent (an older host, or a payload that carries only
+        /// the identity part).  A payload with States filled and Rivals/WholesaleIds/ImportIds EMPTY is
+        /// the on-change publish: it must never reseed the client's identity caches.</summary>
+        public List<CbRivalState>? States { get; set; }
+    }
+
+    /// <summary>RIVAL-FAIR-2 R3: one BigAmbitions.Rivals.SpecialRivalState as the wire carries it.
+    /// completedTimelineEntryIds and sentMessageKeys are DELIBERATELY absent - they are the host's
+    /// timeline bookkeeping and a client runs no timeline.</summary>
+    public class CbRivalState
+    {
+        public string RivalId  { get; set; } = "";
+        public bool   IsActive { get; set; }
+        public bool   IsDefeated { get; set; }
+        public List<CbDefense> Defenses { get; set; } = new();
+    }
+
+    /// <summary>RIVAL-FAIR-2 R3: one BigAmbitions.Rivals.DefenseState.  Timestamp is
+    /// BigAmbitions.DayNightCycle.Timestamp: Day and Hour are ints and Minute is a FLOAT on this
+    /// build (CompanyFeed.cs:138), and it is rebuilt with the same three-argument constructor the
+    /// customer-entry sync uses (CustomerEntrySync.cs:189).</summary>
+    public class CbDefense
+    {
+        public int   Day     { get; set; }
+        public int   Hour    { get; set; }
+        public float Minute  { get; set; }
+        public int   Mechanic   { get; set; }   // BigAmbitions.Rivals.DefensiveMechanic
+        public int   Aggression { get; set; }   // Enums.Priority
+        public List<string> Items       { get; set; } = new();
+        public List<string> EmployeeIds { get; set; } = new();
     }
 
     /// <summary>

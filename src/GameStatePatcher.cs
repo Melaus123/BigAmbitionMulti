@@ -483,6 +483,11 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    // RIVAL-FAIR-2 R3: the STATES-ONLY publish (host rival state changed).  It must
+                    // never reseed the identity caches below - that work belongs to the join snapshot.
+                    if ((payload.Rivals == null || payload.Rivals.Count == 0) && payload.States != null)
+                    { ApplyRivalStates(payload.States); return; }
+
                     ClientRivalNames.Clear();
                     int added = 0;
                     foreach (var r in payload.Rivals)
@@ -607,9 +612,103 @@ namespace BigAmbitionsMP
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] Manual GenerateRivals: {ex.Message}"); }
                     }
+
+                    // RIVAL-FAIR-2 R3: the host's rival state rides the identity snapshot too.
+                    if (payload.States != null) ApplyRivalStates(payload.States);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyRivalsSnapshot: {ex.Message}"); }
             });
+        }
+
+        /// <summary>RIVAL-FAIR-2 R3 - CLIENT, MAIN THREAD.  Overwrite this machine's specialRivalStates
+        /// from the host's.  isActive / isDefeated / defenseStates only: completedTimelineEntryIds and
+        /// sentMessageKeys are the HOST's timeline bookkeeping and this machine runs no timeline
+        /// (Patch_RivalsHelper_CheckRivalTimelines_SkipOnClient), so overwriting them would destroy
+        /// nothing useful and could resurrect messages.  ItemHelper.ClearPriceCaches (public,
+        /// ItemHelper.cs:152) is called when something changed so the price consumers re-read.
+        /// Inert on the host and in single player.</summary>
+        public static void ApplyRivalStates(List<CbRivalState>? states)
+        {
+            try
+            {
+                if (states == null) return;
+                if (MPServer.IsRunning) return;            // the host IS the authority
+                if (!MPClient.IsClientInWorld) return;     // single player: nothing to apply
+                var gi = SaveGameManager.Current;
+                if (gi?.specialRivalStates == null) return;
+
+                int changed = 0, active = 0, defenses = 0;
+                foreach (var s in states)
+                {
+                    if (s == null || string.IsNullOrEmpty(s.RivalId)) continue;
+                    if (s.IsActive) active++;
+                    defenses += s.Defenses?.Count ?? 0;
+
+                    BigAmbitions.Rivals.SpecialRivalState? st = null;
+                    foreach (var e in gi.specialRivalStates)
+                        if (e != null && e.rivalId == s.RivalId) { st = e; break; }
+                    if (st == null)
+                    {
+                        st = new BigAmbitions.Rivals.SpecialRivalState
+                        {
+                            rivalId = s.RivalId,
+                            completedTimelineEntryIds = new List<string>(),
+                            sentMessageKeys = new List<string>(),
+                            defenseStates = new List<BigAmbitions.Rivals.DefenseState>(),
+                        };
+                        gi.specialRivalStates.Add(st);
+                        changed++;
+                    }
+                    if (st.isActive   != s.IsActive)   { st.isActive   = s.IsActive;   changed++; }
+                    if (st.isDefeated != s.IsDefeated) { st.isDefeated = s.IsDefeated; changed++; }
+
+                    if (DefensesDiffer(st.defenseStates, s.Defenses))
+                    {
+                        var rebuilt = new List<BigAmbitions.Rivals.DefenseState>();
+                        if (s.Defenses != null)
+                            foreach (var d in s.Defenses)
+                            {
+                                if (d == null) continue;
+                                rebuilt.Add(new BigAmbitions.Rivals.DefenseState
+                                {
+                                    timestamp         = new BigAmbitions.DayNightCycle.Timestamp(d.Day, d.Hour, d.Minute),
+                                    defensiveMechanic = (BigAmbitions.Rivals.DefensiveMechanic)d.Mechanic,
+                                    aggression        = (Enums.Priority)d.Aggression,
+                                    affectedItems     = new List<string>(d.Items ?? new List<string>()),
+                                    affectedEmployeeIds = new List<string>(d.EmployeeIds ?? new List<string>()),
+                                });
+                            }
+                        st.defenseStates = rebuilt;
+                        changed++;
+                    }
+                }
+                if (changed == 0) return;                  // log only when something actually moved
+                try { ItemHelper.ClearPriceCaches(); } catch { }
+                Plugin.Logger.LogInfo($"[RivalSync] applied host rival state: {states.Count} rival(s), {active} active, {defenses} defense(s).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalSync] apply: {ex.Message}"); }
+        }
+
+        private static bool DefensesDiffer(List<BigAmbitions.Rivals.DefenseState>? local, List<CbDefense>? wire)
+        {
+            int ln = local?.Count ?? 0, wn = wire?.Count ?? 0;
+            if (ln != wn) return true;
+            for (int i = 0; i < ln; i++)
+            {
+                var l = local![i]; var w = wire![i];
+                if (l == null || w == null) return true;
+                if ((int)l.defensiveMechanic != w.Mechanic || (int)l.aggression != w.Aggression) return true;
+                try
+                {
+                    if (l.timestamp == null) return true;
+                    if (l.timestamp.Day != w.Day || l.timestamp.Hour != w.Hour || (int)l.timestamp.Minute != (int)w.Minute) return true;
+                }
+                catch { return true; }
+                int li = l.affectedItems?.Count ?? 0, wi = w.Items?.Count ?? 0;
+                if (li != wi) return true;
+                for (int j = 0; j < li; j++) if (l.affectedItems![j] != w.Items![j]) return true;
+            }
+            return false;
         }
 
         /// <summary>

@@ -1427,6 +1427,83 @@ namespace BigAmbitionsMP
                     return $"OK taxpay ok={tyOk} ownleft={tyLeft:F2}";
                 }
 
+                // -- RIVAL-FAIR-2 levers (2026-09-12) -------------------------
+                case "rivalstate":
+                {
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    var rvStates = MPServer.BuildRivalStates();
+                    int rvActive = 0, rvDef = 0;
+                    var rvParts = new System.Collections.Generic.List<string>();
+                    foreach (var r in rvStates)
+                    {
+                        if (r.IsActive) rvActive++;
+                        rvDef += r.Defenses.Count;
+                        rvParts.Add($"{r.RivalId}:{(r.IsActive ? "A" : "-")}:{(r.IsDefeated ? "D" : "-")}:{r.Defenses.Count}");
+                    }
+                    return $"OK rivalstate rivals={rvStates.Count} active={rvActive} defenses={rvDef} [{string.Join(",", rvParts)}]";
+                }
+
+                case "rivalsig":
+                {
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    return $"OK rivalsig {MPServer.RivalStateSignature()}";
+                }
+
+                case "rivalfire":
+                {
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    int rfSp = arg.IndexOf(' ');
+                    if (rfSp < 0) return "ERR usage: rivalfire price|lowdemand <neighborhood>|@<address>";
+                    string rfKind = arg.Substring(0, rfSp).Trim().ToLowerInvariant();
+                    string rfTarget = arg.Substring(rfSp + 1).Trim();
+                    if (rfKind != "price" && rfKind != "lowdemand") return "ERR usage: rivalfire price|lowdemand <neighborhood>|@<address>";
+                    string rfNb = rfTarget;
+                    if (rfTarget.StartsWith("@"))
+                    {
+                        string rfKey = rfTarget.Substring(1);
+                        var rfReg = GameStatePatcher.FindRegistration(rfKey);
+                        if (rfReg == null) return $"ERR no registration '{rfKey}'";
+                        try { rfNb = rfReg.Neighborhood ?? ""; } catch { rfNb = ""; }
+                    }
+                    if (rfNb.Length == 0) return "ERR no neighborhood";
+                    bool rfResult;
+                    try
+                    {
+                        // Priority.High (Enums.Priority; the aggression band RivalDefenseHelper maps to
+                        // 65%/8 days for a price war and 7 new shops for a low-demand wave, :243/:259).
+                        rfResult = rfKind == "price"
+                            ? BigAmbitions.Rivals.RivalDefenseHelper.ActivatePriceReduction(rfNb, Enums.Priority.High)
+                            : BigAmbitions.Rivals.RivalDefenseHelper.ActivateLowDemand(rfNb, Enums.Priority.High);
+                    }
+                    catch (Exception rfEx) { return $"ERR rivalfire {rfKind}: {rfEx.GetType().Name}: {rfEx.Message}"; }
+                    return $"OK rivalfire {rfKind} nb='{rfNb}' result={rfResult}";
+                }
+
+                case "rivalnews":
+                {
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    string rnKey = arg.Trim();
+                    if (rnKey.Length == 0) return "ERR usage: rivalnews <key>";
+                    BigAmbitions.Rivals.SpecialRival rnRival = null!;
+                    try
+                    {
+                        var rnAll = BigAmbitions.Rivals.RivalsHelper.GetSpecialRivals();
+                        if (rnAll != null) foreach (var r in rnAll) { if (r != null) { rnRival = r; break; } }
+                    }
+                    catch (Exception rnEx) { return $"ERR rivalnews: {rnEx.GetType().Name}: {rnEx.Message}"; }
+                    if (rnRival == null) return "ERR no special rival in this world";
+                    Entities.Contact rnContact = null!;
+                    try { rnContact = BigAmbitions.Rivals.RivalsHelper.GetRivalContact(rnRival); } catch { }
+                    if (rnContact == null) return "ERR that rival has no contact";
+                    CompanyMessages.ResetRivalNewsProbe();
+                    // Through the REAL gateway, so the lever can never take a different path than the game.
+                    try { rnContact.SendMessage(new Entities.TextMessage(rnKey)); }
+                    catch (Exception rnSx) { return $"ERR rivalnews send: {rnSx.GetType().Name}: {rnSx.Message}"; }
+                    return $"OK rivalnews key='{rnKey}' rival='{rnRival.rivalData?.id ?? ""}'"
+                         + $" relayed={CompanyMessages.LastRivalNewsCount}"
+                         + $" hostcopy={(CompanyMessages.LastRivalNewsHostKept ? "kept" : "suppressed")}";
+                }
+
                 case "negotiations":
                 {
                     // NEGO-ORPHAN: what StripOrphanNegotiations would take now - the salary negotiations whose embedded
