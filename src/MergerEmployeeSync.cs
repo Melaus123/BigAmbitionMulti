@@ -590,6 +590,35 @@ namespace BigAmbitionsMP
         /// because the patch that measures native's writes lives in MPPatches; the wire is unchanged.</summary>
         public static void SendHrTrain(EmployeeEditPayload p) { if (p != null) Send(p); }
 
+        /// <summary>CROSS-HR-3 A2: the plan RUNNER's TAG leg, the same carrier and the same host route as the
+        /// training leg (MPServer.HostRouteHrTrain takes both actions).  Public for CompanyPlans, which is
+        /// where the HR appliers live; the wire is unchanged.</summary>
+        public static void SendHrTag(EmployeeEditPayload p) { if (p != null) Send(p); }
+
+        /// <summary>CROSS-HR-3b B2: the OWNER's ANSWER to a tag it could not write, on the same carrier and the
+        /// same host route (Action "hrtag-refused"; `OwnerPid` addresses the plan's RUNNER - the original sender -
+        /// and `Name`, the carrier's only free label field, carries the short reason).  Without it the runner
+        /// keeps a list entry standing on a tag that never landed and nothing ever reconciles it.  A CLEAR is
+        /// never answered this way: an empty plan id added nothing there to take back.</summary>
+        private static void RefuseHrTag(EmployeeEditPayload p, string want, string why)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.PlayerId) || string.IsNullOrEmpty(want)) return;
+                Send(new EmployeeEditPayload
+                {
+                    PlayerId   = MPConfig.PlayerId,
+                    Action     = "hrtag-refused",
+                    EmployeeId = p.EmployeeId ?? "",
+                    OwnerPid   = p.PlayerId,
+                    AssignedHrManagerPlanId = want,
+                    Name       = why ?? "",
+                });
+                Plugin.Logger.LogInfo($"[CrossHR] hrtag REFUSAL answered to '{p.PlayerId}' for employee '{p.EmployeeId}' (plan '{want}', {why}) - the runner takes its list entry back.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] hrtag refusal answer for '{p.EmployeeId}': {ex.Message}"); }
+        }
+
         /// <summary>CROSS-HR-2 T3: the stamps ("planId|day|employeeId") this machine has already mirrored onto
         /// its real records. Per session (Reset clears it): a resend, or a daily pass that ran twice, changes
         /// nothing the second time.</summary>
@@ -615,7 +644,11 @@ namespace BigAmbitionsMP
                                 && (p.Action == "release" || p.Action == "adopt-in" || p.Action == "return"
                                  || p.Action == "drop"    || p.Action == "adopt"
                                  || p.Action == "transfer-refused");   // r4 MINOR-3: the host's word to the initiator carries no address
-                if (string.IsNullOrEmpty(p.AddressKey) && !transferLeg && p.Action != "hrtrain") return;
+                // CROSS-HR-3 A2: a TAG leg is no more an address edit than a training leg is - a benched real
+                // record has no address at all, and the tag is still the owner's to write.  CROSS-HR-3b B2: nor
+                // is the ANSWER to a refused tag - that one is addressed by PID, back to the plan's runner.
+                if (string.IsNullOrEmpty(p.AddressKey) && !transferLeg && p.Action != "hrtrain" && p.Action != "hrtag"
+                 && p.Action != "hrtag-refused") return;
                 if (p.Action == "hrtrain")
                 {
                     // CROSS-HR-2 T3, THE OWNER APPLIES ONCE. The leg carries what the partner's plan just did
@@ -675,11 +708,92 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[CrossHR] applied routed training to '{emp.id}' ({raised} skill(s), wage {wageWas.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} -> {emp.hourlyWage.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}; the copy moved x{p.WageRatio.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)}) for partner plan '{p.AssignedHrManagerPlanId}' (stamp '{stamp}', from '{p.PlayerId}').");
                     // The REAL record's shop republishes so the runner's copy catches up (the leg's address is the copy's as the
                     // runner saw it, and a bench copy has none). A BENCHED real record is not in the roster walk (MPRegisterSync
-                    // publishes per registration): its bench publish (SharedShopStaff.cs, signature id|name|wage) re-sends it on
-                    // its own tick when the wage moved; a skills-only move waits for the next natural bench publish (carried
-                    // minor, r2: skills in the bench signature + a nudge).
+                    // publishes per registration): it travels on the BENCH publish instead, and CROSS-HR-3 A6 makes that publish
+                    // follow a trained skill - the bench signature now carries each skill (SharedShopStaff.cs, id|name|wage|skills)
+                    // and NudgeBenchPublish zeroes the owner tick, so a skills-only move (the wage unchanged at two decimals) no
+                    // longer leaves the runner's bench copy stale until some unrelated change happens to move it.
                     string realAddr = ""; try { realAddr = GameStateReader.AddressKey(emp.assignedAddress) ?? ""; } catch { }
                     if (realAddr.Length > 0) MPRegisterSync.ForceRosterRepublish(realAddr);
+                    else SharedShopStaff.NudgeBenchPublish();
+                }
+                else if (p.Action == "hrtag")
+                {
+                    // CROSS-HR-3 A2, THE TAG BELONGS ON THE REAL RECORD.  A co-member's HR plan took one of this
+                    // save's people onto its list; that plan runs THERE, but native reads assignedHrManagerPlanId
+                    // HERE (EmployeeInstance.OnRemove, the HR panes, the daily pass), so the id has to be written
+                    // here AND resolve here - which it does only through the SHADOW of that plan, installed for
+                    // every partner feed by CROSS-HR-1 (PaperworkSync.cs:956/:973). No shadow, no write: a tag
+                    // naming nothing would be persisted into this save's .hsg. An empty plan id CLEARS.
+                    string want = p.AssignedHrManagerPlanId ?? "";
+                    EmployeeInstance? emp = null;
+                    try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(p.EmployeeId ?? "", out emp); } catch { }
+                    if (emp == null)
+                    {
+                        // CROSS-HR-2 T3b: a CLEAR for a record that has LEFT this save is correct, not a mis-route -
+                        // the runner is answering the unassign this very machine sent when the worker went. One info
+                        // line, no warning.
+                        if (want.Length == 0)
+                            Plugin.Logger.LogInfo($"[CrossHR] routed hrtag CLEAR for employee '{p.EmployeeId}' (plan '-'): that record has left this machine - nothing to clear (from '{p.PlayerId}').");
+                        else
+                        {
+                            Plugin.Logger.LogWarning($"[CrossHR] routed hrtag for employee '{p.EmployeeId}' (plan '{want}'): that record is not on this machine - dropped.");
+                            RefuseHrTag(p, want, "that record is not on this machine");   // CROSS-HR-3b B2
+                        }
+                        return;
+                    }
+                    if (MPRegisterSync.IsInjectedStaff(emp.id))
+                    { Plugin.Logger.LogWarning($"[CrossHR] routed hrtag for employee '{emp.id}' (plan '{want}'): '{emp.id}' is an INJECTED copy here, not the real record - dropped (mis-route)."); return; }
+                    if (want.Length > 0)
+                    {
+                        bool resolves = false;
+                        try { resolves = Buildings.Office.Headquarters.HrManagerHelper.GetPlanFromId(want) != null; } catch { }
+                        if (!resolves)
+                        {
+                            Plugin.Logger.LogWarning($"[CrossHR] routed hrtag for employee '{emp.id}' REFUSED: HR plan '{want}' does not resolve on this machine (no shadow of it here) - the tag would name nothing. From '{p.PlayerId}'.");
+                            RefuseHrTag(p, want, "that HR plan does not resolve on this machine");   // CROSS-HR-3b B2
+                            return;
+                        }
+                    }
+                    string had = emp.assignedHrManagerPlanId ?? "";
+                    if (had == want)
+                    { Plugin.Logger.LogInfo($"[CrossHR] routed hrtag for employee '{emp.id}' (plan '{(want.Length > 0 ? want : "-")}') already stood here - no-op (from '{p.PlayerId}')."); return; }
+                    emp.assignedHrManagerPlanId = want.Length > 0 ? want : null;
+                    Plugin.Logger.LogInfo($"[CrossHR] {(want.Length > 0 ? "applied" : "cleared")} routed hrtag on employee '{emp.id}': plan '{(had.Length > 0 ? had : "-")}' -> '{(want.Length > 0 ? want : "-")}' (from '{p.PlayerId}').");
+                    // CROSS-HR-3b B2: the republish below is about the REST of the record.  The roster does NOT
+                    // carry assignedHrManagerPlanId (MPRegisterSync.StaffInfoOf writes id/name/gender/available/
+                    // wage/satisfaction/age/skills), so the runner's copy keeps the tag its own plan gave it -
+                    // which is the tag that has just landed here.  A tag that does NOT land is answered instead.
+                    string tagAddr = ""; try { tagAddr = GameStateReader.AddressKey(emp.assignedAddress) ?? ""; } catch { }
+                    if (tagAddr.Length > 0) MPRegisterSync.ForceRosterRepublish(tagAddr);
+                    else SharedShopStaff.NudgeBenchPublish();
+                }
+                else if (p.Action == "hrtag-refused")
+                {
+                    // CROSS-HR-3b B2, THE RUNNER TAKES THE ENTRY BACK.  The list entry this machine made stands on
+                    // a tag that never landed: the owner could not write it (no record there, or this plan does not
+                    // resolve there), or the host had nobody to deliver it to.  Undo the pair the applier or the
+                    // pane wrote here.  Only a REAL plan of this machine's own is touched - a shadow or a display
+                    // install is a partner's row drawn from their feed, and no list of ours to edit.
+                    string undoPlan = p.AssignedHrManagerPlanId ?? "";
+                    string undoEid  = p.EmployeeId ?? "";
+                    string why      = string.IsNullOrEmpty(p.Name) ? "no reason given" : p.Name;
+                    if (undoPlan.Length == 0 || undoEid.Length == 0)
+                    { Plugin.Logger.LogWarning($"[CrossHR] hrtag-refused from '{p.PlayerId}' names no employee or no plan - dropped."); return; }
+                    Buildings.Office.Headquarters.HrManagerPlan? undo = null;
+                    try { undo = Buildings.Office.Headquarters.HrManagerHelper.GetPlanFromId(undoPlan); } catch { }
+                    bool displayInstall = false;
+                    try { displayInstall = undo != null && (MergerAbsence.IsDisplayInstall(undo) || CompanyPlans.IsOverlayPlan(undo)); } catch { }   // r2 MINOR-4: nor a drawn partner row
+                    if (undo == null || displayInstall) return;   // not one of this machine's own plans: nothing of ours
+                    var undoList = undo!.assignedEmployees;   // (the null test above sits past a try/catch, which the nullable flow does not carry - CS8602 otherwise)
+                    bool wasListed = undoList != null && undoList.Contains(undoEid);
+                    if (wasListed) undoList!.Remove(undoEid);
+                    EmployeeInstance? copy = null;
+                    try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(undoEid, out copy); } catch { }
+                    bool wasTagged = false;
+                    if (copy != null && copy.assignedHrManagerPlanId == undoPlan) { copy.assignedHrManagerPlanId = null; wasTagged = true; }
+                    if (!wasListed && !wasTagged) return;         // idempotent: a second answer says nothing, changes nothing
+                    Plugin.Logger.LogInfo($"[CrossHR] hr assign of '{undoEid}' on plan '{undoPlan}' UNDONE - the owner '{p.PlayerId}' refused the tag ({why}).");
+                    try { MPPatches.MergerHrPaneRedrawIfOn(undoPlan); } catch { }
                 }
                 else if (p.Action == "fire")
                 {

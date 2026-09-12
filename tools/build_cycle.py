@@ -116,6 +116,24 @@ def main():
         warnings = int(m.group(1)) if m else -1
         summary.append((cfg, rc, errors, warnings))
         print(f"== {cfg}: exit {rc}, errors {errors}, warnings {warnings}")
+        # CROSS-HR-3c (2026-09-12): a count alone cannot NAME a new warning (three reviews guessed at one).
+        # Every distinct warning line goes to local/build-warnings-<cfg>.txt (gitignored) and the per-code
+        # tally is printed, so a build that adds one can be answered from the file, not from a rebuild.
+        try:
+            seen = []
+            for line in text.splitlines():
+                mm = re.search(r"(\S+\(\d+,\d+\)): warning (CS\d+): (.*?)(?: \[[^\]]*\])?\s*$", line)
+                if mm:
+                    entry = f"{mm.group(1)} {mm.group(2)} {mm.group(3)}"
+                    if entry not in seen: seen.append(entry)
+            os.makedirs(os.path.join(ROOT, "local"), exist_ok=True)
+            with open(os.path.join(ROOT, "local", f"build-warnings-{cfg}.txt"), "w", encoding="utf-8") as wf:
+                wf.write("\n".join(seen) + ("\n" if seen else ""))
+            tally = {}
+            for e in seen: tally[e.split(" ")[1]] = tally.get(e.split(" ")[1], 0) + 1
+            print("   warning codes: " + ", ".join(f"{k} x{v}" for k, v in sorted(tally.items(), key=lambda kv: -kv[1])) + f"  (distinct {len(seen)}; full list in local/build-warnings-{cfg}.txt)")
+        except Exception as wx:
+            print(f"   (warning list not written: {wx})")
         if errors or rc != 0:
             for line in text.splitlines():
                 if ": error " in line or "Build FAILED" in line:

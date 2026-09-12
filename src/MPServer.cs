@@ -6447,7 +6447,11 @@ namespace BigAmbitionsMP
                 // CROSS-HR-2 T2: a training leg is not an address edit. It is routed to the machine that holds
                 // the REAL record, which is normally the SENDER's own shop's owner-side counterpart - the gate
                 // below would look the address up, find the sender runs it, and drop the leg as a mis-route.
-                if (p.Action == "hrtrain") { HostRouteHrTrain(p, senderPid); return; }
+                // CROSS-HR-3 A2: a TAG leg is the same shape and takes the same route - one router, two actions.
+                if (p.Action == "hrtrain" || p.Action == "hrtag") { HostRouteHrTrain(p, senderPid); return; }
+                // CROSS-HR-3b B2: the ANSWER to a tag the owner could not write is addressed by PID as well -
+                // back to the plan's RUNNER, named by OwnerPid - so it is read before the address gate too.
+                if (p.Action == "hrtag-refused") { HostRouteHrTagRefused(p, senderPid); return; }
                 if (string.IsNullOrEmpty(p.AddressKey)) return;
                 if (!BuildingOwners.TryGetValue(p.AddressKey, out var owner) || string.IsNullOrEmpty(owner))
                 { Plugin.Logger.LogWarning($"[MergerStaff] employee edit for unowned '{p.AddressKey}' — dropped."); return; }
@@ -6474,41 +6478,100 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] HostRouteEmployeeEdit: {ex.Message}"); }
         }
 
-        /// <summary>HOST (main thread), CROSS-HR-2 T2: route ONE training leg to the machine that holds the
-        /// REAL record. What the host HAS is its own roster registry - MPRegisterSync.OwnerOfInjected, the map
+        /// <summary>HOST (main thread), CROSS-HR-2 T2 and CROSS-HR-3 A2: route ONE leg about a co-member's REAL
+        /// record - a training leg ("hrtrain") or a plan-tag write ("hrtag") - to the machine that holds it.
+        /// What the host HAS is its own roster registry - MPRegisterSync.OwnerOfInjected, the map
         /// the host's own injected copies are indexed by; it answers only for records the host itself holds a
         /// copy of, so the leg also CARRIES the owner the runner read off its copy and the registry VERIFIES
         /// it when it knows better (the registry wins, and the disagreement is logged). Members only, and
-        /// never back to the sender: the sender is the plan's runner, where the copy lives.</summary>
+        /// never back to the sender: the sender is the plan's runner, where the copy lives. A4: the plan's own
+        /// runner is never named here - the leg is addressed by the RECORD's owner - so a STAND-IN running an
+        /// absent runner's real plans sends these exactly as the runner would, and an absent WORKER's owner is
+        /// reached through RouteTargetFor, which answers with the stand-in simulating that save.</summary>
         private static void HostRouteHrTrain(EmployeeEditPayload p, string senderPid)
         {
             try
             {
+                string what = string.IsNullOrEmpty(p.Action) ? "hrtrain" : p.Action;
                 string eid = p.EmployeeId ?? "";
                 if (eid.Length == 0)
-                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain from '{senderPid}' names no employee - dropped."); return; }
+                { Plugin.Logger.LogWarning($"[CrossHR] {what} from '{senderPid}' names no employee - dropped."); return; }
                 string known = ""; try { known = MPRegisterSync.OwnerOfInjected(eid); } catch { }
                 if (known.Length > 0 && !string.IsNullOrEmpty(p.OwnerPid) && known != p.OwnerPid)
-                    Plugin.Logger.LogWarning($"[CrossHR] hrtrain for '{eid}': the leg named owner '{p.OwnerPid}', the registry says '{known}' - the registry wins.");
+                    Plugin.Logger.LogWarning($"[CrossHR] {what} for '{eid}': the leg named owner '{p.OwnerPid}', the registry says '{known}' - the registry wins.");
                 string ownerPid = known.Length > 0 ? known : (p.OwnerPid ?? "");
                 if (ownerPid.Length == 0)
-                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain from '{senderPid}' for unknown employee '{eid}' - dropped."); return; }
+                { Plugin.Logger.LogWarning($"[CrossHR] {what} from '{senderPid}' for unknown employee '{eid}' - dropped."); return; }
                 if (ownerPid == senderPid)
-                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain by '{senderPid}' for '{eid}' - that machine holds the record itself, dropped."); return; }
+                { Plugin.Logger.LogWarning($"[CrossHR] {what} by '{senderPid}' for '{eid}' - that machine holds the record itself, dropped."); return; }
                 if (!MergerSync.MergedRuntime(ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain by '{senderPid}' for '{eid}' (owner '{ownerPid}') - not a co-member of the same company, dropped."); return; }
+                { Plugin.Logger.LogWarning($"[CrossHR] {what} by '{senderPid}' for '{eid}' (owner '{ownerPid}') - not a co-member of the same company, dropped."); return; }
                 // r1 MAJOR-1: WHERE that record lives NOW. The owner online -> the owner; away with a stand-in simulating
                 // that save -> the stand-in (its lifted copy IS the live record); nobody -> dropped HERE with its own line,
                 // never queued. SendToPid to an offline pid returns without a word - the silence this route must not have.
                 string target = RouteTargetFor(p.AddressKey ?? "", ownerPid);
                 if (target.Length == 0)
-                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain for '{eid}' (owner '{ownerPid}'): the owner is offline and nobody stands in - dropped (that worker's training for the day is lost; the runner paid for it once)."); return; }
+                {
+                    Plugin.Logger.LogWarning($"[CrossHR] {what} for '{eid}' (owner '{ownerPid}', plan '{p.AssignedHrManagerPlanId}'): the owner is offline and nobody stands in - dropped ({(what == "hrtag" ? "that worker's HR plan tag did not change; the runner's own list entry is answered below" : "that worker's training for the day is lost; the runner paid for it once")}).");
+                    // CROSS-HR-3b B2: a SET nobody can take is ANSWERED, so the runner undoes the list entry it
+                    // made for it. A CLEAR needs no answer - it added nothing there to take back.
+                    if (what == "hrtag" && !string.IsNullOrEmpty(p.AssignedHrManagerPlanId))
+                        HostAnswerHrTagRefused(p, senderPid, "the owner is offline and nobody stands in");
+                    return;
+                }
                 if (target == senderPid)
-                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain by '{senderPid}' for '{eid}' - that machine stands in for the owner and holds the record itself, dropped."); return; }
+                { Plugin.Logger.LogWarning($"[CrossHR] {what} by '{senderPid}' for '{eid}' - that machine stands in for the owner and holds the record itself, dropped."); return; }
                 if (target == MPConfig.PlayerId) MergerEmployeeSync.ApplyOnOwner(p);
                 else SendToPid(target, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] HostRouteHrTrain: {ex.Message}"); }
+        }
+
+        /// <summary>HOST (main thread), CROSS-HR-3b B2: carry a REFUSED tag back to the machine whose HR plan
+        /// holds the list entry - `OwnerPid` on the answer names that runner (it is the original sender of the
+        /// tag leg). Members only, never back to the sender, and never queued: an undo for a runner that is not
+        /// running is moot, because its plan is not running either.</summary>
+        private static void HostRouteHrTagRefused(EmployeeEditPayload p, string senderPid)
+        {
+            try
+            {
+                string back = p.OwnerPid ?? "";
+                string eid = p.EmployeeId ?? "";
+                if (back.Length == 0)
+                { Plugin.Logger.LogWarning($"[CrossHR] hrtag-refused from '{senderPid}' for '{eid}' names no runner to answer - dropped."); return; }
+                if (back == senderPid)
+                { Plugin.Logger.LogWarning($"[CrossHR] hrtag-refused by '{senderPid}' for '{eid}' - that machine is the runner itself, dropped."); return; }
+                if (!MergerSync.MergedRuntime(back, senderPid))
+                { Plugin.Logger.LogWarning($"[CrossHR] hrtag-refused by '{senderPid}' for '{eid}' (runner '{back}') - not a co-member of the same company, dropped."); return; }
+                if (back == MPConfig.PlayerId) { MergerEmployeeSync.ApplyOnOwner(p); return; }
+                if (PeerForPid(back) == null)
+                { Plugin.Logger.LogWarning($"[CrossHR] hrtag-refused for '{eid}' (plan '{p.AssignedHrManagerPlanId}'): runner '{back}' is offline - dropped (its plan is not running either)."); return; }
+                SendToPid(back, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] HostRouteHrTagRefused: {ex.Message}"); }
+        }
+
+        /// <summary>HOST, CROSS-HR-3b B2: the host's OWN refusal - a tag SET it could deliver to nobody. Same
+        /// carrier, same Action, `Name` carrying the reason; the answer goes straight back to the sender (or is
+        /// applied here when the host is that sender).</summary>
+        private static void HostAnswerHrTagRefused(EmployeeEditPayload p, string senderPid, string why)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(senderPid)) return;
+                var answer = new EmployeeEditPayload
+                {
+                    PlayerId   = MPConfig.PlayerId,
+                    Action     = "hrtag-refused",
+                    EmployeeId = p.EmployeeId ?? "",
+                    OwnerPid   = senderPid,
+                    AssignedHrManagerPlanId = p.AssignedHrManagerPlanId ?? "",
+                    Name       = why ?? "",
+                };
+                if (senderPid == MPConfig.PlayerId) { MergerEmployeeSync.ApplyOnOwner(answer); return; }
+                SendToPid(senderPid, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", answer));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] HostAnswerHrTagRefused: {ex.Message}"); }
         }
 
         /// <summary>HOST (main thread), merger slice 6: fan ONE member's business-scoped pop-up out to

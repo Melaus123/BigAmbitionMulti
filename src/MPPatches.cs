@@ -10056,10 +10056,12 @@ namespace BigAmbitionsMP
         // The one that used to contaminate a save is HrManagerPlanUI.cs:261
         // `EmployeeHelper.GetEmployeeById(employeeId).assignedHrManagerPlanId = _currentPlan.id;` - a REAL
         // employee of this player (the candidate list is global: EmployeesScrollerController.cs:21-23). It is
-        // now routed as the `assign` op and the RUNNER performs that exact pair on ITS own employee; an
-        // employee the runner does not hold is refused there, because a member's own employee joining a
-        // partner's HR plan is build A's host-held TRANSFER first, then this assign. Fill (:224) and
-        // ClearAssignedEmployees (:242) both commit through SetEmployeeAssigned, so one route covers all three.
+        // now routed as the `assign` op and the RUNNER performs that exact pair on ITS own roster; CROSS-HR-3 A2
+        // lets that be a CO-MEMBER's copy as well - the id joins the plan's list there and the TAG travels on to
+        // the machine holding the REAL record (an injected copy of a NON-member is still refused there; moving an
+        // employee between saves is still the host-held TRANSFER). Fill (:224) and ClearAssignedEmployees (:242)
+        // both commit through SetEmployeeAssigned, so one route covers all three - and on MY OWN plan, where
+        // native runs instead of the route, the CROSS-HR-3b B1 postfix below sends that same tag leg.
 
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI), "SetEmployeeAssigned")]
         public static class Patch_HrPaneAssign_MergerGate
@@ -10088,6 +10090,31 @@ namespace BigAmbitionsMP
                     });
                 }
                 catch { return true; }
+            }
+
+            /// <summary>CROSS-HR-3b B1: MY OWN plan runs NATIVE here - the prefix routes a partner's row only
+            /// (CompanyPlans.RoutePaneEdit returns false for a non-overlay plan) - and CROSS-HR-3 A1 put a
+            /// CO-MEMBER's copies on my own plan's assignable list too.  Native writes the list and tags the
+            /// COPY; the owner's REAL record hears nothing unless the leg goes from here.  A REFUSED route leaves
+            /// __runOriginal FALSE (RoutePaneEdit answers true on a refusal, CompanyPlans.cs Refused(...), so the
+            /// prefix skipped native); the overlay test is asked again for the one case where RoutePaneEdit could
+            /// not send at all and native ran on a partner's row - nothing must leave from here then either.
+            /// Native's Fill and ClearAssignedEmployees LOOP this method, so each co-member travels as its own
+            /// leg - safe, because the employee-edit route is not rate-capped (MPServer.SharedRateOk guards
+            /// schedule edits, session messages and bench publishes only).</summary>
+            static void Postfix(Buildings.Office.Headquarters.HrManagerPlan ____currentPlan,
+                                string employeeId, bool assigned, bool __runOriginal)
+            {
+                try
+                {
+                    if (!__runOriginal) return;
+                    if (CompanyPlans.IsOverlayPlan(____currentPlan)) return;   // a partner's row: routed, or refused
+                    if (!MergerSync.IAmMember) return;
+                    string eid = employeeId ?? "";
+                    if (eid.Length == 0 || !CompanyPlans.CoMemberCopyHere(eid)) return;
+                    CompanyPlans.OwnPlanAssignedLocally(____currentPlan, eid, assigned);
+                }
+                catch { }
             }
         }
 
@@ -10157,9 +10184,28 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] hr bulk redraw: {ex.Message}"); }
         }
 
+        /// <summary>CROSS-HR-3b B2: that same pair, but only while the pane actually stands on THAT plan - an
+        /// UNDONE assign (a tag the owner refused) changed the list under an open pane.  Another plan on screen,
+        /// or no pane at all, redraws nothing.</summary>
+        internal static void MergerHrPaneRedrawIfOn(string planId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(planId)) return;
+                var ui = MergerHrPane();
+                if (ui == null || !ui.gameObject.activeInHierarchy) return;
+                var pl = MergerHrCurrentPlan(ui);
+                if (pl == null || pl.id != planId) return;
+                MergerHrPaneRedraw(ui, pl);
+            }
+            catch { }
+        }
+
         /// <summary>Whom Fill would take, in the NATIVE order and on the native test (decompile
         /// HrManagerPlanUI.cs:231-236: off the assignable table, nobody already on a plan, never the plan's own
-        /// manager), capped at the free slot count.  H3 has already pruned that table to one company's people.</summary>
+        /// manager), capped at the free slot count.  H3 has already pruned that table to one company's people,
+        /// and CROSS-HR-3 A1 widened it to a co-member's COPIES - which CROSS-HR-3b B1 skips here, so Fill takes
+        /// this save's OWN people on both kinds of plan, exactly as the routed fill applier does.</summary>
         private static List<Entities.EmployeeInstance> MergerHrFillPicks(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI ui,
                                                                         Buildings.Office.Headquarters.HrManagerPlan pl, int free)
         {
@@ -10176,6 +10222,7 @@ namespace BigAmbitionsMP
                     if (e == null || !string.IsNullOrEmpty(e.assignedHrManagerPlanId)) continue;
                     if (e.id == pl.assignedEmployeeId) continue;
                     if (MPRegisterSync.IsSyntheticDuty(e.id)) continue;   // HO-1c L4.5: a duty stand-in is not staff
+                    if (MPRegisterSync.IsInjectedStaff(e.id)) continue;   // CROSS-HR-3b B1: a copy is not mine to fill with
                     picks.Add(e);
                 }
             }
@@ -10225,7 +10272,21 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!CompanyPlans.IsOverlayPlan(____currentPlan)) return true;
+                    if (!CompanyPlans.IsOverlayPlan(____currentPlan))
+                    {
+                        // CROSS-HR-3b B1: MY OWN plan.  A1 put a co-member's copies on the assignable list, so
+                        // native's Fill (decompile HrManagerPlanUI.cs:224-240) would sweep them up; the ROUTED
+                        // fill applier takes own people only (H3), and one rule holds on both kinds of plan.
+                        // SetEmployeeAssigned is native's own public method (decompile :256), so the list/tag
+                        // pair is exactly native's - and the B1 postfix sends nothing for my own people.
+                        if (!MergerSync.IAmMember) return true;      // off a merger nothing is injected: native runs
+                        int ownFree = ____currentPlan.MaxEmployees - ____currentPlan.NumberOfAssignedEmployees;
+                        if (ownFree <= 0) return false;              // native :226-229 does nothing either
+                        foreach (var pick in MergerHrFillPicks(__instance, ____currentPlan, ownFree))
+                            __instance.SetEmployeeAssigned(pick.id, true, false);
+                        MergerHrPaneRedraw(__instance, ____currentPlan);   // native's own tail, :238-239
+                        return false;
+                    }
                     int free = ____currentPlan.MaxEmployees - ____currentPlan.NumberOfAssignedEmployees;
                     if (free <= 0) return false;                      // native :226-229 does nothing either
                     var picks = MergerHrFillPicks(__instance, ____currentPlan, free);
@@ -10247,9 +10308,10 @@ namespace BigAmbitionsMP
         // ── HO-1a H3: THE ASSIGN LIST OFFERS THAT COMPANY'S ELIGIBLE PEOPLE ONLY ──
         // EmployeesScrollerController.Load (decompile :15-27) builds `data` from the plan's own instances and
         // then, with includeUnassignedEmployees, from EVERY local record without a plan (:21-23).  On a merged
-        // machine that second sweep sweeps up the INJECTED copies of a partner's staff - which is how the
-        // host's people came to be offered on a client's plan - and on a partner's display copy it offers this
-        // player's OWN people, whom that company cannot employ until the host-held transfer has moved them.
+        // machine that second sweep sweeps up EVERY local record without a plan - the injected copies of a
+        // partner's staff, the duty stand-ins and the hiring candidates alike.  CROSS-HR-3 A1: the eligible set
+        // is now the COMPANY's working people (mine, plus a co-member's copies) on my own plan and on a
+        // partner's row alike, because A2 makes an assign cross a machine.
         // The postfix prunes `data` to the one eligible set and reloads through the class's own scroller
         // (:26 `scroller.ReloadData()`).  The cell toggle stays live; there is simply nobody wrong to toggle.
 
@@ -10257,6 +10319,20 @@ namespace BigAmbitionsMP
         public static class Patch_HrAssignList_MergerFilter
         {
             private static readonly HashSet<string> _hrListFailClosed = new();   // HO-1c L4.8: one warning per owner
+
+            /// <summary>CROSS-HR-3 A1: a HIRING CANDIDATE is a record this save holds while employing nobody
+            /// (EmployeeInstance.IsCandidate).  Native's unassigned sweep does not know the difference; an HR plan
+            /// must never tag one, and a co-member never sees somebody else's hiring.</summary>
+            private static bool HrListIsCandidate(string employeeId)
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(employeeId)) return false;
+                    var e = Helpers.EmployeeHelper.GetEmployeeById(employeeId);
+                    return e != null && e.IsCandidate;
+                }
+                catch { return false; }
+            }
 
             static void Postfix(UI.Smartphone.Apps.BizMan.HRManagers.EmployeesScrollerController __instance)
             {
@@ -10283,29 +10359,67 @@ namespace BigAmbitionsMP
                     }
                     var onPlan = rowPlan != null && rowPlan.assignedEmployees != null ? rowPlan.assignedEmployees : null;
                     var keep = new List<UI.Smartphone.Apps.BizMan.HrManagers.HrManagerEmployeeModel>();
-                    int dropped = 0;
+                    int dropped = 0, ownKept = 0, coKept = 0;
                     foreach (var model in __instance.data)
                     {
                         if (model == null) continue;
-                        bool eligible = owner.Length == 0
-                              ? !MPRegisterSync.IsInjectedStaff(model.employeeId)            // my own plan: my own people
-                                && !MPRegisterSync.IsSyntheticDuty(model.employeeId)          // HO-1c L4.5: never a duty stand-in
-                              : MPRegisterSync.OwnerOfInjected(model.employeeId) == owner;    // a partner's row: theirs
+                        // CROSS-HR-3 A1: THE WHOLE COMPANY IS ON THE LIST.  H3 used to offer that partner's own
+                        // people on a partner's row and only mine on my own plan, because an assign could not cross
+                        // a machine: the tag would have been written here, on a copy.  A2 makes it cross - the tag is
+                        // written on the machine that holds the REAL record, and the plan id resolves there through
+                        // the SHADOW CROSS-HR-1 installs for every partner feed (PaperworkSync.cs:956 installs the
+                        // display lists, :973 registers the shadow HR rows), so MY plan is resolvable on a partner's
+                        // machine exactly as theirs is on mine.  One eligible set on both kinds of plan now: my own
+                        // real records, plus the injected copies of a CO-MEMBER's people.  Never a duty stand-in
+                        // (HO-1c L4.5), never a candidate (hiring is not shared), and never an injected copy whose
+                        // owner is not a company member - a plain Business grant is not a company.
+                        bool injectedRow = MPRegisterSync.IsInjectedStaff(model.employeeId);
+                        bool eligible = !MPRegisterSync.IsSyntheticDuty(model.employeeId)
+                              && !HrListIsCandidate(model.employeeId)
+                              && (!injectedRow || MPRegisterSync.IsInjectedFromMergedPartner(model.employeeId));
                         // HO-1c L4.8: the mutates no longer tag the employee RECORD, so somebody added to the
                         // display list still arrives here through native's unassigned sweep (decompile
                         // EmployeesScrollerController.cs:21-23).  The list half already shows them as assigned.
                         bool onRow = onPlan != null && onPlan.Contains(model.employeeId);
                         if (eligible && onRow && !model.assigned) { dropped++; continue; }
                         if (eligible && onRow && owner.Length > 0) model.assigned = true;      // a partner's row: the list is the truth
-                        if (eligible) keep.Add(model); else dropped++;
+                        if (eligible) { keep.Add(model); if (injectedRow) coKept++; else ownKept++; } else dropped++;
                     }
                     if (dropped == 0) return;
                     __instance.data = keep;
                     if (__instance.scroller != null) __instance.scroller.ReloadData();
-                    Plugin.Logger.LogInfo($"[Plans] assign list: {dropped} dropped, {keep.Count} offered"
-                                        + (owner.Length == 0 ? " - my own company's people only." : $" - '{owner}' people only."));
+                    Plugin.Logger.LogInfo($"[Plans] assign list on {(owner.Length == 0 ? "my own HR plan" : $"'{owner}' HR plan")}: "
+                                        + $"{dropped} dropped, {keep.Count} offered ({ownKept} of my own, {coKept} co-member copy/copies) - the company's people may join either plan.");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] assign list filter: {ex.Message}"); }
+            }
+        }
+
+        // -- CROSS-HR-3 A3: DELETING A PLAN CLEARS ITS TAG ON EVERY MACHINE --
+        // HrManagerPlan.Delete (decompile :223-228) nulls assignedHrManagerPlanId on the plan's own
+        // EmployeeInstances - LOCAL records, every one of them. Once a co-member's worker can be on the list
+        // (A2) the ones that matter are somewhere else, and native cannot reach them. The prefix fans a tag
+        // CLEAR out to each of those owners first, then lets native run exactly as it always has.
+        // It hangs on the REAL plan, which is the one this machine may delete: a partner's SHADOW
+        // (MergerAbsence.IsDisplayInstall) and a detached display row (CompanyPlans.IsOverlayPlan) are somebody
+        // else's to delete, and the routed applier's own fan-out marks its plan id so the two never double up.
+        // A stand-in's installs are tagged with a REAL pid, so IsDisplayInstall is false for them: standing in
+        // for an absent runner, this machine fans out for that runner's plans, which is right (A4).
+
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.HrManagerPlan), "Delete")]
+        public static class Patch_HrPlanDelete_MergerTagFanOut
+        {
+            static void Prefix(Buildings.Office.Headquarters.HrManagerPlan __instance)
+            {
+                try
+                {
+                    if (__instance == null || !MergerSync.IAmMember) return;
+                    if (MergerAbsence.IsDisplayInstall(__instance)) return;          // a partner's shadow: not mine to fan out
+                    if (CompanyPlans.IsOverlayPlan(__instance)) return;              // a detached display row: ditto
+                    if (CompanyPlans.HrDeleteFanOutDone(__instance.id)) return;      // the routed applier already sent them
+                    CompanyPlans.HrTagFanOutClear(__instance, "the plan was deleted here");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] hr delete tag fan-out: {ex.Message}"); }
             }
         }
 

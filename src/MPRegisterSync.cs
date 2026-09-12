@@ -2104,9 +2104,9 @@ namespace BigAmbitionsMP
                             // defensive skip (never shadow a genuinely local record).
                             if (!MergerEmployeeSync.ConfirmAdopt(s.Id))
                             {
-                                // CROSS-HR-2b (rig T-CROSSHR2 2026-09-12): this silence hid SEVEN duplicate records in a hands-on
-                                // save - the owner's roster names an id this save ALSO holds as its own. The record stays exactly
-                                // as it is (a genuine local record is never shadowed); the collision is now SAID, once per id.
+                                // A local record with a partner's id would be skipped in silence here - said once per id so a
+                                // duplicate can be reported (CROSS-HR-2b; no such case has been seen yet). The record stays
+                                // exactly as it is: a genuine local record is never shadowed.
                                 if (_localCollisionLogged.Add(s.Id))
                                 {
                                     string localAddr = ""; try { if (Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(s.Id, out var le) && le != null) localAddr = GameStateReader.AddressKey(le.assignedAddress) ?? ""; } catch { }

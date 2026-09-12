@@ -1,7 +1,7 @@
 {
   "id": "T-CROSSHR2",
   "title": "cross-member HR build 2, two players: the client's HR plan (which lists six of the host's people, assigned in the hands-on world) runs its daily training on the client; each host-owned assignee routes ONE training leg to the host, the host applies it to the real record once, and a second run the same day is dropped as already applied; ends dissolved, NO save",
-  "preconditions": "BLOCKED ON THIS FIXTURE until CROSS-HR-3 (2026-09-12, run 1 FAIL 12/20): the client's plan oMg0Ie6U0iAKs859EUeIg== lists SEVEN of the host's people, but the client's own save holds address-less PHANTOM records with those ids (a leak of unknown origin; context log F-2026-09-12-JZ), so the roster apply never injects them and no leg fires. CROSS-HR-3's scenario assigns a PROPERLY injected host person (one of the other 26 at 15 ba:street_thirdavenue) through its new cross-member assign and then runs `hrtrain`. Build CROSS-HR-2b lever answer: OK hrtrain plan='<id>' assigned=N manager=<bool> injected=I legs=M unchanged=K. FIXTURE HYGIENE: skills and wages change in memory only; NOTHING is saved.",
+  "preconditions": "SUPERSEDED by t-crosshr3.json (2026-09-12): run 1 FAIL 12/20 because every host person on the client's plan oMg0Ie6U0iAKs859EUeIg== is at primary skill 100 (the plan's trainingTarget), so native's training moves nothing and no leg exists to send; build 2 was silent about it (2b/2c log the pass summary: OK hrtrain plan='<id>' assigned=N manager=<bool> injected=I legs=M unchanged=K). Kept for the record; not run.",
   "instances": 2,
   "vars": {
     "clientPid": "Client1",

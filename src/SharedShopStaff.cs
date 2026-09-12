@@ -283,6 +283,13 @@ namespace BigAmbitionsMP
         /// <summary>Republish my bench on the next tick (after a routed assign/unassign, or when my grantees change).</summary>
         public static void PublishPoolNow() { _poolSigSent = ""; _nextOwnerTick = 0f; }
 
+        /// <summary>CROSS-HR-3 A6: walk the bench NOW rather than up to OwnerTickSeconds from now, without
+        /// forcing a resend - the signature still decides whether anything goes out. A routed training that
+        /// landed on a BENCHED real record (MergerEmployeeSync, the hrtrain apply with no address) moves skills
+        /// and sometimes no wage at two decimals; with the skills in the signature below that is a real change,
+        /// and this is what stops the runner's bench copy waiting out a whole tick for it.</summary>
+        internal static void NudgeBenchPublish() { _nextOwnerTick = 0f; }
+
         private static void TickOwner()
         {
             if (Time.unscaledTime < _nextOwnerTick) return;
@@ -303,10 +310,19 @@ namespace BigAmbitionsMP
                 staff.Add(MPRegisterSync.StaffInfoOf(e));
             }
             staff.Sort((a, b) => string.CompareOrdinal(a.Id, b.Id));
-            // Signature = membership + name + wage only. NOT satisfaction/availability — those drift every morale
+            // Signature = membership + name + wage + SKILLS. NOT satisfaction/availability — those drift every morale
             // tick and would turn this into a chatty broadcast (the lesson from the roster publish, plan §2.9).
+            // CROSS-HR-3 A6: the SKILLS are in the signature because a routed training moves them on a BENCHED real
+            // record and the wage moving with them can round to the same two decimals - a skills-only move published
+            // nothing and the runner's bench copy stayed stale. The ROSTER signature has carried skills all along
+            // (MPRegisterSync, the roster walk's StaffInfo); this mirrors it, at the same F1 the wire uses.
             var sb = new System.Text.StringBuilder();
-            foreach (var s in staff) sb.Append(s.Id).Append('|').Append(s.Name).Append('|').Append(s.Wage.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)).Append(';');
+            foreach (var s in staff)
+            {
+                sb.Append(s.Id).Append('|').Append(s.Name).Append('|').Append(s.Wage.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
+                if (s.Skills != null) foreach (var sk in s.Skills) sb.Append('|').Append(sk);
+                sb.Append(';');
+            }
             string sig = sb.ToString();
             if (sig == _poolSigSent) return;
             bool first = _poolSigSent.Length == 0;

@@ -1686,6 +1686,39 @@ namespace BigAmbitionsMP
                     return $"OK hrtrain plan='{arg}' assigned={htn} manager={htmgr} injected={MergerEmployeeSync.LastTrainInjected} legs={MergerEmployeeSync.LastTrainLegs} unchanged={MergerEmployeeSync.LastTrainUnchanged} (the game's own daily training pass ran once)";
                 }
 
+                case "hrtag":
+                {
+                    // CROSS-HR-3 A5 rig lever. `hrtag <employeeId> <planId|->` sends exactly the tag leg A2 sends
+                    // when a CO-MEMBER's person joins this machine's HR plan ("-" = the clear). It writes nothing
+                    // here; the assertion belongs on the OWNER's machine, where the real record is.
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (arg.Length == 0) return "ERR usage: hrtag <employeeId> [planId|-]";
+                    return CompanyPlans.TestDriveHrTag(arg);
+                }
+
+                case "hrplanof":
+                {
+                    // CROSS-HR-3 A5 rig lever. `hrplanof <employeeId>` reads assignedHrManagerPlanId off the
+                    // record here and says whether that plan id resolves on THIS machine - real, a partner's
+                    // shadow, or nothing at all. It is the read half of `hrtag`, and the `employees` output
+                    // keeps its format.
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (arg.Length == 0) return "ERR usage: hrplanof <employeeId>";
+                    return CompanyPlans.TestDriveHrPlanOf(arg);
+                }
+
+                case "planown":
+                {
+                    // CROSS-HR-3b B6 rig lever. `planown hr <planId> assign <employeeId> true|false` does, on the
+                    // plan's OWN machine, exactly what the pane's native SetEmployeeAssigned does (decompile
+                    // HrManagerPlanUI.cs:256-268) and then calls the same B1 helper the pane's postfix calls - so
+                    // the own-plan tag leg can be exercised with no pane open. A shadow or a display install is
+                    // refused there: a partner's row is not this machine's list to write.
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (arg.Length == 0) return "ERR usage: planown hr <planId> assign <employeeId> true|false";
+                    return CompanyPlans.TestDrivePlanOwn(arg);
+                }
+
                 case "planbulk":
                 {
                     // HO-1c L3 rig lever. `planbulk <family> <planId> clear|fill|suggestall [n]` sends exactly the
@@ -1762,7 +1795,7 @@ namespace BigAmbitionsMP
                 }
 
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|hrtag|hrplanof|planown|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg)";
             }
         }
 

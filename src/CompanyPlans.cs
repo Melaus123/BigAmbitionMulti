@@ -1687,6 +1687,93 @@ namespace BigAmbitionsMP
         private static bool InjectedHere(string eid)
         { try { return !string.IsNullOrEmpty(eid) && MPRegisterSync.IsInjectedStaff(eid); } catch { return false; } }
 
+        /// <summary>CROSS-HR-3 A2: an injected copy of a CO-MEMBER's person - the one kind of foreign id an HR
+        /// plan may now carry.  An injected copy of somebody who is merely a business GRANTEE is not a company
+        /// member and stays refused, exactly as r2 MAJOR-3 refused every copy.</summary>
+        internal static bool CoMemberCopyHere(string eid)
+        {
+            try { return !string.IsNullOrEmpty(eid) && MPRegisterSync.IsInjectedStaff(eid) && MPRegisterSync.IsInjectedFromMergedPartner(eid); }
+            catch { return false; }
+        }
+
+        /// <summary>CROSS-HR-3 A2: ONE tag leg for a co-member's person on this machine's HR plan.  The write
+        /// itself belongs on the machine that holds the REAL record, so the leg travels the employee-edit
+        /// carrier the training legs use (Action "hrtag", routed by MPServer.HostRouteHrTrain: the registry
+        /// names the record's owner, members only, never back to the sender, and RouteTargetFor sends it to a
+        /// stand-in when that owner is away).  An empty plan id CLEARS.  The owner writes a VALUE, not a delta,
+        /// so the same leg twice is the same tag - no stamp needed.</summary>
+        private static void SendHrTag(string eid, string planId, bool clear, string why)
+        {
+            try
+            {
+                EmployeeInstance? e = null; try { e = EmployeeHelper.GetEmployeeById(eid); } catch { }
+                string addr = ""; try { if (e != null) addr = GameStateReader.AddressKey(e.assignedAddress) ?? ""; } catch { }
+                string owner = ""; try { owner = MPRegisterSync.OwnerOfInjected(eid) ?? ""; } catch { }
+                MergerEmployeeSync.SendHrTag(new EmployeeEditPayload
+                {
+                    PlayerId   = MPConfig.PlayerId,
+                    Action     = "hrtag",
+                    AddressKey = addr,
+                    EmployeeId = eid ?? "",
+                    OwnerPid   = owner,
+                    AssignedHrManagerPlanId = clear ? "" : (planId ?? ""),
+                });
+                Plugin.Logger.LogInfo($"[CrossHR] hr tag {(clear ? "CLEAR" : "SET")} leg for employee '{eid}' (plan '{planId}', {why}) -> owner "
+                                    + $"'{(owner.Length > 0 ? owner : "?")}' @ '{(addr.Length > 0 ? addr : "-")}'. The copy here keeps the tag the plan gave it; a refusal is answered and undone here.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] hr tag leg for employee '{eid}' (plan '{planId}'): {ex.Message}"); }
+        }
+
+        /// <summary>CROSS-HR-3b B1: MY OWN HR plan's pane (or the `planown` rig lever) has just run NATIVE's own
+        /// pair on a CO-MEMBER's copy - the list changed here and the COPY took the tag, but nothing left this
+        /// machine, so the owner's REAL record never heard of it.  This is the leg that path was missing.  The
+        /// copy's tag is whatever native just wrote and it stays: it matches the list.  Native's Fill and
+        /// Clear-all loop SetEmployeeAssigned, so a Clear-all sends one CLEAR per co-member copy.</summary>
+        internal static void OwnPlanAssignedLocally(HrManagerPlan plan, string eid, bool assigned)
+        {
+            try
+            {
+                if (plan == null || string.IsNullOrEmpty(eid) || !CoMemberCopyHere(eid)) return;
+                if (assigned)
+                {
+                    // Native adds to the list before this runs; no entry means the click did not stand.
+                    if (plan.assignedEmployees == null || !plan.assignedEmployees.Contains(eid)) return;
+                    SendHrTag(eid, plan.id, false, "joined this HR plan");
+                }
+                else SendHrTag(eid, plan.id, true, "left this HR plan");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] own-plan hr assign of '{eid}': {ex.Message}"); }
+        }
+
+        /// <summary>CROSS-HR-3 A3: plan ids whose delete has ALREADY fanned its tag clears out.  The routed
+        /// applier below fans out and then calls HrManagerHelper.DeletePlan, which is native's own
+        /// HrManagerPlan.Delete (decompile HrManagerHelper.cs:35-38) - the very method the pane's delete button
+        /// reaches and the one the A3 prefix hangs on.  The id sits here for the length of that call so the
+        /// clears go out once.</summary>
+        private static readonly HashSet<string> _hrDeleteFanOut = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>CROSS-HR-3 A3: has this plan's delete already sent its tag clears?</summary>
+        internal static bool HrDeleteFanOutDone(string planId)
+        { try { return !string.IsNullOrEmpty(planId) && _hrDeleteFanOut.Contains(planId); } catch { return false; } }
+
+        /// <summary>CROSS-HR-3 A3: clear the tag on every CO-MEMBER's worker this plan holds, on the machine
+        /// that holds each real record.  Native's Delete (decompile HrManagerPlan.cs:223-228) nulls
+        /// assignedHrManagerPlanId on LOCAL records only, so without this a partner's worker keeps a tag
+        /// naming a plan that exists nowhere - and the shadow behind that id is gone with it.</summary>
+        internal static void HrTagFanOutClear(HrManagerPlan pl, string why)
+        {
+            try
+            {
+                if (pl == null || pl.assignedEmployees == null) return;
+                int sent = 0;
+                foreach (var one in new List<string>(pl.assignedEmployees))
+                    if (CoMemberCopyHere(one)) { SendHrTag(one, pl.id, true, why); sent++; }
+                if (sent > 0)
+                    Plugin.Logger.LogInfo($"[CrossHR] hr plan '{pl.id}' ({why}): {sent} co-member tag clear(s) sent before the plan goes.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] hr tag fan-out on plan '{(pl != null ? pl.id : "?")}': {ex.Message}"); }
+        }
+
         private static bool RefuseInjected(string fam, string op, string id, string eid)
         {
             Plugin.Logger.LogWarning($"[Merger] {fam} {op} REFUSED for plan '{id}': employee '{eid}' is an injected copy here - a cross-member assignment needs the host-held transfer first.");
@@ -1895,7 +1982,14 @@ namespace BigAmbitionsMP
                 case "manager":
                     if (InjectedHere(p.StrValue)) return RefuseInjected("hr", op, id, p.StrValue);   // r2 MAJOR-3
                     pl.assignedEmployeeId = string.IsNullOrEmpty(p.StrValue) ? null : p.StrValue; return true;
-                case "delete":  HrManagerHelper.DeletePlan(id); return true;
+                case "delete":
+                    // CROSS-HR-3 A3: the tags first, while the list still says who carries them; native then
+                    // clears the LOCAL records as it always has.  The prefix on HrManagerPlan.Delete sees this
+                    // id in _hrDeleteFanOut and leaves the sending to us.
+                    _hrDeleteFanOut.Add(id);
+                    try { HrTagFanOutClear(pl, "the plan was deleted"); HrManagerHelper.DeletePlan(id); }
+                    finally { _hrDeleteFanOut.Remove(id); }
+                    return true;
                 case "insurance-cancel":  pl.CancelHealthInsurancePlan(); return true;
                 case "insurance-upgrade": pl.UpgradeHealthInsurancePlan(); return true;
                 case "assign":
@@ -1921,8 +2015,26 @@ namespace BigAmbitionsMP
                         { Plugin.Logger.LogWarning($"[Merger] hr assign REFUSED for plan '{id}': employee '{eid}' is not on this machine (a cross-member assignment needs the host-held transfer first)."); return Refuse($"assign: employee '{eid}' is not on this machine"); }
                         // r2 MAJOR-3: an INJECTED partner copy sits on the REAL roster here (MergerEmployeeSync.cs:796,
                         // MPRegisterSync.cs:1374), so `emp != null` was never the test it looked like - a member's own
-                        // employee id resolved to the copy and the two writes below would have persisted a FOREIGN id.
-                        if (InjectedHere(eid)) return RefuseInjected("hr", op, id, eid);
+                        // employee id resolves to the COPY, and writing the tag here writes it on a copy.
+                        //
+                        // CROSS-HR-3 A2: that is no longer a refusal for a CO-MEMBER's person.  The company may put
+                        // any of its people on any of its HR plans while each stays at the shop that employs them:
+                        // the id joins this plan's list, the copy takes the tag and KEEPS it (no roster push ever
+                        // overwrites it - MPRegisterSync.StaffInfoOf carries id/name/gender/available/wage/
+                        // satisfaction/age/skills and no plan id at all), and the one write that matters travels to
+                        // the machine holding the REAL record, which sets it only if THIS plan resolves there
+                        // through the shadow - and answers `hrtag-refused` when it does not, which undoes the pair
+                        // here (CROSS-HR-3b B2), so a phantom entry is no longer left for nothing to reconcile.
+                        // An injected copy of a NON-member is still refused, with the same wording as before.
+                        if (InjectedHere(eid))
+                        {
+                            if (!CoMemberCopyHere(eid)) return RefuseInjected("hr", op, id, eid);
+                            if (!pl.assignedEmployees.Contains(eid)) pl.assignedEmployees.Add(eid);
+                            emp.assignedHrManagerPlanId = pl.id;
+                            Plugin.Logger.LogInfo($"[CrossHR] hr assign on plan '{id}': employee '{eid}' is a co-member's person here - on the list, tag write sent to its owner.");
+                            SendHrTag(eid, pl.id, false, "joined this HR plan");
+                            return true;
+                        }
                         if (!pl.assignedEmployees.Contains(eid)) pl.assignedEmployees.Add(eid);
                         emp.assignedHrManagerPlanId = pl.id;
                     }
@@ -1930,6 +2042,11 @@ namespace BigAmbitionsMP
                     {
                         pl.assignedEmployees.Remove(eid);
                         if (emp != null && emp.assignedHrManagerPlanId == pl.id) emp.assignedHrManagerPlanId = null;
+                        // CROSS-HR-3 A2: an unassign of a co-member's person clears the tag where the real record is.
+                        // CROSS-HR-2 T3b: when that worker LEFT its owner's save, the owner's machine routed this very
+                        // unassign here - so the clear goes back for a record that is gone there.  That is correct, and
+                        // the owner's applier answers it quietly.
+                        if (CoMemberCopyHere(eid)) SendHrTag(eid, pl.id, true, "left this HR plan");
                     }
                     return true;
                 }
@@ -1940,15 +2057,17 @@ namespace BigAmbitionsMP
                     // employee and the host's own per-sender cap (MPServer.SharedRateOk, ten work edits a second)
                     // dropped most of the burst in silence.  One leg now; the runner replays the same pair on its
                     // REAL roster, without the two UI calls at :252-253 that have no meaning off-screen.
-                    int cleared = 0;
+                    int cleared = 0, tagsSent = 0;
                     foreach (var one in new List<string>(pl.assignedEmployees))
                     {
                         pl.assignedEmployees.Remove(one);
                         EmployeeInstance e = null; try { e = EmployeeHelper.GetEmployeeById(one); } catch { }
                         if (e != null && e.assignedHrManagerPlanId == pl.id) e.assignedHrManagerPlanId = null;
+                        // CROSS-HR-3 A2: "unassign all" clears a co-member's worker where its real record lives too.
+                        if (CoMemberCopyHere(one)) { SendHrTag(one, pl.id, true, "the plan's list was cleared"); tagsSent++; }
                         cleared++;
                     }
-                    Plugin.Logger.LogInfo($"[Merger] hr clear on plan '{id}': {cleared} assignment(s) released.");
+                    Plugin.Logger.LogInfo($"[Merger] hr clear on plan '{id}': {cleared} assignment(s) released, {tagsSent} co-member tag clear(s) sent.");
                     return true;
                 }
                 case "fill":
@@ -2181,13 +2300,103 @@ namespace BigAmbitionsMP
                 float num = 0f; int iv = 0; bool bv = false;
                 string str = rest;
                 int sp = rest.LastIndexOf(' ');
-                if (sp > 0 && float.TryParse(rest.Substring(sp + 1), System.Globalization.NumberStyles.Float,
+                string tail = sp > 0 ? rest.Substring(sp + 1) : "";
+                if (sp > 0 && float.TryParse(tail, System.Globalization.NumberStyles.Float,
                                              System.Globalization.CultureInfo.InvariantCulture, out var parsed))
                 { num = parsed; str = rest.Substring(0, sp); }
+                // CROSS-HR-3 A5: an id AND a bool - `planedit hr <planId> assign <employeeId> true`.  The number
+                // case already split a trailing value off the string; a trailing true/false was not split, so
+                // bool.TryParse ran on the WHOLE rest, answered false, and the HR assign applier was handed an
+                // UNASSIGN carrying "<employeeId> true" as its employee id.  Same split, for the bool tail.
+                else if (sp > 0 && bool.TryParse(tail, out var parsedBool))
+                { bv = parsedBool; str = rest.Substring(0, sp).Trim(); }
                 else { bool.TryParse(rest, out bv); int.TryParse(rest, out iv); }
                 bool routed = op == "add" ? RoutePlanCreateAt(fam, str.Trim())   // r2b: the HQ key is the argument (no pane on the rig)
                                           : RoutePaneEdit(fam, "planedit verb", row, op, str, iv, num, bv);
                 return $"OK planedit {fam} {id} {op} routed={routed}";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        // -- CROSS-HR-3 A5: the `hrtag` / `hrplanof` rig levers ----------------
+
+        /// <summary>`hrtag <employeeId> <planId|->` - sends exactly the tag leg A2 sends when a co-member's
+        /// person joins this machine's HR plan, "-" (or nothing) for the CLEAR. It writes nothing here: the
+        /// point is to watch the OWNER's real record take the tag, or drop it.</summary>
+        internal static string TestDriveHrTag(string arg)
+        {
+            try
+            {
+                var a = (arg ?? "").Trim().Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 1) return "ERR usage: hrtag <employeeId> [planId|-]";
+                string eid = a[0].Trim(), plan = a.Length > 1 ? a[1].Trim() : "";   // r1 MINOR-2: the plan id is
+                                                                                   // optional - no id CLEARS too
+                bool clear = plan.Length == 0 || plan == "-";
+                if (!CoMemberCopyHere(eid))
+                    return $"ERR '{eid}' is not an injected copy of a co-member's person here - nothing to route";
+                SendHrTag(eid, clear ? "-" : plan, clear, "rig lever");
+                string owner = ""; try { owner = MPRegisterSync.OwnerOfInjected(eid) ?? ""; } catch { }
+                return $"OK hrtag employee='{eid}' plan='{(clear ? "-" : plan)}' clear={clear} owner='{(owner.Length > 0 ? owner : "?")}'";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        /// <summary>`hrplanof <employeeId>` - the record's assignedHrManagerPlanId as it stands on THIS machine
+        /// and whether that id resolves here: "real" (one of my own plans), "shadow" (a partner's, installed by
+        /// CROSS-HR-1 for the feed), "none" (a dangling tag - the A2 refusal exists to prevent exactly that) or
+        /// "-" for no tag at all.</summary>
+        internal static string TestDriveHrPlanOf(string arg)
+        {
+            try
+            {
+                string eid = (arg ?? "").Trim();
+                if (eid.Length == 0) return "ERR usage: hrplanof <employeeId>";
+                EmployeeInstance? e = null; try { e = EmployeeHelper.GetEmployeeById(eid); } catch { }
+                if (e == null) return $"ERR no employee '{eid}' on this machine";
+                string tag = e.assignedHrManagerPlanId ?? "";
+                string resolves = "-";
+                if (tag.Length > 0)
+                {
+                    HrManagerPlan? tp = null; try { tp = HrManagerHelper.GetPlanFromId(tag); } catch { }
+                    bool shadow = false; try { shadow = tp != null && MergerAbsence.IsDisplayInstall(tp); } catch { }
+                    resolves = tp == null ? "none" : (shadow ? "shadow" : "real");
+                }
+                string kind = MPRegisterSync.IsInjectedStaff(eid) ? "copy" : "real";
+                string owner = ""; try { owner = MPRegisterSync.OwnerOfInjected(eid) ?? ""; } catch { }
+                return $"OK hrplanof employee='{eid}' record={kind} owner='{(owner.Length > 0 ? owner : "-")}' "
+                     + $"plan='{(tag.Length > 0 ? tag : "-")}' resolves={resolves}";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        /// <summary>CROSS-HR-3b B6 rig lever: `planown hr &lt;planId&gt; assign &lt;employeeId&gt; true|false` on the plan's
+        /// OWN machine.  It performs native's own pair (decompile HrManagerPlanUI.cs:256-268: the plan's list,
+        /// then assignedHrManagerPlanId on the record GetEmployeeById finds) and then calls the SAME helper the
+        /// B1 pane postfix calls - so the own-plan tag leg is exercised without a pane.  A plan that is not a
+        /// REAL plan here (a shadow or a display install) is refused: its list is a partner's to write.</summary>
+        internal static string TestDrivePlanOwn(string arg)
+        {
+            try
+            {
+                var a = (arg ?? "").Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 5 || !string.Equals(a[0], "hr", StringComparison.OrdinalIgnoreCase)
+                                 || !string.Equals(a[2], "assign", StringComparison.OrdinalIgnoreCase))
+                    return "ERR usage: planown hr <planId> assign <employeeId> true|false";
+                string planId = a[1].Trim(), eid = a[3].Trim();
+                bool want;
+                if (!bool.TryParse(a[4].Trim(), out want))
+                    return "ERR usage: planown hr <planId> assign <employeeId> true|false";
+                HrManagerPlan? pl = null; try { pl = HrManagerHelper.GetPlanFromId(planId); } catch { }
+                if (pl == null) return $"ERR no HR plan '{planId}' on this machine";
+                bool display = false; try { display = MergerAbsence.IsDisplayInstall(pl) || IsOverlayPlan(pl); } catch { }   // r2 MINOR-3: a drawn partner row is not ours either
+                if (display) return $"ERR HR plan '{planId}' is a partner's row here (display install or drawn row), not one of this machine's own plans";
+                if (pl.assignedEmployees == null) return $"ERR HR plan '{planId}' has no assignment list here";
+                if (want) { if (!pl.assignedEmployees.Contains(eid)) pl.assignedEmployees.Add(eid); }
+                else pl.assignedEmployees.Remove(eid);
+                EmployeeInstance? rec = null; try { rec = EmployeeHelper.GetEmployeeById(eid); } catch { }
+                if (rec != null) { if (want) rec.assignedHrManagerPlanId = pl.id; else if (rec.assignedHrManagerPlanId == pl.id) rec.assignedHrManagerPlanId = null; }   // native's own pair: a clear only when the tag names this plan
+                OwnPlanAssignedLocally(pl, eid, want);
+                return $"OK planown hr {planId} assign {eid} {want} listed={pl.assignedEmployees.Count} coMember={CoMemberCopyHere(eid)}";
             }
             catch (Exception ex) { return "ERR " + ex.Message; }
         }

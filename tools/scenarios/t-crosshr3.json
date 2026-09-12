@@ -1,0 +1,354 @@
+{
+  "id": "T-CROSSHR3",
+  "title": "cross-member HR builds 2+3, two players: from the HOST's copy of the client's HR plan, a host employee who stays at the host's shop is assigned to the CLIENT's plan (the client accepts the co-member's copy and tags the host's real record through the host); the client's daily training then routes ONE leg for that person to the host, applied once; a same-day repeat is dropped; the unassign clears the tag on the host; a re-assign then the plan's DELETE clears it again; then the OWN-PLAN path (fold 3b): the host puts a CLIENT's person on its OWN HR plan through the pane's own code path (the `planown` lever) and the tag lands on the client's real record, and the untick clears it; ends dissolved, NO save",
+  "preconditions": "Fixture save1: Client1's HR plan oMg0Ie6U0iAKs859EUeIg== on 52 ba:street_fifthavenue has an HR manager and trainingTarget 100 (read from the 2026-09-12 00:15 mirror). It already lists SIX of the host's people from 15 ba:street_thirdavenue, where EVERY one of the 33 staff is at primary skill 100 (run 1 of this scenario, 07:21) - native's training moves nothing for them - so the capture below picks a host person at 6 ba:street_seventhstreet (32 of its 36 people are below 98 in the 00:15 host mirror). (The client's save also carries those six as copies embedded in stale open salary negotiations, the M4 leak of F-2026-09-12-AC, closed for new saves in 033e705; harmless to this run.) Build CROSS-HR-3 deployed (the `planedit ... true|false` parser fix, `hrtag`, `hrplanof`). FIXTURE HYGIENE: assignments, tags, skills and wages change in memory only; the client's plan is DELETED in memory at the end; NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "plan": "oMg0Ie6U0iAKs859EUeIg==",
+    "hostShop": "6 ba:street_seventhstreet",
+    "hostPlan": "rmlmTjTjkUW32wGIoRLCGw==",
+    "clientShop": "60 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "hr assign REFUSED",
+    "mis-route",
+    "not on this machine - dropped",
+    "carries no stamp",
+    "not a co-member of the same company",
+    "owner is offline and nobody stands in",
+    "stands in for the owner and holds the record itself",
+    "\\[CrossHR\\] training legs:",
+    "\\[CrossHR\\] shadow-safe OnRemove:",
+    "HostRouteHrTrain:",
+    "the registry wins",
+    "REFUSED: HR plan",
+    "the tag would name nothing",
+    "UNDONE - the owner"
+  ],
+  "oracles_report": [
+    "\\[CrossHR\\] ",
+    "hrtag"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST CROSSHR3 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "both worlds settle: the host's staff copies land on the client, the client's HR plan lands on the host as a display row"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "employees ${hostShop}",
+      "expect_result": "^OK [1-9]\\d* employee\\(s\\) @ '${hostShop}': ",
+      "capture": {
+        "hostEmp": "(?:: |; )([A-Za-z0-9]{20,22}==)\\|[^|;]*\\|assigned=${hostShop}\\|injected=False\\|bonus=[^|]*\\|canbonus=[^|]*\\|skill=[^;|]*:(?:[0-9]|[1-8][0-9]|9[0-7])(?=\\s*;|\\s*$)"
+      },
+      "note": "a HOST person at the host's shop, id without + or / (kept simple), primary skill below 98 so the plan's training (target 100) moves it (the skill name itself carries a colon: ba:skill_x:NN)"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "planedit hr ${plan} assign ${hostEmp} true",
+      "expect_result": "^OK planedit hr ${plan} assign routed=True",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CrossHR\\] hr assign on plan '${plan}': employee '${hostEmp}' is a co-member's person here - on the list, tag write sent to its owner\\.",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] applied routed hrtag on employee '${hostEmp}': plan '[^']*' -> '${plan}' \\(from '${clientPid}'\\)\\.",
+          "within_s": 15
+        }
+      ],
+      "note": "A2: the client (the plan's runner) accepts the co-member's injected copy, lists it, and routes the tag write to the host, which writes it on the REAL record"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "hrplanof ${hostEmp}",
+      "expect_result": "^OK hrplanof employee='${hostEmp}' record=real owner='[^']*' plan='${plan}' resolves=shadow",
+      "note": "the host's real record carries the client's plan id, which resolves here as a SHADOW"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 3,
+      "note": "the client's plan feed (MarkUrgent, 2 s) refreshes the host's display row"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "planlist hr ${plan}",
+      "expect_result": "^OK planlist hr ${plan} assigned=[1-9]\\d* .*${hostEmp}",
+      "note": "the HOST's display copy of the client's real plan now lists the host's person (planlist reads PARTNER rows - run 2 slip: it cannot read the runner's own plan)"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "hrtrain ${plan}",
+      "expect_result": "^OK hrtrain plan='${plan}' assigned=[1-9]\\d* manager=True injected=[1-9]\\d* legs=[1-9]\\d*",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CrossHR\\] training leg for '${hostEmp}' \\(plan '${plan}'",
+          "within_s": 8
+        },
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] applied routed training to '${hostEmp}' \\([1-9]\\d* skill\\(s\\), wage [\\d.]+ -> [\\d.]+; the copy moved x[\\d.]+\\) for partner plan '${plan}'",
+          "within_s": 15
+        }
+      ],
+      "note": "CROSS-HR-2: the runner's daily pass sends ONE leg for the host's person; the host applies it to the real record once"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "mark TEST CROSSHR3 APPLIED",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "hrtrain ${plan}",
+      "expect_result": "^OK hrtrain plan='${plan}' assigned=[1-9]\\d* manager=True injected=[1-9]\\d* legs=[1-9]\\d*",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] routed hrtrain '${plan}\\|\\d+\\|${hostEmp}' already applied - dropped",
+          "within_s": 20
+        }
+      ],
+      "note": "the same day's leg for the same person is a no-op on the owner (the stamp)"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "planedit hr ${plan} assign ${hostEmp} false",
+      "expect_result": "^OK planedit hr ${plan} assign routed=True",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CrossHR\\] hr tag CLEAR leg for employee '${hostEmp}' \\(plan '${plan}', left this HR plan\\) -> owner '${hostPid}'",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] cleared routed hrtag on employee '${hostEmp}': plan '${plan}' -> '-' \\(from '${clientPid}'\\)\\.",
+          "within_s": 15
+        }
+      ],
+      "note": "A2: the unassign drops the id from the client's real plan and routes a tag CLEAR to the host"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "hrplanof ${hostEmp}",
+      "expect_result": "^OK hrplanof employee='${hostEmp}' record=real owner='[^']*' plan='-?' resolves=(none|-)",
+      "note": "the tag is gone on the host"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "planedit hr ${plan} assign ${hostEmp} true",
+      "expect_result": "^OK planedit hr ${plan} assign routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] applied routed hrtag on employee '${hostEmp}': plan '[^']*' -> '${plan}' \\(from '${clientPid}'\\)\\.",
+          "within_s": 15
+        }
+      ],
+      "note": "re-assign for the delete test"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "planedit hr ${plan} delete",
+      "expect_result": "^OK planedit hr ${plan} delete routed=True",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CrossHR\\] hr plan '${plan}' \\(the plan was deleted\\): [1-9]\\d* co-member tag clear\\(s\\) sent before the plan goes\\.",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] cleared routed hrtag on employee '${hostEmp}': plan '${plan}' -> '-' \\(from '${clientPid}'\\)\\.",
+          "within_s": 15
+        }
+      ],
+      "note": "A3: deleting the client's plan clears the tag on EVERY member's record - the host's included (in memory only; no save)"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "hrplanof ${hostEmp}",
+      "expect_result": "^OK hrplanof employee='${hostEmp}' record=real owner='[^']*' plan='-?' resolves=(none|-)"
+    },
+    {
+      "role": "c",
+      "cmd": "employees ${clientShop}",
+      "expect_result": "^OK [1-9]\\d* employee\\(s\\) @ '${clientShop}': ",
+      "capture": {
+        "clientEmp": "(?:: |; )([A-Za-z0-9]{20,22}==)\\|[^|;]*\\|assigned=${clientShop}\\|injected=False\\|"
+      },
+      "note": "fold 3b B6: a CLIENT person at the client's shop (injected on the host)",
+      "seq": 27
+    },
+    {
+      "role": "h",
+      "cmd": "planown hr ${hostPlan} assign ${clientEmp} true",
+      "expect_result": "^OK planown hr ${hostPlan} assign ${clientEmp} True listed=[1-9]\\d* coMember=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] hr tag SET leg for employee '${clientEmp}' \\(plan '${hostPlan}', joined this HR plan\\) -> owner '${clientPid}'",
+          "within_s": 8
+        },
+        {
+          "role": "c",
+          "regex": "\\[CrossHR\\] applied routed hrtag on employee '${clientEmp}': plan '[^']*' -> '${hostPlan}' \\(from '${hostPid}'\\)\\.",
+          "within_s": 15
+        }
+      ],
+      "note": "B1: the pane's own path on MY OWN plan (native list + copy tag, then the postfix's helper) sends the tag to the client's real record",
+      "seq": 28
+    },
+    {
+      "role": "c",
+      "cmd": "hrplanof ${clientEmp}",
+      "expect_result": "^OK hrplanof employee='${clientEmp}' record=real owner='[^']*' plan='${hostPlan}' resolves=shadow",
+      "seq": 29
+    },
+    {
+      "role": "h",
+      "cmd": "planown hr ${hostPlan} assign ${clientEmp} false",
+      "expect_result": "^OK planown hr ${hostPlan} assign ${clientEmp} False listed=\\d+ coMember=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] hr tag CLEAR leg for employee '${clientEmp}' \\(plan '${hostPlan}', left this HR plan\\) -> owner '${clientPid}'",
+          "within_s": 8
+        },
+        {
+          "role": "c",
+          "regex": "\\[CrossHR\\] cleared routed hrtag on employee '${clientEmp}': plan '${hostPlan}' -> '-' \\(from '${hostPid}'\\)\\.",
+          "within_s": 15
+        }
+      ],
+      "note": "B1: the untick on my own plan clears the tag on the client's real record",
+      "seq": 30
+    },
+    {
+      "role": "c",
+      "cmd": "hrplanof ${clientEmp}",
+      "expect_result": "^OK hrplanof employee='${clientEmp}' record=real owner='[^']*' plan='-?' resolves=(none|-)",
+      "seq": 31
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved; NO save"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 35,
+      "role": "both",
+      "cmd": "mark TEST CROSSHR3 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
