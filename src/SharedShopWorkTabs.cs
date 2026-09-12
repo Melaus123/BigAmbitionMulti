@@ -4458,6 +4458,11 @@ namespace BigAmbitionsMP
             try
             {
                 if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.PlayerId)) return;
+                // 4c part 2a r2 MAJOR-6: the runner's REFUSAL ANSWER to an edit THIS machine sent. It is not an
+                // edit on my state, so it is read before the ownership gates below (which would drop it: the
+                // address is the plan's headquarters, which this machine by definition does not run).
+                if (p.Op == "mergerplanedit" && p.PlanOp == "refused")
+                { CompanyPlans.ReceiveRefusal(p.Family ?? "", p.PlanId ?? "", p.StrValue ?? ""); return; }
                 if (!GrantSync.IsGranted(GrantKind.Business, MPConfig.PlayerId, p.PlayerId))   // W3-2: the UNION the host gate now uses
                 {
                     if (_logged.Add("edit-nogrant|" + p.PlayerId))
@@ -4483,6 +4488,11 @@ namespace BigAmbitionsMP
                 if (p.Op == "mergercontract") { ApplyRoutedContractCreate(reg, p); return; }
                 if (p.Op == "mergersellall")  { ApplyRoutedSellAll(reg, p); return; }
                 if (p.Op == "mergerplan")     { ApplyRoutedPlanEdit(reg, p); return; }
+                // 4c part 2a: the four NON-logistics HQ families. Unlike "mergerplan" this is not a
+                // replace-by-id install - the runner applies ONE op onto its own real plan with the game's
+                // own method, because those four families are screen-layer only on the member (an installed
+                // HR or headhunter copy would train, insure and recruit a second time).
+                if (p.Op == "mergerplanedit") { CompanyPlans.ApplyRouted(reg, p); return; }
 
                 bool applied; string echoTab;
                 if (p.Op == "rename" || p.Op == "logo")

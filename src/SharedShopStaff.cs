@@ -986,8 +986,16 @@ namespace BigAmbitionsMP
         ///    this dialog; the removal that takes a partner's candidate copy out of both lists is the
         ///    confirm action itself, so the company-copy repair has to run AFTER it, not in a postfix on
         ///    RemoveMessage (which returns first). CompanyCandidates.MessagePurgeArmed is that flag.
-        /// The overload is found by shape (the two Show overloads differ in their first parameter), the same
-        /// reflection the work tabs already use on this type.</summary>
+        ///  * 4c part 2a r2 (D2) - `end` / `urgent` on a PARTNER's purchasing partnership. Here the wrapper
+        ///    does not wrap but REPLACES: the routed send takes the place of the native callback, which would
+        ///    otherwise write the detached temp object and this machine's own list.
+        /// ONE overload is targeted - the LanguageChangeEventDataHolder one (HudConfirm.cs:16) - and r3 G2 put
+        /// it back. The STRING overload (:37) needs no patch of its own: it FORWARDS (:52 `Show(headerData,
+        /// bodyData, onConfirmAction, ...)`), so EndPartnership's string call (PurchasingAgentPlanUI.cs:205)
+        /// arrives here anyway - which is why r2's widening to both ran this prefix TWICE per string call.
+        /// Harmless for the plan route (TakeConfirmRoute consumes the arming), but it double-wrapped the
+        /// mass-train / message-purge action, so RepairAfterMessagePurge ran twice per confirmed message
+        /// delete. Nothing is wrapped while every arming flag is down, so nothing else is affected.</summary>
         [HarmonyPatch]
         public static class Patch_HudConfirm_MassTrainWindow
         {
@@ -1009,6 +1017,10 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (onConfirmAction == null) return;
+                    // D2: a partner's `end` / `urgent` - the game's own dialog, this machine's own write REPLACED.
+                    Action routed = null;
+                    try { routed = CompanyPlans.TakeConfirmRoute(); } catch { }
+                    if (routed != null) { onConfirmAction = routed; return; }
                     bool train = _massTrainArming;
                     bool purge = false;
                     try { purge = CompanyCandidates.MessagePurgeArmed; } catch { }

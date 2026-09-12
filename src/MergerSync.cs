@@ -138,7 +138,9 @@ namespace BigAmbitionsMP
         }
 
         // ── Runtime (PlayerId space, replicated, online-only) ─────────────────
-        private static Dictionary<string, string> _groupByPid = new();      // online pid → groupId
+        // Every member whose PlayerId is KNOWN this session, offline-but-known included (Protocol.cs:732-734),
+        // not only the online ones - and it now feeds the grant signature through CoMembersOf (~:273).
+        private static Dictionary<string, string> _groupByPid = new();      // known pid → groupId
         private static Dictionary<string, MergerGroupInfo> _groupInfo = new();
         private static bool _wasMember;
         /// <summary>Phase 1-B (B1): the game day my last member self-report was pushed for (-1 = none).</summary>

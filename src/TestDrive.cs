@@ -665,8 +665,20 @@ namespace BigAmbitionsMP
                     // MERGER PHASE 4c part 1 (H5). Read-only. With no argument: how many headquarters plans
                     // of each family this machine owns, and how many each partner has published to the
                     // screen-layer registry. With an owner pid: that owner's five counts. With an HQ address
-                    // key: that headquarters' plans by family and whose they are. Nothing is written.
+                    // key: that headquarters' plans by family and whose they are. With `<ownerPid> rows
+                    // [family]`: that owner's HELD ROWS as <family>:<planId>:<name>, which is where the plan
+                    // ids `planedit` needs come from. Nothing is written.
                     return CompanyPlans.TestDriveLine(arg);
+                }
+
+                case "planedit":
+                {
+                    // MERGER PHASE 4c part 2a (E5). `planedit <family> <planId> <op> [args]` sends exactly the
+                    // leg the pane would send for one of the four non-logistics HQ families, off the temp row
+                    // the registry holds for a PARTNER's headquarters. It writes nothing on this machine:
+                    // the runner of that headquarters applies the op and the next fan-out redraws the rows.
+                    // Families: pricing | purchasing | hr | headhunter. Ops: see CompanyPlans.ApplyRouted.
+                    return CompanyPlans.TestDriveEdit(arg);
                 }
 
                 case "contract":
@@ -1268,6 +1280,58 @@ namespace BigAmbitionsMP
                     return rwhy.Length == 0
                         ? $"OK relaymsg id='{rid}' contact='{rcontact}' buttons={rbuttons} sent={rsent}"
                         : $"ERR relaymsg message='{rarg}': {rwhy}";
+                }
+
+                case "pmnotice":
+                {
+                    // MERGER PHASE 4d (D24). Raises the GAME'S OWN pricing-manager notice - the same key and the same
+                    // two-entry data table PricingManagerPlan.NotifyMispricedItems builds (decompile
+                    // Buildings.Office.Headquarters/PricingManagerPlan.cs:195, employeeName + amount) - and nothing
+                    // else, so NotificationRelay's Show postfix takes it exactly as it takes the real notice and the
+                    // employee->workplace resolve is driven end to end. The mod contributes no text of its own.
+                    // 'name:<text>' raises it with a LITERAL name, which is how the zero-match and the ambiguous
+                    // paths are driven. This handler runs on the main thread (the 0.5s .cmd poll), like 'transfer'.
+                    string pname = "";
+                    int pcount = 1;
+                    if (arg.StartsWith("name:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // A person's name CONTAINS SPACES, so the optional count is taken off the end only when the
+                        // last token is a number; everything before it is the name.
+                        string prest = arg.Substring(5).Trim();
+                        int psp = prest.LastIndexOf(' ');
+                        if (psp > 0 && int.TryParse(prest.Substring(psp + 1).Trim(), out var pn))
+                        { pcount = pn; prest = prest.Substring(0, psp).Trim(); }
+                        pname = prest;
+                        if (pname.Length == 0) return "ERR usage: pmnotice name:<text> [count]";
+                    }
+                    else
+                    {
+                        var ptk = arg.Split(' ');
+                        string pempId = ptk[0].Trim();
+                        if (pempId.Length == 0) return "ERR usage: pmnotice <employeeId>|name:<text> [count]";
+                        if (ptk.Length > 1 && ptk[1].Trim().Length > 0 && !int.TryParse(ptk[1].Trim(), out pcount))
+                            return "ERR usage: pmnotice <employeeId> [count]";
+                        var pemp = FindEmployee(pempId);
+                        if (pemp == null) return $"ERR no employee '{pempId}' on this machine";
+                        bool pinj = false; try { pinj = MPRegisterSync.IsInjectedStaff(pempId); } catch { }
+                        if (pinj) return $"ERR employee '{pempId}' is an injected partner copy - the real notice about them is raised on the machine that OWNS them";
+                        try { pname = pemp.characterData?.name?.ToString() ?? ""; } catch { }
+                        if (pname.Length == 0) return $"ERR employee '{pempId}' has no character name";
+                    }
+                    if (pcount < 1) return "ERR pmnotice count must be 1 or more";
+                    try
+                    {
+                        UI.Notification.Notifications.Show(UI.Notification.NotificationType.Info,
+                            "notifications_PricingManager_mispriced_items",
+                            new System.Collections.Generic.Dictionary<string, string>
+                            {
+                                { "employeeName", pname },
+                                { "amount", pcount.ToString(System.Globalization.CultureInfo.InvariantCulture) },
+                            },
+                            4f, null, null);
+                    }
+                    catch (Exception ex) { return $"ERR pmnotice show: {ex.Message}"; }
+                    return $"OK pmnotice name='{pname}' amount={pcount}";
                 }
 
                 case "cues":

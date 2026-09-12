@@ -477,6 +477,7 @@ namespace BigAmbitionsMP
             try { CompanyBooks.HostReset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] host store reset: {ex.Message}"); }   // phase 4a rides the same world boundary
             try { CompanyFeed.HostReset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] host ring reset: {ex.Message}"); }      // phase 4b: the feed ring is memory-only and rides the same boundary
             lock (_paperwork) _paperwork.Clear();
+            ResetPlanEditSeen();      // 4c part 2a r2 MAJOR-2: the plan-edit duplicate table is per session too
             lock (_capWarnedDay) _capWarnedDay.Clear();
             lock (_resendServedAt) { _resendServedAt.Clear(); _resendThrottleLogged.Clear(); }   // r7: the throttle dies with the session too
         }
@@ -6764,6 +6765,42 @@ namespace BigAmbitionsMP
 
                 string id = p.CandidateId ?? "";
                 if (id.Length == 0) { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' from '{senderPid}' with no candidate id - dropped."); return; }
+
+                // MERGER PHASE 4c PART 2a (D23): a PLAN-KEYED claim - today a staff-insurance OFFER id. No
+                // pool lists it, so the owner cannot be looked up: the sender names it and the host checks
+                // co-membership instead. Everything after that is the candidate claim, unchanged - the same
+                // table, the same first-asker rule, the same staleness release.
+                if (p.Action == "claim-plan" || p.Action == "release-plan")
+                {
+                    string oOwner = p.OwnerPid ?? "";
+                    if (oOwner.Length == 0 || (oOwner != senderPid && !MergerSync.MergedRuntime(oOwner, senderPid)))
+                    { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' by '{senderPid}' for offer '{id}' names '{oOwner}', who is not in that company - dropped."); return; }
+                    if (p.Action == "release-plan")
+                    {
+                        if (!_candidateClaims.TryGetValue(id, out var ocur) || ocur.pid != senderPid)
+                        { Plugin.Logger.LogInfo($"[Candidates] release of offer '{id}' by '{senderPid}' - they do not hold it, ignored."); return; }
+                        _candidateClaims.Remove(id);
+                        Plugin.Logger.LogInfo($"[Candidates] '{senderPid}' released insurance offer '{id}' - back to the company.");
+                        FanOutCandidates(new CompanyCandidatesPayload { PlayerId = "host", Action = "verdict", OwnerPid = oOwner, CandidateId = id, ClaimedBy = "", Ok = true }, oOwner, includeOwner: true);
+                        return;
+                    }
+                    _candidateClaims.TryGetValue(id, out var oheld);
+                    string oholder = oheld.pid ?? "";
+                    bool ofree = oholder.Length == 0 || oholder == senderPid || !IsOnlinePid(oholder)
+                              || UnityEngine.Time.unscaledTime - oheld.at > CandidateClaimStaleSeconds;
+                    if (!ofree)
+                    {
+                        Plugin.Logger.LogInfo($"[Candidates] claim of insurance offer '{id}' by '{senderPid}' REFUSED - '{oholder}' is already negotiating it.");
+                        SendToPid(senderPid, MessageEnvelope.Create(MessageType.CompanyCandidates, "host",
+                            new CompanyCandidatesPayload { PlayerId = "host", Action = "verdict", OwnerPid = oOwner, CandidateId = id, ClaimedBy = oholder, Ok = false }));
+                        return;
+                    }
+                    _candidateClaims[id] = (senderPid, UnityEngine.Time.unscaledTime);
+                    Plugin.Logger.LogInfo($"[Candidates] claim of insurance offer '{id}' (of '{oOwner}') GRANTED to '{senderPid}'.");
+                    FanOutCandidates(new CompanyCandidatesPayload { PlayerId = "host", Action = "verdict", OwnerPid = oOwner, CandidateId = id, ClaimedBy = senderPid, Ok = true }, oOwner, includeOwner: true);
+                    return;
+                }
+
                 string ownerPid = OwnerOfCandidate(id);
                 if (ownerPid.Length == 0)
                 { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' by '{senderPid}' for '{id}' - no member lists that candidate, dropped."); return; }
@@ -7808,6 +7845,15 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedWorkInfo: {ex.Message}"); }
         }
 
+        /// <summary>4c part 2a (E4): (plan id|seq|op|sender) already routed. The host is the one place every
+        /// member's edits meet, so this is where "the same edit twice is one edit" is decided. r2 MAJOR-2: it
+        /// is cleared at the WORLD BOUNDARY with the rest of the host's per-session stores (ResetPaperwork) -
+        /// a new world must not inherit the old world's seq numbers, and a sender's seq is seeded per session
+        /// from the clock (CompanyPlans.NewSeqBase), so within one session it only climbs.</summary>
+        private static readonly HashSet<string> _planEditSeen = new HashSet<string>(StringComparer.Ordinal);
+
+        internal static void ResetPlanEditSeen() { lock (_planEditSeen) _planEditSeen.Clear(); }
+
         /// <summary>Shared-shop slice 6b/6c: a helper's warehouse/factory/marketing/settings edit → the
         /// building's owner (applied here if the host owns it). Rate-capped like every routed op, and since
         /// merger phase 2 wave 3 (W3-1) gated on the UNION check, so a company member's native work-tab edit
@@ -7819,6 +7865,20 @@ namespace BigAmbitionsMP
             {
                 if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
                 if (!SharedRateOk(senderPid, "work edit")) return;
+                // 4c part 2a r2 MAJOR-6: THE REFUSAL ANSWER. The runner could not apply an edit and is telling
+                // the ONE member that sent it (StationId). It is FORWARDED, never fanned out and never
+                // re-routed at the headquarters - the address is the plan's, and the runner is the sender.
+                if (p.Op == "mergerplanedit" && p.PlanOp == "refused")
+                {
+                    string back = p.StationId ?? "";
+                    if (back.Length == 0 || back == senderPid) return;
+                    if (!MergerSync.MergedRuntime(back, senderPid))
+                    { Plugin.Logger.LogWarning($"[Merger] plan-edit refusal from '{senderPid}' for '{back}' dropped: they are not company members."); return; }
+                    if (back == MPConfig.PlayerId) SharedShopWorkTabs.OwnerApplyEdit(p);
+                    else SendToPid(back, MessageEnvelope.Create(MessageType.SharedWorkEdit, "host", p));
+                    Plugin.Logger.LogInfo($"[Merger] plan-edit refusal forwarded to '{back}' from '{senderPid}' ({p.Family} plan {p.PlanId}).");
+                    return;
+                }
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0 || ownerPid == senderPid) return;
                 if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 3 (W3-1): UNION — direct grant or merger membership
@@ -7831,9 +7891,30 @@ namespace BigAmbitionsMP
                 // 24/27) - a plan lives on one. The contract creation (a shop) and the sell-all (a warehouse)
                 // keep the address check: neither has any business on an excluded address (r2 minor c - the
                 // code used to skip it for all three while this comment already said otherwise).
-                bool w4 = p.Op == "mergercontract" || p.Op == "mergersellall" || p.Op == "mergerplan";
+                bool w4 = p.Op == "mergercontract" || p.Op == "mergersellall" || p.Op == "mergerplan"
+                       || p.Op == "mergerplanedit";
                 if (w4 && !MergerSync.MergedRuntime(ownerPid, senderPid))
                 { Plugin.Logger.LogWarning($"[Merger] {p.Op} by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
+                // 4c part 2a (E4): the host SERIALISES plan edits per plan id. A second leg carrying a
+                // (plan id, seq, op) already seen is a resend and is dropped here, so a member that pressed
+                // twice - or reconnected and re-sent - cannot double an edit even if the runner changed.
+                if (p.Op == "mergerplanedit")
+                {
+                    if (string.IsNullOrEmpty(p.PlanId) || string.IsNullOrEmpty(p.Family) || string.IsNullOrEmpty(p.PlanOp))
+                    { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}': the leg named no family, plan or op."); return; }
+                    string key = p.PlanId + "|" + p.EditSeq + "|" + p.PlanOp + "|" + senderPid;
+                    // r3 G4a: the table is CLEARED under `lock (_planEditSeen)` (ResetPlanEditSeen, :7855), so
+                    // the add and the cap take the same lock - an unlocked Add racing a Clear is the one way a
+                    // HashSet corrupts and starts answering wrongly.
+                    bool seen;
+                    lock (_planEditSeen)
+                    {
+                        seen = !_planEditSeen.Add(key);
+                        if (!seen && _planEditSeen.Count > 4000) _planEditSeen.Clear();   // a session-long cap, not a leak
+                    }
+                    if (seen)
+                    { Plugin.Logger.LogInfo($"[Merger] plan edit {p.Family} {p.PlanOp} ({p.PlanId}, seq {p.EditSeq}) from '{senderPid}' already routed - dropped."); return; }
+                }
                 if (w4 && p.Op == "mergerplan")
                 {
                     if (p.Plan == null) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}': the payload carried no plan."); return; }
@@ -7853,6 +7934,7 @@ namespace BigAmbitionsMP
                 {
                     if (p.Op == "mergercontract")      Plugin.Logger.LogInfo($"[Merger] contract create routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergersellall")  Plugin.Logger.LogInfo($"[Merger] sell-all routed to '{wtarget}' for '{p.AddressKey}'");
+                    else if (p.Op == "mergerplanedit") Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' ({p.Family} {p.PlanOp}, plan {p.PlanId}, seq {p.EditSeq})");
                     else                               Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' (plan {p.Plan?.Id})");
                 }
                 if (wtarget == MPConfig.PlayerId) SharedShopWorkTabs.OwnerApplyEdit(p);

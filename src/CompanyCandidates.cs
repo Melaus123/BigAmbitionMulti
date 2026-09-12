@@ -58,6 +58,16 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, (string owner, EmployeeInstance inst)> _injected = new();   // candidateId -> origin + display copy
         private static readonly Dictionary<string, HashSet<string>> _poolByOwner = new();                      // owner pid -> last published ids
         private static readonly Dictionary<string, string> _claims = new();                                    // candidateId -> claimant pid
+
+        /// <summary>MERGER PHASE 4c PART 2a (D23). The claim table is REUSED for staff-insurance OFFERS: an
+        /// offer id goes in the same _claims dictionary and through the same host arbitration, because "one
+        /// member negotiates at a time" is one rule, not two. The id spaces do not collide - both are uuids
+        /// the game mints - and this set is what tells the two apart on the way back: an offer's granted
+        /// claim opens the insurance dialog (CompanyMessages), not a salary negotiation, and the 5 s sweep
+        /// leaves it alone because an insurance negotiation is not a CandidateSalaryNegotiation and so has
+        /// no HasLiveNegotiation to test. It is released by the commit, or by the host's own staleness rule
+        /// when the claimant drops.</summary>
+        private static readonly HashSet<string> _offerClaims = new();
         private static readonly Dictionary<string, float> _pending = new();                                    // candidateId -> when we asked to negotiate
         private static readonly Dictionary<string, float> _keepalive = new();                                  // candidateId -> last claim re-assert
         private static readonly HashSet<string> _logged = new();
@@ -330,6 +340,18 @@ namespace BigAmbitionsMP
                 // to an instance of an object" on the host. Only a claim the player just asked for through
                 // MyEmployees.NegotiateWithCandidate (or the harness lever) continues into the dialog.
                 bool reassert = _reassertOnly.Remove(id);
+                if (_offerClaims.Contains(id))
+                {
+                    // D23: this claim is a staff-insurance OFFER, not a candidate.
+                    if (p.Ok && mine) { CompanyMessages.OfferClaimGranted(id); }
+                    else
+                    {
+                        _offerClaims.Remove(id);
+                        Plugin.Logger.LogWarning($"{Tag} claim of insurance offer '{id}' REFUSED by the host - '{p.ClaimedBy}' is already negotiating it; nothing opened here.");
+                    }
+                    if (mine) _keepalive[id] = Time.unscaledTime;
+                    return;
+                }
                 if (p.Ok && mine && reassert)
                     Plugin.Logger.LogInfo($"{Tag} claim of '{id}' re-asserted and GRANTED - the negotiation already open here keeps it; nothing new opened.");
                 else if (p.Ok && mine) BeginNegotiationNow(id);
@@ -357,7 +379,11 @@ namespace BigAmbitionsMP
             if (held == null) return;
             foreach (var id in held)
             {
-                if (!HasLiveNegotiation(id))
+                // r2 MINOR-8: an OFFER claim is released by the commit, not by this sweep - but it still has to
+                // be RE-ASSERTED, or the host's 120 s staleness (MPServer.cs:6727) hands the offer to somebody
+                // else while the negotiation dialog is still open here. The `continue` used to skip the
+                // keepalive below with it; now only the liveness test is skipped.
+                if (!_offerClaims.Contains(id) && !HasLiveNegotiation(id))
                 {
                     string owner = OwnerOfCandidate(id);
                     SetClaim(id, "");
@@ -480,6 +506,47 @@ namespace BigAmbitionsMP
                 finally { _committing = false; }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} begin negotiation: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>D23 (4c part 2a): ask the host for the claim on one staff-insurance OFFER. OwnerPid is
+        /// the machine that raised it (the relayed copy names it) - the host checks co-membership rather
+        /// than looking the id up in the candidate pools, which never list an offer.</summary>
+        public static void ClaimOffer(string offerId, string ownerPid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(offerId)) return;
+                if (!MergerSync.IAmMember) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                string claimant = ClaimantOf(offerId);
+                if (claimant == MPConfig.PlayerId) { _offerClaims.Add(offerId); CompanyMessages.OfferClaimGranted(offerId); return; }
+                if (claimant.Length > 0)
+                {
+                    Plugin.Logger.LogInfo($"{Tag} insurance offer '{offerId}' is already being negotiated by '{claimant}' - this machine does not open a second one.");
+                    return;
+                }
+                if (_pending.ContainsKey(offerId)) return;                      // asked a moment ago
+                _pending[offerId] = Time.unscaledTime;
+                _offerClaims.Add(offerId);
+                Send(new CompanyCandidatesPayload { PlayerId = MPConfig.PlayerId, Action = "claim-plan", CandidateId = offerId, OwnerPid = ownerPid ?? "" });
+                Plugin.Logger.LogInfo($"{Tag} claiming insurance offer '{offerId}' (of '{ownerPid}') from the host before opening the negotiation.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} claim offer: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>D23: the commit (accept / decline, from the button or the dialog) is the end of the
+        /// negotiation, so the claim goes back to the company there and then.</summary>
+        public static void ReleaseOfferClaim(string offerId, string ownerPid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(offerId) || !_offerClaims.Remove(offerId)) return;
+                _pending.Remove(offerId);
+                if (ClaimantOf(offerId) == MPConfig.PlayerId) SetClaim(offerId, "");
+                Send(new CompanyCandidatesPayload { PlayerId = MPConfig.PlayerId, Action = "release-plan", CandidateId = offerId, OwnerPid = ownerPid ?? "" });
+                Plugin.Logger.LogInfo($"{Tag} released the claim on insurance offer '{offerId}' - the negotiation here is finished.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} release offer: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>The negotiation seam (MyEmployees.NegotiateWithCandidate, decompile :600-613 - the ONE
@@ -800,6 +867,7 @@ namespace BigAmbitionsMP
                 var ids = new List<string>(_injected.Keys);
                 foreach (var id in ids) RemoveInjected(id, destroy: true);
                 _poolByOwner.Clear(); _claims.Clear(); _pending.Clear(); _keepalive.Clear(); _everCopied.Clear(); _reassertOnly.Clear();
+                _offerClaims.Clear();
                 _publishedOnce = false; _poolSeen = false;   // RIG-3 / U3(c): both gates re-arm on the next connection
                 _sigSent = null;   // r4 re-check: a reconnect must re-publish the pool even when its signature is unchanged (the host's store may be stale)
                 if (ids.Count > 0) { Plugin.Logger.LogInfo($"{Tag} dropped {ids.Count} company candidate copy(ies) ({why})."); RefreshIfOpen(); }
@@ -879,6 +947,7 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             _injected.Clear(); _poolByOwner.Clear(); _claims.Clear(); _pending.Clear(); _keepalive.Clear(); _everCopied.Clear();
+            _offerClaims.Clear();
             _reassertOnly.Clear();
             _logged.Clear(); _sigSent = null; _committing = false; _nextTick = 0f;
             _pendingAccept.Clear(); _verbHeld.Clear(); _hiring = false;
@@ -925,6 +994,49 @@ namespace BigAmbitionsMP
     }
 
     // -- patches ---------------------------------------------------------------
+
+    /// <summary>MERGER PHASE 4c PART 2a (D23). The commit of a RELAYED staff-insurance offer. Both paths
+    /// end here - the copy's own Accept button and the game's negotiation dialog
+    /// (Dialogs/HealthInsuranceNegotiationDialog.cs:79/161 AcceptOffer, :95/:176 DeclineOffer) - and on a
+    /// DETACHED copy the native body cannot run at all: AcceptOffer's first statement is
+    /// `HrManagerPlan.healthInsurancePlan = ...` (HealthInsurancePlanOffer.cs:88) and HrManagerPlan resolves
+    /// through HrManagerHelper.GetPlanFromId, which on a member answers null - the plan is in the owner's
+    /// save. The gate routes the commit to whoever runs that headquarters and skips the body; an offer of
+    /// this machine's own is not in the relayed table and runs natively, untouched.</summary>
+    [HarmonyPatch(typeof(Entities.HealthInsurancePlanOffer), "AcceptOffer")]
+    public static class Patch_HealthInsuranceOffer_Accept_CompanyRoute
+    {
+        static bool Prefix(Entities.HealthInsurancePlanOffer __instance, float pricePerDayAndEmployee)
+        { try { return !CompanyMessages.RouteOfferCommit(__instance, true, pricePerDayAndEmployee); } catch { return true; } }
+    }
+
+    [HarmonyPatch(typeof(Entities.HealthInsurancePlanOffer), "DeclineOffer")]
+    public static class Patch_HealthInsuranceOffer_Decline_CompanyRoute
+    {
+        static bool Prefix(Entities.HealthInsurancePlanOffer __instance)
+        { try { return !CompanyMessages.RouteOfferCommit(__instance, false, 0f); } catch { return true; } }
+    }
+
+    /// <summary>r2 MINOR-8, THE CLOSE WITHOUT A COMMIT. The negotiation dialog's own cancel
+    /// (Dialogs/HealthInsuranceNegotiationDialog.cs:208 CancelOffer -> DialogController.CancelDialog) ends the
+    /// negotiation with neither AcceptOffer nor DeclineOffer, so nothing released the company claim and the
+    /// offer stayed locked here until the host's 120 s staleness swept it. The offer the dialog is on is its
+    /// own PUBLIC STATIC field (`public static HealthInsurancePlanOffer planOffer`, :14), so the claim can be
+    /// handed straight back. A postfix - the native cancel is the game's and runs untouched.</summary>
+    [HarmonyPatch(typeof(Dialogs.HealthInsuranceNegotiationDialog), "CancelOffer")]
+    public static class Patch_InsuranceNegotiation_Cancel_ReleaseClaim
+    {
+        static void Postfix()
+        {
+            try
+            {
+                string offerId = Dialogs.HealthInsuranceNegotiationDialog.planOffer?.id ?? "";
+                if (offerId.Length == 0) return;
+                CompanyCandidates.ReleaseOfferClaim(offerId, CompanyMessages.OwnerOfOffer(offerId));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Candidates] insurance negotiation cancel: {ex.Message}"); }
+        }
+    }
 
     /// <summary>THE CLAIM SEAM. MyEmployees.NegotiateWithCandidate is the one entry that mints a
     /// CandidateSalaryNegotiation (decompile :600-613). On a company candidate the call is swallowed and

@@ -74,7 +74,7 @@ namespace BigAmbitionsMP
             "employeehelper_notification_employee_amount_messaged_you",           // :96   count only
             // ── MERGER PHASE 4d (R5): five more AUTONOMOUS company events ─────────────────────────────
             // Buildings.Office.Headquarters/PricingManagerPlan.cs
-            "notifications_PricingManager_mispriced_items",                       // :195  employeeName + amount — drops at the owner gate until an employee->workplace resolve exists (decision pending, 4d)
+            "notifications_PricingManager_mispriced_items",                       // :195  employeeName + amount - resolved by the named employee's workplace (D24); an ambiguous name drops
             // Helpers/RealEstateHelper.cs - the daily "a competitor bought your building" pass
             "real_estate_building_sold_notification",                             // :132  address/price/amount
             "real_estate_building_sold_notification_items_sold",                  // :132  + itemsAmount
@@ -139,6 +139,9 @@ namespace BigAmbitionsMP
         /// roll-up pop-up ("4 employees called in sick") names no business by design, and would
         /// otherwise log every game day.</summary>
         private static readonly HashSet<string> _loggedUnresolved = new HashSet<string>(StringComparer.Ordinal);
+        /// <summary>D24: one line per (key, name) when a pricing-manager notice names a person this machine
+        /// employs TWICE - the workplace is not guessable, so the notice drops.</summary>
+        private static readonly HashSet<string> _loggedAmbiguous = new HashSet<string>(StringComparer.Ordinal);
 
         // C1 SENDER ---------------------------------------------------------------------------
 
@@ -214,6 +217,55 @@ namespace BigAmbitionsMP
                     break;
                 }
             }
+            // MERGER PHASE 4d (D24, user 2026-09-11): the pricing-manager notice names NO business and NO address -
+            // only the ANALYST (decompile Buildings.Office.Headquarters/PricingManagerPlan.cs:195 - employeeName +
+            // amount, where amount is a COUNT of hand-priced items above the neighbourhood ceiling). The company the
+            // notice belongs to is the one that named employee WORKS at, so the third resolve walks this machine's
+            // roster and takes the single match's workplace. A partner's INJECTED copy is skipped: the notice about a
+            // partner's analyst is raised on the partner's machine and relays from there. The workplace registration is
+            // then held to the same MergerFlip.TrulyMine test as the name step, so a company building still relays only
+            // from its real owner. TWO people with that name is not guessable - it DROPS (one log line, never a guess);
+            // ZERO falls through to the ordinary unresolved log. Every read is wrapped so a throwing getter skips that
+            // employee, never the relay.
+            if (string.IsNullOrEmpty(addressKey) && headerKey == "notifications_PricingManager_mispriced_items"
+                && data != null && data.TryGetValue("employeeName", out var who) && !string.IsNullOrEmpty(who))
+            {
+                int matches = 0;
+                string workKey = "";
+                bool twoPlaces = false;      // D24: only DIFFERING addresses are an ambiguity
+                try
+                {
+                    var roster = Helpers.EmployeeHelper.GetEmployeeInstances();
+                    if (roster != null)
+                        foreach (var e in roster)
+                        {
+                            if (e == null) continue;
+                            string eid; try { eid = e.id; } catch { continue; }
+                            try { if (MPRegisterSync.IsInjectedStaff(eid)) continue; } catch { continue; }
+                            string ename; try { ename = e.characterData?.name?.ToString(); } catch { continue; }
+                            if (!string.Equals(ename, who, StringComparison.Ordinal)) continue;
+                            string ekey; try { if (e.assignedAddress == null) continue; ekey = GameStateReader.AddressKey(e.assignedAddress); } catch { continue; }
+                            if (string.IsNullOrEmpty(ekey)) continue;
+                            matches++;
+                            if (workKey.Length > 0 && !string.Equals(workKey, ekey, StringComparison.Ordinal)) twoPlaces = true;
+                            workKey = ekey;
+                        }
+                }
+                catch { }
+                // D24 (r2 MINOR-12): two people of the same name at the SAME workplace name ONE workplace -
+                // which is all this resolver needs. It is ambiguous only when the addresses actually differ.
+                if (twoPlaces) { LogAmbiguous(headerKey, who, matches); return; }
+                if (matches >= 1)
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null) continue;
+                        string rk; try { rk = GameStateReader.AddressKey(reg); } catch { continue; }
+                        if (!string.Equals(rk, workKey, StringComparison.Ordinal)) continue;
+                        if (MergerFlip.TrulyMine(reg)) addressKey = rk;
+                        break;
+                    }
+            }
+
             if (string.IsNullOrEmpty(addressKey)) { LogUnresolved(headerKey, string.IsNullOrEmpty(name) ? "(no business named)" : name); return; }
 
             var (day, hourOfDay) = GameStateReader.GetGameTime();
@@ -247,6 +299,14 @@ namespace BigAmbitionsMP
         {
             if (!_loggedUnresolved.Add(headerKey)) return;
             Plugin.Logger.LogInfo($"[NotifyRelay] '{headerKey}' not relayed - no owned business named '{name}'");
+        }
+
+        /// <summary>D24: the employee->workplace resolve found the name TWICE on this machine. Never guess a company -
+        /// drop the notice and say so once per (key, name).</summary>
+        private static void LogAmbiguous(string headerKey, string name, int count)
+        {
+            if (!_loggedAmbiguous.Add(headerKey + "|" + name)) return;
+            Plugin.Logger.LogInfo($"[NotifyRelay] '{headerKey}' not relayed - {count} employees named '{name}' (ambiguous)");
         }
 
         // C3 RECEIVER -------------------------------------------------------------------------

@@ -1,0 +1,305 @@
+{
+  "id": "T-P4C-PART2A-PLANEDIT",
+  "title": "phase 4c part 2a, two players: a member's edit on a partner's headquarters plan routes to the machine that runs it (add, a field edit, delete), an edit naming an injected copy is refused and the refusal comes back, an edit on a plan that is gone is refused as gone, and the pricing-manager notice (D24) relays by the named employee's workplace; ends dissolved",
+  "preconditions": "Fixture save1 (the host melaus owns a headquarters with pricing plans; Client1 is a member with its own staff). Build 4c part 2a r2 deployed (the `plans <pid> rows|hqs` levers exist from r2/r2b). The pane itself is review-verified (the rig drives no UI); the `planedit` lever sends exactly the leg a pane commit would. FIXTURE HYGIENE: the plan this run adds on the host is deleted again before the save; the notice raised for D24 is a game-native notification and is the only trace left.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "plan edit .*exception"
+  ],
+  "oracles_report": [
+    "\\[Merger\\] plan edit",
+    "\\[Merger\\] plan-edit-refused",
+    "\\[Merger\\] pricing ",
+    "\\[NotifyRelay\\]"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST P4C-PART2A START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "the client's world settles; the host's plan fan-out and staff copies land on the client"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "plans",
+      "expect_result": "partners=\\{[^}]*${hostPid}:\\{pricing:\\d+",
+      "capture": {
+        "pricingBefore": "${hostPid}:\\{pricing:(\\d+)"
+      },
+      "note": "the client holds the host's plan counts from the fan-out"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "plans ${hostPid} hqs",
+      "expect_result": "^OK plans '${hostPid}' hqs=\\[[^\\]]+\\]",
+      "capture": {
+        "hostHq": "hqs=\\[([^,\\]]+)"
+      },
+      "note": "the host's headquarters key, from the rows the client holds"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "planedit pricing 0 add ${hostHq}",
+      "expect_result": "^OK planedit pricing 0 add routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied for '.*' from '${clientPid}' \\(pricing add",
+          "within_s": 20
+        }
+      ],
+      "note": "E1/E2: the member creates a pricing plan on the PARTNER's headquarters (named outright - no pane on the rig); the host (its runner) creates the real plan"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "sleep_s": 35,
+      "note": "the next fan-out carries the new plan to the member"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows pricing",
+      "expect_result": "^OK plans '${hostPid}' rows=\\[.*pricing:",
+      "capture": {
+        "newPlan": "pricing:([^:,\\]]+):[^,\\]]*\\]$"
+      },
+      "note": "the newest plan is the last row in the owner's list order"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "planedit pricing ${newPlan} manager",
+      "expect_result": "^OK planedit pricing ${newPlan} manager routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied for '.*' from '${clientPid}' \\(pricing manager, plan ${newPlan}",
+          "within_s": 20
+        }
+      ],
+      "note": "a field edit (clear the analyst) routes and applies on the runner"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "employees",
+      "expect_result": "injected=False",
+      "capture": {
+        "ownEmp": "(?:': |; )((?!BAMP_DUTY)[^|]+)\\|[^|]*\\|assigned=[^|]*ba:street[^|]*\\|injected=False"
+      },
+      "note": "one of the CLIENT's own assigned employees - on the host this id resolves to an injected copy"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "planedit pricing ${newPlan} manager ${ownEmp}",
+      "expect_result": "^OK planedit pricing ${newPlan} manager routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] .*REFUSED.*'${ownEmp}'.*injected copy",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[Merger\\] plan-edit-refused \\(pricing ${newPlan}\\)",
+          "within_s": 25
+        }
+      ],
+      "note": "F5/F8: the runner refuses an injected copy as a manager and the refusal reaches the member"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "planedit pricing ${newPlan} delete",
+      "expect_result": "^OK planedit pricing ${newPlan} delete routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied for '.*' from '${clientPid}' \\(pricing delete, plan ${newPlan}",
+          "within_s": 20
+        }
+      ],
+      "note": "FIXTURE HYGIENE: the added plan is deleted on the runner"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "planedit pricing ${newPlan} delete",
+      "expect_result": "^OK planedit pricing ${newPlan} delete routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit REFUSED \\(pricing delete\\): plan '${newPlan}' is gone",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[Merger\\] plan-edit-refused \\(pricing ${newPlan}\\)",
+          "within_s": 25
+        }
+      ],
+      "note": "E4: the registry row is still held here until the next fan-out, so the leg goes out; the runner refuses it (gone) and the member is told"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "sleep_s": 35,
+      "note": "the fan-out drops the deleted plan"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows pricing",
+      "expect_result": "^OK plans",
+      "refute_result": "${newPlan}",
+      "note": "the deleted plan is gone from the member's registry"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "employees",
+      "expect_result": "injected=False",
+      "capture": {
+        "hostEmp": "(?:': |; )((?!BAMP_DUTY)[^|]+)\\|[^|]*\\|assigned=[^|]*ba:street[^|]*\\|injected=False"
+      },
+      "note": "D24: one of the HOST's own assigned employees - the notice names them, the resolve finds their workplace"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "pmnotice name:Nobody Atall",
+      "expect_result": "^OK pmnotice name='Nobody Atall' amount=1",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[NotifyRelay\\] 'notifications_PricingManager_mispriced_items' not relayed - no owned business named",
+          "within_s": 10
+        }
+      ],
+      "note": "D24 zero matches: dropped with the unresolved log, never relayed"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "pmnotice ${hostEmp}",
+      "expect_result": "^OK pmnotice name='.+' amount=1",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[NotifyRelay\\] shown 'notifications_PricingManager_mispriced_items' for '.*' from '${hostPid}'",
+          "within_s": 20
+        }
+      ],
+      "note": "D24: the game's own notice, resolved by the named employee's workplace, reaches the partner"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 32,
+      "role": "both",
+      "cmd": "mark TEST P4C-PART2A END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

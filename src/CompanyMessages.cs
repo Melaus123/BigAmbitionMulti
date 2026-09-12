@@ -226,6 +226,13 @@ namespace BigAmbitionsMP
                 p.CtxType       = (int)msg.contextAction.type;
                 p.CtxEmployeeId = msg.contextAction.employeeInstanceId ?? "";
                 p.CtxOfferId    = msg.contextAction.healthPlanOfferId ?? "";
+                // D23: a relayed staff-insurance offer must be ACTIONABLE on every member, so the offer's
+                // own terms travel with it. The offer object itself stays here - these five rebuild a
+                // detached copy on the member that is good enough for the game's own negotiation dialog,
+                // and the accept/decline route back to whoever runs the HR plan's headquarters.
+                if (p.CtxType == (int)TextMessage.ContextAction.ContextActionType.HealthInsurancePlanOffer
+                    && p.CtxOfferId.Length > 0)
+                    FillInsuranceTerms(p);
             }
 
             if (!PayloadSane(p, "sender")) return null;
@@ -233,6 +240,30 @@ namespace BigAmbitionsMP
             Send(p);
             Plugin.Logger.LogInfo($"{Tag} relaying '{p.MessageKey}' on '{p.ContactId}' as {id} ({p.Buttons.Count} button(s), context={p.CtxType}) to my company.");
             return id;
+        }
+
+        /// <summary>D23 SENDER. The live offer (GameInstance.cs:185 `healthInsurancePlanOffers`) and the HR
+        /// plan it is for (HealthInsurancePlanOffer.cs:13 `hrManagerPlanId`), as the wire carries them. The
+        /// headquarters key is what the ACCEPT route is addressed at, so a copy without one is relayed
+        /// without buttons rather than with buttons that could not route.</summary>
+        private static void FillInsuranceTerms(CompanyMessagePayload p)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.healthInsurancePlanOffers == null) return;
+                Entities.HealthInsurancePlanOffer offer = null;
+                foreach (var o in gi.healthInsurancePlanOffers) if (o != null && o.id == p.CtxOfferId) { offer = o; break; }
+                if (offer == null) return;
+                p.CtxPlanId        = offer.hrManagerPlanId ?? "";
+                p.CtxPlanType      = (int)offer.planType;
+                p.CtxOfferPrice    = offer.initialOfferPrice;
+                p.CtxOfferMinPrice = offer.minOfferPrice;
+                foreach (var pl in gi.hrManagerPlans ?? new List<Buildings.Office.Headquarters.HrManagerPlan>())
+                    if (pl != null && pl.id == p.CtxPlanId)
+                    { try { p.CtxHqKey = GameStateReader.AddressKey(pl.headquartersAddress); } catch { } break; }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} insurance terms: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>Is this contact one THIS machine really owns? A business contact is matched by name
@@ -366,8 +397,31 @@ namespace BigAmbitionsMP
                 if (p.CtxType == (int)TextMessage.ContextAction.ContextActionType.SalaryNegotiation && candidateId.Length > 0)
                     ad.contextButtonData.Add(new TextMessage.ContextButtonData("dialog_negotiate_button",
                         ContextButton.BackgroundColor.orange, () => OpenLocalNegotiation(mid, candidateId)));
+                // D23 (part 2a): the staff-insurance offer is ACTIONABLE here too. The three labels are the
+                // game's own keys, built exactly as ContactsApp.InitHealthInsuranceButtons builds them
+                // (decompile :603-634) - no new on-screen text. DECLINE and ACCEPT route the commit to the
+                // runner of the HR plan's headquarters; NEGOTIATE opens the game's own dialog LOCALLY under
+                // the company claim lock, and its own accept routes through the same leg.
+                else if (p.CtxType == (int)TextMessage.ContextAction.ContextActionType.HealthInsurancePlanOffer
+                         && (p.CtxOfferId ?? "").Length > 0 && (p.CtxPlanId ?? "").Length > 0
+                         && (p.CtxHqKey ?? "").Length > 0)
+                {
+                    _insurance[mid] = new InsuranceCopy
+                    {
+                        OfferId = p.CtxOfferId, PlanId = p.CtxPlanId, HqKey = p.CtxHqKey,
+                        PlanType = p.CtxPlanType, Price = p.CtxOfferPrice, MinPrice = p.CtxOfferMinPrice,
+                        OwnerPid = p.OwnerPid ?? "",
+                    };
+                    ad.contextButtonData.Add(new TextMessage.ContextButtonData("dialog_decline_button",
+                        ContextButton.BackgroundColor.gray, () => CommitInsurance(mid, false, 0f)));
+                    ad.contextButtonData.Add(new TextMessage.ContextButtonData("dialog_negotiate_button",
+                        ContextButton.BackgroundColor.orange, () => OpenLocalInsuranceNegotiation(mid)));
+                    ad.contextButtonData.Add(new TextMessage.ContextButtonData("dialog_accept_button",
+                        ContextButton.BackgroundColor.blue, () => CommitInsurance(mid, true, p.CtxOfferPrice)));
+                    Plugin.Logger.LogInfo($"{Tag} {mid}: the health-insurance offer on '{p.ContactId}' is actionable here - its commit routes to whoever runs '{p.CtxHqKey}' (plan {p.CtxPlanId}).");
+                }
                 else if (p.CtxType == (int)TextMessage.ContextAction.ContextActionType.HealthInsurancePlanOffer)
-                    Plugin.Logger.LogInfo($"{Tag} {mid}: the health-insurance offer on '{p.ContactId}' is informational here - the HR plan and its offer live in '{p.OwnerPid}'s save, so its buttons stay on that machine.");
+                    Plugin.Logger.LogWarning($"{Tag} {mid}: the health-insurance offer on '{p.ContactId}' arrived without its plan or headquarters - shown without actions (nothing could be routed).");
             }
 
             var msg = new TextMessage(p.MessageKey,
@@ -648,6 +702,170 @@ namespace BigAmbitionsMP
         /// <summary>The relayed salary negotiation, opened HERE on the company's own candidate. The game's
         /// own MyEmployees.NegotiateWithCandidate is the entry, so build A's claim prefix decides: the host
         /// grants the first asker, the accept stays host-gated, and nothing new arbitrates anything.</summary>
+        // ── D23: THE RELAYED STAFF-INSURANCE OFFER (4c part 2a, E3) ──────────────────────────────
+        //
+        // The offer and the HR plan live in the OWNER's save; this machine only ever holds a copy of the
+        // message. So the three actions split in two: NEGOTIATE runs the game's own dialog HERE, under the
+        // company claim lock (one member at a time, arbitrated by the host on the candidate claim table,
+        // keyed on the OFFER id) - and the moment of COMMITMENT, whichever path reaches it, becomes a
+        // `mergerplanedit` leg to the runner of the HR plan's headquarters, which calls the game's own
+        // HealthInsurancePlanOffer.AcceptOffer / DeclineOffer on the REAL offer. Nothing is committed here.
+
+        private sealed class InsuranceCopy
+        {
+            internal string OfferId = "", PlanId = "", HqKey = "", OwnerPid = "";
+            internal int PlanType;
+            internal float Price, MinPrice;
+        }
+
+        /// <summary>message id -> the relayed offer's terms, kept for as long as the copy is on screen.</summary>
+        private static readonly Dictionary<string, InsuranceCopy> _insurance = new();
+
+        /// <summary>offer id -> the message it came on, so a granted claim finds its way back.</summary>
+        private static readonly Dictionary<string, string> _insuranceByOffer = new();
+
+        /// <summary>r2 MINOR-8: whose offer this is - what a claim RELEASE has to be addressed to when the
+        /// negotiation dialog is closed without a commit. "" when this machine holds no copy of it.</summary>
+        public static string OwnerOfOffer(string offerId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(offerId) || !_insuranceByOffer.TryGetValue(offerId, out var mid) || mid == null) return "";
+                return _insurance.TryGetValue(mid, out var c) && c != null ? (c.OwnerPid ?? "") : "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>ACCEPT / DECLINE, from the copy's own button or from the game's negotiation dialog.
+        /// One commit per message: the id is marked handled here and the company is told, so every other
+        /// copy loses its buttons through the relay's existing `handled` leg.</summary>
+        internal static void CommitInsurance(string messageId, bool accept, float price)
+        {
+            try
+            {
+                if (!_insurance.TryGetValue(messageId, out var c) || c == null)
+                { Plugin.Logger.LogWarning($"{Tag} {messageId}: insurance commit with nothing held here - ignored."); return; }
+                if (_handled.Contains(messageId))
+                { Plugin.Logger.LogInfo($"{Tag} {messageId}: insurance already handled in this company - no second commit."); return; }
+                CompanyPlans.RouteInsurance(accept ? "insurance-accept" : "insurance-decline",
+                                           c.PlanId, c.HqKey, c.OfferId, price);
+                _handled.Add(messageId);
+                CompanyCandidates.ReleaseOfferClaim(c.OfferId, c.OwnerPid);
+                Send(new CompanyMessagePayload
+                {
+                    PlayerId = MPConfig.PlayerId, Action = "handled", MessageId = messageId,
+                    OwnerPid = c.OwnerPid, HandledBy = MPConfig.PlayerId, ButtonIndex = -1,
+                });
+                GameStatePatcher.EnqueueOnMainThread(() => ApplyHandled(new CompanyMessagePayload
+                { PlayerId = MPConfig.PlayerId, Action = "handled", MessageId = messageId, OwnerPid = c.OwnerPid, HandledBy = MPConfig.PlayerId }));
+                Plugin.Logger.LogInfo($"{Tag} insurance {(accept ? "accept" : "decline")} routed for plan '{c.PlanId}' at '{c.HqKey}' (offer {c.OfferId}, message {messageId}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} insurance commit: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>NEGOTIATE on a relayed copy: ask the host for the claim on this OFFER first (the same
+        /// first-asker arbitration build A gave candidates), then open the game's own dialog here.</summary>
+        private static void OpenLocalInsuranceNegotiation(string messageId)
+        {
+            try
+            {
+                if (!_insurance.TryGetValue(messageId, out var c) || c == null) return;
+                if (_handled.Contains(messageId))
+                { Plugin.Logger.LogInfo($"{Tag} {messageId}: the insurance offer is already handled in this company - nothing opened."); return; }
+                _insuranceByOffer[c.OfferId] = messageId;
+                CompanyCandidates.ClaimOffer(c.OfferId, c.OwnerPid);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} insurance negotiate: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>MAIN THREAD. The host granted this machine the claim on that offer: open the game's own
+        /// HealthInsuranceNegotiationDialog on a DETACHED copy of the offer. The dialog only reads the
+        /// offer's numbers (Dialogs/HealthInsuranceNegotiationDialog.cs:24-27) and calls AcceptOffer /
+        /// DeclineOffer on it, both of which the merger gate turns into the routed commit.</summary>
+        public static void OfferClaimGranted(string offerId)
+        {
+            try
+            {
+                if (!_insuranceByOffer.TryGetValue(offerId ?? "", out var mid) || mid == null) return;
+                if (!_insurance.TryGetValue(mid, out var c) || c == null) return;
+                var app = UnityEngine.Object.FindObjectOfType<UI.Smartphone.Apps.Contacts.ContactsApp>(true);
+                if (app == null)
+                { Plugin.Logger.LogWarning($"{Tag} {mid}: the insurance negotiation cannot open - the contacts app is not on screen."); return; }
+
+                var offer = new Entities.HealthInsurancePlanOffer(c.PlanId, (Entities.HealthInsurancePlanType)c.PlanType)
+                { initialOfferPrice = c.Price, minOfferPrice = c.MinPrice };
+                SetReadonly(offer, "id", c.OfferId);
+                _relayedOffers[c.OfferId] = mid;
+
+                // ContactsApp.InitHealthInsuranceButtons' own negotiate delegate, step for step
+                // (decompile :616-624) - the same fields, set on the same instance.
+                SetField(app, "callButton", null, interactableFalse: true);
+                var selected = app.selectedContact;
+                SetField(app, "contact", selected);
+                Dialogs.HealthInsuranceNegotiationDialog.planOffer = offer;
+                DialogController.current = app;
+                SetField(app, "dialog", Dialogs.CallDialogFactory.GetDialog(Dialogs.CallDialogType.HealthInsuranceNegotiationDialog));
+                Plugin.Logger.LogInfo($"{Tag} insurance negotiation opened here for plan '{c.PlanId}' under the company claim on offer '{c.OfferId}'.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} insurance dialog: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>offer id -> the message id, for the DETACHED offers this machine minted. The accept /
+        /// decline gate uses it to turn the dialog's own commit into the routed one.</summary>
+        private static readonly Dictionary<string, string> _relayedOffers = new();
+
+        /// <summary>THE COMMIT GATE. True = this offer is a relayed copy and the commit has been routed
+        /// instead of run; the caller must not run the native body (AcceptOffer would dereference
+        /// HrManagerPlan, which resolves to null here - the plan is in the owner's save).</summary>
+        public static bool RouteOfferCommit(Entities.HealthInsurancePlanOffer offer, bool accept, float price)
+        {
+            try
+            {
+                string id = offer != null ? (offer.id ?? "") : "";
+                if (id.Length == 0 || !_relayedOffers.TryGetValue(id, out var mid)) return false;
+                CommitInsurance(mid, accept, price);
+                // The dialog reads these two straight after its own call, so the detached copy ends in the
+                // state the game expects; nothing else on it is ever persisted.
+                try { offer.negotiationFinished = true; offer.accepted = accept; } catch { }
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} offer commit gate: {ex.GetType().Name}: {ex.Message}"); return false; }
+        }
+
+        private static void SetReadonly(object o, string field, object value)
+        {
+            try
+            {
+                for (var t = o.GetType(); t != null; t = t.BaseType)
+                {
+                    var f = t.GetField(field, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (f != null) { f.SetValue(o, value); return; }
+                }
+            }
+            catch { }
+        }
+
+        private static void SetField(object o, string field, object value, bool interactableFalse = false)
+        {
+            try
+            {
+                for (var t = o.GetType(); t != null; t = t.BaseType)
+                {
+                    var f = t.GetField(field, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    if (f == null) continue;
+                    if (interactableFalse)
+                    {
+                        var b = f.GetValue(o) as UnityEngine.UI.Button;
+                        if (b != null) b.interactable = false;
+                        return;
+                    }
+                    f.SetValue(o, value);
+                    return;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} field '{field}': {ex.GetType().Name}: {ex.Message}"); }
+        }
+
         private static void OpenLocalNegotiation(string messageId, string candidateId)
         {
             try
@@ -903,6 +1121,7 @@ namespace BigAmbitionsMP
                     foreach (var c in _createdHere)
                         if (c != null && (c.messagesQueue == null || c.messagesQueue.Count == 0)) gi.Contacts.Remove(c);
                 _copies.Clear(); _createdHere.Clear(); _mine.Clear(); _handled.Clear(); _order.Clear(); _pending.Clear();
+                _insurance.Clear(); _insuranceByOffer.Clear(); _relayedOffers.Clear();   // r2 MINOR-9: D23's three tables die with the copies
                 if (n > 0) Plugin.Logger.LogInfo($"{Tag} dropped {n} relayed message copy(ies) ({why}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} ClearAll: {ex.GetType().Name}: {ex.Message}"); }
@@ -912,6 +1131,7 @@ namespace BigAmbitionsMP
         {
             _mine.Clear(); _copies.Clear(); _handled.Clear(); _createdHere.Clear(); _pending.Clear();
             _order.Clear(); _logged.Clear(); _seq = 0; _applying = false;
+            _insurance.Clear(); _insuranceByOffer.Clear(); _relayedOffers.Clear();   // r2 MINOR-9
         }
 
         // -- TestDrive --
