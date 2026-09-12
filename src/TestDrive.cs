@@ -1666,6 +1666,26 @@ namespace BigAmbitionsMP
                     return $"OK train addr='{rnaddr}' employee='{arg}' cost={rncost.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} routed={rnrouted}";
                 }
 
+                case "hrtrain":
+                {
+                    // CROSS-HR-2 T4 rig lever. `hrtrain <planId>` runs THIS machine's own HR plan through the
+                    // game's own TrainEmployees - the daily pass exactly as HRManager.WorkDaily runs it - so a
+                    // run can assert that a leg leaves for every injected assignee and the owner applies it.
+                    // Native's money is native's: the plan's single ChangeMoneySafe runs inside that method.
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (arg.Length == 0) return "ERR usage: hrtrain <planId>";
+                    var htplan = Buildings.Office.Headquarters.HrManagerHelper.GetPlanFromId(arg);
+                    if (htplan == null) return $"ERR no HR plan '{arg}' on this machine";
+                    // r1 MAJOR-2: a partner's SHADOW sits in the same list. The game's own daily pass skips it (the WorkDaily
+                    // guard); this lever must too - it would write the shadow's list, train copies and charge THIS wallet.
+                    if (MergerAbsence.IsDisplayInstall(htplan)) return $"ERR HR plan '{arg}' is a partner's shadow here - it trains on the machine that owns it";
+                    int htn = 0; try { htn = htplan.assignedEmployees?.Count ?? 0; } catch { }
+                    bool htmgr = false; try { htmgr = !string.IsNullOrEmpty(htplan.assignedEmployeeId); } catch { }
+                    MergerEmployeeSync.NoteTrainPass(arg, -1, -1, -1);   // -1 = the postfix did not run
+                    htplan.TrainEmployees();
+                    return $"OK hrtrain plan='{arg}' assigned={htn} manager={htmgr} injected={MergerEmployeeSync.LastTrainInjected} legs={MergerEmployeeSync.LastTrainLegs} unchanged={MergerEmployeeSync.LastTrainUnchanged} (the game's own daily training pass ran once)";
+                }
+
                 case "planbulk":
                 {
                     // HO-1c L3 rig lever. `planbulk <family> <planId> clear|fill|suggestall [n]` sends exactly the
@@ -1742,7 +1762,7 @@ namespace BigAmbitionsMP
                 }
 
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg)";
             }
         }
 

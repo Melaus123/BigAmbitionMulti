@@ -300,6 +300,22 @@ namespace BigAmbitionsMP
         // (MpManifest.Transfers), so a host restart resumes it rather than losing the record.
         public string TransferId      { get; set; } = "";
         public string OtherAddressKey { get; set; } = "";
+        // CROSS-HR-2 (2026-09-12, plan D38): THE ROUTED DAILY TRAINING. A partner's HR plan trains a worker
+        // who STAYS at my shop: the plan runs on the PARTNER's machine, where my worker is only an injected
+        // copy, so native's writes there are overwritten by my next roster push and the training is paid for
+        // and never happens. Action = "hrtrain" carries the DIFF native just applied to that copy - the skill
+        // deltas and the wage delta - to the machine that holds the REAL record, which mirrors them once.
+        // Money is NOT carried: the plan's single ChangeMoneySafe stays on the runner, where native pays it.
+        // Every field is additive; the plan id rides the existing AssignedHrManagerPlanId.
+        public string OwnerPid   { get; set; } = "";   // whose machine holds the real record (the host verifies it)
+        public string Stamp      { get; set; } = "";   // "<planId>|<day>|<employeeId>" - the owner applies it once
+        public List<string> SkillDeltas { get; set; } = new();   // "name=+delta" per skill native raised
+        public float  WageDelta  { get; set; }         // hourlyWage after - before on the runner's copy (log only)
+        // CROSS-HR-2b (review r1): the wage as the RATIO native's IncreaseWageFromTraining multiplied by (hourlyWage *=
+        // f^p, f and p from the skill values alone - machine-independent, unlike an absolute delta), and the plan's
+        // trainingTarget so the owner re-clamps against its REAL value (native clamped on the runner against the copy).
+        public float  WageRatio  { get; set; }         // hourlyWage after / before on the copy; 0 = no change
+        public int    TrainingTarget { get; set; }     // HrManagerPlan.trainingTarget of the plan that trained
     }
 
     // ── Shared-shop management (Business PERMISSION feature; src/SharedShopSchedule.cs) — separate from the merger ──

@@ -586,6 +586,21 @@ namespace BigAmbitionsMP
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.MergerEmployeeEdit, MPConfig.PlayerId, p));
         }
 
+        /// <summary>CROSS-HR-2 T1: the plan RUNNER's training leg onto the same routed carrier. Public only
+        /// because the patch that measures native's writes lives in MPPatches; the wire is unchanged.</summary>
+        public static void SendHrTrain(EmployeeEditPayload p) { if (p != null) Send(p); }
+
+        /// <summary>CROSS-HR-2 T3: the stamps ("planId|day|employeeId") this machine has already mirrored onto
+        /// its real records. Per session (Reset clears it): a resend, or a daily pass that ran twice, changes
+        /// nothing the second time.</summary>
+        private static readonly HashSet<string> _hrTrainApplied = new();
+
+        /// <summary>CROSS-HR-2b: what the LAST daily training pass on this machine did (the `hrtrain` rig lever reads it back;
+        /// nothing else does). Set by the TrainEmployees postfix, also when it sent nothing.</summary>
+        public static string LastTrainPlan = ""; public static int LastTrainInjected, LastTrainLegs, LastTrainUnchanged;
+        public static void NoteTrainPass(string planId, int injected, int legs, int unchanged)
+        { LastTrainPlan = planId ?? ""; LastTrainInjected = injected; LastTrainLegs = legs; LastTrainUnchanged = unchanged; }
+
         /// <summary>THE OWNER's machine: apply a routed employee op natively. MAIN THREAD.</summary>
         public static void ApplyOnOwner(EmployeeEditPayload p)
         {
@@ -600,8 +615,73 @@ namespace BigAmbitionsMP
                                 && (p.Action == "release" || p.Action == "adopt-in" || p.Action == "return"
                                  || p.Action == "drop"    || p.Action == "adopt"
                                  || p.Action == "transfer-refused");   // r4 MINOR-3: the host's word to the initiator carries no address
-                if (string.IsNullOrEmpty(p.AddressKey) && !transferLeg) return;
-                if (p.Action == "fire")
+                if (string.IsNullOrEmpty(p.AddressKey) && !transferLeg && p.Action != "hrtrain") return;
+                if (p.Action == "hrtrain")
+                {
+                    // CROSS-HR-2 T3, THE OWNER APPLIES ONCE. The leg carries what the partner's plan just did
+                    // to its COPY of this record; here it is mirrored onto the REAL one and republished, so
+                    // the runner's copy follows on the next roster push. Nothing about money is in the leg.
+                    string stamp = p.Stamp ?? "";
+                    if (stamp.Length == 0)
+                    { Plugin.Logger.LogWarning($"[CrossHR] routed hrtrain for '{p.EmployeeId}' carries no stamp - dropped (it could not be applied once)."); return; }
+                    EmployeeInstance? emp = null;
+                    try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(p.EmployeeId ?? "", out emp); } catch { }
+                    if (emp == null)
+                    { Plugin.Logger.LogWarning($"[CrossHR] routed hrtrain: employee '{p.EmployeeId}' is not on this machine - dropped."); return; }
+                    if (MPRegisterSync.IsInjectedStaff(emp.id))
+                    { Plugin.Logger.LogWarning($"[CrossHR] routed hrtrain: '{emp.id}' is an INJECTED copy here, not the real record - dropped (mis-route)."); return; }
+                    if (!_hrTrainApplied.Add(stamp))
+                    { Plugin.Logger.LogInfo($"[CrossHR] routed hrtrain '{stamp}' already applied - dropped (the day's training happens once)."); return; }
+                    float wageWas = emp.hourlyWage;   // for the log line
+                    int raised = 0;
+                    if (p.SkillDeltas != null)
+                        foreach (var pair in p.SkillDeltas)
+                        {
+                            if (string.IsNullOrEmpty(pair)) continue;
+                            int eq = pair.IndexOf('=');
+                            if (eq <= 0) continue;
+                            string nm = pair.Substring(0, eq);
+                            string dv = pair.Substring(eq + 1).TrimStart('+');
+                            if (!float.TryParse(dv, System.Globalization.NumberStyles.Float,
+                                                System.Globalization.CultureInfo.InvariantCulture, out float d) || d <= 0f) continue;
+                            var skills = emp.characterData?.skills;
+                            if (skills == null) continue;
+                            foreach (var sk in skills)
+                                if (sk != null && string.Equals(sk.name, nm, StringComparison.Ordinal))
+                                {
+                                    // Native's clamp ran on the RUNNER against the COPY's value (HrManagerPlan.cs:84
+                                    // Mathf.Min(trainingTarget - value, 2f), :92 for the secondary skills) and that copy
+                                    // can be stale-low. r1 MINOR-2: re-clamp here against the REAL value and the plan's
+                                    // trainingTarget carried on the leg - a skill already at or past the target does not
+                                    // move (native's own num3 <= 0 would have skipped it there), and nothing passes 100.
+                                    float cap = p.TrainingTarget > 0 ? Mathf.Min((float)p.TrainingTarget, 100f) : 100f;
+                                    float ceiling = Mathf.Max(sk.value, cap);   // already past the target: stays put
+                                    float next = Mathf.Min(sk.value + d, ceiling);
+                                    if (next > sk.value)
+                                    {
+                                        float previous = sk.value;
+                                        sk.value = next; raised++;
+                                        // r2 MINOR-2: the wage by the game's OWN formula on the REAL record (EmployeeInstance.cs:293-301:
+                                        // hourlyWage *= f^p from this skill's old and new values) - exactly what native did on the copy,
+                                        // computed where the real values are, and needing nothing from the wire (a copy whose wage was 0
+                                        // carried no usable ratio). Native's own guard: no move when the value did not rise.
+                                        try { emp.IncreaseWageFromTraining(sk, previous); } catch { }
+                                    }
+                                    break;
+                                }
+                        }
+                    // The wage moved inside the loop, by the game's own IncreaseWageFromTraining per raised skill; the leg's
+                    // WageRatio and WageDelta are what the COPY did on the runner, logged beside what the real record did.
+                    Plugin.Logger.LogInfo($"[CrossHR] applied routed training to '{emp.id}' ({raised} skill(s), wage {wageWas.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} -> {emp.hourlyWage.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}; the copy moved x{p.WageRatio.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)}) for partner plan '{p.AssignedHrManagerPlanId}' (stamp '{stamp}', from '{p.PlayerId}').");
+                    // The REAL record's shop republishes so the runner's copy catches up (the leg's address is the copy's as the
+                    // runner saw it, and a bench copy has none). A BENCHED real record is not in the roster walk (MPRegisterSync
+                    // publishes per registration): its bench publish (SharedShopStaff.cs, signature id|name|wage) re-sends it on
+                    // its own tick when the wage moved; a skills-only move waits for the next natural bench publish (carried
+                    // minor, r2: skills in the bench signature + a nudge).
+                    string realAddr = ""; try { realAddr = GameStateReader.AddressKey(emp.assignedAddress) ?? ""; } catch { }
+                    if (realAddr.Length > 0) MPRegisterSync.ForceRosterRepublish(realAddr);
+                }
+                else if (p.Action == "fire")
                 {
                     EmployeeInstance emp = null;
                     try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(p.EmployeeId ?? "", out emp); } catch { }
@@ -1011,6 +1091,7 @@ namespace BigAmbitionsMP
             _transfersDone.Clear();
             _lastOwnAddr.Clear();
             _returnFailLog.Clear();
+            _hrTrainApplied.Clear();
         }
     }
 }

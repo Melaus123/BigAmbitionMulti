@@ -1,0 +1,177 @@
+{
+  "id": "T-CROSSHR2",
+  "title": "cross-member HR build 2, two players: the client's HR plan (which lists six of the host's people, assigned in the hands-on world) runs its daily training on the client; each host-owned assignee routes ONE training leg to the host, the host applies it to the real record once, and a second run the same day is dropped as already applied; ends dissolved, NO save",
+  "preconditions": "BLOCKED ON THIS FIXTURE until CROSS-HR-3 (2026-09-12, run 1 FAIL 12/20): the client's plan oMg0Ie6U0iAKs859EUeIg== lists SEVEN of the host's people, but the client's own save holds address-less PHANTOM records with those ids (a leak of unknown origin; context log F-2026-09-12-JZ), so the roster apply never injects them and no leg fires. CROSS-HR-3's scenario assigns a PROPERLY injected host person (one of the other 26 at 15 ba:street_thirdavenue) through its new cross-member assign and then runs `hrtrain`. Build CROSS-HR-2b lever answer: OK hrtrain plan='<id>' assigned=N manager=<bool> injected=I legs=M unchanged=K. FIXTURE HYGIENE: skills and wages change in memory only; NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "plan": "oMg0Ie6U0iAKs859EUeIg==",
+    "hostEmp": "f1aJGwedaUS4u\\+YIo8NDng=="
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "mis-route",
+    "not on this machine - dropped",
+    "carries no stamp",
+    "not a co-member of the same company",
+    "\\[CrossHR\\] training legs:",
+    "\\[CrossHR\\] shadow-safe OnRemove:",
+    "names no employee - dropped",
+    "unknown employee",
+    "holds the record itself, dropped",
+    "HostRouteHrTrain:",
+    "the registry wins",
+    "owner is offline and nobody stands in",
+    "stands in for the owner and holds the record itself"
+  ],
+  "oracles_report": [
+    "\\[CrossHR\\] ",
+    "\\[StaffRoster\\] published"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST CROSSHR2 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "both worlds settle; the host's staff copies (the six assignees) land on the client"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "hrtrain ${plan}",
+      "expect_result": "^OK hrtrain plan='${plan}' assigned=[1-9]\\d* manager=True injected=[1-9]\\d* legs=[1-9]\\d*",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CrossHR\\] training leg for '${hostEmp}' \\(plan '${plan}'",
+          "within_s": 8
+        },
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] applied routed training to '${hostEmp}' \\(\\d+ skill\\(s\\), wage \\+[\\d.]+\\) for partner plan '${plan}' \\(stamp '${plan}\\|\\d+\\|${hostEmp}', from '${clientPid}'\\)",
+          "within_s": 15
+        }
+      ],
+      "note": "T1+T2+T3: the runner's daily pass sends ONE leg for the host's assignee; the host applies it to the real record once"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "mark TEST CROSSHR2 APPLIED",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "hrtrain ${plan}",
+      "expect_result": "^OK hrtrain plan='${plan}' assigned=[1-9]\\d* manager=True injected=[1-9]\\d* legs=[1-9]\\d*",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[CrossHR\\] routed hrtrain '${plan}\\|\\d+\\|${hostEmp}' already applied - dropped",
+          "within_s": 20
+        }
+      ],
+      "note": "T3: the same day's leg for the same person is a no-op on the owner (the stamp)"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved; NO save"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 20,
+      "role": "both",
+      "cmd": "mark TEST CROSSHR2 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

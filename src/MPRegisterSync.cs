@@ -1836,6 +1836,7 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, string> _injectedOwner = new();            // employeeId → owner pid (bench records)
         private static readonly Dictionary<string, HashSet<string>> _poolByOwner = new();     // owner pid → bench ids last applied
         private static readonly Dictionary<string, float> _benchGrace = new();                // employeeId → when the bench stopped listing it (the roster may be about to claim it)
+        private static readonly HashSet<string> _localCollisionLogged = new();                 // CROSS-HR-2b: local-id collisions already said (once per id per process)
         private const float BenchGraceSeconds = 12f;
         private static readonly Dictionary<string, string> _rosterSigSent = new();            // owner side: addr → last published sig
         private static readonly Dictionary<string, string> _rosterLogSig  = new();            // round-189: addr → last LOGGED membership (log speaks on hire/fire/rename only)
@@ -2101,7 +2102,18 @@ namespace BigAmbitionsMP
                             // means the record now lives in THEIR save — release our local original and fall
                             // through to inject the display copy. Any other local-id collision keeps the
                             // defensive skip (never shadow a genuinely local record).
-                            if (!MergerEmployeeSync.ConfirmAdopt(s.Id)) continue;
+                            if (!MergerEmployeeSync.ConfirmAdopt(s.Id))
+                            {
+                                // CROSS-HR-2b (rig T-CROSSHR2 2026-09-12): this silence hid SEVEN duplicate records in a hands-on
+                                // save - the owner's roster names an id this save ALSO holds as its own. The record stays exactly
+                                // as it is (a genuine local record is never shadowed); the collision is now SAID, once per id.
+                                if (_localCollisionLogged.Add(s.Id))
+                                {
+                                    string localAddr = ""; try { if (Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(s.Id, out var le) && le != null) localAddr = GameStateReader.AddressKey(le.assignedAddress) ?? ""; } catch { }
+                                    Plugin.Logger.LogWarning($"[StaffRoster] '{v.pid}' publishes '{s.Id}' at '{addr}' but this save holds a LOCAL record with that id (address '{localAddr}') - left alone; two saves holding one id is a leak worth a report.");
+                                }
+                                continue;
+                            }
                             try
                             {
                                 for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)

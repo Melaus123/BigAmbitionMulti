@@ -6444,6 +6444,10 @@ namespace BigAmbitionsMP
                  || p.Action == "transfer-refused" || p.Action == "returned" || p.Action == "dropped"
                  || p.Action == "release-refused")
                 { HostRouteTransfer(p, senderPid); return; }
+                // CROSS-HR-2 T2: a training leg is not an address edit. It is routed to the machine that holds
+                // the REAL record, which is normally the SENDER's own shop's owner-side counterpart - the gate
+                // below would look the address up, find the sender runs it, and drop the leg as a mis-route.
+                if (p.Action == "hrtrain") { HostRouteHrTrain(p, senderPid); return; }
                 if (string.IsNullOrEmpty(p.AddressKey)) return;
                 if (!BuildingOwners.TryGetValue(p.AddressKey, out var owner) || string.IsNullOrEmpty(owner))
                 { Plugin.Logger.LogWarning($"[MergerStaff] employee edit for unowned '{p.AddressKey}' — dropped."); return; }
@@ -6468,6 +6472,43 @@ namespace BigAmbitionsMP
                 else SendToPid(etarget, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] HostRouteEmployeeEdit: {ex.Message}"); }
+        }
+
+        /// <summary>HOST (main thread), CROSS-HR-2 T2: route ONE training leg to the machine that holds the
+        /// REAL record. What the host HAS is its own roster registry - MPRegisterSync.OwnerOfInjected, the map
+        /// the host's own injected copies are indexed by; it answers only for records the host itself holds a
+        /// copy of, so the leg also CARRIES the owner the runner read off its copy and the registry VERIFIES
+        /// it when it knows better (the registry wins, and the disagreement is logged). Members only, and
+        /// never back to the sender: the sender is the plan's runner, where the copy lives.</summary>
+        private static void HostRouteHrTrain(EmployeeEditPayload p, string senderPid)
+        {
+            try
+            {
+                string eid = p.EmployeeId ?? "";
+                if (eid.Length == 0)
+                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain from '{senderPid}' names no employee - dropped."); return; }
+                string known = ""; try { known = MPRegisterSync.OwnerOfInjected(eid); } catch { }
+                if (known.Length > 0 && !string.IsNullOrEmpty(p.OwnerPid) && known != p.OwnerPid)
+                    Plugin.Logger.LogWarning($"[CrossHR] hrtrain for '{eid}': the leg named owner '{p.OwnerPid}', the registry says '{known}' - the registry wins.");
+                string ownerPid = known.Length > 0 ? known : (p.OwnerPid ?? "");
+                if (ownerPid.Length == 0)
+                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain from '{senderPid}' for unknown employee '{eid}' - dropped."); return; }
+                if (ownerPid == senderPid)
+                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain by '{senderPid}' for '{eid}' - that machine holds the record itself, dropped."); return; }
+                if (!MergerSync.MergedRuntime(ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain by '{senderPid}' for '{eid}' (owner '{ownerPid}') - not a co-member of the same company, dropped."); return; }
+                // r1 MAJOR-1: WHERE that record lives NOW. The owner online -> the owner; away with a stand-in simulating
+                // that save -> the stand-in (its lifted copy IS the live record); nobody -> dropped HERE with its own line,
+                // never queued. SendToPid to an offline pid returns without a word - the silence this route must not have.
+                string target = RouteTargetFor(p.AddressKey ?? "", ownerPid);
+                if (target.Length == 0)
+                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain for '{eid}' (owner '{ownerPid}'): the owner is offline and nobody stands in - dropped (that worker's training for the day is lost; the runner paid for it once)."); return; }
+                if (target == senderPid)
+                { Plugin.Logger.LogWarning($"[CrossHR] hrtrain by '{senderPid}' for '{eid}' - that machine stands in for the owner and holds the record itself, dropped."); return; }
+                if (target == MPConfig.PlayerId) MergerEmployeeSync.ApplyOnOwner(p);
+                else SendToPid(target, MessageEnvelope.Create(MessageType.MergerEmployeeEdit, "host", p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] HostRouteHrTrain: {ex.Message}"); }
         }
 
         /// <summary>HOST (main thread), merger slice 6: fan ONE member's business-scoped pop-up out to

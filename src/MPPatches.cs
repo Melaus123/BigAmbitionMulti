@@ -1505,6 +1505,173 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ===== CROSS-HR-2 (2026-09-12, plan D38) T1: THE TRAINING LEG ==============================
+        // A partner's HR plan may train a worker who STAYS at my shop. The plan runs HERE (this machine
+        // owns it); that worker's REAL record lives on the machine that employs him and what sits here is
+        // an INJECTED COPY (MPRegisterSync.IsInjectedStaff). Native's writes in HrManagerPlan.TrainEmployees
+        // (decompile Buildings.Office.Headquarters/HrManagerPlan.cs:66-117) land on that copy and the
+        // owner's next roster push overwrites them - so the day's training is paid for and never happens.
+        //
+        // The copy is LEFT exactly as native left it; what travels is the DIFF. The prefix snapshots each
+        // injected assignee's skill values and hourlyWage, the postfix reads them again and sends ONE
+        // "hrtrain" leg per employee on the existing employee-edit carrier; the owner mirrors the same
+        // writes onto the real record and republishes (MergerEmployeeSync.ApplyOnOwner).
+        // MONEY IS NOT SENT: the plan's single ChangeMoneySafe (:115) is native's, on this machine, once.
+        // Native runs TrainEmployees once a day (HRManager.WorkDaily, Entities/HRManager.cs:30-38), so one
+        // leg per employee per game day is native's own cadence - and the Stamp makes a repeat inert.
+        // INERT with no injected assignee: the snapshot stays null and the postfix returns at once.
+        private sealed class HrTrainSnap
+        {
+            internal float Wage;
+            internal readonly System.Collections.Generic.Dictionary<string, float> Skills
+                = new System.Collections.Generic.Dictionary<string, float>(System.StringComparer.Ordinal);
+        }
+
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.HrManagerPlan),
+                      nameof(Buildings.Office.Headquarters.HrManagerPlan.TrainEmployees))]
+        public static class Patch_HrPlanTrainEmployees_RouteInjected
+        {
+            static void Prefix(Buildings.Office.Headquarters.HrManagerPlan __instance,
+                               out System.Collections.Generic.Dictionary<string, HrTrainSnap>? __state)
+            {
+                __state = null;
+                try
+                {
+                    if (__instance == null || IsShadowPlan(__instance)) return;   // a shadow never trains here
+                    var ids = __instance.assignedEmployees;
+                    if (ids == null) return;
+                    foreach (var id in ids)
+                    {
+                        if (string.IsNullOrEmpty(id) || !MPRegisterSync.IsInjectedStaff(id)) continue;
+                        Entities.EmployeeInstance? e = null;
+                        try { e = Helpers.EmployeeHelper.GetEmployeeById(id); } catch { }
+                        if (e == null) continue;
+                        var snap = new HrTrainSnap();
+                        try { snap.Wage = e.hourlyWage; } catch { }
+                        try
+                        {
+                            var sk = e.characterData?.skills;
+                            if (sk != null)
+                                foreach (var s in sk)
+                                    if (s != null && !string.IsNullOrEmpty(s.name)) snap.Skills[s.name] = s.value;
+                        }
+                        catch { }
+                        (__state ??= new System.Collections.Generic.Dictionary<string, HrTrainSnap>(System.StringComparer.Ordinal))[id] = snap;
+                    }
+                }
+                catch { __state = null; }
+            }
+
+            static void Postfix(Buildings.Office.Headquarters.HrManagerPlan __instance,
+                                System.Collections.Generic.Dictionary<string, HrTrainSnap>? __state)
+            {
+                string planId0 = ""; try { planId0 = __instance?.id ?? ""; } catch { }
+                if (__state == null || __state.Count == 0) { MergerEmployeeSync.NoteTrainPass(planId0, 0, 0, 0); return; }   // inert: no injected assignee, no leg, no log
+                int legs = 0, unchanged = 0;
+                try
+                {
+                    int day = 0; try { day = SaveGameManager.Current?.Day ?? 0; } catch { }
+                    string planId = planId0;
+                    int target = 0; try { target = __instance?.trainingTarget ?? 0; } catch { }
+                    foreach (var kv in __state)
+                    {
+                        Entities.EmployeeInstance? e = null;
+                        try { e = Helpers.EmployeeHelper.GetEmployeeById(kv.Key); } catch { }
+                        if (e == null) { unchanged++; continue; }   // r2 MINOR-3: gone between prefix and postfix - counted, so the summary adds up
+                        var deltas = new System.Collections.Generic.List<string>();
+                        try
+                        {
+                            var sk = e.characterData?.skills;
+                            if (sk != null)
+                                foreach (var s in sk)
+                                {
+                                    if (s == null || string.IsNullOrEmpty(s.name)) continue;
+                                    float was = kv.Value.Skills.TryGetValue(s.name, out var w) ? w : s.value;
+                                    float d = s.value - was;
+                                    if (d > 0.0001f)
+                                        deltas.Add(s.name + "=+" + d.ToString("F3", System.Globalization.CultureInfo.InvariantCulture));
+                                }
+                        }
+                        catch { }
+                        float wd = 0f; try { wd = e.hourlyWage - kv.Value.Wage; } catch { }
+                        float wr = 0f; try { wr = kv.Value.Wage > 0f ? e.hourlyWage / kv.Value.Wage : 0f; } catch { }
+                        if (deltas.Count == 0 && wd <= 0.0001f) { unchanged++; continue; }   // native did nothing to this copy (at target, or past it)
+                        string addr = ""; try { addr = GameStateReader.AddressKey(e.assignedAddress) ?? ""; } catch { }
+                        string owner = ""; try { owner = MPRegisterSync.OwnerOfInjected(kv.Key) ?? ""; } catch { }
+                        MergerEmployeeSync.SendHrTrain(new EmployeeEditPayload
+                        {
+                            PlayerId   = MPConfig.PlayerId,
+                            Action     = "hrtrain",
+                            AddressKey = addr,
+                            EmployeeId = kv.Key,
+                            OwnerPid   = owner,
+                            AssignedHrManagerPlanId = planId,
+                            Stamp      = planId + "|" + day + "|" + kv.Key,
+                            SkillDeltas = deltas,
+                            WageDelta  = wd > 0f ? wd : 0f,
+                            WageRatio  = wr > 1f ? wr : 0f,
+                            TrainingTarget = target,
+                        });
+                        legs++;
+                        Plugin.Logger.LogInfo($"[CrossHR] training leg for '{kv.Key}' (plan '{planId}', day {day}) -> owner "
+                                            + $"'{(owner.Length > 0 ? owner : "?")}': {(deltas.Count > 0 ? string.Join(", ", deltas) : "no skill change")}, "
+                                            + $"wage +{wd.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} (x{wr.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)}). The copy here stays as native left it.");
+                    }
+                    // One summary per pass that had injected assignees (rig T-CROSSHR2 2026-09-12: a pass that sends nothing must say why).
+                    Plugin.Logger.LogInfo($"[CrossHR] training pass on plan '{planId}' (day {day}): {__state.Count} injected assignee(s), {legs} leg(s) sent, {unchanged} unchanged (native left those copies as they were).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] training legs: {ex.Message}"); }
+                MergerEmployeeSync.NoteTrainPass(planId0, __state.Count, legs, unchanged);
+            }
+        }
+
+        // ===== CROSS-HR-2 T3b: A SHADOW STAYS READ-ONLY ONCE A WORKER CARRIES ITS ID ================
+        // EmployeeInstance.OnRemove (decompile Entities/EmployeeInstance.cs:841-846, reached from Resign()
+        // :760-762, RemoveEmployee() :828-831 and HeadhunterPlan.cs:405) ends with
+        //     HrManagerHelper.GetPlanFromId(assignedHrManagerPlanId)?.assignedEmployees.Remove(id);
+        // and runs on the WORKER's machine. Once a member's own worker carries a PARTNER's plan id, that
+        // lookup resolves the SHADOW installed here and the removal WRITES it: harmless to the runner (the
+        // next feed replaces the shadow) but it breaks "nothing writes a shadow" and desyncs the copy until
+        // then. The prefix hides the id for the duration of the native body - GetPlanFromId("") is null
+        // (decompile HrManagerHelper.cs:18-28) and `?.` makes the removal a no-op - restores it after, and
+        // sends the removal where it belongs: the routed HR "assign" with BoolValue=false on the
+        // mergerplanedit carrier (CompanyPlans.RoutePaneEdit:1364 -> Send:1471; a shadow row is registered in
+        // _rowInfo by RegisterShadowRows:1213-1237, so IsOverlayPlan is true for it), which the RUNNER applies
+        // to its REAL plan through the never-refused unassign branch (CompanyPlans.cs:1901 "assign").
+        [HarmonyPatch(typeof(Entities.EmployeeInstance), nameof(Entities.EmployeeInstance.OnRemove))]
+        public static class Patch_EmployeeOnRemove_ShadowStaysReadOnly
+        {
+            static void Prefix(Entities.EmployeeInstance __instance, out string __state)
+            {
+                __state = "";
+                try
+                {
+                    string pid = __instance?.assignedHrManagerPlanId ?? "";
+                    if (pid.Length == 0) return;
+                    if (!IsShadowPlan(Buildings.Office.Headquarters.HrManagerHelper.GetPlanFromId(pid))) return;
+                    __state = pid;
+                    __instance!.assignedHrManagerPlanId = "";
+                }
+                catch { __state = ""; }
+            }
+
+            static void Postfix(Entities.EmployeeInstance __instance, string __state)
+            {
+                if (string.IsNullOrEmpty(__state)) return;
+                try
+                {
+                    __instance.assignedHrManagerPlanId = __state;   // the record leaves with the tag it had
+                    var plan = Buildings.Office.Headquarters.HrManagerHelper.GetPlanFromId(__state);
+                    if (plan == null) return;
+                    bool routed = CompanyPlans.RoutePaneEdit("hr", "the worker left - take him off the plan",
+                                                            plan, "assign", __instance.id, 0, 0f, false);
+                    Plugin.Logger.LogInfo($"[CrossHR] '{__instance.id}' left this save carrying partner plan '{__state}' - "
+                                        + $"the shadow was NOT written; the drop routed to its owner (routed={routed}).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CrossHR] shadow-safe OnRemove: {ex.Message}"); }
+            }
+        }
+
         // AI rival poach-defense (the long-standing phantom-poach edge, backlog → closed): under a
         // merger flip the partner's regs read RentedByPlayer=true, so the AI could select an
         // injected MIRROR as its poach target — a poach of an employee that only exists as a copy.
