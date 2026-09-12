@@ -270,6 +270,12 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    // SPEED-SHARED: the session clock multiplier rides the heartbeat. Adopt it BEFORE the clock alignment
+                    // below, so the drift maths judges this client at the speed it is about to run at. The host never
+                    // applies its own heartbeat — its slider IS the source.
+                    if (payload.ClockMult >= 0f && !MPServer.IsRunning)
+                        OptionsGuard.SetSessionMultiplier(payload.ClockMult, "heartbeat");
+
                     // Apply speed/pause change first (exact, no lerp)
                     if (payload.Speed >= 0f)
                         TimeSync.ApplyNetwork(payload.Speed);

@@ -10036,6 +10036,10 @@ namespace BigAmbitionsMP
             {
                 Day = day, TimeOfDay = hour, Speed = speed, RainState = MPWeatherSync.CurrentRainState(),
                 RainIntensity = MPWeatherSync.CurrentRainIntensity(),
+                // SPEED-SHARED: the host's slider is the session clock. Send the PREFERENCE (OptionsGuard.HostValue), not the live
+                // MinutesMultiplier field: the pin prefix keeps the two equal in a session, but the preference is the source the
+                // host's own slider writes first (Options.cs:1219) and it cannot be caught mid-call by another setter.
+                ClockMult = OptionsGuard.HostValue(),
                 TuneDrain = MPNeedsTuning.DrainPercent, TuneRest = MPNeedsTuning.RestPercent,
                 TuneMorale = MPNeedsTuning.MoralePercent,
                 TunePowerNap = MPNeedsTuning.PowerNapAllowed ? 1 : 0,   // POWERNAP host gate rides the 3s heartbeat

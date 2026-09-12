@@ -587,7 +587,7 @@ namespace BigAmbitionsMP
             MPRegisterSync.DemoteForeignAssignedStaff("world-ready");      // round-196: interrupted-transfer staff residue
             MergerDissolve.HealIfPending("world-ready");   // DISSOLVE fold d: the heal armed by a first non-member state that landed before the world did
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
-            OptionsGuard.PinClock("world-ready");   // OPTIONS-GUARD: a Game speed set before joining must not outrun the host clock
+            OptionsGuard.PinClock("world-ready");   // SPEED-SHARED: adopt the session clock speed as the world opens (the host's own slider on the host, the value the host sent on a client)
             MPSaveCoordinator.EnsurePortraitFolderForWorld("world-ready");   // DISK-JUNK backstop: the scene-loaded call bails while the session name is still unknown
             GameStatePatcher.SweepLedgerVsRivalBusinesses("world-ready");   // round-50: drop player reservations on AI-rival-run addresses (host-only inside)
             GameStatePatcher.HealHollowAiLayouts("world-ready");   // field 175635: hosting from a client mirror — restore AI-shop layouts from business defaults (host-only inside)
@@ -3404,6 +3404,7 @@ namespace BigAmbitionsMP
                 // Fresh world-clock skip detector + appearance state for this session.
                 ResetWorldClock();
                 TimeSync.ResetClockState();   // drop any leftover MP clock catch-up / ahead-hold so a fresh game (SP or a new MP session) doesn't inherit it
+            OptionsGuard.OnSceneReset();  // SPEED-SHARED: drop the previous session's clock speed; out of a session, hand this machine its own Game speed preference back
                 TrafficSync.Reset();
                 ParkedVehicleSync.Reset();
                 MPRegisterSync.Reset();   // duty posts die with the scene
@@ -7686,6 +7687,7 @@ namespace BigAmbitionsMP
                     MPClient.InMpGame     = false;                  // committed to the offline solo fork → native time allowed
                     MPClient.OfflineFork  = true;                   // H-BIZ-1 r3: this world stays an (offline) MP world for the registration shields
                     try { TrafficSync.HandBackToVanilla("offline fork"); } catch { }   // H-SVC-116: after InMpGame=false so the clamp is already off
+                    try { OptionsGuard.OnSessionLeft("offline fork"); } catch { }   // SPEED-SHARED fold b: the fork keeps no scene reload, so restore the own clock speed here
                     GameStateReader.SetNativePause(false);          // lift the true pause too
                     _startupScreenGO.SetActive(false);
                     _startupScreenWasShown = false;

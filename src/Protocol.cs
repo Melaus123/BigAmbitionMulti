@@ -2297,6 +2297,10 @@ namespace BigAmbitionsMP
         /// -1 means "speed not included in this packet" — client should not apply it.
         /// </summary>
         public float Speed     { get; set; } = -1f;
+        /// <summary>SPEED-SHARED: the host's Game speed slider value — the multiplier the WHOLE session's game
+        /// clock runs at (GameManager.MinutesMultiplier). -1 = absent (an older host), additive exactly like
+        /// RainState below, so an older peer simply ignores the field and an older host leaves clients at 1.00x.</summary>
+        public float ClockMult { get; set; } = -1f;
         /// <summary>Host rain state: -1 absent/unknown (older builds omit the field —
         /// JSON-tolerant), 0 dry, 1 raining.  Clients align their local RainHelper.</summary>
         public int   RainState { get; set; } = -1;

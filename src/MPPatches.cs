@@ -6579,11 +6579,46 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(GameManager), "RunMainGameTick")]
         public static class Patch_GameManager_RunMainGameTick_AheadFreeze
         {
+            private static bool _boatLogged;
+            private static int  _boatWarned;
+
             static void Prefix(ref float deltaTimeWithMultiplier)
             {
                 // Gate on an active MP game: a stale AheadHeld must never freeze the clock/economy
                 // in single-player after a disconnect.
-                if ((MPServer.IsRunning || MPClient.InMpGame) && TimeSync.AheadHeld && !MPRestSync.SkipActive)
+                bool inSession = MPServer.IsRunning || MPClient.InMpGame;
+
+                // SPEED-SHARED (deliberate deviation from native, required by the shared clock): on the casino boat the game runs
+                // the clock at HALF speed on this machine and ignores the multiplier entirely — GameManager.cs:422-424 calls
+                // RunMainGameTick(Time.deltaTime * 0.5f) instead of the normal * MinutesMultiplier branch (:428). A shared clock
+                // cannot slow one machine: before this build a boat visit put that player behind the session and the drift
+                // correction papered over it with catch-up bursts every heartbeat. So in a session the boat branch is rescaled to
+                // the session speed. The equality test is what keeps this surgical: only the boat branch's EXACT product is
+                // rewritten (the same float computation from the same frame), so the mod's own catch-up and skip calls, which pass
+                // other magnitudes, are never rescaled.
+                if (inSession)
+                {
+                    try
+                    {
+                        if (CasinoBoatManager.IsOnCasinoBoat)
+                        {
+                            if (deltaTimeWithMultiplier == UnityEngine.Time.deltaTime * 0.5f)
+                            {
+                                float v = OptionsGuard.EffectiveSessionValue();
+                                deltaTimeWithMultiplier = UnityEngine.Time.deltaTime * v;
+                                if (!_boatLogged)
+                                {
+                                    _boatLogged = true;   // one line per boarding
+                                    Plugin.Logger.LogInfo($"[OptionsGuard] casino boat: the clock keeps the session speed {v:0.00}x here (the game's own boat rate is 0.5x; a shared clock cannot slow one machine).");
+                                }
+                            }
+                        }
+                        else _boatLogged = false;   // stepped off — arm the next boarding's line
+                    }
+                    catch (Exception ex) { try { if (_boatWarned++ < 5) Plugin.Logger.LogWarning($"[OptionsGuard] casino boat clock: {ex.Message}"); } catch { } }
+                }
+
+                if (inSession && TimeSync.AheadHeld && !MPRestSync.SkipActive)
                     deltaTimeWithMultiplier = 0f;
             }
         }
