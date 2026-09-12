@@ -8667,6 +8667,50 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>BUILD POPUPS-1 P1.  The IRS unpaid-tax warning (decompile Helpers/TaxHelper.cs:181-200)
+        /// is built on each member from its OWN shops under the merger veil, so a four-member company gets
+        /// four warnings each naming a quarter of the bill - while the tax PAGE already shows the company
+        /// total (Patch_EconoViewTaxes_CompanyTotal, :8634) and D19-2 lets any member pay the sum.  This
+        /// prefix runs the native body's EXACT sequence - same contact, same key, same three data entries -
+        /// with `amount` = own + partners, and returns false so the native body does not also send.  Off a
+        /// merger, or with no partner bill, it returns true and the native body runs untouched.
+        /// NOT DONE HERE (reported): the tax BILL itself (SendTaxNotice) - its renderer (decompile
+        /// UI.Smartphone.Apps.Contacts/TaxesMessage.cs:180-196) computes the total it shows out of
+        /// subtotalRegisteredBusinesses / subtotalDeductibleExpenses / subtotalRealEstateTaxes / taxPercentage
+        /// and shows each of them on its own labelled line, so no clone can raise the shown total without
+        /// falsifying a labelled line; the company-books payload carries one scalar, not those parts.</summary>
+        [HarmonyPatch(typeof(Helpers.TaxHelper), "SendUnpaidWarning")]
+        public static class Patch_TaxHelper_UnpaidWarning_CompanyTotal
+        {
+            static bool Prefix()
+            {
+                bool sent = false;   // POPUPS-1 review MINOR-4: true once the company warning went out
+                try
+                {
+                    if (!MergerSync.IAmMember) return true;
+                    float partners = CompanyBooks.PartnerTaxCurrentDue();
+                    if (partners <= 0f) return true;                      // nothing to add: leave the game alone
+                    sent = false;
+                    float own;
+                    try { own = Helpers.TaxHelper.GetCurrentTaxesToPay(); } catch { return true; }
+                    var irs = Helpers.TaxHelper.GetIRSAddress();
+                    var contact = Entities.Contact.GetContact("internal_revenue_service", UI.Smartphone.Apps.Contacts.ContactCategoryName.Finance, "government", irs);
+                    if (contact == null) return true;
+                    var data = new System.Collections.Generic.Dictionary<string, string>
+                    {
+                        { "day",     Helpers.TaxHelper.GetCurrentTaxesDueDay().ToString() },
+                        { "address", Streets.AddressHelper.ToFormattedString(irs) },
+                        { "amount",  (own + partners).ToCurrencyFormat() },
+                    };
+                    GameManager.SendTextMessage(contact, "ba:messagetype_contacts_taxes_message_warning", data);
+                    sent = true;   // POPUPS-1 review MINOR-4: from here on native must NOT send a second warning
+                    Plugin.Logger.LogInfo($"[Tax] the unpaid-tax warning names the COMPANY bill: own {own:F2} + partners {partners:F2}.");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] company warning: {ex.Message}"); return !sent; }
+            }
+        }
+
         /// <summary>B9-iv: the game's OWN pay action fired. The member's own bill was paid natively;
         /// ask every partner to settle theirs so the whole company is clear. PayingForCompany guards
         /// the relayed payment from firing a second pay-all.</summary>

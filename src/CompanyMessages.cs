@@ -220,9 +220,16 @@ namespace BigAmbitionsMP
             string addressKey = OwnedContactAddress(contact, out string why, out string personId);
             if (why != null)
             {
-                if (_logged.Add("skip|" + contact.id))
-                    Plugin.Logger.LogInfo($"{Tag} '{contact.id}' is not a company contact of mine ({why}) - its messages stay on this machine.");
-                return null;
+                // BUILD POPUPS-1 P3/P4: two families of company news land on a contact NOBODY owns, so the
+                // ownership gate can never pass them.  They are recognised by their message KEY instead.
+                string byKey = ForeignContactRelayAddress(contact, msg, out string keyWhy);
+                if (byKey == null)
+                {
+                    if (_logged.Add("skip|" + contact.id))
+                        Plugin.Logger.LogInfo($"{Tag} '{contact.id}' is not a company contact of mine ({why}{(keyWhy != null ? "; " + keyWhy : "")}) - its messages stay on this machine.");
+                    return null;
+                }
+                addressKey = byKey; personId = "";
             }
 
             var (day, hourOfDay) = GameStateReader.GetGameTime();
@@ -334,6 +341,75 @@ namespace BigAmbitionsMP
             personId = person.id ?? "";
             try { return person.assignedAddress != null ? GameStateReader.AddressKey(person.assignedAddress) : ""; }
             catch { return ""; }
+        }
+
+        internal const string CampaignFinishedKey = "ba:messagetype_phone_recruitment_agency_campaign_finished_info";
+
+        /// <summary>P3/P4.  Two message families belong to the whole company yet arrive on a contact this
+        /// machine cannot own, so OwnedContactAddress always refuses them.  They are gated on the KEY.
+        ///   (a) RECRUITMENT (P3).  RecruitmentCampaign.FinishCampaign (decompile Entities/RecruitmentCampaign.cs:74-89)
+        ///       addresses the AGENCY - a service business nobody owns.  The campaign's own `businessAddress`
+        ///       (:30) is the shop it hires for, and THAT is the owned address the copy travels under, so the
+        ///       member's contact row and header take the sending member's colour through the same
+        ///       OwnerOfRelayContact route every other relayed contact takes.  The campaign is still in
+        ///       RecruitmentCampaigns while it sends (RecruitmentHelper.RunHourly:38 removes the finished ones
+        ///       only AFTER the FinishCampaign pass at :36), and campaigns are per-machine save state, so
+        ///       exactly ONE machine ever raises it - no dedupe beyond the never-relay-a-relay rule above.
+        ///   (b) RIVAL NEWS (P4).  The three special messages of BigAmbitions.Rivals/RivalDefenseHelper (:100,
+        ///       :151, :191) are drained by RivalTimeline.CompleteEntry (:245-249) onto the RIVAL's contact
+        ///       through this very gateway, carrying isSpecialMessage - which the payload already has a field
+        ///       for (IsSpecial), so the copy arrives special too.  The whole rival timeline is HOST-ONLY in
+        ///       this mod (Patch_RivalsHelper_CheckRivalTimelines_SkipOnClient, MPPatches.cs:1656), so the host
+        ///       is the only machine that can raise them and a member can never raise a duplicate.  It is
+        ///       world news about no one's address, so it travels with an empty address key.
+        /// Returns the address key to travel under, or null with a reason.</summary>
+        private static string ForeignContactRelayAddress(Contact contact, TextMessage msg, out string why)
+        {
+            why = null;
+            string key = msg.messageKey ?? "";
+
+            if (key == CampaignFinishedKey)
+            {
+                var gi = SaveGameManager.Current;
+                var camps = gi?.RecruitmentCampaigns;
+                if (camps == null || camps.Count == 0) { why = "no recruitment campaign here"; return null; }
+                Address agency = null;
+                try { agency = contact.Address; } catch { }
+                if (agency == null) { why = "that agency contact has no address"; return null; }
+                // POPUPS-1 review MAJOR-1: several campaigns can share one agency; the notice belongs to the one
+                // that has just FINISHED (RecruitmentHelper.cs:34-37 calls FinishCampaign inside the ForEach and
+                // only then RemoveAll, so `finished` is still true here). The first campaign at the agency is
+                // taken only when none is marked finished. MINOR-2: fail CLOSED - a shop this machine cannot
+                // resolve is never relayed as mine (TrulyMine(null) is false).
+                Entities.RecruitmentCampaign pick = null;
+                foreach (var c in camps)
+                {
+                    if (c == null || c.agencyAddress == null || c.businessAddress == null) continue;
+                    if (!(c.agencyAddress == agency)) continue;
+                    bool fin = false; try { fin = c.finished; } catch { }
+                    if (fin) { pick = c; break; }
+                    if (pick == null) pick = c;
+                }
+                if (pick == null) { why = "no campaign of mine at that agency"; return null; }
+                {
+                    string shopKey;
+                    try { shopKey = GameStateReader.AddressKey(pick.businessAddress); } catch { why = "that campaign's shop has no key"; return null; }
+                    var reg = GameStatePatcher.FindRegistration(shopKey);
+                    if (!MergerFlip.TrulyMine(reg))
+                    { why = reg == null ? "that campaign's shop is not known here" : "that campaign hires for a partner's shop"; return null; }
+                    return shopKey;
+                }
+            }
+
+            if (key == "ba:messagetype_impacted_products"
+             || key == "ba:messagetype_rivals_businesses_opened"
+             || key == "ba:messagetype_rivals_attempting_to_poach")
+            {
+                if (!MPServer.IsRunning) { why = "rival news is raised on the host only"; return null; }
+                return "";
+            }
+
+            return null;
         }
 
         private static EmployeeInstance FindOwnPerson(GameInstance gi, string name)
@@ -493,7 +569,12 @@ namespace BigAmbitionsMP
             // HO-1c L1: remember WHOSE message made this contact appear, so the contacts app can paint its name
             // label in that member's colour (the patches in SharedShopStaff).  The payload's sending member is
             // OwnerPid - the same field Track() stamps the copy with below.
-            if (!string.IsNullOrEmpty(p.OwnerPid)) _relayOwner[contact] = p.OwnerPid;
+            // POPUPS-1 review MINOR-3: the rival news keys are WORLD news relayed from the host - the rival's
+            // contact is nobody's, so it carries no member colour.
+            bool worldNews = p.MessageKey == "ba:messagetype_impacted_products"
+                          || p.MessageKey == "ba:messagetype_rivals_businesses_opened"
+                          || p.MessageKey == "ba:messagetype_rivals_attempting_to_poach";
+            if (!string.IsNullOrEmpty(p.OwnerPid) && !worldNews) _relayOwner[contact] = p.OwnerPid;
 
             // MINOR-4: contact.SendMessage runs CleanOldMessages (decompile Entities/Contact.cs:148-180),
             // which dequeues at 21 and, when the message it evicts is a NATIVE one carrying a contextAction,

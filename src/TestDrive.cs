@@ -1717,8 +1717,32 @@ namespace BigAmbitionsMP
                     return $"OK bench {bn}" + bsb.ToString();
                 }
 
+                case "grant":
+                {
+                    // BUILD POPUPS-1 P5. `grant <pid> business|housing|vehicle on|off` - the HOST's own grant
+                    // store, so a run can plant a permission BEFORE a merge and then assert that accepting the
+                    // merge removes it.  MPServer.HostSetGrant is the only writer; it is void and refuses a
+                    // co-member silently, so its own guard is mirrored here to give the rig a visible refusal.
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    var ga = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (ga.Length != 3) return "ERR usage: grant <pid> business|housing|vehicle on|off";
+                    string gpid = ga[0], gkindName = ga[1].ToLowerInvariant(), gon = ga[2].ToLowerInvariant();
+                    GrantKind gkind;
+                    if (gkindName == "business") gkind = GrantKind.Business;
+                    else if (gkindName == "housing") gkind = GrantKind.Housing;
+                    else if (gkindName == "vehicle") gkind = GrantKind.Vehicle;
+                    else return "ERR usage: grant <pid> business|housing|vehicle on|off";
+                    if (gon != "on" && gon != "off") return "ERR usage: grant <pid> business|housing|vehicle on|off";
+                    if (MergerSync.MergedRuntime(MPConfig.PlayerId, gpid))
+                        return "ERR '" + gpid + "' is a co-member - the merger overrides the three permissions";
+                    if (!MPServer.IsOnlinePid(gpid)) return "ERR '" + gpid + "' is not an online player here";   // review MINOR-5
+                    MPServer.HostSetGrant(gkind, gpid, gon == "on");
+                    return $"OK grant {gpid} {gkindName} {gon}";
+                }
+
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|grants|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg)";
             }
         }
 

@@ -1754,10 +1754,10 @@ namespace BigAmbitionsMP
                 var a = (arg ?? "").Trim().Split(new[] { ' ' }, 4, StringSplitOptions.RemoveEmptyEntries);
                 if (a.Length < 3) return "ERR planedit <family> <planId> <op> [arg]";
                 string fam = a[0].ToLowerInvariant(), id = a[1], op = a[2], rest = a.Length > 3 ? a[3] : "";
-                foreach (var ownerPid in new List<string>(_byOwner.Keys)) MaterialiseRows(ownerPid);   // r2c: no screen on the rig
-                object row = null;
-                foreach (var kv in _rows)
-                    if (kv.Value != null && _rowInfo.TryGetValue(kv.Value, out var q) && q.Family == fam && q.PlanId == id) { row = kv.Value; break; }
+                // HO-1d MINOR-A (BUILD POPUPS-1 P5): the SAME lookup `planbulk` / `planlist` take, stale
+                // drop included.  Materialising without dropping the stale families first read a row built
+                // from the PREVIOUS feed, so `planedit` could address a row the runner had already replaced.
+                object row = FindTestDriveRow(fam, id);
                 if (row == null && op != "add") return $"ERR no {fam} row '{id}' in the registry here";
                 float num = 0f; int iv = 0; bool bv = false;
                 string str = rest;

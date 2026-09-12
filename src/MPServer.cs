@@ -6056,7 +6056,7 @@ namespace BigAmbitionsMP
 
         /// <summary>HOST, phase 1-A r2: liveness by CONNECTION. StableIdByPlayer is never pruned on a
         /// departure (a rejoiner keeps their handle), so a stable lookup is NOT an online test.</summary>
-        private static bool IsOnlinePid(string pid)
+        internal static bool IsOnlinePid(string pid)   // internal since POPUPS-1b: the `grant` rig lever asks it
             => !string.IsNullOrEmpty(pid) && (pid == MPConfig.PlayerId || PeerForPlayer(pid) != null);
 
         /// <summary>HOST, phase 1-A r4: retire ONE pending entry. Nobody's ROW is cleared here — every
