@@ -110,6 +110,35 @@ namespace BigAmbitionsMP
         /// the slot, REPLACED from the loaded slot on every load, reset on a new world, never carried
         /// over in memory. Empty/absent on manifests written before the field existed.</summary>
         public List<MpTransferEntry> Transfers { get; set; } = new();
+        /// <summary>Merger phase 4c part 2 (D20-7): CARGO in transit between two members as of this save
+        /// moment. The goods have left the source's warehouse natively and no destination has shelved them
+        /// yet, so NOBODY's .hsg holds them - the host's table is the only copy, which is why it rides the
+        /// model exactly like Transfers/Absence and follows the same timeline (written with the slot,
+        /// REPLACED from the loaded slot on every load). Empty/absent on manifests written before the field
+        /// existed, and an empty list is the normal steady state.</summary>
+        public List<MpCargoTransferEntry> CargoTransfers { get; set; } = new();
+        /// <summary>Merger phase 4c part 2 r4 (I3): a FRESH stamp minted on every manifest write, naming the
+        /// exact save the host's live cargo tail (cargo-transit.bamp.json) was written after. That file is
+        /// per lineage BASE - one live tail per playthrough - while a load may select any VARIANT of the
+        /// lineage, so without this a rollback unioned in the tail of the timeline it abandons: those
+        /// records' sources still hold the goods in the loaded world, and they would be delivered twice. The
+        /// load unions the tail ONLY when the file's BaseSaveStamp equals this; otherwise the manifest alone
+        /// is the truth. Empty on manifests written before the field existed (treated as another timeline,
+        /// so the tail is discarded).</summary>
+        public string SaveStamp { get; set; } = "";
+        /// <summary>Merger phase 4c part 2 r2 (review F3): the transfer ids whose acknowledgement or give-back
+        /// THIS machine has already applied - the remainder is back in the warehouse and the books are
+        /// written, so a leg the host re-sends after a restart must land nothing twice. ADDITIVE (a restore is
+        /// a union of file and memory), newest 500 kept. Empty/absent on manifests written before the field
+        /// existed.</summary>
+        public List<MpCargoMarkEntry> CargoClosed { get; set; } = new();
+        /// <summary>Merger phase 4c part 2 r2 (review F6c): the transfer ids THIS machine has already
+        /// DELIVERED, each carrying the acknowledgement it sent (the per-item remainders), so a replayed
+        /// "deliver" after a restart re-acknowledges from the record instead of shelving the goods a second
+        /// time. ADDITIVE, newest 500 kept. NOTE: on a MEMBER machine manifest.bamp.json is a MIRROR of the
+        /// host's file - the store-mirror path writes the host's JSON over it whole - so these two lists ALSO
+        /// ride a per-machine file beside it (see WriteCargoLocal), and the restore unions the two.</summary>
+        public List<MpCargoMarkEntry> CargoApplied { get; set; } = new();
 
         /// <summary>Round-53 — per-SAVE needs/morale authority (user design 2026-07-22): the load
         /// lobby mirrors these, the Customize panel edits them, and the edited values become the
@@ -211,10 +240,79 @@ namespace BigAmbitionsMP
         public string RecordJson    { get; set; } = "";
     }
 
+    /// <summary>Merger phase 4c part 2: ONE routed cargo transfer the host is holding. ItemsJson is the
+    /// per-item list (name, amount, price per unit) serialized, so an older host round-trips it untouched.
+    /// Day/Hour are the GAME clock the record was last stamped at: the host's give-back deadline is one
+    /// game day, and a restart resumes from it.</summary>
+    public class MpCargoTransferEntry
+    {
+        public string TransferId       { get; set; } = "";
+        public string PlanId           { get; set; } = "";
+        public string SourceAddressKey { get; set; } = "";
+        public string DestAddressKey   { get; set; } = "";
+        public string SourcePid        { get; set; } = "";
+        /// <summary>delivering | acked | returning - the stage the `cargo` verb prints. r2 (F2/F3): an
+        /// ACKNOWLEDGED record IS persisted now - the host holds it until the machine that runs the source
+        /// confirms it applied the acknowledgement ("closed"), so an outcome can never be lost with the
+        /// runner it was aimed at.</summary>
+        public string Stage            { get; set; } = "";
+        public int    Day              { get; set; }
+        public int    Hour             { get; set; }
+        public string ItemsJson        { get; set; } = "";
+        /// <summary>r2 (F2): a held record whose LATE acknowledgement must be answered with a withdraw-again
+        /// rather than a return (the delivered units exist twice until the source takes them out).</summary>
+        public bool   WithdrawAgain    { get; set; }
+        /// <summary>r3 (H1): a monotonically increasing stamp, bumped on the host every time this record is
+        /// stored, changes stage or is dropped. It is what makes the world-load union decidable: the same id
+        /// can sit in the manifest AND in cargo-transit.bamp.json, and the HIGHER Seq is the newer one.</summary>
+        public long   Seq              { get; set; }
+    }
+
+    /// <summary>Merger phase 4c part 2 r2: ONE idempotence mark on the routed cargo path. Day is the GAME day
+    /// the mark was made - the prune keeps the newest 500. PayloadJson is used by CargoApplied only: the
+    /// acknowledgement this machine sent, so a replayed "deliver" is answered with the identical figures.</summary>
+    public class MpCargoMarkEntry
+    {
+        public string TransferId  { get; set; } = "";
+        public int    Day         { get; set; }
+        public string PayloadJson { get; set; } = "";
+    }
+
+    /// <summary>Merger phase 4c part 2 r2: the PER-MACHINE cargo idempotence file (cargo-marks.bamp.json),
+    /// written beside the manifest in the same session folder. It exists because manifest.bamp.json on a
+    /// MEMBER is a mirror of the HOST's file: the store-mirror path deserializes the host's manifest JSON and
+    /// writes it whole, so a member's own marks stamped into the manifest would be erased by the next push.
+    /// This file is never sent, never mirrored and never inside a .hsg.</summary>
+    public class MpCargoLocalState
+    {
+        public List<MpCargoMarkEntry> Closed  { get; set; } = new();
+        public List<MpCargoMarkEntry> Applied { get; set; } = new();
+    }
+
+    /// <summary>Merger phase 4c part 2 r3 (H1): the HOST's in-transit cargo table (cargo-transit.bamp.json),
+    /// beside the manifest in the same session folder. While a record is "delivering" the goods are nowhere
+    /// else at all - the source has already withdrawn them and no destination has shelved them - so the
+    /// manifest's copy, which is only written at a save, leaves a window in which an unclean host restart
+    /// destroys them. This file is written the MOMENT a record is stored, changes stage or is dropped.
+    /// Seq is the high-water stamp at the moment of that write: an id stamped at or before it that is NOT
+    /// in Transfers has been closed and dropped, so a staler manifest cannot resurrect it. Host-only; never
+    /// sent, never mirrored, never inside a .hsg.</summary>
+    public class MpCargoTransitState
+    {
+        public long Seq { get; set; }
+        /// <summary>r4 (I3): the SaveStamp of the manifest write this tail continues. Set when a manifest
+        /// write stamps it and carried UNCHANGED by every later write of this file, so a load can tell a
+        /// tail of the save it is loading from a tail of an abandoned timeline.</summary>
+        public string BaseSaveStamp { get; set; } = "";
+        public List<MpCargoTransferEntry> Transfers { get; set; } = new();
+    }
+
     public static class MPSaveManager
     {
         private const string MpRootName  = "_BAMP_MP";
         private const string ManifestName = "manifest.bamp.json";
+        private const string CargoMarksName = "cargo-marks.bamp.json";   // 4c part 2 r2: per-machine, never mirrored
+        private const string CargoTransitName = "cargo-transit.bamp.json";   // 4c part 2 r3 (H1): the host's in-transit table
 
 #if BAMP_DEV
         // Dev separate-machine SIMULATION: when a client instance is launched with
@@ -640,6 +738,85 @@ namespace BigAmbitionsMP
                 return Newtonsoft.Json.JsonConvert.DeserializeObject<MpManifest>(File.ReadAllText(p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ReadManifest '{sessionName}': {ex.Message}"); return null; }
+        }
+
+        // ── Merger 4c part 2 r2: the per-machine cargo idempotence file ───────
+        // Beside the manifest, NOT inside it, because a member's manifest is a wholesale mirror of the
+        // host's. Every machine that runs either end of a cargo transfer writes it the moment a mark is
+        // made and reads it back at every world load.
+
+        public static string CargoLocalPath(string sessionName)
+        {
+            string f = MpSessionFolder(sessionName);
+            return string.IsNullOrEmpty(f) ? "" : Path.Combine(f, CargoMarksName);
+        }
+
+        public static MpCargoLocalState? ReadCargoLocal(string sessionName)
+        {
+            try
+            {
+                string p = CargoLocalPath(sessionName);
+                if (string.IsNullOrEmpty(p) || !File.Exists(p)) return null;
+                return Newtonsoft.Json.JsonConvert.DeserializeObject<MpCargoLocalState>(File.ReadAllText(p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ReadCargoLocal '{sessionName}': {ex.Message}"); return null; }
+        }
+
+        /// <summary>ATOMIC, exactly as WriteManifest does it: a reader sees the old complete file or the new
+        /// complete one, never a torn one.</summary>
+        public static void WriteCargoLocal(string sessionName, MpCargoLocalState s)
+        {
+            if (s == null) return;
+            WriteSidecarAtomic(sessionName, CargoLocalPath(sessionName), s, "WriteCargoLocal");
+        }
+
+        // ── Merger 4c part 2 r3 (H1): the HOST's in-transit cargo table ───────
+        // The record IS the goods while a transfer is "delivering", so it is written the moment it is
+        // stored, changes stage or is dropped - never merely at the next save. Host-only, never mirrored.
+
+        public static string CargoTransitPath(string sessionName)
+        {
+            string f = MpSessionFolder(sessionName);
+            return string.IsNullOrEmpty(f) ? "" : Path.Combine(f, CargoTransitName);
+        }
+
+        public static MpCargoTransitState? ReadCargoTransit(string sessionName)
+        {
+            try
+            {
+                string p = CargoTransitPath(sessionName);
+                if (string.IsNullOrEmpty(p) || !File.Exists(p)) return null;
+                return Newtonsoft.Json.JsonConvert.DeserializeObject<MpCargoTransitState>(File.ReadAllText(p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] ReadCargoTransit '{sessionName}': {ex.Message}"); return null; }
+        }
+
+        /// <summary>ATOMIC, the same temp + File.Replace shape as the marks file beside it.</summary>
+        public static void WriteCargoTransit(string sessionName, MpCargoTransitState s)
+        {
+            if (s == null) return;
+            WriteSidecarAtomic(sessionName, CargoTransitPath(sessionName), s, "WriteCargoTransit");
+        }
+
+        /// <summary>The shared atomic write for the small per-session sidecars beside the manifest: a reader
+        /// sees the old complete file or the new complete one, never a torn one.</summary>
+        private static void WriteSidecarAtomic(string sessionName, string path, object payload, string who)
+        {
+            try
+            {
+                if (payload == null || string.IsNullOrEmpty(path)) return;
+                Directory.CreateDirectory(MpSessionFolder(sessionName));
+                string json = Newtonsoft.Json.JsonConvert.SerializeObject(payload, Newtonsoft.Json.Formatting.Indented);
+                string tmp  = path + ".tmp-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+                try
+                {
+                    File.WriteAllText(tmp, json);
+                    if (File.Exists(path)) File.Replace(tmp, path, null);
+                    else File.Move(tmp, path);
+                }
+                finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] {who} '{sessionName}': {ex.Message}"); }
         }
 
         /// <summary>List all MP save sessions (folders under the MP root that

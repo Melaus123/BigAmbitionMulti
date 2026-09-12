@@ -437,6 +437,12 @@ namespace BigAmbitionsMP
                 // same moment, same clear-then-apply. The candidate pool and its claims are a SESSION
                 // thing and are simply cleared: the members republish theirs within one tick of the load.
                 RestoreTransfersFromManifest(m);
+                RestoreCargoTransfersFromManifest(m);   // 4c part 2: cargo in transit rides the same moment and the same rule
+                // 4c part 2 r2 (F6a): this machine's own cargo statics are per WORLD - _started was never
+                // cleared, so loading back to the same day and hour left every id of that hour "already
+                // started" and the leg silently did nothing. Cleared here, then the PERSISTED idempotence
+                // marks (F3 closed ids / F6c applied ids) are read back for the world being loaded.
+                MPSaveCoordinator.RestoreCargoMarksNow(m);
                 HostResetCandidates();
                 try { PaperworkSync.Reset(); } catch { }   // and this machine's publisher forgets the previous world's day/edge
                 PruneOffers("session state restored");   // r4: the restored store decides which offers still stand
@@ -1505,6 +1511,12 @@ namespace BigAmbitionsMP
             MergerAbsence.HostReset(); MergerAbsence.Reset();   // phase 3-B: the absence marks die with the session too - a new world starts with nobody simulating for anybody
             _mergerPendingByTarget.Clear();   // and no proposals carried in from the previous world (audit 2026-08-26)
             ResetWallet();            // fresh world — no shared wallet (slice 4)
+            // 4c part 2b r4c (re-check r4 MAJOR-1): the host-held in-transit tables die with the session too - a new world
+            // must never resume the previous world's employee moves or cargo (they were cleared only by a manifest LOAD).
+            // The previous world's transit tail stays on disk untouched: it continues THAT world's last save (its stamp).
+            lock (_transfers) _transfers.Clear();
+            lock (_cargo) { _cargo.Clear(); _cargoSeq = 0; }
+            try { CargoTransfer.ResetSession(); } catch { }
             MPSaveCoordinator.ConsumeDevHostLoadAs("new game");   // round-285: a fresh world has no member slots to impersonate
 
             // Re-arm the startup pause hold for this new game.
@@ -2219,6 +2231,17 @@ namespace BigAmbitionsMP
                     var cm = env.GetPayload<CompanyMessagePayload>();
                     if (cm != null && SenderIs(cm.PlayerId, senderPid, MessageType.CompanyMessages))
                         GameStatePatcher.EnqueueOnMainThread(() => HostRouteCompanyMessages(cm, senderPid));
+                    break;
+                }
+                case MessageType.CargoTransfer:
+                {
+                    // Merger phase 4c part 2: one leg of a routed cargo transfer - the need ask or its
+                    // answer, the source's offer of what it withdrew, or the destination's ack. Main
+                    // thread - the host is a member too, so a leg addressed to this machine's own
+                    // buildings is applied here and writes this save's stock.
+                    var ct = env.GetPayload<CargoTransferPayload>();
+                    if (ct != null && SenderIs(ct.PlayerId, senderPid, MessageType.CargoTransfer))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteCargoTransfer(ct, senderPid));
                     break;
                 }
                 case MessageType.SharedPriceEdit:
@@ -7425,6 +7448,7 @@ namespace BigAmbitionsMP
         /// deadline, read from the game's own clock, so a paused world never expires anything.</summary>
         public static void HostTransfersTick()
         {
+            HostCargoTick();   // 4c part 2: the routed cargo table is swept on the same host sweep
             try
             {
                 if (_transfersReturned.Count > 0)
@@ -7547,6 +7571,568 @@ namespace BigAmbitionsMP
                 if (n > 0) Plugin.Logger.LogInfo($"[Transfer] restored {n} in-transit entr{(n == 1 ? "y" : "ies")} from the manifest.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] manifest restore: {ex.Message}"); }
+        }
+
+        // === MERGER PHASE 4c PART 2: THE ROUTED CARGO TRANSFER (host relay + in-transit table) ===
+
+        /// <summary>One cargo transfer the host is holding. The goods are REAL and are nowhere else
+        /// while Stage is "delivering": the source has already withdrawn them from its warehouse and no
+        /// destination has shelved them yet, so this record is the only thing that knows they exist -
+        /// which is why it is stamped into the per-slot manifest beside the absence marks. Items is the
+        /// payload as the source sent it (name, amount, price per unit - exactly what the native
+        /// detached CargoInstance carries), kept whole so a give-back can name every unit.</summary>
+        private sealed class HostCargo
+        {
+            public string TransferId = "", PlanId = "", SourceKey = "", DestKey = "";
+            public string SourcePid = "", RelayedTo = "", Stage = "delivering";
+            public int Day, Hour, LastLogDay = -1, LastLogHour = -1;
+            public int LastOfferLogDay = -1, LastOfferLogHour = -1;   // r4 (I5): the repeat-offer note has its OWN game-hour throttle - it shared the close leg's pair, so either one silenced the other for the rest of the hour
+            public bool Rerouted;                       // C6: a deliver is re-pointed at a NEW runner exactly once
+            public bool Redelivered;                    // r2 (F2): the ONE last deliver attempt before a whole-record give-back
+            public bool WithdrawAgain;                  // r2 (F2): a LATE ack after a give-back - the close leg asks the source to withdraw again
+            public string SentCloseTo = "";             // r2 (F3/F4): who the ack/return went to last - the only pid a "closed" is taken from
+            public long Seq;                            // r3 (H1): the monotonic stamp the world-load union decides by
+            public List<CargoTransferItem> Items = new();
+        }
+
+        private static readonly Dictionary<string, HostCargo> _cargo = new();
+
+        /// <summary>r3 (H1): the table above reached DISK only at a save, and while a record is "delivering"
+        /// it is the only thing in the world that knows the goods exist - the source has already withdrawn
+        /// them. Every mutation therefore stamps the record with the next Seq and writes the whole table to
+        /// cargo-transit.bamp.json at once (a handful of times a game hour, a few KB). Seq is also the
+        /// "newer" test the world-load union needs when the manifest and the file both hold one id.</summary>
+        private static long _cargoSeq;
+
+        private static void CargoChanged(HostCargo? e)
+        {
+            if (e != null) e.Seq = ++_cargoSeq;
+            MPSaveCoordinator.PersistCargoTransitNow();
+        }
+
+        /// <summary>r2 (F4): what the host ANSWERED under one transfer id, remembered from the need leg so
+        /// the offer can be checked against it. Without it the host stored whatever amounts arrived, from
+        /// anybody: SenderIs (:2233) only proves the payload's PlayerId is the real sender, never that the
+        /// sender is the machine the need was answered for.</summary>
+        private sealed class HostCargoNeed
+        {
+            public string SourcePid = "", DestRunner = "";
+            public readonly Dictionary<string, int> Answered = new();
+        }
+
+        private static readonly Dictionary<string, HostCargoNeed> _cargoNeed = new();
+
+        /// <summary>r2 (F2): records the host has already given back WHOLE. An acknowledgement that arrives
+        /// afterwards means the destination shelved units that have since gone home - they exist twice, and
+        /// the source is asked to withdraw them again under a derived id.</summary>
+        private static readonly Dictionary<string, HostCargo> _cargoGaveBack = new();
+
+        /// <summary>Hand one cargo leg to the machine that must run it: this machine applies it itself,
+        /// anyone else gets it on the wire. The host never keeps a leg - the table above is the state.</summary>
+        private static void SendCargoToPid(string pid, CargoTransferPayload p)
+        {
+            if (string.IsNullOrEmpty(pid)) return;
+            p.TargetPid = pid;
+            if (pid == MPConfig.PlayerId) CargoTransfer.Receive(p);
+            else SendToPid(pid, MessageEnvelope.Create(MessageType.CargoTransfer, "host", p));
+        }
+
+        private static CargoTransferPayload CargoLeg(HostCargo e, string action, string reason)
+        {
+            var p = new CargoTransferPayload
+            {
+                PlayerId = "host", Action = action, TransferId = e.TransferId, PlanId = e.PlanId,
+                SourceKey = e.SourceKey, DestKey = e.DestKey, SourcePid = e.SourcePid,
+                Day = e.Day, Hour = e.Hour, Reason = reason ?? "",
+            };
+            foreach (var it in e.Items)
+                if (it != null) p.Items.Add(new CargoTransferItem { ItemName = it.ItemName, Amount = it.Amount, PricePerUnit = it.PricePerUnit, Remainder = it.Remainder });
+            return p;
+        }
+
+        /// <summary>HOST, MAIN THREAD. Every inbound leg of a routed cargo transfer. The host stamps
+        /// SourcePid and TargetPid itself and never takes the sender's word for either; a leg whose two
+        /// ends are not in one merged company is dropped. Stage is the authority: an "offer" for an id
+        /// already held is a resend, and an "ack" for an id already closed is answered by silence.</summary>
+        public static void HostRouteCargoTransfer(CargoTransferPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null) return;
+                string tid = p.TransferId ?? "";
+                if (tid.Length == 0) { Plugin.Logger.LogWarning($"[Cargo] a leg from '{senderPid}' carries no transfer id - dropped."); return; }
+
+                if (p.Action == CargoTransfer.ActNeed && !p.Answer)
+                {
+                    string runner = RouteTargetFor(p.DestKey ?? "");
+                    // r3 (H2): SourceKey was copied unchecked, and every close leg goes to whoever runs it -
+                    // so a member could name a CO-MEMBER's warehouse as the source and have that warehouse
+                    // shelve goods it never sent, remainder included. The sender must run the source, by the
+                    // same runner test the close leg uses.
+                    string srcRunner = RunnerOf(p.SourceKey ?? "");
+                    if (runner.Length == 0 || srcRunner != senderPid || !CargoEndsAreOneCompany(senderPid, p.SourceKey ?? "", p.DestKey ?? ""))
+                    {
+                        var refusal = new CargoTransferPayload
+                        {
+                            PlayerId = "host", Action = CargoTransfer.ActNeed, Answer = true, TransferId = tid,
+                            PlanId = p.PlanId, SourceKey = p.SourceKey, DestKey = p.DestKey,
+                            Day = p.Day, Hour = p.Hour,
+                            Reason = runner.Length == 0 ? "nobody is running that destination"
+                                   : srcRunner != senderPid ? "the sender does not run that source"
+                                   : "the two ends are not in one company",
+                        };
+                        Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: {refusal.Reason} ('{p.DestKey}') - nothing is withdrawn.");
+                        SendCargoToPid(senderPid, refusal);
+                        return;
+                    }
+                    // r2 (F4): the ask BINDS this id to one source and one destination runner.
+                    if (_cargoNeed.Count > 2000) _cargoNeed.Clear();
+                    _cargoNeed[tid] = new HostCargoNeed { SourcePid = senderPid, DestRunner = runner };
+                    p.PlayerId = "host"; p.SourcePid = senderPid;
+                    SendCargoToPid(runner, p);
+                    return;
+                }
+
+                if (p.Action == CargoTransfer.ActNeed && p.Answer)
+                {
+                    // r2 (F4): the answer may come ONLY from the runner the host asked, and goes ONLY to the
+                    // source that asked - never to whatever TargetPid the payload happens to name.
+                    _cargoNeed.TryGetValue(tid, out var nd);
+                    if (nd == null)
+                    { Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: a need ANSWER from '{senderPid}' for an id the host never asked about - dropped."); return; }
+                    if (senderPid != nd.DestRunner)
+                    { Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: the need answer came from '{senderPid}', not from '{nd.DestRunner}' who was asked - dropped."); return; }
+                    string to = nd.SourcePid;
+                    if (to.Length == 0 || (to != MPConfig.PlayerId && !IsOnlinePid(to)))
+                    { Plugin.Logger.LogWarning($"[Cargo] transfer {tid}: the need answer is for '{to}', who is not here - dropped (nothing was withdrawn)."); return; }
+                    // r3 (H3): the cap is per ITEM, SUMMED over the rows. An answer carrying one item twice
+                    // used to overwrite, and each offered row was then tested alone against that figure.
+                    nd.Answered.Clear();
+                    foreach (var it in p.Items ?? new List<CargoTransferItem>())
+                        if (it != null && !string.IsNullOrEmpty(it.ItemName) && it.Amount > 0)
+                            nd.Answered[it.ItemName] = (nd.Answered.TryGetValue(it.ItemName, out var had) ? had : 0) + it.Amount;
+                    p.PlayerId = "host"; p.TargetPid = to;
+                    SendCargoToPid(to, p);
+                    return;
+                }
+
+                if (p.Action == CargoTransfer.ActOffer)
+                {
+                    if (_cargo.TryGetValue(tid, out var have) && have != null)
+                    {
+                        if (senderPid != have.SourcePid)
+                        { Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: a repeat offer from '{senderPid}', not from the source '{have.SourcePid}' - dropped."); return; }
+                        // r3 (H4): only a record still DELIVERING may be re-relayed. A stale offer for one
+                        // already acked or returning re-entered the delivering path, and with nobody on the
+                        // destination that hands the WHOLE record back although its share is already shelved.
+                        // Those two stages hold their own close leg and re-send it on the sweep by themselves.
+                        if (have.Stage == "delivering") { RelayCargoDeliver(have); return; }   // a resend of the offer: re-relay, never re-store
+                        if (have.LastOfferLogDay != GameDayNow() || have.LastOfferLogHour != GameHourNow())
+                        {
+                            have.LastOfferLogDay = GameDayNow(); have.LastOfferLogHour = GameHourNow();   // r4 (I5): its own pair
+                            Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: a repeat offer for a record already '{have.Stage}' - ignored; the outcome is already on its way home.");
+                        }
+                        return;
+                    }
+                    // r2 (F4): only the machine the need was answered FOR may offer, and only amounts the
+                    // host actually answered. A refusal here must still be a RETURN - the goods are already
+                    // out of the warehouse, so dropping the leg would destroy them.
+                    _cargoNeed.TryGetValue(tid, out var need);
+                    string bad = "";
+                    if (need == null) bad = "the host answered no need under that id";
+                    else if (senderPid != need.SourcePid) bad = $"the offer came from '{senderPid}', not from the source '{need.SourcePid}' the need was answered for";
+                    else
+                    {
+                        // r3 (H3): SUM the offered rows per item before the test - two rows of one item, each
+                        // inside the answered figure, together carried twice the need.
+                        var offered = new Dictionary<string, int>();
+                        foreach (var it in p.Items ?? new List<CargoTransferItem>())
+                        {
+                            if (it == null || string.IsNullOrEmpty(it.ItemName) || it.Amount <= 0) continue;
+                            offered[it.ItemName] = (offered.TryGetValue(it.ItemName, out var had) ? had : 0) + it.Amount;
+                        }
+                        foreach (var kv in offered)
+                        {
+                            int answered = need.Answered.TryGetValue(kv.Key, out var a) ? a : 0;
+                            if (kv.Value > answered) { bad = $"'{kv.Key}' x{kv.Value} was offered but only {answered} was answered"; break; }
+                        }
+                    }
+                    var e = new HostCargo
+                    {
+                        TransferId = tid, PlanId = p.PlanId ?? "", SourceKey = p.SourceKey ?? "",
+                        DestKey = p.DestKey ?? "", SourcePid = senderPid, Stage = "delivering",
+                        Day = GameDayNow(), Hour = GameHourNow(),
+                    };
+                    // r4 (I2): the host AGGREGATES the offered rows per item name - ONE record per name, in
+                    // the order the names first appear, priced by the first row of that name. The source
+                    // aggregates already (CargoTransfer.cs), but a modified client need not, and two records
+                    // of one name both matched the SAME row of the acknowledgement below: one remainder was
+                    // applied to both, creating or destroying units. A row with no name at all is dropped -
+                    // nothing can be acknowledged, returned or booked under an empty name.
+                    var byName = new Dictionary<string, CargoTransferItem>();
+                    int noName = 0;
+                    foreach (var it in p.Items ?? new List<CargoTransferItem>())
+                    {
+                        if (it == null || it.Amount <= 0) continue;
+                        if (string.IsNullOrEmpty(it.ItemName)) { noName++; continue; }
+                        if (byName.TryGetValue(it.ItemName, out var row) && row != null) { row.Amount += it.Amount; continue; }
+                        row = new CargoTransferItem { ItemName = it.ItemName, Amount = it.Amount, PricePerUnit = it.PricePerUnit };
+                        byName[it.ItemName] = row; e.Items.Add(row);
+                    }
+                    if (noName > 0) Plugin.Logger.LogWarning($"[Cargo] transfer {tid}: {noName} offered row(s) from '{senderPid}' carry no item name - dropped.");
+                    if (e.Items.Count == 0) { Plugin.Logger.LogWarning($"[Cargo] transfer {tid}: the offer from '{senderPid}' carries nothing - dropped."); return; }
+                    if (bad.Length > 0)
+                    {
+                        Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: {bad} (sender '{senderPid}') - the goods go straight back.");
+                        _cargo[tid] = e; CargoChanged(e);                      // held until the source confirms "closed"
+                        RelayCargoReturn(e, "the offer did not match what the host answered", false);
+                        return;
+                    }
+                    _cargo[tid] = e; CargoChanged(e);                          // r3 (H1): on disk before the relay, not at the next save
+                    Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: {e.Items.Count} item(s) in transit from '{e.SourceKey}' to '{e.DestKey}' - held by the host.");
+                    RelayCargoDeliver(e);
+                    return;
+                }
+
+                if (p.Action == CargoTransfer.ActDeliver)
+                {
+                    // r2 (F4): a deliver is host-originated. Accepting one from a member would let anybody
+                    // conjure goods onto any destination's shelves.
+                    Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: 'deliver' is host-originated and never arrives from a member (sender '{senderPid}') - dropped.");
+                    return;
+                }
+
+                if (p.Action == CargoTransfer.ActAck)
+                {
+                    HostCargo? e = null;
+                    if (!_cargo.TryGetValue(tid, out e) || e == null) _cargoGaveBack.TryGetValue(tid, out e);
+                    if (e == null)
+                    { Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: an acknowledgement arrived for a record the host no longer holds - dropped."); return; }
+                    if (senderPid != e.RelayedTo)
+                    { Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: the acknowledgement came from '{senderPid}', not from '{e.RelayedTo}' the deliver was relayed to - dropped."); return; }
+                    // r4 (I2): the acknowledgement is matched by UNIQUE item name - the FIRST row of a name
+                    // wins, exactly as the inner scan here used to - against a record table that now holds
+                    // one row per name, so no remainder can land on two records of the same item.
+                    var ackBy = new Dictionary<string, int>();
+                    foreach (var ai in p.Items ?? new List<CargoTransferItem>())
+                        if (ai != null && !string.IsNullOrEmpty(ai.ItemName) && !ackBy.ContainsKey(ai.ItemName)) ackBy[ai.ItemName] = ai.Remainder;
+                    int shelved = 0;
+                    for (int i = 0; i < e.Items.Count; i++)
+                    {
+                        var src = e.Items[i]; if (src == null) continue;
+                        // r4b: the remainder is CLAMPED to [0, Amount] here as well as on the source's close (CargoTransfer.cs
+                        // ~:541-543) - a forged acknowledgement can neither owe negative units nor claim more back than left.
+                        if (!string.IsNullOrEmpty(src.ItemName) && ackBy.TryGetValue(src.ItemName, out var rem)) src.Remainder = Math.Max(0, Math.Min(rem, src.Amount));
+                        int got = src.Amount - src.Remainder; if (got > 0) shelved += got;
+                    }
+                    if (e.Stage == "returning" || e.WithdrawAgain)
+                    {
+                        // r2 (F2) THE LATE ACKNOWLEDGEMENT: the whole record has already gone home, so what
+                        // the destination shelved now exists twice. The undo rides a DERIVED id, because the
+                        // give-back's own id is (or is about to be) marked closed on the source.
+                        if (shelved <= 0)
+                        { Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: a late acknowledgement after a give-back, but the destination shelved nothing - nothing to undo."); return; }
+                        string againId = tid + "|again";
+                        if (_cargo.ContainsKey(againId))
+                        { Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: a late acknowledgement after a give-back - the withdraw-again is already in flight."); return; }
+                        Plugin.Logger.LogWarning($"[Cargo] transfer {tid}: LATE acknowledgement after a give-back - {shelved} unit(s) may now exist twice; asking the source to withdraw them again.");
+                        var again = new HostCargo
+                        {
+                            TransferId = againId, PlanId = e.PlanId, SourceKey = e.SourceKey, DestKey = e.DestKey,
+                            SourcePid = e.SourcePid, RelayedTo = e.RelayedTo, Stage = "acked", WithdrawAgain = true,
+                            Day = GameDayNow(), Hour = GameHourNow(),
+                        };
+                        foreach (var it in e.Items)
+                            if (it != null) again.Items.Add(new CargoTransferItem { ItemName = it.ItemName, Amount = it.Amount, PricePerUnit = it.PricePerUnit, Remainder = it.Remainder });
+                        _cargoGaveBack.Remove(tid);
+                        _cargo[againId] = again; CargoChanged(again);
+                        SendCargoCloseLeg(again, CargoTransfer.ActReturn, "a late acknowledgement after a give-back", true);
+                        return;
+                    }
+                    // r2 (F2/F3): an ACKED record is HELD and persisted - the host keeps offering the
+                    // acknowledgement to whoever runs the source until that machine confirms "closed".
+                    e.Stage = "acked"; e.WithdrawAgain = false; e.SentCloseTo = "";
+                    CargoChanged(e);                                           // r3 (H1): the shelved figures and the stage, on disk now
+                    SendCargoCloseLeg(e, CargoTransfer.ActAck, p.Reason ?? "", true);
+                    return;
+                }
+
+                if (p.Action == CargoTransfer.ActClosed)
+                {
+                    if (!_cargo.TryGetValue(tid, out var e) || e == null)
+                    { Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: a 'closed' arrived for a record the host no longer holds - nothing to drop."); return; }
+                    if (senderPid != e.SentCloseTo)
+                    { Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: 'closed' came from '{senderPid}', not from '{e.SentCloseTo}' the leg was sent to - dropped."); return; }
+                    _cargo.Remove(tid); _cargoNeed.Remove(tid); CargoChanged(null);
+                    // _cargoGaveBack deliberately KEEPS a whole give-back: that is exactly the record a late
+                    // acknowledgement has to be matched against.
+                    Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: confirmed closed by '{senderPid}' - the host's record is dropped.");
+                    return;
+                }
+
+                Plugin.Logger.LogWarning($"[Cargo] transfer {tid}: unknown leg '{p.Action}' from '{senderPid}' - dropped.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] HostRouteCargoTransfer: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>Both ends of a cargo leg must belong to ONE merged company: the sender, whoever owns
+        /// the destination, and (r3 H2) whoever owns the SOURCE - an unchecked source let a member name a
+        /// co-member's warehouse as the origin. Same discipline as the phone relay's owner check.</summary>
+        private static bool CargoEndsAreOneCompany(string senderPid, string sourceKey, string destKey)
+        {
+            try
+            {
+                string owner = SharedShopOwnerPid(destKey);
+                if (owner.Length == 0) return false;
+                if (!(owner == senderPid || MergerSync.MergedRuntime(owner, senderPid))) return false;
+                string src = SharedShopOwnerPid(sourceKey);
+                if (src.Length == 0) return false;
+                return src == owner || MergerSync.MergedRuntime(src, owner);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>HOST: hand the in-transit goods to whoever runs the destination NOW. With nobody
+        /// there the whole record goes home to the source - nothing is ever left in the gap.</summary>
+        private static void RelayCargoDeliver(HostCargo e)
+        {
+            string dst = RunnerOf(e.DestKey);
+            if (dst.Length == 0)
+            { Plugin.Logger.LogWarning($"[Cargo] transfer {e.TransferId}: refused: nobody runs '{e.DestKey}' any more - the goods go back to the source."); RelayCargoReturn(e, "nobody runs the destination", false); return; }
+            e.Stage = "delivering"; e.RelayedTo = dst;
+            e.Day = GameDayNow(); e.Hour = GameHourNow();
+            CargoChanged(e);                                     // r3 (H1): the stage and the clock, on disk before the leg goes out
+            SendCargoToPid(dst, CargoLeg(e, CargoTransfer.ActDeliver, ""));
+            Plugin.Logger.LogInfo($"[Cargo] transfer {e.TransferId}: deliver relayed to '{dst}' for '{e.DestKey}'.");
+        }
+
+        /// <summary>HOST (r2 F2/F3): hand the CLOSE leg - an acknowledgement or a give-back - to whoever
+        /// RUNS the source now. The record is NOT dropped here: it is dropped only when that machine answers
+        /// "closed", so a leg aimed at a machine that goes away is simply offered again next sweep. The leg
+        /// is self-contained, so a stand-in runner that never had the source's row can still apply it.
+        /// remaindersOnly=false is the whole-record give-back and is used ONLY for a record that never
+        /// acknowledged - after an ack, every unit the destination shelved stays shelved.</summary>
+        private static void SendCargoCloseLeg(HostCargo e, string action, string why, bool remaindersOnly)
+        {
+            string back = e.SourceKey.Length > 0 ? RunnerOf(e.SourceKey) : "";
+            if (back.Length == 0 && (e.SourcePid == MPConfig.PlayerId || IsOnlinePid(e.SourcePid))) back = e.SourcePid;
+            if (back.Length == 0)
+            {
+                if (e.LastLogDay != GameDayNow() || e.LastLogHour != GameHourNow())
+                {
+                    e.LastLogDay = GameDayNow(); e.LastLogHour = GameHourNow();
+                    Plugin.Logger.LogWarning($"[Cargo] transfer {e.TransferId}: refused: nobody is running '{e.SourceKey}' - the host keeps the goods until one of them is back.");
+                }
+                return;
+            }
+            var leg = CargoLeg(e, action, why ?? "");
+            leg.RemaindersOnly = remaindersOnly;
+            leg.WithdrawAgain  = e.WithdrawAgain;
+            bool resend = e.SentCloseTo == back;
+            e.SentCloseTo = back;
+            SendCargoToPid(back, leg);
+            if (resend)
+            {
+                if (e.LastLogDay != GameDayNow() || e.LastLogHour != GameHourNow())
+                {
+                    e.LastLogDay = GameDayNow(); e.LastLogHour = GameHourNow();
+                    Plugin.Logger.LogInfo($"[Cargo] transfer {e.TransferId}: the acknowledgement was re-sent to '{back}' - still waiting for it to be confirmed closed.");
+                }
+                return;
+            }
+            Plugin.Logger.LogInfo($"[Cargo] transfer {e.TransferId}: {(remaindersOnly ? "acknowledgement" : "give-back")} handed to '{back}'{(string.IsNullOrEmpty(why) ? "" : " (" + why + ")")} - waiting for 'closed'.");
+        }
+
+        /// <summary>HOST: give a record back to the source. One that NEVER acknowledged goes back WHOLE and
+        /// is remembered, in case its acknowledgement is merely late (r2 F2); one that DID acknowledge
+        /// carries the remainders only, so nothing the destination shelved comes home as well.</summary>
+        private static void RelayCargoReturn(HostCargo e, string why, bool remaindersOnly)
+        {
+            e.Stage = remaindersOnly ? "acked" : "returning";
+            if (!remaindersOnly)
+            {
+                if (_cargoGaveBack.Count > 2000) _cargoGaveBack.Clear();
+                _cargoGaveBack[e.TransferId] = e;
+            }
+            CargoChanged(e);                                     // r3 (H1)
+            SendCargoCloseLeg(e, CargoTransfer.ActReturn, why, remaindersOnly);
+        }
+
+        /// <summary>HOST, MAIN THREAD (C6). Events drive the happy path; this catches what never
+        /// answered. A destination whose RUNNER changed (an absence hand-over) gets the deliver once
+        /// more; a record with no acknowledgement after one GAME day goes home. The clock is the game's
+        /// own, so a paused world expires nothing.</summary>
+        private static void HostCargoTick()
+        {
+            try
+            {
+                if (!_running || _cargo.Count == 0) return;
+                foreach (var e in new List<HostCargo>(_cargo.Values))
+                {
+                    if (e == null) continue;
+                    // r2 (F3): a close leg that has not been CONFIRMED is offered again every sweep, to
+                    // whoever runs the source NOW - which is how an outcome survives its runner going away.
+                    if (e.Stage == "acked")
+                    { SendCargoCloseLeg(e, e.WithdrawAgain ? CargoTransfer.ActReturn : CargoTransfer.ActAck, e.WithdrawAgain ? "a late acknowledgement after a give-back" : "", true); continue; }
+                    if (e.Stage == "returning")
+                    { SendCargoCloseLeg(e, CargoTransfer.ActReturn, "nobody could take the goods", false); continue; }
+                    string dst = RunnerOf(e.DestKey);
+                    if (dst.Length > 0 && dst != e.RelayedTo && !e.Rerouted)
+                    { e.Rerouted = true; RelayCargoDeliver(e); continue; }   // a restored record, or the runner changed - once
+                    if (GameDayNow() - e.Day < 1) continue;
+                    // r2 (F2): ONE last deliver to any reachable runner before the whole record goes home -
+                    // a give-back is the only leg that cannot be undone if the delivery did in fact happen.
+                    // The clock is NOT restamped, so the give-back follows on the very next sweep.
+                    if (dst.Length > 0 && !e.Redelivered)
+                    {
+                        e.Redelivered = true; e.RelayedTo = dst;
+                        SendCargoToPid(dst, CargoLeg(e, CargoTransfer.ActDeliver, ""));
+                        Plugin.Logger.LogWarning($"[Cargo] transfer {e.TransferId}: no acknowledgement within a game day - deliver replayed to '{dst}' once before giving the record back.");
+                        continue;
+                    }
+                    RelayCargoReturn(e, "no acknowledgement within a game day", false);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] host tick: {ex.Message}"); }
+        }
+
+        /// <summary>TestDrive `cargo`: one line per in-transit cargo record the host holds.</summary>
+        public static List<string> CargoReadout()
+        {
+            var outp = new List<string>();
+            try
+            {
+                foreach (var e in _cargo.Values)
+                    if (e != null) outp.Add($"{e.TransferId}:{e.SourceKey}->{e.DestKey} items={e.Items.Count} stage={e.Stage}");
+            }
+            catch { }
+            return outp;
+        }
+
+        /// <summary>Merger phase 4c part 2: the in-transit CARGO table for the manifest MODEL, beside
+        /// the employee transfers it rides with. The items travel as text (the list serialized).</summary>
+        public static List<MpCargoTransferEntry> SnapshotCargoTransfers()
+        {
+            var list = new List<MpCargoTransferEntry>();
+            try
+            {
+                foreach (var e in _cargo.Values)
+                {
+                    if (e == null || string.IsNullOrEmpty(e.TransferId)) continue;
+                    string json = "";
+                    try { json = Newtonsoft.Json.JsonConvert.SerializeObject(e.Items); } catch { }
+                    list.Add(new MpCargoTransferEntry
+                    {
+                        TransferId = e.TransferId, PlanId = e.PlanId,
+                        SourceAddressKey = e.SourceKey, DestAddressKey = e.DestKey,
+                        SourcePid = e.SourcePid, Stage = e.Stage, Day = e.Day, Hour = e.Hour,
+                        ItemsJson = json, WithdrawAgain = e.WithdrawAgain, Seq = e.Seq,
+                    });
+                }
+                list.Sort((x, y) => string.CompareOrdinal(x.TransferId, y.TransferId));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] manifest snapshot: {ex.Message}"); }
+            return list;
+        }
+
+        /// <summary>r3 (H1): the same table for its OWN file (cargo-transit.bamp.json), stamped with the
+        /// host's high-water Seq at the moment of the write - which is what lets the world-load union tell
+        /// "this id was dropped after that manifest was written" from "this id is simply not in the file".
+        /// r4 (I3): the file's BaseSaveStamp - which SAVE this tail continues - is the coordinator's to fill
+        /// in, because it is carried unchanged across every write between two manifest writes.</summary>
+        public static MpCargoTransitState SnapshotCargoTransit()
+            => new MpCargoTransitState { Seq = _cargoSeq, Transfers = SnapshotCargoTransfers() };
+
+        /// <summary>Host: REPLACE the in-transit cargo table from the manifest being restored, UNIONED with
+        /// this host's own transit file WHEN that file continues this very save (r4 I3: the file is per
+        /// lineage BASE and the manifest is one VARIANT of the lineage, so the stamps must agree; a tail of
+        /// an abandoned timeline is discarded and the manifest alone is the truth) - by TransferId, the
+        /// higher Seq winning -
+        /// clear-then-apply beside the employee transfers, the same timeline rule. An entry carrying no
+        /// items is dropped (nothing was ever withdrawn under that id). Every restored entry resumes on
+        /// the next tick: re-relayed to whoever runs the destination now, else returned to the source -
+        /// which is why a member's own save never has to carry a unit that is in the air.</summary>
+        public static void RestoreCargoTransfersFromManifest(MpManifest m)
+        {
+            try
+            {
+                _cargo.Clear(); _cargoSeq = 0;
+                string mine = m?.SaveStamp ?? "";
+                // r3 (H1) THE UNION. The manifest is written at a save; the transit file at every change.
+                // One id can be in both, and the HIGHER Seq is the newer. An id the file has already seen
+                // stamped (Seq <= the file's high-water) but does NOT list was closed and dropped after that
+                // manifest was written, so it is not resurrected. Entries with no stamp at all (a pre-r3
+                // manifest) are kept: the ids are idempotent on both ends either way.
+                var best = new Dictionary<string, MpCargoTransferEntry>();
+                if (m?.CargoTransfers != null)
+                    foreach (var t in m.CargoTransfers)
+                        if (t != null && !string.IsNullOrEmpty(t.TransferId)) best[t.TransferId] = t;
+                var transit = MPSaveCoordinator.ReadCargoTransitNow();
+                bool hadFile = transit != null;
+                // r4 (I1): the high-water is the COUNTER, not a property of the records that survived.
+                // Rebuilding it from the restored entries alone threw it away, and the rewrite at the end
+                // then published {Seq:0}: every tombstone the file held stopped being one, so a crash before
+                // the next save let the NEXT load resurrect ids that had already been delivered and closed.
+                if (transit != null && transit.Seq > _cargoSeq) _cargoSeq = transit.Seq;
+                // r4 (I3) WHICH SAVE DOES THE TAIL CONTINUE? The file is per lineage BASE - one live tail
+                // per playthrough - while the manifest being loaded is one VARIANT of that lineage. A tail
+                // written after a DIFFERENT save belongs to a timeline this load abandons: in the world now
+                // being loaded those records' sources still hold the goods, so unioning it delivers them a
+                // second time (and its high-water would drop this variant's own entries as well). Only a
+                // tail stamped with THIS manifest's SaveStamp continues this save; a manifest with no stamp
+                // at all (written before the field existed) counts as another timeline.
+                if (transit != null && (mine.Length == 0 || transit.BaseSaveStamp != mine))
+                {
+                    Plugin.Logger.LogWarning($"[Cargo] the live transit tail continues a different save ('{transit.BaseSaveStamp}' vs '{mine}') - discarded; the loaded manifest is the truth.");
+                    transit = null;
+                }
+                int fromFile = 0;
+                if (transit != null)
+                {
+                    var live = new HashSet<string>();
+                    foreach (var t in transit.Transfers ?? new List<MpCargoTransferEntry>())
+                    {
+                        if (t == null || string.IsNullOrEmpty(t.TransferId)) continue;
+                        live.Add(t.TransferId);
+                        if (best.TryGetValue(t.TransferId, out var cur) && cur != null && cur.Seq >= t.Seq) continue;
+                        best[t.TransferId] = t; fromFile++;
+                    }
+                    foreach (var id in new List<string>(best.Keys))
+                        if (!live.Contains(id) && best[id].Seq > 0 && best[id].Seq <= transit.Seq) best.Remove(id);
+                }
+                int n = 0;
+                foreach (var t in best.Values)
+                {
+                    if (string.IsNullOrEmpty(t?.TransferId)) continue;
+                    List<CargoTransferItem>? items = null;
+                    try { if (!string.IsNullOrEmpty(t.ItemsJson)) items = Newtonsoft.Json.JsonConvert.DeserializeObject<List<CargoTransferItem>>(t.ItemsJson); } catch { }
+                    if (items == null || items.Count == 0) continue;
+                    _cargo[t.TransferId] = new HostCargo
+                    {
+                        TransferId = t.TransferId, PlanId = t.PlanId ?? "",
+                        SourceKey = t.SourceAddressKey ?? "", DestKey = t.DestAddressKey ?? "",
+                        SourcePid = t.SourcePid ?? "",
+                        // r2 (F2/F3): "acked" is a REAL persisted stage now - the destination shelved the
+                        // goods and the host is still offering the acknowledgement to the source's runner.
+                        Stage = (t.Stage == "returning" || t.Stage == "acked") ? t.Stage : "delivering",
+                        WithdrawAgain = t.WithdrawAgain,
+                        Day = t.Day, Hour = t.Hour, Items = items, RelayedTo = "", SentCloseTo = "",
+                        Seq = t.Seq,
+                    };
+                    if (t.Seq > _cargoSeq) _cargoSeq = t.Seq;
+                    n++;
+                }
+                // Every live record leaves the seam with a stamp of its own, so the tombstone test above can
+                // be trusted at the NEXT load, and the file is rewritten to match what was actually restored.
+                foreach (var e in _cargo.Values) if (e != null && e.Seq == 0) e.Seq = ++_cargoSeq;
+                // r4 (I3): from here the tail continues THIS save - whether the file was unioned or
+                // discarded, it is rewritten from what was actually restored, under this manifest's stamp
+                // and carrying the high-water above (r4 I1), and every later write keeps that stamp.
+                MPSaveCoordinator.AdoptCargoTransitStamp(mine);
+                if (n > 0 || hadFile) MPSaveCoordinator.PersistCargoTransitNow();
+                if (n > 0) Plugin.Logger.LogInfo($"[Cargo] restored {n} in-transit cargo entr{(n == 1 ? "y" : "ies")} - the manifest and the transit file ({fromFile} newer in the file).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] manifest restore: {ex.Message}"); }
         }
 
         // === MERGER PHASE 4b (PEOPLE) P1 r2 (T2/T3): THE HIRE GATE AND THE OFFLINE ORIGIN ===
@@ -7909,8 +8495,10 @@ namespace BigAmbitionsMP
                     bool seen;
                     lock (_planEditSeen)
                     {
+                        // The cap is applied BEFORE the add: clearing afterwards discarded the key that had
+                        // just been recorded, so an immediate resend of that very edit would apply twice.
+                        if (_planEditSeen.Count > 4000) _planEditSeen.Clear();   // a session-long cap, not a leak
                         seen = !_planEditSeen.Add(key);
-                        if (!seen && _planEditSeen.Count > 4000) _planEditSeen.Clear();   // a session-long cap, not a leak
                     }
                     if (seen)
                     { Plugin.Logger.LogInfo($"[Merger] plan edit {p.Family} {p.PlanOp} ({p.PlanId}, seq {p.EditSeq}) from '{senderPid}' already routed - dropped."); return; }

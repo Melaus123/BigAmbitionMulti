@@ -695,6 +695,15 @@ namespace BigAmbitionsMP
                     if (cm != null) GameStatePatcher.EnqueueOnMainThread(() => CompanyMessages.Receive(cm));
                     break;
                 }
+                case MessageType.CargoTransfer:
+                {
+                    // Merger phase 4c part 2: one leg of a routed cargo transfer the host has handed to this
+                    // machine - a need ask or its answer, a deliver, an ack, or a give-back. Main thread -
+                    // the deliver and return legs move real stock through the game's own methods.
+                    var ct = env.GetPayload<CargoTransferPayload>();
+                    if (ct != null) GameStatePatcher.EnqueueOnMainThread(() => CargoTransfer.Receive(ct));
+                    break;
+                }
                 case MessageType.SharedPriceEdit:
                 {
                     // Host-relayed: this machine OWNS the shop — write the price into both native lists.

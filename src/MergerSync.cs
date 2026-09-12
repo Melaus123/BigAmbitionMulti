@@ -195,8 +195,11 @@ namespace BigAmbitionsMP
         public static IReadOnlyList<string> MyMemberNamesOrdered
             => _groupByPid.TryGetValue(MPConfig.PlayerId, out var g) && _groupInfo.TryGetValue(g, out var gi) && gi != null
                ? gi.MemberNamesOrdered : (IReadOnlyList<string>)new List<string>();
-        /// <summary>Phase 1-B: MY company's ONLINE member pids in JOIN ORDER (founder first) - the
-        /// rivals-list fold reads each member's published stats through these.</summary>
+        /// <summary>Phase 1-B: MY company's member pids in JOIN ORDER (founder first) - every member whose
+        /// PlayerId is KNOWN this session, NOT only the online ones: it returns MemberPidsOrdered, and a
+        /// member who connected and left stays listed (Protocol.cs:732-734). Callers that need presence must
+        /// test it themselves - the keys-hub company row (MPCanvasUI.cs ~:3008) draws such a member with a
+        /// car count of 0. The rivals-list fold reads each member's published stats through these.</summary>
         public static IReadOnlyList<string> MyMemberPidsOrdered
             => _groupByPid.TryGetValue(MPConfig.PlayerId, out var g) && _groupInfo.TryGetValue(g, out var gi) && gi != null
                ? gi.MemberPidsOrdered : (IReadOnlyList<string>)new List<string>();

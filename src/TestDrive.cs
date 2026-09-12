@@ -1413,6 +1413,152 @@ namespace BigAmbitionsMP
                          + $" wage={gold.ToString("F2", gci)}->{gnew.ToString("F2", gci)}";
                 }
 
+                case "cargo":
+                {
+                    // 4c part 2: the HOST's in-transit CARGO table - goods that have left a member's
+                    // warehouse and are not yet on another member's shelves. A member has nothing to show
+                    // here by design (the host is the only holder). NOT `transfers`, which build A already
+                    // uses for the host-held EMPLOYEE moves.
+                    if (!MPServer.IsRunning) return "ERR cargo is a host verb - the host holds the in-transit cargo table";
+                    var crows = MPServer.CargoReadout();
+                    var cgsb = new StringBuilder();
+                    foreach (var crow in crows)
+                    {
+                        Plugin.Logger.LogWarning($"[TestDrive] cargo: {crow}");
+                        if (cgsb.Length > 0) cgsb.Append(" ; ");
+                        cgsb.Append(crow);
+                    }
+                    return $"OK cargo pending={crows.Count}{(crows.Count > 0 ? " [" + cgsb + "]" : "")}";
+                }
+
+                case "legs":
+                {
+                    // 4c part 2b L1: READ-ONLY.  THIS machine's OWN logistics manager plans - the legs the
+                    // cargo transfer can be raised on.  Wave 4's TAGGED DISPLAY COPIES sit in the same
+                    // gi.logisticsManagerPlans list and are a partner's rows, not mine, so they are excluded
+                    // through the same tag test CompanyPlans.OwnCount uses (MergerAbsence.IsDisplayInstall).
+                    var lgi = SaveGameManager.Current;
+                    var lgsb = new StringBuilder();
+                    if (lgi?.logisticsManagerPlans != null)
+                        foreach (var lp in lgi.logisticsManagerPlans)
+                        {
+                            if (lp == null) continue;
+                            bool ldisp; try { ldisp = MergerAbsence.IsDisplayInstall(lp); } catch { ldisp = false; }
+                            if (ldisp) continue;
+                            string lsrc = ""; try { lsrc = GameStateReader.AddressKey(lp.targetAddress); } catch { }
+                            int ldn = 0;     try { ldn  = lp.destinations != null ? lp.destinations.Count : 0; } catch { }
+                            if (lgsb.Length > 0) lgsb.Append(",");
+                            lgsb.Append($"{lp.id}:src={lsrc}:dests={ldn}");
+                        }
+                    return $"OK legs plans=[{lgsb}]";
+                }
+
+                case "stockof":
+                {
+                    // 4c part 2b L2: READ-ONLY.  Every item with stock at ONE registration, walked exactly
+                    // where BuildingHelper.GetItemsWithStock walks it (BuildingHelper.cs:446-455 - the
+                    // registration's itemInstances, each holder's cargoInstances, a cargo with nested cargo
+                    // skipped).  That helper takes ONE itemName and BuildingHelper's shelf-item filter
+                    // (ShelfItemNames) is private, so the walk here is the same one without those two
+                    // narrowings: it reports every item name the registration holds cargo of.
+                    if (arg.Length == 0) return "ERR usage: stockof <number> <ba:street_x>";
+                    var soreg = GameStatePatcher.FindRegistration(arg);
+                    if (soreg == null) return $"ERR no registration at '{arg}'";
+                    string sokey = arg; try { sokey = GameStateReader.AddressKey(soreg); } catch { }
+                    var sotot = new System.Collections.Generic.SortedDictionary<string, int>(StringComparer.Ordinal);
+                    try
+                    {
+                        if (soreg.itemInstances != null)
+                            foreach (var sokv in soreg.itemInstances)
+                            {
+                                var soii = sokv.Value;
+                                if (soii?.cargoInstances == null) continue;
+                                foreach (var soc in soii.cargoInstances)
+                                {
+                                    if (soc == null || soc.amount <= 0) continue;
+                                    if (soc.nestedCargoInstances != null && soc.nestedCargoInstances.Count > 0) continue;
+                                    string soname = soc.itemName ?? "";
+                                    if (soname.Length == 0) continue;
+                                    int soprev; sotot.TryGetValue(soname, out soprev);
+                                    sotot[soname] = soprev + soc.amount;
+                                }
+                            }
+                    }
+                    catch (Exception sox) { return $"ERR stockof addr='{sokey}': {sox.GetType().Name}: {sox.Message}"; }
+                    var sosb = new StringBuilder();
+                    foreach (var sokv2 in sotot)
+                    {
+                        if (sosb.Length > 0) sosb.Append(",");
+                        sosb.Append($"{sokv2.Key}:{sokv2.Value}");
+                    }
+                    return $"OK stockof addr='{sokey}' items=[{sosb}]";
+                }
+
+                case "cargotest":
+                {
+                    // 4c part 2b L3: DRIVER.  The game runs a logistics plan's delivery pass on its OWN
+                    // schedule and the rig cannot wait for it, so this raises ONE real leg on demand: it
+                    // APPENDS a real destination to a real own plan and calls the game's own
+                    // LogisticsManagerPlan.DeliverDestination (LogisticsManagerPlan.cs:74) - nothing else.
+                    // The mod's leg gate (Patch_LogisticsPlanLeg_MergerGate) sits on that method and hands a
+                    // mixed-owner leg to CargoTransfer.TakeOver.  FIXTURE: `cargotest remove <plan> <addr>`
+                    // takes the appended destination back out; the scenario never saves after a cargotest.
+                    var ctk = arg.Split(' ');
+                    bool ctrem = ctk.Length > 0 && ctk[0] == "remove";
+                    if (ctrem ? ctk.Length != 4 : ctk.Length != 5)
+                        return "ERR usage: cargotest <planId|first> <number> <ba:street_x> <itemName> <amount>"
+                             + "  |  cargotest remove <planId|first> <number> <ba:street_x>";
+                    // The address key holds a space, so the argument arity fixes its two tokens - the same
+                    // shape `transfer <employeeId> <num> <ba:street_x>` uses.
+                    string ctplan = ctrem ? ctk[1] : ctk[0];
+                    string ctdest = ctrem ? (ctk[2] + " " + ctk[3]) : (ctk[1] + " " + ctk[2]);
+                    var ctgi = SaveGameManager.Current;
+                    if (ctgi?.logisticsManagerPlans == null) return "ERR this machine holds no logistics manager plans";
+                    Buildings.Office.Headquarters.LogisticsManagerPlan ctp = null;
+                    foreach (var cp in ctgi.logisticsManagerPlans)
+                    {
+                        if (cp == null) continue;
+                        bool cdisp; try { cdisp = MergerAbsence.IsDisplayInstall(cp); } catch { cdisp = false; }
+                        if (cdisp) continue;                    // a partner's display copy is not this machine's to run
+                        if (ctplan == "first" || cp.id == ctplan) { ctp = cp; break; }
+                    }
+                    if (ctp == null) return $"ERR no own logistics plan '{ctplan}' on this machine";
+                    if (ctp.destinations == null) return $"ERR plan '{ctp.id}' holds no destination list";
+                    var ctreg = GameStatePatcher.FindRegistration(ctdest);
+                    if (ctreg == null) return $"ERR no registration at '{ctdest}'";
+                    string ctdkey = ctdest; try { ctdkey = GameStateReader.AddressKey(ctreg); } catch { }
+                    string ctsrc  = "";     try { ctsrc  = GameStateReader.AddressKey(ctp.targetAddress); } catch { }
+
+                    if (ctrem)
+                    {
+                        int ctn = 0;
+                        for (int ci = ctp.destinations.Count - 1; ci >= 0; ci--)
+                        {
+                            var cd = ctp.destinations[ci];
+                            if (cd == null) continue;
+                            string ck = ""; try { ck = GameStateReader.AddressKey(cd.deliveryTargetAddress); } catch { }
+                            if (ck == ctdkey) { ctp.destinations.RemoveAt(ci); ctn++; }
+                        }
+                        return $"OK cargotest removed={ctn}";
+                    }
+
+                    string ctitem = ctk[3];
+                    int ctamt;
+                    if (!int.TryParse(ctk[4], out ctamt) || ctamt < 1 || ctamt > 999)
+                        return $"ERR amount '{ctk[4]}' is not 1..999";
+                    bool ctknown = false;
+                    try { ctknown = BigAmbitions.Items.ItemsGetter.GetByName(ctitem) != null; } catch { }
+                    if (!ctknown) return $"ERR no item '{ctitem}'";
+
+                    var ctd = new Entities.LogisticsManagerPlanDestination { deliveryTargetAddress = ctreg.Address };
+                    ctd.stockTargets.Add(new BigAmbitions.Items.ItemAmountTarget(ctitem, ctamt));   // CargoTransfer.cs:253
+                    ctp.destinations.Add(ctd);
+                    try { ctp.DeliverDestination(ctd); }
+                    catch (Exception ctx) { return $"ERR cargotest plan='{ctp.id}': {ctx.GetType().Name}: {ctx.Message}"; }
+                    return $"OK cargotest plan='{ctp.id}' src='{ctsrc}' dest='{ctdkey}' item='{ctitem}' amount={ctamt}"
+                         + $" dests={ctp.destinations.Count}";
+                }
+
                 case "transfers":
                 {
                     // T6: the HOST's in-transit table - the records no save holds right now. A member has

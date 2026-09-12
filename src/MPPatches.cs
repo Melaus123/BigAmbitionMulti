@@ -3752,7 +3752,7 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>STOP-GAP S3 — HQ LOGISTICS PLAN LEG.
+        /// <summary>THE CROSS-MEMBER DELIVERY ENTRY (4c part 2, D20-7) — was STOP-GAP S3, HQ LOGISTICS PLAN LEG.
         /// LogisticsManagerPlan.cs:74 `public void DeliverDestination(LogisticsManagerPlanDestination
         /// destination)` moves the goods for ONE leg. It checks only RAW RentedByPlayer on the plan's own
         /// warehouse (:79) — which the flip satisfies — and does not test the DESTINATION at all, and the
@@ -3760,10 +3760,11 @@ namespace BigAmbitionsMP
         /// replica. A leg runs only when BOTH ends sit in the SAME operating set (W3-0 r3, F1): both mine, or
         /// both simulated here for an absent owner — on the machine standing in for one, its lifted copy is the
         /// live state, so that owner's own daily legs keep running while they are away. Every mixed leg is
-        /// refused: one end mine and the other run here for an absent partner is a goods movement between two
-        /// MEMBERS' buildings — refused until the routed cargo transfer of phase 4c exists (slice 7 delivers
-        /// from a warehouse/factory to ANY group business with the deduction made on both machines), never a
-        /// side effect of an absence. The HQ owner's own legs are untouched
+        /// TAKEN OVER: one end mine and the other run here for an absent partner is a goods movement between
+        /// two MEMBERS' buildings, which no single machine can perform — 4c part 2 hands it to CargoTransfer,
+        /// the two-phase routed transfer (need → withdraw → deliver → ack → return), and the native method
+        /// still does not run. Only a leg the transfer cannot even start (no plan id, no warehouse, no
+        /// destination registration) falls back to the old refusal. The HQ owner's own legs are untouched
         /// (which is why this is a per-leg gate and not a veil entry). The plan's UI creation is not
         /// touched. LogisticsManagerPlan has NO name field (its id is a base64 uuid), so the plan is
         /// named in the log by its warehouse address key. One INFO per plan per game day.</summary>
@@ -3801,20 +3802,24 @@ namespace BigAmbitionsMP
                     // W3-0 r3 (F1): an end this machine SIMULATES is not "operated elsewhere" — it is operated
                     // HERE, for an absent owner. The two ends must sit in the SAME operating set: both mine, or
                     // both simulated here. Every mixed leg (one end mine + one simulated, or any end flipped and
-                    // NOT simulated) is a cross-owner goods movement — wave 4's route, refused for good, never
-                    // something an absence may start. An end with no address does not vote: an unset destination
+                    // NOT simulated) is a cross-owner goods movement — 4c part 2's ROUTED TRANSFER, never
+                    // something one machine performs. An end with no address does not vote: an unset destination
                     // row cannot cross an owner boundary.
                     if (!src && !dst) return true;                                        // both ends mine
                     bool srcSim = srcKey.Length == 0 || MergerAbsence.SimulatesHere(srcKey);
                     bool dstSim = dstKey.Length == 0 || MergerAbsence.SimulatesHere(dstKey);
                     if (srcSim && dstSim) return true;                                    // both ends simulated here
+                    // 4c PART 2 (C1 TAKE-OVER): this is the mixed leg, and it is now a ROUTED CARGO TRANSFER
+                    // rather than a refusal. The native method never runs either way — the transfer performs
+                    // every native effect once, on the machine that holds the object (CargoTransfer.cs).
+                    if (CargoTransfer.TakeOver(__instance, destination)) return false;
                     string plan = srcKey.Length > 0 ? srcKey : "?";
                     int day = 0; try { day = SaveGameManager.Current != null ? SaveGameManager.Current.Day : 0; } catch { }
                     string key = __instance.id ?? plan;
                     if (!_loggedDay.TryGetValue(key, out var seen) || seen != day)
                     {
                         _loggedDay[key] = day;
-                        Plugin.Logger.LogInfo($"[Merger] logistics plan '{plan}' skipped - source/destination is a company building operated elsewhere (a two-machine goods movement; refused until the routed cargo transfer of phase 4c exists)");
+                        Plugin.Logger.LogInfo($"[Merger] logistics plan '{plan}' skipped - source/destination is a company building operated elsewhere and the routed cargo transfer could not be started for this leg");
                     }
                     return false;
                 }

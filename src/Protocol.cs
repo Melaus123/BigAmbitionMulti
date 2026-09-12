@@ -214,6 +214,7 @@ namespace BigAmbitionsMP
         CompanyLists          = 213,     // MERGER PHASE 2 WAVE 4 (2026-09-11, D18), WIDENED BY 4c PART 1 (D20-6): ONE owner's FIVE headquarters/agreement list families - delivery contracts and logistics manager plans as INSTALLED DISPLAY COPIES, plus the four SCREEN-LAYER families 4c part 1 added (pricing manager plans, import partnerships, HR manager plans, headhunter plans), which are never installed into a game list at all - Host -> that owner's ONLINE co-members (and the same type replays them to a joiner). The books payload could not carry these: 4a's bundle is per-DAY financial records and is rebuilt from gi.financialSummaries, while these are the owner's live agreement objects the host already holds per owner in PaperworkStore. Receivers INSTALL them into their own gi lists through the absence installer, TAGGED - the two BizMan screens that show them read the GAME lists directly (BizManDeliveries.cs:53 `SaveGameManager.Current.DeliveryContracts.FindAll(...)`, LogisticsManagersPlanList.cs:108 -> LogisticsManagerHelper.cs:62 `SaveGameManager.Current.logisticsManagerPlans.FindAll(...)`), so 4b's screen-layer overlay has nothing to hook. The tag keeps them out of every .hsg (the absence strip) AND out of the two execution passes. Member -> host needs no type: the owner's own publish already carries the lists.
         CompanyCandidates     = 214,     // MERGER PHASE 4b (PEOPLE) part 1 (2026-09-11, D20-1): THE SHARED CANDIDATE POOL and its CLAIM. Four legs on one type, told apart by Action. "pool": a member's own candidate rows (client -> HOST, and the host fans them to that member's ONLINE co-members and replays them to a joiner) - a candidate pool is per SAVE (Helpers/RecruitmentHelper.cs:80) and job-board generation for a merged shop is already owner-only, so without this leg a member cannot even SEE what the company's boards produced. "claim": a member asks to open a salary negotiation on a company candidate; the host grants it to the FIRST asker and refuses the rest (the RivalStaffSync poach-claim shape), so two members can never hire the same person. "verdict": host -> the WHOLE company (the origin included, because the origin's own record must know it is taken) - who holds the candidate now, "" when released. "hired": the member who completed the hire -> host -> the ORIGIN, whose own candidate record is then discarded through the game's own DiscardCandidate. Receivers hold the rows as TAGGED display copies in their own CandidateEmployeeInstances: stripped at the save choke point and lifted out of the hourly pass that ages and deletes candidates, so expiry is the ORIGIN's clock and copies never vanish at different times on different machines.
         CompanyMessages       = 215,     // MERGER PHASE 4b (PEOPLE) part 2 / P4 (2026-09-11, D20-5): THE PHONE RELAY. Four legs on one type, told apart by Action. "msg": a member's OWN business or staff message - the contact identity (id, category, description, address), the game's own messageKey + messageData + flags, and the BUTTON DESCRIPTORS (label key + the game's own background colour) - member -> HOST -> that member's ONLINE co-members, who re-raise it through the game's own Contact.GetContact + Contact.SendMessage so the contact auto-creates and the badge, the toast and the wording are all the game's. The button CLOSURES cannot travel (live UnityActions over the sender's objects, decompile TextMessage.cs:116-131), hence: "press": a co-member pressed a relayed copy's button - host -> the OWNER, whose machine runs the ORIGINAL closure exactly once; "handled": the owner -> the whole company, so every other copy clears its buttons and is marked read, which is what the game itself does to a message it pressed (ContextButton.SetUp); "refused" (review r2 MAJOR-2): the host, or the owner, -> the ONE presser, because a local click clears that copy's buttons BEFORE any answer (ContextButton.cs:77) - so a press nobody could run (owner offline, owner no longer holds the message, unknown to the host) is not silently lost: the presser puts the stored descriptors back, the copy is unread again and a real click can retry. The two ContextAction kinds are NOT pressed remotely: a salary negotiation opens LOCALLY on the presser through build A's candidate claim, and a health-insurance offer is ACTIONABLE since 4c part 2a (D23): the HR plan and the offer exist only in the owner's save, so the presser's accept/decline is ROUTED as a `mergerplanedit` leg to the machine that runs that headquarters, which runs the game's own AcceptOffer/DeclineOffer on the real offer. A receiver's copy carries NO contextAction, so deleting it can never discard the owner's candidate or offer (decompile ContactsApp.cs:452-465), and every copy is lifted at both save choke points - a relayed message never reaches a .hsg. A relayed COMPLAINT never runs StartComplaint here, so it is outside the receiver's 2-per-week cap (ComplaintHelper.cs:32-39). No join replay: a message is a moment, not a state.
+        CargoTransfer         = 216,     // MERGER PHASE 4c PART 2 (2026-09-12, D20-7): CROSS-MEMBER DELIVERIES. A logistics leg whose warehouse and whose destination are run by DIFFERENT machines cannot happen in one pass: a replica's CountTotalResourcesInStock reads 0/stale (SharedShopStock.cs:10-18), so the source cannot even compute what the destination needs, and the native chain (LogisticsManagerPlanDestination.ProcessStockTarget) writes BOTH ends. Five legs on one type, told apart by Action, each effect landing ONCE on the machine that physically holds the object. "need": source runner -> HOST -> the destination's runner, carrying each stock target; the same message with Answer=true carries the per-item need back (ProcessStockTarget's own arithmetic, run where the shelves really are). "offer": the source has WITHDRAWN exactly those amounts natively and hands the host the in-transit record (the host is the authority and persists it in the mod's per-slot manifest, so goods can never be lost in the withdraw->deliver gap). "deliver": host -> the destination's runner, which runs the game's own DeliverCargoToBuilding with the native filters. "ack": the destination's per-item REMAINDER back through the host to the source, which returns it with ReturnToCargo and raises the game's own undelivered phone report. "return": host -> source - nobody runs the destination any more, or no acknowledgement within a game day, so the whole record goes home. Idempotent by TransferId at every step (a repeat of "deliver" for an applied id re-acks identically and delivers nothing). An EXPORT leg (isFactory + an import/export destination) has NO destination-side effect natively - ProcessStockTarget's export branch never calls DeliverCargoToBuilding - so it needs no need query and no deliver leg: the source runs it whole and books the export income itself (D20-7). Rides Gameplay - it is timely and small. r2 (review F3): a SIXTH action rides the SAME type - "closed" - the receiver's confirmation that an ack/return actually LANDED. The host re-offers the ack/return to whoever runs the source once per sweep and drops its record ONLY on "closed", so an outcome can never vanish with the machine it was aimed at; the receiver is idempotent by a PERSISTED set of closed ids. No new MessageType and no version change.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -3957,5 +3958,52 @@ namespace BigAmbitionsMP
         public List<PwImportPartnership> ImportPartnerships  { get; set; } = new();
         public List<PwHrPlan>            HrManagerPlans      { get; set; } = new();
         public List<PwHeadhunterPlan>    HeadhunterPlans     { get; set; } = new();
+    }
+
+    // -- Merger phase 4c part 2 (cross-member deliveries): the routed cargo transfer (MessageType.CargoTransfer) --
+
+    /// <summary>ONE item on a routed cargo leg. The three fields are exactly what the native withdraw
+    /// hands back: BuildingHelper.WithdrawFromCargo (BuildingHelper.cs:463) returns a DETACHED
+    /// CargoInstance carrying only itemName, amount and pricePerUnit, so the wire needs nothing more to
+    /// rebuild it on the far machine. Amount means the ASK on a "need" leg (the stock target), the ANSWER
+    /// on a "need" reply (target minus what the destination already holds), and what was actually
+    /// WITHDRAWN from "offer" onward. Remainder is filled by the destination's ack: what it could not
+    /// shelve, which goes home to the source's warehouse.</summary>
+    public class CargoTransferItem
+    {
+        public string ItemName     { get; set; } = "";
+        public int    Amount       { get; set; }
+        public float  PricePerUnit { get; set; }
+        public int    Remainder    { get; set; }
+    }
+
+    /// <summary>The five legs of the routed cargo transfer - see the MessageType comment. Action is the
+    /// discriminator; Answer separates the "need" ASK from the "need" REPLY on the one action name.
+    /// TransferId is minted by the source as plan id + destination key + game day + hour, so a delivery
+    /// pass that runs twice in one game hour mints the SAME id and the second run is dropped everywhere.
+    /// SourcePid/TargetPid are stamped by the HOST, never taken from the sender.</summary>
+    public class CargoTransferPayload
+    {
+        public string PlayerId   { get; set; } = "";
+        public string Action     { get; set; } = "";      // need | offer | deliver | ack | return | closed
+        public bool   Answer     { get; set; }            // "need" only: false = the ask, true = the reply
+        public string TransferId { get; set; } = "";
+        public string PlanId     { get; set; } = "";
+        public string SourceKey  { get; set; } = "";      // the warehouse/factory the goods leave
+        public string DestKey    { get; set; } = "";      // the building the goods are for
+        public string SourcePid  { get; set; } = "";      // host-stamped: the machine that runs SourceKey
+        public string TargetPid  { get; set; } = "";      // host-stamped: who this leg is addressed to
+        public int    Day        { get; set; }
+        public int    Hour       { get; set; }
+        public string Reason     { get; set; } = "";      // set on a refusal, logged - never shown
+        /// <summary>r2 (F2): on a "return" leg - bring back the per-item REMAINDER only, never the whole
+        /// amount. Set whenever the destination HAS acknowledged: every unit it shelved stays shelved.</summary>
+        public bool   RemaindersOnly { get; set; }
+        /// <summary>r2 (F2): a LATE acknowledgement arrived after the host had already given the whole record
+        /// back, so the delivered units now exist twice. The source WITHDRAWS them again (natively, best
+        /// effort, shortfalls logged) instead of returning anything - the effect lands once as far as stock
+        /// allows. Rides the "return" action; it never travels on its own.</summary>
+        public bool   WithdrawAgain  { get; set; }
+        public List<CargoTransferItem> Items { get; set; } = new();
     }
 }

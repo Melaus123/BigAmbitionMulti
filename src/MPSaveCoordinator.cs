@@ -1300,6 +1300,7 @@ namespace BigAmbitionsMP
                 if (!string.IsNullOrEmpty(p.SessionName))
                     lock (_lock) { _activeSessionName = p.SessionName; }
                 Plugin.Logger.LogInfo("[MPSave] Mid-join: no host-stored save — fresh character with host settings.");
+                RestoreCargoMarksNow(null);   // 4c part 2 r2 (F6a): a fresh character in a new world starts with no cargo state
                 ClearClientDisconnectMarker();   // host resolved our join — pending disconnect offer consumed
                 EnsurePortraitFolderForWorld("fresh-start");   // DISK-JUNK r2: _activeSessionName was adopted from p.SessionName just above (host sends the stripped base)
                 MPClient.StartFreshFromHost(p.FallbackSettings);
@@ -1358,6 +1359,7 @@ namespace BigAmbitionsMP
             string session = p.SessionName;
             lock (_lock) { _activeSessionName = session; }
             EnsurePortraitFolderForWorld("load-data");   // DISK-JUNK r2: the session is named now; the top bar's portrait write comes at load-finish
+            RestoreCargoMarksNow(MPSaveManager.ReadManifest(session));   // 4c part 2 r2 (F6a): the cargo statics are per world - cleared here, the marks read back
             try
             {
                 byte[] raw    = UnGzipBytes(p.GetHsgGzip());
@@ -3403,6 +3405,116 @@ namespace BigAmbitionsMP
 
         // ── Manifest assembly (thread-safe, pure C#) ─────────────────────────────
 
+        // ── Merger 4c part 2 r2: the PER-MACHINE cargo idempotence marks ─────────
+        //
+        // manifest.bamp.json cannot be the only home for these on a MEMBER machine: the store-mirror path
+        // (ClientHandleStorePiece, above) deserializes the HOST's manifest JSON and writes it whole over the
+        // member's copy, so anything a member stamps into its own manifest is erased by the next push. The
+        // marks therefore ALSO ride a small file of their own beside it (cargo-marks.bamp.json), written by
+        // every machine the moment a mark is made and read back at every world load. The manifest fields
+        // stay - they are the host's own copy - and the restore is a UNION, so neither can erase the other.
+
+        /// <summary>Write this machine's cargo idempotence marks NOW. Called whenever one is made: a close or
+        /// a delivery happens a handful of times a game hour and the file is a few KB at its 500-entry cap,
+        /// and waiting for the next coordinated save would leave exactly the restart window the marks exist
+        /// to close (a member never writes a manifest of its own at all).</summary>
+        internal static void PersistCargoMarksNow()
+        {
+            try
+            {
+                string session;
+                lock (_lock) session = _activeSessionName;
+                if (string.IsNullOrEmpty(session)) return;
+                MPSaveManager.WriteCargoLocal(session, new MpCargoLocalState
+                {
+                    Closed  = CargoTransfer.SnapshotClosed(),
+                    Applied = CargoTransfer.SnapshotApplied(),
+                });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] the idempotence marks could not be persisted: {ex.Message}"); }
+        }
+
+        /// <summary>WORLD LOAD, both roles: the per-world cargo statics die with the old world and the
+        /// persisted marks are read back for the new one - the manifest's copy first (the host's own), then
+        /// this machine's file, additively.</summary>
+        internal static void RestoreCargoMarksNow(MpManifest? m)
+        {
+            try
+            {
+                CargoTransfer.ResetSession();
+                string session;
+                lock (_lock) session = _activeSessionName;
+                CargoTransfer.RestoreLocalState(m?.CargoClosed, m?.CargoApplied);
+                var local = string.IsNullOrEmpty(session) ? null : MPSaveManager.ReadCargoLocal(session);
+                if (local != null) CargoTransfer.RestoreLocalState(local.Closed, local.Applied);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] the idempotence marks could not be read back: {ex.Message}"); }
+        }
+
+        /// <summary>r3 (H1): write the HOST's in-transit cargo table NOW - called from EVERY mutation of it
+        /// (stored, stage changed, dropped). Same argument as the marks above, one step stronger: while a
+        /// record is "delivering" the units are in no warehouse and in no .hsg, so the gap between the offer
+        /// and the next manifest write is exactly the gap in which an unclean restart destroys them.</summary>
+        internal static void PersistCargoTransitNow()
+        {
+            try
+            {
+                string session, stamp;
+                lock (_lock) { session = _activeSessionName; stamp = _cargoTransitStamp; }
+                if (string.IsNullOrEmpty(session)) return;
+                var state = MPServer.SnapshotCargoTransit();
+                state.BaseSaveStamp = stamp;   // r4 (I3): every write BETWEEN saves keeps the file's stamp unchanged
+                MPSaveManager.WriteCargoTransit(session, state);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] the in-transit table could not be persisted: {ex.Message}"); }
+        }
+
+        /// <summary>r4 (I3): the save the live cargo tail continues. Minted at every manifest write
+        /// (StampSave), adopted from the LOADED manifest at the world-load restore, and written into
+        /// cargo-transit.bamp.json unchanged by every mutation in between - which is what lets the next load
+        /// tell a tail of this save from one of a timeline the load abandons (the file is per lineage base,
+        /// the manifest per variant).</summary>
+        private static string _cargoTransitStamp = "";
+
+        /// <summary>r4 (I3): mint this manifest write's save stamp and take it as the stamp the live cargo
+        /// tail now continues. The caller holds _lock and writes the manifest itself.</summary>
+        private static string StampSave(MpManifest m)
+        {
+            string stamp = Guid.NewGuid().ToString("N");
+            if (m != null) m.SaveStamp = stamp;
+            _cargoTransitStamp = stamp;
+            return stamp;
+        }
+
+        /// <summary>r4 (I3): the tail file is rewritten in the SAME moment as the manifest that stamped it -
+        /// the current table, the current high-water and the new stamp. HOST only: nobody else holds a tail,
+        /// and a member's manifest is a wholesale mirror of the host's file.</summary>
+        private static void PersistCargoTransitAfterStamp()
+        {
+            try { if (MPServer.IsRunning) PersistCargoTransitNow(); } catch { }
+        }
+
+        /// <summary>r4 (I3): the world-load seam adopts the LOADED manifest's stamp, so every tail this host
+        /// writes from here on names the save it actually continues.</summary>
+        internal static void AdoptCargoTransitStamp(string stamp)
+        {
+            lock (_lock) _cargoTransitStamp = stamp ?? "";
+        }
+
+        /// <summary>r3 (H1): the host's world-load seam reads the transit file back; the merge with the
+        /// manifest's own table is MPServer.RestoreCargoTransfersFromManifest's job.</summary>
+        internal static MpCargoTransitState? ReadCargoTransitNow()
+        {
+            try
+            {
+                string session;
+                lock (_lock) session = _activeSessionName;
+                if (string.IsNullOrEmpty(session)) return null;
+                return MPSaveManager.ReadCargoTransit(session);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] the in-transit table could not be read back: {ex.Message}"); return null; }
+        }
+
         private static MpManifest EnsureManifest(string sessionName)
         {
             // caller holds _lock
@@ -3541,6 +3653,9 @@ namespace BigAmbitionsMP
                 m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                 m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books store rides the same save moment
                 m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: an in-transit employee is held by NOBODY's .hsg - the host's table is the only copy
+                m.CargoTransfers = MPServer.SnapshotCargoTransfers();   // phase 4c part 2: in-transit GOODS are held by nobody's .hsg either
+                m.CargoClosed  = CargoTransfer.SnapshotClosed();        // r2 (F3): the ack/return ids this machine has applied
+                m.CargoApplied = CargoTransfer.SnapshotApplied();       // r2 (F6c): and the deliveries it has already shelved
                 m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans are part of the save moment
                 // Round-53: the running session's tuning dials persist with the save (mid-session
                 // changes included), so the next load's lobby mirrors what this world actually ran.
@@ -3553,7 +3668,9 @@ namespace BigAmbitionsMP
                 m.LastHostStableId = MPConfig.StableId;
                 m.HostEpoch        = _activeHostEpoch;
                 RefreshSlotCash(m);
+                StampSave(m);                  // r4 (I3): this write's save stamp - the live cargo tail names it below
                 MPSaveManager.WriteManifest(sessionName, m);
+                PersistCargoTransitAfterStamp();
             }
         }
 
@@ -3608,12 +3725,17 @@ namespace BigAmbitionsMP
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): same reason - a grants-only write must not drop the books store
                     m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: same reason - a grants-only write must not drop an in-transit employee
+                    m.CargoTransfers = MPServer.SnapshotCargoTransfers();   // phase 4c part 2: same reason - nor in-transit goods
+                    m.CargoClosed  = CargoTransfer.SnapshotClosed();        // r2 (F3): same reason - a grants-only write must not drop the marks
+                    m.CargoApplied = CargoTransfer.SnapshotApplied();       // r2 (F6c)
                     m.Loans = MPHub.SnapshotLoans();   // sweep 2026-08-18: loans ride the manifest like grants
+                    StampSave(m);                      // r4 (I3): a grants-only write is a manifest write - it stamps too
                     // Round-274/H1: do NOT touch SavedAtUnix here — it means "when was this
                     // WORLD saved", and a grants-only persist is not a world save.  Re-stamping
                     // it fired within seconds of every load ("Persisted 0 grant(s)") and
                     // silently un-marked abandoned-timeline slots (rig-proven, twice).
                     MPSaveManager.WriteManifest(_activeSessionName, m);
+                    PersistCargoTransitAfterStamp();   // r4 (I3): the tail follows the stamp in the same moment
                     Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) + {m.Merger.Count} merger member(s) + {m.Loans.Count} loan(s) to '{_activeSessionName}' on change.");
                     session = _activeSessionName;
                     manifestJson = Newtonsoft.Json.JsonConvert.SerializeObject(m);
@@ -3686,14 +3808,20 @@ namespace BigAmbitionsMP
                 // the world this host is RUNNING (its lineage base and that base's auto siblings).
                 // Any other session keeps whatever paperwork its own manifest already carries — no
                 // carry-over across slots or timelines.
-                if (StripAutoSuffix(sessionName) == StripAutoSuffix(_activeSessionName))
+                bool mine = StripAutoSuffix(sessionName) == StripAutoSuffix(_activeSessionName);
+                if (mine)
                 {   // P3-B review MAJOR-5: BOTH stamps sit under the lineage gate (a bare second statement escaped it)
                     m.Paperwork = MPServer.SnapshotPaperwork();
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books stamp sits under the SAME lineage gate
                     m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: the in-transit stamp sits under the SAME lineage gate
+                    m.CargoTransfers = MPServer.SnapshotCargoTransfers();   // phase 4c part 2: the cargo stamp sits under the SAME lineage gate
+                    m.CargoClosed  = CargoTransfer.SnapshotClosed();        // r2 (F3/F6c): the idempotence marks sit under it too
+                    m.CargoApplied = CargoTransfer.SnapshotApplied();
+                    StampSave(m);                                           // r4 (I3): the save stamp the cargo tail names sits under the SAME gate - a write onto ANOTHER timeline's manifest must not claim this host's live tail
                 }
                 MPSaveManager.WriteManifest(sessionName, m);
+                if (mine) PersistCargoTransitAfterStamp();
             }
         }
 

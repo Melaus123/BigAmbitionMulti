@@ -1,0 +1,129 @@
+{
+  "id": "T-P4C-CARGO",
+  "title": "phase 4c part 2b, two players: a logistics leg from the host's warehouse to the client's warehouse (a mixed-owner leg) is taken over by the routed two-phase cargo transfer - the destination answers its need, the source withdraws exactly that, the host holds the record and relays the delivery, the destination places the goods and acks, the host closes the record; the appended test leg is removed; ends dissolved WITHOUT a save (one unit moved between the two warehouses in memory only)",
+  "preconditions": "Fixture save1 (the host melaus owns a logistics plan with a stocked source warehouse; Client1 owns a warehouse). Build 4c part 2b deployed with the rig levers legs / stockof / cargotest. The export leg (factory -> import/export) is review-verified only. FIXTURE HYGIENE: `cargotest` appends a REAL destination to a real plan and moves ONE unit; the destination is removed before the dissolve and the run never saves, so the fixture .hsg files are untouched (the manifest is reset before every run).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "\\[Cargo\\] take-over: ",
+    "\\[Cargo\\] transfer .* refused: (?!the destination needs nothing)",
+    "the export leg failed",
+    "could not be paid"
+  ],
+  "oracles_report": [
+    "\\[Cargo\\]"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 4, "role": "both", "cmd": "mark TEST P4C-CARGO START", "expect_result": "OK MARK" },
+    { "seq": 5, "role": "h", "cmd": "merge propose ${clientPid}", "expect_result": "OK merge propose sent" },
+    { "seq": 6, "role": "h", "sleep_s": 1 },
+    { "seq": 7, "role": "h", "cmd": "offers", "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]" },
+    { "seq": 8, "role": "c", "cmd": "merge accept", "expect_result": "OK merge accept sent" },
+    { "seq": 9, "role": "h", "sleep_s": 3 },
+    { "seq": 10, "role": "h", "cmd": "mergestatus", "expect_result": "member=True.*flipped=[1-9]" },
+    { "seq": 11, "role": "h", "sleep_s": 30, "note": "the client's world settles; the client's buildings flip onto the host" },
+    { "seq": 12, "role": "c", "cmd": "status", "expect_result": "settled=True" },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "legs",
+      "expect_result": "^OK legs plans=\\[[^\\]]+\\]",
+      "capture": {
+        "planId": "plans=\\[([^:,\\]]+):src=",
+        "srcKey": "plans=\\[[^:,\\]]+:src=([^,\\]]+?):dests="
+      },
+      "note": "the host's first own logistics plan and its source warehouse"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "stockof ${srcKey}",
+      "expect_result": "^OK stockof addr='${srcKey}' items=\\[[^\\]]+\\]",
+      "capture": { "item": "items=\\[(?:[^,\\]]+?:1,)*([^,\\]]+?):(?:[2-9]|[1-9]\\d+)(?:,|\\])" },
+      "note": "an item the source warehouse holds at least two of"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "warehouses",
+      "expect_result": "flipped=\\['[^']+'",
+      "capture": { "destKey": "flipped=\\['([^']+)'" },
+      "note": "the client's first warehouse as seen from the host (flipped = the partner's, run by the partner)"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "stockof ${destKey}",
+      "expect_result": "^OK stockof",
+      "note": "the destination's stock before (reported)"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "cargo",
+      "expect_result": "^OK cargo pending=0",
+      "note": "no transfer in flight before"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "cargotest ${planId} ${destKey} ${item} 1",
+      "expect_result": "^OK cargotest plan='${planId}' src='${srcKey}' dest='${destKey}' item='${item}' amount=1",
+      "expect_log": [
+        { "role": "h", "regex": "\\[Cargo\\] transfer .* started - '${srcKey}' -> '${destKey}'", "within_s": 10 },
+        { "role": "c", "regex": "\\[Cargo\\] transfer .* need answered - .* at '${destKey}'", "within_s": 30 },
+        { "role": "h", "regex": "\\[Cargo\\] transfer .* withdrawn - .* out of '${srcKey}'", "within_s": 30 },
+        { "role": "h", "regex": "\\[Cargo\\] transfer .*: deliver relayed to '${clientPid}' for '${destKey}'", "within_s": 30 },
+        { "role": "c", "regex": "\\[Cargo\\] transfer .* delivered 1 \\(remainder 0\\) at '${destKey}'", "within_s": 40 },
+        { "role": "h", "regex": "\\[Cargo\\] transfer .* delivered 1 \\(remainder 0\\) - nothing to return", "within_s": 45 },
+        { "role": "h", "regex": "\\[Cargo\\] transfer .*: confirmed closed by '${hostPid}' - the host's record is dropped", "within_s": 45 }
+      ],
+      "note": "C1-C5: the game's own delivery pass for the appended destination hits the mixed-owner gate; the mod takes over; need / withdraw / relay / deliver / ack / close"
+    },
+    { "seq": 19, "role": "h", "sleep_s": 5 },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "cargo",
+      "expect_result": "^OK cargo pending=0",
+      "note": "the host's record is closed"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "stockof ${destKey}",
+      "expect_result": "items=\\[[^\\]]*${item}:[1-9]",
+      "note": "the destination now holds the item"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "stockof ${srcKey}",
+      "expect_result": "^OK stockof",
+      "note": "the source's stock after (reported; one fewer)"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "cargotest remove ${planId} ${destKey}",
+      "expect_result": "^OK cargotest removed=1",
+      "note": "FIXTURE HYGIENE: the appended destination is gone from the plan"
+    },
+    { "seq": 24, "role": "c", "cmd": "merge leave", "expect_result": "OK merge leave sent", "note": "FIXTURE HYGIENE: end dissolved; NO save in this scenario" },
+    { "seq": 25, "role": "h", "sleep_s": 5 },
+    { "seq": 26, "role": "h", "cmd": "mergestatus", "expect_result": "member=False.*flipped=0" },
+    { "seq": 27, "role": "both", "cmd": "mark TEST P4C-CARGO END", "expect_result": "OK MARK" }
+  ]
+}

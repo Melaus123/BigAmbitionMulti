@@ -14,7 +14,8 @@ Blanks: Merger, MergerWalletBalance, MergerWalletContributed, Paperwork, Absence
 import glob, json, os, sys
 
 SG = os.path.join(os.environ.get("USERPROFILE", ""), r"AppData\LocalLow\Hovgaard Games\Big Ambitions\SaveGames")
-KEYS_EXACT = ("Paperwork", "Absence")
+KEYS_EXACT = ("Paperwork", "Absence", "Transfers", "CargoTransfers", "CargoClosed", "CargoApplied")   # Transfers = build A's employee moves; Cargo* = 4c part 2b
+SIDECARS = ("cargo-marks.bamp.json", "cargo-transit.bamp.json")   # 4c part 2b r2/r3: the PER-MACHINE cargo sidecars beside each manifest (idempotence marks; the host's in-transit table) - deleted on reset
 
 
 def main(argv):
@@ -30,6 +31,12 @@ def main(argv):
     for root in sorted(glob.glob(os.path.join(SG, "_BAMP_MP*"))):
         pattern = os.path.join(root, "**", playthrough, session + "*", "manifest.bamp.json")
         for m in sorted(glob.glob(pattern, recursive=True)):
+            for side in SIDECARS:
+                marks = os.path.join(os.path.dirname(m), side)
+                if os.path.exists(marks):
+                    dirty += 1
+                    if check: print("DIRTY ", os.path.relpath(marks, SG), "(cargo sidecar present)")
+                    else: os.remove(marks); print("REMOVED", os.path.relpath(marks, SG))
             raw = open(m, "rb").read()
             try:
                 j = json.loads(raw.decode("utf-8-sig"))

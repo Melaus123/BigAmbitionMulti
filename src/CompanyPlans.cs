@@ -1423,16 +1423,18 @@ namespace BigAmbitionsMP
                         }
                         // r3 G4e: the native list also drops an HR plan ALREADY assigned to ANOTHER headhunter
                         // plan (HeadhuntersAutomaticReplacementTab.cs:94-97); the overlay REPLACED that list, so
-                        // the runner enforces the same rule over this headquarters' other headhunter plans.
+                        // the runner enforces the same rule. GLOBAL across every headhunter plan, not just this
+                        // headquarters' (re-check r3 of part 2a): the game's own filter walks the whole
+                        // gi.headhunterPlans list and so does the overlay's `taken` set (~:1498-1502), so a
+                        // per-HQ check here would let the runner accept an assignment both of those refuse.
                         foreach (var other in gi.headhunterPlans)
                         {
                             if (other == null || ReferenceEquals(other, pl) || other.assignedHrPlans == null) continue;
-                            if (!Same(KeyOf(other.headquartersAddress), KeyOf(pl.headquartersAddress))) continue;
                             bool clash = false;
                             foreach (var a in other.assignedHrPlans) if (!string.IsNullOrEmpty(a) && a == want) { clash = true; break; }
                             if (clash)
                             {
-                                Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (headhunter hrplan): hr plan '{want}' is already assigned to headhunter plan '{other.id}' on this headquarters.");
+                                Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (headhunter hrplan): hr plan '{want}' is already assigned to headhunter plan '{other.id}' on this headquarters.");   // wording kept: the refusal and its readout pattern are unchanged
                                 return Refuse($"hr plan '{want}' is already assigned to another headhunter plan");
                             }
                         }
