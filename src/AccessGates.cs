@@ -185,6 +185,21 @@ namespace BigAmbitionsMP
         // Warehouses and factories are held back even for the two widened types: AllowedTabs gives a shared
         // warehouse or factory neither "Deliveries" nor "Marketing" (:127-141). That exclusion, and the
         // picker's own filter delegate, are applied by the append Postfix in SharedShopVisibility.cs.
+        //
+        // PICKER-NARROW set (2026-09-12, user-approved) = FIVE service dialogs whose in-dialog business picker
+        // must never offer a merged PARTNER's shop - not even to a company member, and not even on a stand-in
+        // machine that merely runs the absent owner's world (MergerAbsence.SimulatesHere):
+        //   MovingServiceContractSettings           origin picker + destination picker
+        //   InteriorInstallationFirmDesignSettings  design-target picker
+        //   RecruitmentSettings                     campaign-target picker
+        //   FurnitureDeliveryContractSettings       delivery destination (calls the base method)
+        //   FoodDeliveryContractSettings            delivery destination (inherits the base method)
+        // Each books a PER-MACHINE contract: written on the booking machine, paid from the shared wallet and
+        // executed there against that machine's replica of the shop - the owner never hears of it, and these
+        // bookings are not in the absence hand-over lists, so a stand-in's booking would strand on its own
+        // machine at the owner's return. Patched in the G5 region at the foot of this file. The WHOLESALE
+        // dialog's DeliveryContractSettings is a SEPARATE class and is deliberately NOT among them: its
+        // deliveries are already routed (mergercontract).
 
         /// <summary>The name of the dialog the game currently has open, when it is one of the TWO whose picker may
         /// be widened (the table above); else null. R3: the cheap MP gates run first, so single-player and a
@@ -305,6 +320,114 @@ namespace BigAmbitionsMP
                     if (n == 0) return;                 // a merger member whose company owns nothing stays refused, like the other seven
                     __result = true;
                     LogOnce("FoodDeliveryDialog", n);
+                }
+                catch { }
+            }
+        }
+
+        // ── G5: partner-shop service pickers (2026-09-12) ───────────────────
+        //
+        // The eight gates above say "the NPC answers the phone". This region says "and your partner's shop is
+        // not on the menu": the five service dialogs listed in the header book per-machine contracts that
+        // execute on the BOOKING machine, so a partner's shop is never bookable in them, on any machine.
+        //
+        // NO NEW ON-SCREEN TEXT: the shops are simply not offered, and when nothing remains the dialogs' own
+        // native empty branches disable the controls (MovingServiceContractSettings.cs:93-97,
+        // InteriorInstallationFirmDesignSettings.cs:114-117).
+        //
+        // INERT without a merger: IsForeignPlayerBusiness can only be true here if a merger's presentation flip
+        // put the partner's registrations back, because the helper postfix on
+        // BuildingHelper.GetPlayerBuildingRegistrations (MPPatches.cs ~:5537-5544) has already removed foreign
+        // registrations before these filters ever run. All five targets are private, so string method names as
+        // the constructor gates do; every postfix is wrapped in try/catch and leaves __result alone on failure.
+
+        private static readonly HashSet<string> _pickerNarrowLogged = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>One log line per dialog per session - one line per dropped registration would be chatty.</summary>
+        private static void LogPickerOnce(string dialogType)
+        {
+            try
+            {
+                if (!_pickerNarrowLogged.Add(dialogType)) return;
+                Plugin.Logger.LogInfo($"[AccessGates] {dialogType}: a partner shop is not offered here (booked only by the machine that runs it).");
+            }
+            catch { }
+        }
+
+        [HarmonyPatch(typeof(global::UI.Dialog.MovingServiceContractSettings), "PlayerBuildingFilterOrigin")]
+        public static class Patch_MovingServiceContractSettings_FilterOrigin
+        {
+            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                try
+                {
+                    if (!__result || !GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) return;
+                    __result = false;
+                    LogPickerOnce("MovingService");
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(global::UI.Dialog.MovingServiceContractSettings), "PlayerBuildingFilterDestination")]
+        public static class Patch_MovingServiceContractSettings_FilterDestination
+        {
+            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                try
+                {
+                    if (!__result || !GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) return;
+                    __result = false;
+                    LogPickerOnce("MovingService");
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(global::UI.Dialog.InteriorInstallationFirmDesignSettings), "PlayerBuildingFilter")]
+        public static class Patch_InteriorInstallationFirmDesignSettings_Filter
+        {
+            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                try
+                {
+                    if (!__result || !GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) return;
+                    __result = false;
+                    LogPickerOnce("InteriorInstallationFirm");
+                }
+                catch { }
+            }
+        }
+
+        [HarmonyPatch(typeof(global::UI.Dialog.RecruitmentSettings), "PlayerBuildingFilter")]
+        public static class Patch_RecruitmentSettings_Filter
+        {
+            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            {
+                try
+                {
+                    if (!__result || !GameStatePatcher.IsForeignPlayerBusiness(buildingRegistration)) return;
+                    __result = false;
+                    LogPickerOnce("RecruitmentAgency");
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>Furniture delivery overrides this and calls base (FurnitureDeliveryContractSettings.cs:25-27),
+        /// food delivery inherits it unchanged - one patch on the base covers both. The wholesale dialog's
+        /// DeliveryContractSettings is a separate MonoBehaviour with its own filter and is not touched.</summary>
+        [HarmonyPatch(typeof(global::UI.Dialog.DeliveryContractSettingsBase), "GetDeliveryDestinations")]
+        public static class Patch_DeliveryContractSettingsBase_Destinations
+        {
+            static void Postfix(ref List<BuildingRegistration> __result)
+            {
+                try
+                {
+                    if (__result == null || __result.Count == 0) return;
+                    int before = __result.Count;
+                    __result.RemoveAll(r => GameStatePatcher.IsForeignPlayerBusiness(r));
+                    if (__result.Count != before) LogPickerOnce("DeliveryContract");
                 }
                 catch { }
             }

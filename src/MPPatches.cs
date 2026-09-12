@@ -2855,11 +2855,18 @@ namespace BigAmbitionsMP
                     {
                         var names = new System.Collections.Generic.HashSet<string>(System.StringComparer.Ordinal);
                         foreach (var e in __state)
-                            try { if (e != null && MPRegisterSync.IsInjectedStaff(e.id) && !string.IsNullOrEmpty(e.characterData?.name)) names.Add(e.characterData.name); } catch { }
+                            try { if (e != null && MPRegisterSync.IsInjectedStaff(e.id) && !MPRegisterSync.IsInjectedFromMergedPartner(e.id) && !string.IsNullOrEmpty(e.characterData?.name)) names.Add(e.characterData.name); } catch { }
                         // Round-95b (user-approved) NAME-COLLISION guard: contacts are keyed by character
                         // NAME, so a contact whose name also belongs to a NON-injected (own) employee holds
                         // the player's real message history — never purge those. Failure direction flips to
                         // "kept a phantom half", never "deleted yours".
+                        // 2026-09-12: merged partners' staff are EXEMPT from this purge entirely
+                        // (MPRegisterSync.IsInjectedFromMergedPartner, :1794). Their Employees contacts are the
+                        // message relay's OWN, minted on purpose with the SENDER's category since phase 4b build B
+                        // (CompanyMessages.cs:441-451) - purging them would delete a live relayed message and its
+                        // buttons at the next game hour. No phantom is left behind: the exemption lapses with the
+                        // membership (IsInjectedFromMergedPartner ends at MergerSync.IsMemberPid), so after a
+                        // dissolve the purge collects those names again at the next game hour.
                         try
                         {
                             var all = Helpers.EmployeeHelper.GetEmployeeInstances();
@@ -5525,6 +5532,9 @@ namespace BigAmbitionsMP
         // BizManBusiness page-nav dropdown.  Merger-aware via HideFromOwnAssetLists
         // (flipped regs stay visible — shared management is the merger's job).
         // Full audit: .modding/03-systems/ownership-exposure-map.md.
+        // 2026-09-12: the five SERVICE pickers (Moving origin+destination, Interior Installation Firm,
+        // Recruitment campaign, Furniture/Food delivery destinations) drop a partner's shops AGAIN in
+        // AccessGates, because their bookings are PER-MACHINE contracts that execute on the booking machine.
         [HarmonyPatch(typeof(Helpers.BuildingHelper), nameof(Helpers.BuildingHelper.GetPlayerBuildingRegistrations))]
         public static class Patch_GetPlayerBuildingRegistrations_HidePartnerBusinesses
         {

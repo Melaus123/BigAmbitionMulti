@@ -6427,6 +6427,13 @@ namespace BigAmbitionsMP
                 string ownerPid = owner == "host" ? MPConfig.PlayerId : owner;
                 if (ownerPid != senderPid && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
                 { Plugin.Logger.LogWarning($"[MergerStaff] employee edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no access, dropped."); return; }
+                // J2 (user ruling 2026-09-12): helpers never fire, members may. GrantSync.IsGranted UNIONS a
+                // direct Business grant with merger membership, so a permissions helper would otherwise pass the
+                // gate above for every action - including "fire" (MergerEmployeeSync.cs:43). Firing is the one op
+                // reserved to the owner himself or a co-member of the same company; assign/adopt/transfer stay on
+                // the union, because those are exactly what helpers and members share.
+                if (p.Action == "fire" && ownerPid != senderPid && !MergerSync.MergedRuntime(ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[MergerStaff] fire by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — a business helper may not fire the owner's staff; only a company member may. Dropped."); return; }
                 // W3-0 r1 (F6): the fifth write route joins the other four — an offline owner's edit goes to
                 // the machine simulating them (MergerEmployeeSync.ApplyOnOwner already accepts SimulatesHere),
                 // and with nobody running the address RouteTargetFor logs the refusal and we drop it.

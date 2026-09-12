@@ -22,7 +22,10 @@ namespace BigAmbitionsMP
     ///    travel the VALIDATED per-day pipeline in SharedShopSchedule (IsScheduleManaged is true for them),
     ///    and a routed "schedule" op from an old build is logged and ignored.
     ///
-    /// Host validates every op: sender must BE the owner or be MERGED with the owner. INERT without
+    /// Host validates every op (MPServer.HostRouteEmployeeEdit): the FIRE op needs the owner himself or a
+    /// co-member of the same company (2026-09-12 - a business helper may not fire the owner's staff); the
+    /// other ops (assign/adopt) also accept a direct Business grant, the same union the host gates read;
+    /// the transfer legs branch off to HostRouteTransfer before that gate. INERT without
     /// a merger: no injected records → the fire patch passes through; no flipped shops → no scan.
     /// </summary>
     public static class MergerEmployeeSync
