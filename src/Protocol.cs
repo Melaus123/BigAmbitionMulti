@@ -3755,6 +3755,18 @@ namespace BigAmbitionsMP
         public List<PwItemOrderLine> StockTargets { get; set; } = new();
     }
 
+    /// <summary>HQ-PARITY-2 P1: one stock figure the OWNER measured, for one address and one item.
+    /// The logistics pane draws `BuildingHelper.CountResourcesInPallets(plan.targetAddress, product)`
+    /// (LogisticsManagerPlanUI.cs:296-298) for every product it lists, and a co-member's replica of a
+    /// partner warehouse is seeded once at world-live and refreshed only while somebody is inside it
+    /// (InteriorSync) - so that count is stale or zero there.  The owner's numbers travel instead.</summary>
+    public class PwStockLine
+    {
+        public string AddressKey { get; set; } = "";   // the warehouse/factory the count was taken in
+        public string ItemName   { get; set; } = "";
+        public int    Count      { get; set; }
+    }
+
     public class PwLogisticsPlan
     {
         public string Id                     { get; set; } = "";
@@ -3763,6 +3775,19 @@ namespace BigAmbitionsMP
         public string TargetAddressKey       { get; set; } = "";
         public bool   IsFactory              { get; set; }
         public List<PwLogisticsDestination> Destinations { get; set; } = new();
+        // HQ-PARITY-2 P1, ADDITIVE (an older sender leaves them at these defaults; Version stays 23).
+        /// <summary>The OWNER's computed `plan.MaxDestinations` = the source warehouse's vehicle slots that
+        /// can deliver, raised by the manager's skill (LogisticsManagerPlan.cs:145-157).  A co-member cannot
+        /// compute it: a partner's VehicleInstances are deliberately absent from the local save list, so
+        /// `VehicleSlot.DestinationsThatCanDeliver` (Entities/VehicleSlot.cs:13-22) answers 0 there and every
+        /// destination row is drawn at half alpha with the add-destination button dead.</summary>
+        public int    MaxDestinations         { get; set; }
+        /// <summary>Every item the source warehouse holds, counted on the OWNER's machine.  An item that is
+        /// NOT in this list is zero there (CountResourcesInPallets sums the pallets and nothing else), so a
+        /// co-member drawing this plan answers 0 for it rather than reading its own stale replica.  Refreshed
+        /// on the ordinary dirty cadence when deliveries or sales move stock; a plan COMMIT publishes
+        /// urgently (HQ-PARITY-1 P5), so the figures beside an edit are at most 2 s old.</summary>
+        public List<PwStockLine> Stock { get; set; } = new();
     }
 
     /// <summary>HQ-PARITY-1 P2: one row of PricingManagerPlan.cachedSuggestions (decompile

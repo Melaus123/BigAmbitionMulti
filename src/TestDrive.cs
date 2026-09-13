@@ -844,6 +844,16 @@ namespace BigAmbitionsMP
                     return CompanyPlans.TestDriveHqTarget(arg);
                 }
 
+                case "hqlog":
+                {
+                    // HQ-PARITY-2 P4 - TEST LEVER. `hqlog <planId> <op> [args]` drives one LOGISTICS control
+                    // exactly where the pane's own control drives it: on a PARTNER's display copy it sends the
+                    // single op leg (the same one the pane's edit diffs into), on one of this machine's OWN
+                    // plans it runs the same runner body and marks the bundle urgent. Ops: manager, warehouse,
+                    // destadd, destremove, destchange, target.
+                    return CompanyPlans.TestDriveHqLog(arg);
+                }
+
                 case "planedit":
                 {
                     // MERGER PHASE 4c part 2a (E5). `planedit <family> <planId> <op> [args]` sends exactly the

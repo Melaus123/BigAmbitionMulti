@@ -456,6 +456,7 @@ namespace BigAmbitionsMP
                                         pdst.StockTargets.Add(new PwItemOrderLine { ItemName = t.itemName, Amount = t.targetAmount });
                                 pp.Destinations.Add(pdst);
                             }
+                        CompanyLists.FillLogisticsNumbers(pp, pl);   // HQ-PARITY-2 P1: the owner's capacity and stock
                         l.LogisticsManagerPlans.Add(pp);
                     }
 
@@ -980,7 +981,7 @@ namespace BigAmbitionsMP
             }
 
             _byOwner[p.OwnerPid] = p;
-            RebuildOwnerMap();
+            RebuildOwnerMap(p.OwnerPid);   // fold d: this bundle's owner - only ITS bundles count against a pending wait
             // 4c part 1 - AFTER the owner map: the registry's open-tab redraw asks TryOwnerOfAddress, which reads that map;
             // before it, the FIRST feed for an HQ new to the map could not redraw an open tab (re-check r2).
             // CROSS-HR-1 S4, BEFORE the registry's redraw: the shadow plans ARE this owner's HR rows now, so
@@ -1003,7 +1004,7 @@ namespace BigAmbitionsMP
                 try { n = MergerAbsence.RemoveInstalledForOwner(MergerAbsence.DisplayOwnerTag(ownerPid)); } catch { }
                 bool had = _byOwner.Remove(ownerPid);
                 try { CompanyPlans.ClearOwner(ownerPid, why); } catch { }   // 4c part 1: the HQ plan overlay goes with them
-                RebuildOwnerMap();
+                RebuildOwnerMap("");   // fold d: a departure is nobody's publish - no pending wait advances
                 if (n > 0 || had)
                 {
                     Plugin.Logger.LogInfo($"[CompanyLists] cleared {n} display copy item(s) of '{ownerPid}' - {why}.");
@@ -1052,9 +1053,10 @@ namespace BigAmbitionsMP
         public static void ClearAll(string why)
         {
             try { CompanyPlans.ClearAll(why); } catch { }   // 4c part 1
-            if (_byOwner.Count == 0) { _ownerOfAddr.Clear(); return; }
+            if (_byOwner.Count == 0) { _ownerOfAddr.Clear(); _planById.Clear(); _lastSentPlan.Clear(); _pendingPlan.Clear(); return; }   // fold d: no owners left - nothing pending can echo
             foreach (var pid in new List<string>(_byOwner.Keys)) ClearOwner(pid, why);
             _byOwner.Clear(); _ownerOfAddr.Clear();
+            _planById.Clear(); _lastSentPlan.Clear(); _pendingPlan.Clear();   // fold d: a stale mark must not outlive the session
         }
 
         /// <summary>MergerFlip's OFF edge: an address that stopped being a flipped company building must
@@ -1067,13 +1069,27 @@ namespace BigAmbitionsMP
             ClearOwner(pid, $"'{addressKey}' is no longer a flipped company building");
         }
 
-        private static void RebuildOwnerMap()
+        /// <param name="freshOwner">The owner whose bundle just arrived ("" for a rebuild that no bundle caused). Fold d
+        /// (fold-c re-check): a pending wait is measured in the PLAN OWNER'S publishes - the rebuild re-walks every
+        /// owner's cached bundle, so without this an unrelated co-member's bundle or a departure would burn the
+        /// budget of three before the owner had published once.</param>
+        private static void RebuildOwnerMap(string freshOwner)
         {
             _ownerOfAddr.Clear();
             // WAVE 4 r2 (review MAJOR-4 + minor a): the registry IS the last-known truth for every partner
             // plan, so it also SEEDS the route's dedupe cache. Without the seed the very first LoadPlan of a
             // display copy routes a no-op back to its owner; with it, nothing is routed until the plan really
             // differs from what the owner last published.
+            // FOLD c1 (re-review MAJOR-1): the rebuild is a WIPE, so a plan whose optimistic baseline is
+            // still waiting for its echo has to be carried across it - see _pendingPlan.
+            var keep = new Dictionary<string, PwLogisticsPlan>();
+            var keepShape = new Dictionary<string, string>();
+            var seen = new HashSet<string>();
+            foreach (var id in _pendingPlan.Keys)
+            {
+                if (_planById.TryGetValue(id, out var pv)) keep[id] = pv;
+                if (_lastSentPlan.TryGetValue(id, out var sv)) keepShape[id] = sv;
+            }
             _planById.Clear();
             _lastSentPlan.Clear();
             foreach (var kv in _byOwner)
@@ -1085,14 +1101,31 @@ namespace BigAmbitionsMP
                 foreach (var g in p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
                 {
                     if (g == null || string.IsNullOrEmpty(g.Id)) continue;
+                    seen.Add(g.Id);
+                    // HQ-PARITY-2 P1: the seed must be the BARE shape.  PlanToDto (the shape every route
+                    // compares against) does not carry MaxDestinations or Stock - seeding the received DTO
+                    // whole would differ from it on sight and route a no-op whole plan back to the owner.
+                    string bare = "";
+                    try { bare = Newtonsoft.Json.JsonConvert.SerializeObject(Bare(g)); } catch { }
+                    // FOLD c1: this bundle may have left the owner BEFORE my op reached them.  While the
+                    // plan is pending its baselines stay as this machine sent them; PendingSettled says when
+                    // the wait is over and the ordinary re-seed below may run again.
+                    if (keep.ContainsKey(g.Id) && !PendingSettled(g.Id, bare, countIt: kv.Key == freshOwner))
+                    {
+                        _planById[g.Id] = keep[g.Id];
+                        if (keepShape.TryGetValue(g.Id, out var ks)) _lastSentPlan[g.Id] = ks;
+                        continue;
+                    }
                     _planById[g.Id] = g;
-                    try { _lastSentPlan[g.Id] = Newtonsoft.Json.JsonConvert.SerializeObject(g); } catch { }
+                    if (bare.Length > 0) _lastSentPlan[g.Id] = bare;
                 }
                 foreach (var g in p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
                     if (!string.IsNullOrEmpty(g?.HeadquartersAddressKey)) _ownerOfAddr[g.HeadquartersAddressKey] = kv.Key;
                 foreach (var a in p.Addresses ?? new List<string>())
                     if (!string.IsNullOrEmpty(a) && !_ownerOfAddr.ContainsKey(a)) _ownerOfAddr[a] = kv.Key;
             }
+            // FOLD c1: a plan nobody publishes any more can never echo - its mark goes with it.
+            foreach (var id in new List<string>(_pendingPlan.Keys)) if (!seen.Contains(id)) _pendingPlan.Remove(id);
         }
 
         /// <summary>The deliveries screen rebuilds from the game list in OnEnable (BizManDeliveries.cs:35);
@@ -1145,6 +1178,42 @@ namespace BigAmbitionsMP
         /// <summary>One line per plan whose emptied target was ignored - not once per LoadPlan.</summary>
         private static readonly HashSet<string> _loggedEmptyTarget = new();
 
+        /// <summary>FOLD c1 (re-review MAJOR-1): plan id -> the optimistic baseline still waiting for its
+        /// echo.  A bundle the owner published BEFORE applying my op (their ordinary dirty publish, or a
+        /// co-member's urgent one) lands AFTER my Send and, re-seeding both baselines from it, puts the
+        /// PRE-OP shape back; the next pane mutation in the same ~2 s window then re-derives the op already
+        /// sent - a second `destremove` takes another row, a second `destadd` duplicates one (absolute
+        /// writes are harmless).  The runner's `_applied` set keys on (plan|seq|op) with a fresh seq per leg
+        /// and cannot catch that.  So the rebuild leaves a pending plan's baselines alone.</summary>
+        private sealed class PendingPlan
+        {
+            public string Shape = "";    // the BARE shape that was sent - the echo is the bundle that equals it
+            public DateTime SentAt;      // diagnostics only: nothing below expires on the clock
+            public int Bundles;          // bundles seen for this plan since the send, none of them the echo
+        }
+        private static readonly Dictionary<string, PendingPlan> _pendingPlan = new();
+
+        /// <summary>FOLD c1: one received bundle's verdict on a pending plan.  True = the mark is gone and
+        /// the ordinary re-seed runs; false = keep what this machine sent.  The echo is recognised by SHAPE,
+        /// because a bundle carrying exactly what we sent IS our own op coming back.  The give-up is counted
+        /// in BUNDLES, not seconds: what this waits for is a PUBLISH, so a wall-clock timer would give up
+        /// while nothing had arrived at all (a paused or slow owner) and would equally hold on across three
+        /// publishes that every one of them disagreed with.  Only the plan OWNER'S bundles count (fold d): three of
+        /// them without the echo means the op was lost or transformed beyond recognition - recurrence-covered, no timer.</summary>
+        private static bool PendingSettled(string id, string bare, bool countIt)
+        {
+            if (!_pendingPlan.TryGetValue(id, out var pend) || pend == null) return true;
+            if (bare.Length > 0 && bare == pend.Shape) { _pendingPlan.Remove(id); return true; }
+            if (!countIt) return false;                       // fold d: not the owner's publish - the wait neither advances nor ends
+            if (++pend.Bundles >= 3)
+            {
+                _pendingPlan.Remove(id);
+                Plugin.Logger.LogInfo($"[Plans] logistics baseline for '{id}' re-seeded after {pend.Bundles} bundle(s) without the echo");
+                return true;
+            }
+            return false;
+        }
+
         /// <summary>HQ-PARITY-1 c3: plan id -> the shape this machine last saw on one of its OWN plans.
         /// LogisticsManagerPlanUI.LoadPlan re-runs on every CLICK (LogisticsManagersPlanList.SelectPlan
         /// :228), so the owner's leg must mark urgent only when the plan really CHANGED.</summary>
@@ -1172,6 +1241,84 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[Merger] own plan signature: {ex.Message}");
                 return true;
             }
+        }
+
+        /// <summary>HQ-PARITY-2 P1, OWNER SIDE.  The two numbers a co-member cannot compute, measured here at
+        /// publish time and carried on the plan's DTO.  MaxDestinations is the plan's own getter
+        /// (LogisticsManagerPlan.cs:43 -> CalculateMaxDestinations :145-157), which needs the warehouse's
+        /// VehicleInstances - present only on this machine.  Stock is one line per item the source warehouse
+        /// actually holds, summed exactly as BuildingHelper.CountResourcesInPallets does (Helpers/
+        /// BuildingHelper.cs:391-413: every item instance tagged iswarehousestorage, every cargo instance in
+        /// it); an item absent from this list is zero HERE too, so the drawing side answers 0 for it instead
+        /// of reading its own replica.  Deliveries and sales move these figures on the ordinary dirty cadence
+        /// (30 s); a plan COMMIT publishes urgently (HQ-PARITY-1 P5), so the numbers beside an edit are at
+        /// most 2 s old.  NOT part of PlanToDto: that DTO's serialised shape is the edit dedupe, and a stock
+        /// tick must never read as somebody's edit.</summary>
+        public static void FillLogisticsNumbers(PwLogisticsPlan pp, Buildings.Office.Headquarters.LogisticsManagerPlan pl)
+        {
+            if (pp == null || pl == null) return;
+            try { pp.MaxDestinations = pl.MaxDestinations; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics capacity for plan {pl.id}: {ex.Message}"); }
+            try
+            {
+                if (pl.targetAddress == null) return;
+                string wkey = SafeKey(pl.targetAddress);
+                if (wkey.Length == 0) return;
+                var reg = Helpers.BuildingHelper.GetBuildingRegistration(pl.targetAddress);
+                if (reg == null || reg.itemInstances == null) return;
+                var totals = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var ii in reg.itemInstances.Values)
+                {
+                    if (ii == null || ii.cargoInstances == null) continue;
+                    var item = BigAmbitions.Items.ItemsGetter.GetByName(ii.itemName);
+                    if (item == null || !item.HasTag(BigAmbitions.Tags.TagRef.Itemtag.iswarehousestorage)) continue;
+                    foreach (var ci in ii.cargoInstances)
+                    {
+                        if (ci == null || string.IsNullOrEmpty(ci.itemName)) continue;
+                        totals.TryGetValue(ci.itemName, out var had);
+                        totals[ci.itemName] = had + ci.amount;
+                    }
+                }
+                foreach (var kv in totals)
+                    pp.Stock.Add(new PwStockLine { AddressKey = wkey, ItemName = kv.Key, Count = kv.Value });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock for plan {pl.id}: {ex.Message}"); }
+        }
+
+        /// <summary>HQ-PARITY-2 P1: one received plan WITHOUT the owner-measured numbers - exactly the shape
+        /// PlanToDto builds, so the two can be compared.  The numbers move with deliveries and sales and must
+        /// never read as somebody's edit.</summary>
+        public static PwLogisticsPlan? Bare(PwLogisticsPlan? g)
+        {
+            if (g == null) return null;
+            var b = new PwLogisticsPlan
+            {
+                Id = g.Id, AssignedEmployeeId = g.AssignedEmployeeId,
+                HeadquartersAddressKey = g.HeadquartersAddressKey,
+                TargetAddressKey = g.TargetAddressKey, IsFactory = g.IsFactory,
+            };
+            // FOLD b4: a COPY of the destinations and of each one's stock targets, not the registry's own
+            // lists by reference.  This shape is the DIFF BASELINE, and since fold b2 it is also what gets
+            // stored back as the optimistic baseline - handing out the received DTO's list would let either
+            // side rewrite the other's history under it.
+            foreach (var d in g.Destinations ?? new List<PwLogisticsDestination>())
+            {
+                if (d == null) continue;
+                var c = new PwLogisticsDestination { DeliveryTargetAddressKey = d.DeliveryTargetAddressKey };
+                foreach (var t in d.StockTargets ?? new List<PwItemOrderLine>())
+                {
+                    if (t == null) continue;
+                    c.StockTargets.Add(new PwItemOrderLine
+                    {
+                        ItemName = t.ItemName, Boxes = t.Boxes, Amount = t.Amount,
+                        AmountOrderedLastWeek = t.AmountOrderedLastWeek,
+                        AmountOrderedThisWeek = t.AmountOrderedThisWeek,
+                        AssignedWarehouseKey = t.AssignedWarehouseKey,
+                    });
+                }
+                b.Destinations.Add(c);
+            }
+            return b;
         }
 
         /// <summary>One live plan as the wire DTO - the same mapping PaperworkSync.Build uses.</summary>
@@ -1215,6 +1362,44 @@ namespace BigAmbitionsMP
         /// place, and the operator's next publish replaces it wholesale (V1). Deduped by shape, so the
         /// screen's own refresh calls cost nothing. Cross-owner is PRE-CHECKED here with the existing
         /// wording and re-checked at the host and on the operator.</summary>
+        /// <summary>HQ-PARITY-2 FOLD b1 — THE ONE METHOD BOTH PANE SEAMS CALL.  The LoadPlan postfix
+        /// (the warehouse dropdown, a reorder, the destination remove button) and the SaveGameManager
+        /// .MarkChange postfix (the per-item target field, AddDestination, UpdateSelectedBusiness - the three
+        /// controls that reach nothing else, review MAJOR-1/2) both end here, and here is where the shape is
+        /// diffed against the baseline and sent as the derived op(s) or, failing that, as the whole plan.
+        /// It is a NO-OP when the shape is unchanged (RoutePlanEdit's `_lastSentPlan` early return), which is
+        /// what makes it safe on a seam as busy as MarkChange: one dictionary lookup and one JSON signature
+        /// while a partner's logistics pane is open, and nothing at all otherwise.</summary>
+        public static void RouteDisplayPlanIfChanged(Buildings.Office.Headquarters.LogisticsManagerPlan plan,
+                                                     string why = "logistics pane edit")
+        {
+            if (plan == null || !IsDisplayPlan(plan)) return;
+            RoutePlanEdit(plan, why);
+        }
+
+        /// <summary>FOLD b2, THE REFUSAL'S SIDE.  The optimistic baseline below assumes the runner applies
+        /// what was sent.  When it answers a refusal instead, that assumption is wrong for this plan, so both
+        /// baselines go back to the owner's last PUBLISHED shape: the next edit then diffs against the truth
+        /// and sends the whole of it.</summary>
+        public static void ReseedLogisticsBaseline(string planId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(planId)) return;
+                _pendingPlan.Remove(planId);   // FOLD c1: a refusal ends the wait - no echo is coming
+                foreach (var kv in _byOwner)
+                    foreach (var g in kv.Value?.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
+                    {
+                        if (g == null || !string.Equals(g.Id, planId, StringComparison.Ordinal)) continue;
+                        _planById[planId] = g;
+                        try { _lastSentPlan[planId] = Newtonsoft.Json.JsonConvert.SerializeObject(Bare(g)); } catch { }
+                        Plugin.Logger.LogInfo($"[Merger] plan {planId}: baseline re-seeded from the owner's last published shape after a refusal - the next edit sends the whole truth.");
+                        return;
+                    }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] baseline re-seed for '{planId}': {ex.Message}"); }
+        }
+
         public static void RoutePlanEdit(Buildings.Office.Headquarters.LogisticsManagerPlan plan, string why)
         {
             try
@@ -1222,17 +1407,30 @@ namespace BigAmbitionsMP
                 if (plan == null || !IsDisplayPlan(plan)) return;
                 var dto = PlanToDto(plan);
                 if (string.IsNullOrEmpty(dto.HeadquartersAddressKey)) return;
-                // WAVE 4 r2 (review MAJOR-4): an EMPTY target is never a member's edit. The native pass nulls
-                // targetAddress itself whenever the plan's warehouse is not RentedByPlayer on THIS machine
-                // (LogisticsManagerPlan.GetPlannedDeliveries, decompile :56-60), and routing that would take
-                // the owner's real warehouse off their plan. The plan-load route only ever carries a target
-                // the registry also knows about; clearing one is not a routed edit in wave 4.
+                // WAVE 4 r2 (review MAJOR-4), NARROWED BY FOLD c2 (re-review MAJOR-2): an empty target has
+                // TWO causes and RESOLVABILITY tells them apart.  The native pass nulls targetAddress itself
+                // whenever the plan's warehouse is missing or not RentedByPlayer on THIS machine
+                // (LogisticsManagerPlan.GetPlannedDeliveries, decompile :53-60), and routing that would take
+                // the owner's real warehouse off their plan.  But the pane's own 'Unassigned' entry makes
+                // the very same write (LogisticsManagerPlanUI.OnChangedWarehouse :212-214, index 0 ->
+                // targetAddress = null -> LoadPlan -> MarkChange) and that IS the player's edit - it was
+                // being swallowed here.  A partner's warehouse normally DOES resolve on this machine,
+                // because the flip makes its registration RentedByPlayer, so: the baseline's key resolves ->
+                // the null can only be deliberate, and the diff below derives an empty `warehouse` op
+                // (ApplyLogistics :2647-2651: an empty key is pl.UnAssignAddress(), not a refusal, and
+                // UnAssignAddress :202-205 clears targetAddress ALONE - the plan's destinations and
+                // their stock targets all stay).  It does not resolve -> the old guard stands, logged
+                // once per plan exactly as before.
                 if (string.IsNullOrEmpty(dto.TargetAddressKey)
                     && _planById.TryGetValue(dto.Id ?? "", out var known) && !string.IsNullOrEmpty(known.TargetAddressKey))
                 {
-                    if (_loggedEmptyTarget.Add(dto.Id ?? ""))
-                        Plugin.Logger.LogInfo($"[Merger] plan {dto.Id} not routed: its target was cleared locally (the owner's warehouse is '{known.TargetAddressKey}') - a display copy's emptied target is never an edit.");
-                    return;
+                    var wreg = GameStatePatcher.FindRegistration(known.TargetAddressKey);
+                    if (wreg == null || !wreg.RentedByPlayer)
+                    {
+                        if (_loggedEmptyTarget.Add(dto.Id ?? ""))
+                            Plugin.Logger.LogInfo($"[Merger] plan {dto.Id} not routed: its target was cleared locally (the owner's warehouse is '{known.TargetAddressKey}') - a display copy's emptied target is never an edit.");
+                        return;
+                    }
                 }
                 string shape;
                 try { shape = Newtonsoft.Json.JsonConvert.SerializeObject(dto); } catch { shape = ""; }
@@ -1259,11 +1457,46 @@ namespace BigAmbitionsMP
                     return;
                 }
                 if (shape.Length > 0) _lastSentPlan[dto.Id ?? ""] = shape;
+                // HQ-PARITY-2 P3: THE ONE FORK.  Every logistics control on a display plan ends at this same
+                // route (the pane's LoadPlan catch-all, the destination dropdown's postfix, the manager
+                // change).  What changed against the owner's last-known shape is expressed as SINGLE OPS -
+                // the same family mechanism pricing/purchasing/hr/headhunter use, so two members editing one
+                // plan no longer overwrite each other with a whole-plan replace.  A change no op covers
+                // (a reorder, several controls at once) still rides the whole-plan leg, and says so.
+                PwLogisticsPlan? wasDto = _planById.TryGetValue(dto.Id ?? "", out var prev) ? Bare(prev) : null;
+                if (wasDto != null && CompanyPlans.RouteLogisticsOps(wasDto, dto, hqOwner, why)) { AdvanceBaseline(dto); return; }
                 SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
                 { PlayerId = MPConfig.PlayerId, AddressKey = dto.HeadquartersAddressKey, Op = "mergerplan", Plan = dto });
-                Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{hqOwner}' for '{dto.HeadquartersAddressKey}' (plan {dto.Id}) — {why}");
+                AdvanceBaseline(dto);
+                Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{hqOwner}' for '{dto.HeadquartersAddressKey}' (plan {dto.Id}) — {why}"
+                                    + (wasDto == null ? " (whole plan: nothing known here to compare it with)" : " (whole plan: the change is not one of the logistics ops)"));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan edit route: {ex.Message}"); }
+        }
+
+        /// <summary>FOLD b2 — THE OPTIMISTIC BASELINE (review MAJOR-3).  `_planById` used to be written
+        /// only by RebuildOwnerMap, on a RECEIVED bundle, so inside the ~2 s before the owner's answer came
+        /// back a SECOND mutation diffed against the shape from BEFORE the first one and re-sent the first
+        /// op: remove destination 2 then change the warehouse sent `destremove 1` twice and deleted a second
+        /// destination on the owner; add-then-repick duplicated a destination.  The runner's `_applied` set
+        /// keys on seq and cannot see that.  The SENT shape is therefore stored as the baseline at once -
+        /// what the runner is about to hold - so the next diff is taken against it.  Truth still wins: the
+        /// next fan-out re-seeds both baselines from the received bundle (RebuildOwnerMap), and a refusal
+        /// re-seeds them early (ReseedLogisticsBaseline).</summary>
+        private static void AdvanceBaseline(PwLogisticsPlan dto)
+        {
+            try
+            {
+                if (dto == null || string.IsNullOrEmpty(dto.Id)) return;
+                _planById[dto.Id] = dto;
+                // FOLD c1: and MARK IT PENDING, holding the shape the owner's echo must equal.  Bare() is
+                // applied so this signature is built exactly as RebuildOwnerMap builds the received one;
+                // without the mark an in-flight bundle drops this baseline on the floor.
+                string shape = "";
+                try { shape = Newtonsoft.Json.JsonConvert.SerializeObject(Bare(dto)); } catch { }
+                _pendingPlan[dto.Id] = new PendingPlan { Shape = shape, SentAt = DateTime.UtcNow, Bundles = 0 };
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] baseline advance: {ex.Message}"); }
         }
 
         /// <summary>V2c CREATION: a member pressing "add plan" on a PARTNER's headquarters. Nothing is added

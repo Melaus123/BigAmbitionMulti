@@ -324,7 +324,7 @@ namespace BigAmbitionsMP
             try
             {
                 var f = list.GetType().GetField("_selectedEntry", BindingFlags.Instance | BindingFlags.NonPublic);
-                object sel = f != null ? f.GetValue(list) : null;
+                object? sel = f != null ? f.GetValue(list) : null;
                 var t = TransformOf(sel);
                 if (t == null) return r;
                 r.Id = PlanIdOfEntry(list, sel, t);
@@ -333,7 +333,7 @@ namespace BigAmbitionsMP
             return r;
         }
 
-        private static Transform TransformOf(object entry)
+        private static Transform? TransformOf(object? entry)
         {
             var t = entry as Transform; if (t != null) return t;
             var c = entry as Component;  return c != null ? c.transform : null;
@@ -347,12 +347,12 @@ namespace BigAmbitionsMP
                 if (entry != null && !(entry is Transform))
                 {
                     var pp = entry.GetType().GetProperty("Plan", BindingFlags.Instance | BindingFlags.Public);
-                    object plan = pp != null ? pp.GetValue(entry) : null;
+                    object? plan = pp != null ? pp.GetValue(entry) : null;
                     if (plan != null)
                     {
                         var idf = plan.GetType().GetField("id", BindingFlags.Instance | BindingFlags.Public);
                         var id = idf != null ? idf.GetValue(plan) as string : null;
-                        if (!string.IsNullOrEmpty(id)) return id;
+                        if (id != null && id.Length > 0) return id;
                     }
                 }
                 var mf = list.GetType().GetField("_entriesByPlanIds", BindingFlags.Instance | BindingFlags.NonPublic);
@@ -398,7 +398,7 @@ namespace BigAmbitionsMP
 
                 var parent = EntryParentOf(list);
                 if (parent == null) return false;
-                Transform hit = null; Component hitEntry = null;
+                Transform? hit = null; Component? hitEntry = null;
                 for (int i = 0; i < parent.childCount; i++)
                 {
                     var c = parent.GetChild(i);
@@ -416,10 +416,10 @@ namespace BigAmbitionsMP
                 if (fam == "LogisticsManagersPlanList")
                 {
                     var pp = hitEntry != null ? hitEntry.GetType().GetProperty("Plan", BindingFlags.Instance | BindingFlags.Public) : null;
-                    object plan = pp != null ? pp.GetValue(hitEntry) : null;
+                    object? plan = pp != null ? pp.GetValue(hitEntry) : null;
                     if (plan == null) return false;
                     var sel = list.GetType().GetMethod("SelectPlan", BindingFlags.Instance | BindingFlags.Public,
-                                                       null, new[] { typeof(Transform), pp.PropertyType }, null);
+                                                       null, new[] { typeof(Transform), pp!.PropertyType }, null);
                     if (sel == null) return false;
                     sel.Invoke(list, new object[] { hit, plan });
                     return true;
@@ -438,7 +438,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Every entry is instantiated under the TEMPLATE's parent (all five SetUpPlanEntry bodies
         /// do exactly that), so the template field is the handle on the row container.</summary>
-        private static Transform EntryParentOf(Component list)
+        private static Transform? EntryParentOf(Component list)
         {
             try
             {
@@ -454,7 +454,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>The entry COMPONENT on a rebuilt row, where that family has one (pricing, logistics).</summary>
-        private static Component EntryComponentOf(Transform t)
+        private static Component? EntryComponentOf(Transform t)
         {
             try
             {
@@ -1527,8 +1527,16 @@ namespace BigAmbitionsMP
                 Take("pricing", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""), $"#suggestions={d?.CachedSuggestions?.Count ?? 0}");
             foreach (var d in p.ImportPartnerships ?? new List<PwImportPartnership>())
             {
-                string who = EmpName(d?.EmployeeInstanceId ?? "");
-                Take("purchasing", d?.Id, who.Length > 0 ? who : (d?.ImportAddressKey ?? ""), ProductLines(d));
+                if (d == null) continue;
+                string who = EmpName(d.EmployeeInstanceId ?? "");
+                Take("purchasing", d.Id ?? "", who.Length > 0 ? who : (d.ImportAddressKey ?? ""), ProductLines(d));
+            }
+            // HQ-PARITY-2 P4: the logistics rows were never listed here.  Each carries the two numbers a
+            // co-member cannot compute, so the rig can assert the capacity and the stock it is drawing with.
+            foreach (var d in p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
+            {
+                if (d == null) continue;
+                Take("logistics", d.Id ?? "", EmpName(d.AssignedEmployeeId ?? ""), LogisticsDetail(d));
             }
             foreach (var d in p.HrManagerPlans ?? new List<PwHrPlan>()) Take("hr", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""));
             foreach (var d in p.HeadhunterPlans ?? new List<PwHeadhunterPlan>()) Take("headhunter", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""));
@@ -1591,6 +1599,97 @@ namespace BigAmbitionsMP
                     return $"ERR item '{a[1]}' is not on partnership '{a[0]}' here";
                 }
                 return $"ERR no purchasing plan '{a[0]}' of my own here";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        /// <summary>P4: one logistics plan's carried numbers - the capacity the destination rows are greyed
+        /// against (LogisticsManagerPlanUI.cs:265) and the per-item stock the product rows draw (:296-298).
+        /// The row format's own three characters cannot appear in a field, so the stock list is `;`-joined
+        /// and `=`-paired exactly as the purchasing lines are.</summary>
+        private static string LogisticsDetail(PwLogisticsPlan d)
+        {
+            try
+            {
+                if (d == null) return "";
+                var sb = new System.Text.StringBuilder($"#max={d.MaxDestinations} dests={d.Destinations?.Count ?? 0} stock=[");
+                int n = 0;
+                foreach (var ln in d.Stock ?? new List<PwStockLine>())
+                {
+                    if (ln == null || string.IsNullOrEmpty(ln.ItemName)) continue;
+                    if (n++ > 0) sb.Append(';');
+                    sb.Append($"{RowFieldSafe(ln.ItemName)}={ln.Count}");
+                }
+                return sb.Append(']').ToString();
+            }
+            catch { return "#max=0 dests=0 stock=[]"; }
+        }
+
+        /// <summary>P4, THE LOGISTICS LEVER: `hqlog &lt;planId&gt; &lt;op&gt; [args]` drives exactly the paths the
+        /// pane's controls drive.  On a PARTNER's display copy it sends the op leg the diff would have sent
+        /// (RouteLogisticsOps -> Send); on one of THIS machine's own plans it runs the same runner body the
+        /// op would have run there and marks the bundle urgent, which is what the pane's own commit does.
+        /// Ops: manager &lt;employeeId|->, warehouse &lt;addressKey|->, destadd [addressKey],
+        /// destremove &lt;index&gt;, destchange &lt;index&gt; &lt;addressKey&gt;, target &lt;index&gt; &lt;item&gt; &lt;amount&gt;.</summary>
+        public static string TestDriveHqLog(string arg)
+        {
+            try
+            {
+                var a = (arg ?? "").Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 2) return "ERR usage: hqlog <planId> <manager|warehouse|destadd|destremove|destchange|target> [args]";
+                string id = a[0], op = a[1].ToLowerInvariant();
+                string s = ""; int iv = 0, dest = -1;
+                switch (op)
+                {
+                    case "manager":
+                    case "warehouse":  s = a.Length > 2 && a[2] != "-" ? a[2] : ""; break;
+                    case "destadd":    s = a.Length > 2 ? a[2] : ""; break;
+                    case "destremove": if (a.Length < 3 || !int.TryParse(a[2], out iv)) return "ERR usage: hqlog <planId> destremove <index>"; break;
+                    case "destchange": if (a.Length < 4 || !int.TryParse(a[2], out iv)) return "ERR usage: hqlog <planId> destchange <index> <addressKey>"; s = a[3]; break;
+                    case "target":
+                        if (a.Length < 5 || !int.TryParse(a[2], out dest) || !int.TryParse(a[4], out iv))
+                            return "ERR usage: hqlog <planId> target <destIndex> <itemName> <amount>";
+                        s = a[3]; break;
+                    default: return $"ERR no logistics op '{op}'";
+                }
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.logisticsManagerPlans == null) return "ERR no game instance here";
+                Buildings.Office.Headquarters.LogisticsManagerPlan? pl = null;
+                foreach (var x in gi.logisticsManagerPlans) if (x != null && x.id == id) { pl = x; break; }
+                if (pl == null) return $"ERR no logistics plan '{id}' here";
+                string item = s;
+                if (op == "target")
+                {
+                    // The rig captures the ROW-SAFE spelling of an item name (fold b); accept either.
+                    foreach (var dst in pl.destinations ?? new List<Entities.LogisticsManagerPlanDestination>())
+                        foreach (var t in dst?.stockTargets ?? new List<BigAmbitions.Items.ItemAmountTarget>())
+                            if (t != null && RowFieldSafe(t.itemName) == s) item = t.itemName;
+                }
+                // FOLD b4: the ROUTED branch reads two values (the op's string and its destination index)
+                // and Send builds the payload itself; only the OWN-plan branch needs a whole one, and it is
+                // built there.
+                string strValue = op == "target" ? item : s;
+                string station = dest >= 0 ? dest.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
+                if (CompanyLists.IsDisplayPlan(pl))
+                {
+                    string hq = KeyOf(pl.headquartersAddress);
+                    if (hq.Length == 0) return $"ERR plan '{id}' names no headquarters here";
+                    CompanyLists.TryOwnerOfAddress(hq, out var owner);
+                    Send("logistics", id, hq, owner ?? "", op, "hqlog lever", null, strValue, iv, 0f, false, station);
+                    return $"OK hqlog {id} {op} routed to '{(string.IsNullOrEmpty(owner) ? "?" : owner)}' for '{hq}'";
+                }
+                var pay = new SharedWorkEditPayload
+                {
+                    PlayerId = MPConfig.PlayerId, Op = "mergerplanedit", Family = "logistics", PlanId = id,
+                    PlanOp = op, StrValue = strValue, IntValue = iv, StationId = station,
+                    AddressKey = KeyOf(pl.headquartersAddress),
+                };
+                _refusal = "";
+                if (!ApplyLogistics(gi, pl.headquartersAddress, pay, op, id))
+                    return $"ERR hqlog {id} {op} refused: {(_refusal.Length > 0 ? _refusal : "the runner refused the edit")}";
+                SaveGameManager.MarkChange();
+                OwnEditCommitted("hqlog lever");
+                return $"OK hqlog {id} {op} applied (own plan; published at the urgent cadence)";
             }
             catch (Exception ex) { return "ERR " + ex.Message; }
         }
@@ -1856,6 +1955,213 @@ namespace BigAmbitionsMP
         /// <summary>RUNNER: (plan id|seq|op) already applied, so a resend is a no-op (E4).</summary>
         private static readonly HashSet<string> _applied = new(StringComparer.Ordinal);
 
+        // ── HQ-PARITY-2 P2: THE DISPLAY SCOPE ────────────────────────────────────
+
+        /// <summary>HQ-PARITY-2 FOLD b3 — THE PANE REGISTER.  The call-window scope object is gone.  It
+        /// was opened by a prefix on LogisticsManagerPlanUI.LoadPlan and closed in that patch's finalizer, so
+        /// it answered for the FIRST draw of a plan and for nothing after it: AddDestination (:227-237) and
+        /// UpdateSelectedBusiness (:566-575) redraw rows from a CLICK handler with no LoadPlan around them,
+        /// and both read the two patched game methods - which is why a destination added on a partner's plan
+        /// drew at half alpha with the add button dead, and a re-picked destination drew stale local stock
+        /// (review MAJOR-4/5).  What is remembered now is only WHICH PANE OBJECT is drawing; the answers below
+        /// follow the PLAN.  A destroyed pane compares equal to null through UnityEngine.Object's operator.</summary>
+        private static Component? _paneUI;
+        private static FieldInfo? _paneCurrentPlanField;
+
+        /// <summary>Called from the LoadPlan postfix with that patch's `__instance`.</summary>
+        public static void NoteLogisticsPane(object ui) { _paneUI = ui as Component; }
+
+        /// <summary>The cheap first test the pallet-count prefix runs before it resolves an address key:
+        /// false off a merger and false until a logistics pane has drawn at least once on this machine.</summary>
+        public static bool LogisticsPaneTracked => MergerFlip.FlippedCount != 0 && _paneUI != null;
+
+        /// <summary>The plan the logistics pane is showing RIGHT NOW, if it is a PARTNER's display copy.  A
+        /// LIVE read of the pane's own `_currentPlan` (LogisticsManagerPlanUI.cs:71) - not a copy taken at
+        /// draw time - so the answer is the plan as it stands at the moment of the question, which is what
+        /// the MarkChange commit seam needs.  Null = no pane, a hidden pane, or one of this machine's own
+        /// plans.</summary>
+        public static Buildings.Office.Headquarters.LogisticsManagerPlan? PaneDisplayPlan()
+        {
+            try
+            {
+                var ui = _paneUI;
+                if (ui == null || !ui.gameObject.activeInHierarchy) return null;
+                if (_paneCurrentPlanField == null)
+                    _paneCurrentPlanField = ui.GetType().GetField("_currentPlan", BindingFlags.Instance | BindingFlags.NonPublic);
+                var pl = _paneCurrentPlanField == null
+                       ? null : _paneCurrentPlanField.GetValue(ui) as Buildings.Office.Headquarters.LogisticsManagerPlan;
+                if (pl == null || !CompanyLists.IsDisplayPlan(pl)) return null;
+                return pl;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics pane read: {ex.Message}"); return null; }
+        }
+
+        /// <summary>The OWNER's published DTO for one plan id, out of the registry the fan-out fills.</summary>
+        private static PwLogisticsPlan? LogisticsDtoOf(string planId)
+        {
+            foreach (var kv in _byOwner)
+                foreach (var g in kv.Value?.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
+                    if (g != null && string.Equals(g.Id, planId, StringComparison.Ordinal)) return g;
+            return null;
+        }
+
+        /// <summary>PREFIX (a)'s answer: the owner's capacity for ANY tagged display copy whose owner has
+        /// published numbers - asked from LoadPlan's draw, from AddDestination's click handler (:235) and
+        /// from AddDestinationEntry (:265), and all three get the same answer now.  False = off a merger, not
+        /// a display copy, or nothing published for it yet: the native getter runs.</summary>
+        public static bool ScopedMaxDestinations(object plan, out int max)
+        {
+            max = 0;
+            if (MergerFlip.FlippedCount == 0) return false;
+            var lg = plan as Buildings.Office.Headquarters.LogisticsManagerPlan;
+            if (lg == null || string.IsNullOrEmpty(lg.id) || !CompanyLists.IsDisplayPlan(lg)) return false;
+            var dto = LogisticsDtoOf(lg.id);
+            if (dto == null) return false;
+            max = dto.MaxDestinations;
+            return true;
+        }
+
+        /// <summary>PREFIX (b)'s answer: the owner's pallet count for the SOURCE WAREHOUSE OF THE PLAN THE
+        /// PANE IS SHOWING and for no other address; every other address falls through to the native count.
+        /// An item missing from the list is answered ZERO, because the owner's list holds every item that
+        /// warehouse actually holds - falling through there would draw this machine's stale replica of a
+        /// partner's building.</summary>
+        public static bool ScopedStock(string addressKey, string itemName, out int count)
+        {
+            count = 0;
+            var pl = PaneDisplayPlan();
+            if (pl == null || string.IsNullOrEmpty(pl.id)) return false;
+            var dto = LogisticsDtoOf(pl.id);
+            if (dto == null || string.IsNullOrEmpty(dto.TargetAddressKey) || !Same(addressKey, dto.TargetAddressKey)) return false;
+            if (!string.IsNullOrEmpty(itemName))
+                foreach (var ln in dto.Stock ?? new List<PwStockLine>())
+                    if (ln != null && string.Equals(ln.ItemName, itemName, StringComparison.Ordinal)) { count = ln.Count; break; }
+            return true;
+        }
+
+        // ── HQ-PARITY-2 P3: LOGISTICS EDITS AS SINGLE OPS ──────────────────────────────────
+
+        private const int MaxLogisticsOps = 8;
+
+        /// <summary>THE DIFF.  `was` is the owner's last-known shape, `now` is the display copy as the player
+        /// just left it; what changed between them becomes ONE op per control, sent on the same
+        /// `mergerplanedit` carrier the other four families use.  True = every difference was expressed and
+        /// sent, so the whole-plan `mergerplan` leg is not needed.  False = the change is not one of these
+        /// ops (several controls at once beyond the cap) and the caller falls back.  FOLD b: a DRAG REORDER
+        /// IS expressible here, as `destchange` plus `target` ops - but the runner's `destchange` calls
+        /// Reset() on the destination it rewrites, which would wipe the runtime state of every moved row, so
+        /// a permutation is refused by IsReorder below and rides the whole-plan leg instead.
+        /// The controls are NOT patched one by one: three of the six (the destination remove button, the
+        /// add-destination button, the per-item target field) are anonymous delegates built inside
+        /// LogisticsManagerDestinationUI.SetUp and LogisticsManagerPlanUI.LoadProducts and have no method to
+        /// patch.  Only the remove button comes back through LoadPlan; the target field (:387/:406/:424) and
+        /// AddDestination (:227-237) end at SaveGameManager.MarkChange, and BOTH seams call
+        /// CompanyLists.RouteDisplayPlanIfChanged, which is where this diff sits.</summary>
+        public static bool RouteLogisticsOps(PwLogisticsPlan? was, PwLogisticsPlan? now, string owner, string why)
+        {
+            try
+            {
+                if (was == null || now == null) return false;
+                string id = now.Id ?? "", hq = now.HeadquartersAddressKey ?? "";
+                if (id.Length == 0 || hq.Length == 0) return false;
+                var ops = new List<LogOp>();
+                if (!Same(was.AssignedEmployeeId, now.AssignedEmployeeId))
+                    ops.Add(new LogOp { Op = "manager", S = now.AssignedEmployeeId ?? "" });
+                if (!Same(was.TargetAddressKey, now.TargetAddressKey))
+                    ops.Add(new LogOp { Op = "warehouse", S = now.TargetAddressKey ?? "" });
+                var wd = was.Destinations ?? new List<PwLogisticsDestination>();
+                var nd = now.Destinations ?? new List<PwLogisticsDestination>();
+                if (nd.Count == wd.Count + 1)
+                {
+                    for (int i = 0; i < wd.Count; i++) if (!SameDest(wd[i], nd[i])) return false;
+                    ops.Add(new LogOp { Op = "destadd", S = nd[nd.Count - 1] == null ? "" : (nd[nd.Count - 1].DeliveryTargetAddressKey ?? "") });
+                }
+                else if (nd.Count == wd.Count - 1)
+                {
+                    int gone = -1;
+                    for (int i = 0; i < wd.Count; i++)
+                    {
+                        bool fits = true;
+                        for (int a = 0, b = 0; a < wd.Count; a++)
+                        {
+                            if (a == i) continue;
+                            if (!SameDest(wd[a], nd[b++])) { fits = false; break; }
+                        }
+                        if (fits) { gone = i; break; }
+                    }
+                    if (gone < 0) return false;
+                    ops.Add(new LogOp { Op = "destremove", Iv = gone });
+                }
+                else if (nd.Count == wd.Count)
+                {
+                    if (IsReorder(wd, nd)) return false;   // fold b: destchange's Reset() would wipe runtime state
+                    for (int i = 0; i < nd.Count; i++)
+                    {
+                        string wk = wd[i] == null ? "" : wd[i].DeliveryTargetAddressKey;
+                        string nk = nd[i] == null ? "" : nd[i].DeliveryTargetAddressKey;
+                        if (!Same(wk, nk)) ops.Add(new LogOp { Op = "destchange", S = nk ?? "", Iv = i });
+                        foreach (var t in TargetChanges(wd[i], nd[i]))
+                            ops.Add(new LogOp { Op = "target", S = t.Key, Iv = t.Value, St = i.ToString(System.Globalization.CultureInfo.InvariantCulture) });
+                    }
+                }
+                else return false;
+                if (ops.Count == 0 || ops.Count > MaxLogisticsOps) return false;
+                foreach (var o in ops) Send("logistics", id, hq, owner ?? "", o.Op, why ?? "", null, o.S, o.Iv, 0f, false, o.St);
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics op diff: {ex.Message}"); return false; }
+        }
+
+        private sealed class LogOp { public string Op = ""; public string S = ""; public int Iv; public string St = ""; }
+
+        /// <summary>FOLD b: a DRAG REORDER (OnDestinationReordered, LogisticsManagerPlanUI.cs:107-115) leaves
+        /// the SAME destinations in a new order.  The equal-count branch above would express it as a run of
+        /// `destchange` ops, each of which Reset()s the destination it rewrites at the runner and so would
+        /// throw away every moved row's runtime state; a permutation therefore goes on the whole-plan leg.
+        /// True only for a genuine re-ordering: an unchanged list and any real edit both answer false.</summary>
+        private static bool IsReorder(List<PwLogisticsDestination> wd, List<PwLogisticsDestination> nd)
+        {
+            if (wd.Count != nd.Count || wd.Count < 2) return false;
+            bool sameOrder = true;
+            for (int i = 0; i < wd.Count; i++) if (!SameDest(wd[i], nd[i])) { sameOrder = false; break; }
+            if (sameOrder) return false;
+            var used = new bool[wd.Count];
+            for (int i = 0; i < nd.Count; i++)
+            {
+                int j = -1;
+                for (int k = 0; k < wd.Count; k++) if (!used[k] && SameDest(wd[k], nd[i])) { j = k; break; }
+                if (j < 0) return false;
+                used[j] = true;
+            }
+            return true;
+        }
+
+        private static bool SameDest(PwLogisticsDestination? a, PwLogisticsDestination? b)
+        {
+            string ak = a == null ? "" : a.DeliveryTargetAddressKey, bk = b == null ? "" : b.DeliveryTargetAddressKey;
+            if (!Same(ak, bk)) return false;
+            return TargetChanges(a, b).Count == 0;
+        }
+
+        /// <summary>item -> its NEW amount, for every stock target that differs between the two destinations.
+        /// A target removed is amount 0, which is exactly what the pane writes (LogisticsManagerPlanUI
+        /// :376-379 removes the entry when the field reaches zero).</summary>
+        private static Dictionary<string, int> TargetChanges(PwLogisticsDestination? a, PwLogisticsDestination? b)
+        {
+            var had = new Dictionary<string, int>(StringComparer.Ordinal);
+            var cur = new Dictionary<string, int>(StringComparer.Ordinal);
+            if (a != null)
+                foreach (var t in a.StockTargets ?? new List<PwItemOrderLine>())
+                    if (t != null && !string.IsNullOrEmpty(t.ItemName)) had[t.ItemName] = t.Amount;
+            if (b != null)
+                foreach (var t in b.StockTargets ?? new List<PwItemOrderLine>())
+                    if (t != null && !string.IsNullOrEmpty(t.ItemName)) cur[t.ItemName] = t.Amount;
+            var diff = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var kv in cur) { int w; had.TryGetValue(kv.Key, out w); if (w != kv.Value) diff[kv.Key] = kv.Value; }
+            foreach (var kv in had) if (!cur.ContainsKey(kv.Key) && kv.Value != 0) diff[kv.Key] = 0;
+            return diff;
+        }
+
         /// <summary>THE PANE COMMIT (E2).  False = this is one of my own plans and the native body must run.
         /// True = it was a partner's row: the native body is SKIPPED and the edit has left as a leg (or was
         /// refused with a logged reason, which is still a skip - a partner's row must never be written here).
@@ -1989,7 +2295,7 @@ namespace BigAmbitionsMP
         }
 
         private static bool Send(string family, string planId, string hq, string owner, string op, string what,
-                                 object dto, string strValue, int intValue, float number, bool flag,
+                                 object? dto, string strValue, int intValue, float number, bool flag,
                                  string stationId = "")
         {
             if (string.IsNullOrEmpty(planId) || string.IsNullOrEmpty(hq))
@@ -2049,6 +2355,12 @@ namespace BigAmbitionsMP
         public static void ReceiveRefusal(string family, string planId, string reason)
         {
             Plugin.Logger.LogWarning($"[Merger] plan-edit-refused ({family} {planId}): {reason}.");
+            // FOLD b2: the routed logistics op advanced the OPTIMISTIC baseline on the way out.  A refusal
+            // means the runner never applied it, so that baseline is now a shape the owner never held and the
+            // next diff would be taken against a lie.  Re-seed it from the last RECEIVED DTO, so the next
+            // edit on this plan sends the whole truth instead.
+            if (string.Equals(family, "logistics", StringComparison.Ordinal))
+                CompanyLists.ReseedLogisticsBaseline(planId ?? "");
             try { if (CompanyHqPageOpen(out _, out var owner)) RefreshOpenTabsFor(owner); } catch { }
         }
 
@@ -2151,6 +2463,7 @@ namespace BigAmbitionsMP
                     case "purchasing": ok = ApplyPurchasing(gi, addr, p, op, id); break;
                     case "hr":         ok = ApplyHr(gi, addr, p, op, id);         break;
                     case "headhunter": ok = ApplyHeadhunter(gi, addr, p, op, id); break;
+                    case "logistics":  ok = ApplyLogistics(gi, addr, p, op, id);  break;   // HQ-PARITY-2 P3
                     default:
                         Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}': unknown family '{fam}'.");
                         SendRefusal(p, $"unknown family '{fam}'"); return;
@@ -2299,6 +2612,111 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogWarning($"[Merger] {fam} {op} REFUSED for plan '{id}': employee '{eid}' is an injected copy here - a cross-member assignment needs the host-held transfer first.");
             return Refuse($"{op}: '{eid}' is an injected copy here - a cross-member assignment needs the host-held transfer first");
         }
+
+        /// <summary>RUNNER, HQ-PARITY-2 P3.  One logistics op onto MY OWN plan, each with the write the
+        /// game's own control makes: `manager` is ChangeLogisticsManager's single assignment
+        /// (LogisticsManagersPlanList.cs:195), `warehouse` is OnChangedWarehouse's (LogisticsManagerPlanUI
+        /// .cs:214/:220, and index 0 there is UnAssignAddress), `destadd` is AddDestination's append (:229-232)
+        /// under the plan's own capacity test (:235), `destremove` is the remove button's RemoveAt
+        /// (LogisticsManagerDestinationUI.cs:60), `destchange` is UpdateSelectedBusiness's Reset + assign
+        /// (:568-571) and `target` is the product row's stock-target write (:361-383, where zero REMOVES the
+        /// entry).  ApplyRouted marks the save changed and publishes urgently after this returns, which is the
+        /// LoadPlan-equivalent bookkeeping: nothing here touches this machine's open pane, because the pane
+        /// that made the edit is on the SENDER's machine and redraws off the fan-out.</summary>
+        private static bool ApplyLogistics(GameInstance gi, Address addr, SharedWorkEditPayload p, string op, string id)
+        {
+            if (gi.logisticsManagerPlans == null) return Gone("logistics", op, id);
+            Buildings.Office.Headquarters.LogisticsManagerPlan? pl = null;
+            foreach (var x in gi.logisticsManagerPlans) if (x != null && x.id == id) { pl = x; break; }
+            if (pl == null) return Gone("logistics", op, id);
+            if (CompanyLists.IsDisplayPlan(pl))
+                return Refuse($"{op}: plan '{id}' is a display copy here - this machine does not run it");
+            switch (op)
+            {
+                case "manager":
+                {
+                    string eid = p.StrValue ?? "";
+                    if (eid.Length == 0) { pl.UnAssignEmployee(); return true; }
+                    if (InjectedHere(eid) && !CoMemberCopyHere(eid))
+                        return Refuse($"manager: '{eid}' is an injected copy of somebody else's person here");
+                    EmployeeInstance? e = null; try { e = EmployeeHelper.GetEmployeeById(eid); } catch { }
+                    if (e == null) return Refuse($"manager: no employee '{eid}' on this machine");
+                    pl.assignedEmployeeId = eid;
+                    return true;
+                }
+                case "warehouse":
+                {
+                    string key = p.StrValue ?? "";
+                    if (key.Length == 0) { pl.UnAssignAddress(); return true; }
+                    var a = AddrOf(key);
+                    if (a == null) return Refuse($"warehouse: '{key}' is not a building known here");
+                    pl.targetAddress = a;
+                    return true;
+                }
+                case "destadd":
+                {
+                    if (pl.destinations == null) return Refuse("destadd: the plan holds no destination list");
+                    if (pl.destinations.Count >= pl.MaxDestinations)
+                        return Refuse($"destadd: the plan is already at its capacity of {pl.MaxDestinations} destination(s)");
+                    var dst = new Entities.LogisticsManagerPlanDestination { isUiCollapsed = false };
+                    string key = p.StrValue ?? "";
+                    if (key.Length > 0)
+                    {
+                        var a = AddrOf(key);
+                        if (a == null) return Refuse($"destadd: '{key}' is not a building known here");
+                        dst.deliveryTargetAddress = a;
+                    }
+                    pl.destinations.Add(dst);
+                    return true;
+                }
+                case "destremove":
+                {
+                    int i = p.IntValue;
+                    if (pl.destinations == null || i < 0 || i >= pl.destinations.Count)
+                        return Refuse($"destremove: destination {i} is not on plan '{id}' here ({pl.destinations?.Count ?? 0} of them)");
+                    pl.destinations.RemoveAt(i);
+                    return true;
+                }
+                case "destchange":
+                {
+                    int i = p.IntValue;
+                    if (pl.destinations == null || i < 0 || i >= pl.destinations.Count)
+                        return Refuse($"destchange: destination {i} is not on plan '{id}' here ({pl.destinations?.Count ?? 0} of them)");
+                    string key = p.StrValue ?? "";
+                    Address? a = null;
+                    if (key.Length > 0) { a = AddrOf(key); if (a == null) return Refuse($"destchange: '{key}' is not a building known here"); }
+                    var dst = pl.destinations[i];
+                    dst.Reset();
+                    dst.deliveryTargetAddress = a;
+                    return true;
+                }
+                case "target":
+                {
+                    int i;
+                    if (!int.TryParse(p.StationId ?? "", System.Globalization.NumberStyles.Integer,
+                                      System.Globalization.CultureInfo.InvariantCulture, out i))
+                        return Refuse("target: the leg named no destination");
+                    if (pl.destinations == null || i < 0 || i >= pl.destinations.Count)
+                        return Refuse($"target: destination {i} is not on plan '{id}' here ({pl.destinations?.Count ?? 0} of them)");
+                    string item = p.StrValue ?? "";
+                    if (item.Length == 0) return Refuse("target: the leg named no item");
+                    var dst = pl.destinations[i];
+                    if (dst.stockTargets == null) return Refuse("target: the destination holds no target list");
+                    int want = p.IntValue < 0 ? 0 : (p.IntValue > MaxTargetAmount ? MaxTargetAmount : p.IntValue);
+                    BigAmbitions.Items.ItemAmountTarget? row = null;
+                    foreach (var t in dst.stockTargets) if (t != null && t.itemName == item) { row = t; break; }
+                    if (want == 0) { if (row != null) dst.stockTargets.Remove(row); return true; }
+                    if (row == null) { row = new BigAmbitions.Items.ItemAmountTarget(item); dst.stockTargets.Add(row); }
+                    row.targetAmount = want;
+                    return true;
+                }
+            }
+            Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (logistics {op}): no such op.");
+            return Refuse($"logistics: no op '{op}'");
+        }
+
+        /// <summary>The pane's own ceiling on a stock target (LogisticsManagerPlanUI.cs:38/:367-369).</summary>
+        private const int MaxTargetAmount = 9999999;
 
         private static bool ApplyPricing(GameInstance gi, Address addr, SharedWorkEditPayload p, string op, string id)
         {

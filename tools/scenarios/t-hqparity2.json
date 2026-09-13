@@ -1,0 +1,257 @@
+{
+  "id": "T-HQPARITY2",
+  "title": "HQ-PARITY-2, two players: a partner's LOGISTICS page carries the owner's capacity and warehouse stock, and a destination removed by the member (or added back by the owner) is on the other machine inside four seconds as a SINGLE routed op, not a whole-plan replace; ends dissolved, NO save",
+  "preconditions": "Fixture save1. Build HQ-PARITY-2 deployed on both machines. FIXTURE REQUIREMENT for steps 15-26: the HOST's own headquarters must hold at least one LOGISTICS plan (not a factory plan) that has (a) a manager assigned, (b) a source warehouse designated, (c) at least one vehicle slot in that warehouse holding BOTH a truck and a driver - only (c) makes the owner's MaxDestinations non-zero (LogisticsManagerPlan.CalculateMaxDestinations -> VehicleSlot.DestinationsThatCanDeliver) - and (d) at least one destination row. If the fixture's host headquarters has no such plan, seed it BEFORE the run on the host's own machine (BizMan > Logistics Managers: assign a manager, pick a warehouse, put a truck and a driver in a slot, add a destination); it cannot be seeded from the rig, because assigning a vehicle and a driver to a warehouse slot is not a plan op. Step 14 passes either way (the lever line is asserted, an empty row set included); steps 15-26 are the parity itself and are the steps to drop if the fixture cannot be seeded - in that case the capacity and stock parity is review-verified only, exactly as the pricing suggestions were in T-HQPARITY1. The rig draws no screen: the capacity and the stock are read through the `plans <owner> rows logistics` lever, which prints the numbers the pane's own greying and product rows are drawn from.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[CompanyPlans\\] .*(failed|exception|threw)",
+    "pane.*refus",
+    "\\[Merger\\] accept .* REFUSED"
+  ],
+  "oracles_report": [
+    "\\[Merger\\] plan edit applied",
+    "\\[Merger\\] plan edit routed",
+    "\\[Merger\\] plan edit refused",
+    "\\[Merger\\] logistics (capacity|stock)",
+    "\\[Plans\\] received"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST HQPARITY2 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "sleep_s": 30,
+      "note": "the worlds settle and the first paperwork bundles cross"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "plans ${hostPid} hqs",
+      "expect_result": "^OK plans .* hqs=\\[[^\\]]",
+      "capture": {
+        "hostHq": "hqs=\\[([^,\\]]+)"
+      },
+      "note": "the host's headquarters key, off the client's own DTOs"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "^OK plans .*rows=\\[(logistics:[^:]+:[^#]*#max=[0-9]+ dests=[0-9]+ stock=\\[[^\\]]*\\].*|)\\]",
+      "note": "P4: the logistics rows were never listed by this lever before this build. The line parses whether or not the fixture holds a logistics plan; the parity assertions are the next steps."
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "logistics:[^:]+:[^#]*#max=[1-9]",
+      "capture": {
+        "planId": "logistics:([^:]+):",
+        "dests0": "#max=[0-9]+ dests=([0-9]+)"
+      },
+      "note": "P1/P2, THE CAPACITY: the number the destination rows are greyed against (LogisticsManagerPlanUI :265 isExceeding, :235/:252 the add-destination button). Before this build a co-member computed it as ZERO - a partner's VehicleInstances are deliberately absent from the local save list, so every slot answered DestinationsThatCanDeliver 0 - and every destination row drew at half alpha with add-destination dead. FIXTURE: needs a truck AND a driver in a slot of the plan's warehouse (see preconditions)."
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "#max=[1-9][0-9]* dests=[1-9]",
+      "note": "FIXTURE: the plan holds at least one destination, which is what step 19 removes"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "stock=\\[[^\\]]+\\]",
+      "note": "P1, THE STOCK: one line per item the OWNER's source warehouse actually holds, measured on the owner's machine as CountResourcesInPallets does. The pane draws these in every product row (:296-298) and GetRunsOutIn is computed from the same number. A warehouse the owner has genuinely emptied prints stock=[] and would fail this step legitimately - seed a pallet or drop this one step."
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "mark TEST HQPARITY2 MEMBER-REMOVES-DESTINATION",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "hqlog ${planId} destremove 0",
+      "expect_result": "^OK hqlog .* routed to '${hostPid}'",
+      "note": "P3: the member removes destination 0 on the HOST's plan. Before this build every logistics control on a partner row sent the WHOLE plan on the `mergerplan` leg (last writer wins); it now leaves as one op on the `mergerplanedit` carrier the other four families use, and the runner answers a refusal to the sender if it cannot apply it.",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied .*logistics destremove",
+          "within_s": 4
+        },
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] received ${hostPid}:",
+          "within_s": 8
+        }
+      ]
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "sleep_s": 4,
+      "note": "apply at the runner, MarkUrgent, publish, fan out"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "logistics:${planId}:[^#]*#max=[1-9][0-9]* dests=[0-9]+",
+      "refute_result": "logistics:${planId}:[^#]*#max=[1-9][0-9]* dests=${dests0} ",
+      "note": "THE USER'S ITEM 3: the member removed a destination on the host's plan - the member's OWN copy must show the change (the count is no longer the original) within the 4 s wait, proving the routed apply came back through the urgent publish. Fold c3: there is no second routed op above any more - the manager-unassign step was removed after run 3 - so nothing in this run asserts no-compounding. The double-send guard is review-verified instead: the hqlog lever builds its op directly and never touches the pane's baseline, so no scenario step can exercise it."
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "plans ${hostHq}",
+      "expect_result": "^OK plans .* logistics:[1-9]",
+      "note": "the host still runs its own plan; the member wrote nothing on the host's list but through the op"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "mark TEST HQPARITY2 OWNER-ADDS-IT-BACK",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "hqlog ${planId} destadd",
+      "expect_result": "^OK hqlog .* applied",
+      "note": "P4: the OWNER's own lever runs the same runner body the routed op runs and marks the bundle urgent, exactly as the pane's own add-destination commit does. The destination is added empty (address unassigned), which is what the game's own AddDestination does too; the COUNT is what the next step reads back.",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] received ${hostPid}:",
+          "within_s": 8
+        }
+      ]
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "sleep_s": 4,
+      "note": "the 2 s urgent publish interval plus the host's store-and-fan-out"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "logistics:${planId}:[^#]*#max=[1-9][0-9]* dests=${dests0}",
+      "note": "IMMEDIACY, both directions inside four seconds: the count went down on the member's routed op and came back up on the owner's own commit, and the capacity the rows are greyed against is still the owner's"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "stock=\\[[^\\]]+\\]",
+      "note": "the stock figures survive the edit round trip - they are republished with every bundle, urgently beside a commit and on the ordinary dirty cadence when deliveries or sales move them"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved; NO save. The host's plan is left with its destination re-added (address unassigned) in memory and is never written to disk"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "plans ${hostHq}",
+      "expect_result": "^OK plans .* logistics:[1-9]",
+      "note": "off the merger the host's own plans are untouched and the two prefixes are inert - the scope is only ever opened inside a partner plan's pane draw"
+    },
+    {
+      "seq": 32,
+      "role": "both",
+      "cmd": "mark TEST HQPARITY2 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

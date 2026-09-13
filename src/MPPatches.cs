@@ -4532,32 +4532,152 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>WAVE 4 (V2c) — THE CATCH-ALL for every in-place mutation of a tagged display plan.
-        /// `public void LoadPlan(LogisticsManagerPlan plan)` is what the whole plan UI re-runs after a
-        /// change: the warehouse dropdown (LogisticsManagerPlanUI.cs:569), a destination reorder (:113), a
-        /// destination removal and the add-destination path (LogisticsManagerDestinationUI.cs:60 via
-        /// `_logisticsManagerPlanUI.LoadPlan(_currentPlan)`) all end there, and every one of them mutates
-        /// the STORED plan object in place and calls SaveGameManager.MarkChange. Routing from this one
-        /// point covers them without patching each anonymous delegate. CompanyLists dedupes by the plan's
+        /// <summary>WAVE 4 (V2c) — ONE OF THE TWO ROUTE SEAMS for an in-place mutation of a tagged
+        /// display plan.  `public void LoadPlan(LogisticsManagerPlan plan)` is re-run by the warehouse
+        /// dropdown (LogisticsManagerPlanUI.cs:569), a destination reorder (:113) and the destination REMOVE
+        /// button (LogisticsManagerDestinationUI.cs:60 via `_logisticsManagerPlanUI.LoadPlan(_currentPlan)`),
+        /// each mutating the STORED plan object in place.  FOLD b (review MAJOR-1/2): it is NOT the catch-all
+        /// it was described as - the per-item target field (:387/:406/:424), AddDestination (:227-237) and
+        /// UpdateSelectedBusiness (:566-575) never come back through here; they end at
+        /// SaveGameManager.MarkChange, which is the OTHER seam (the postfix below). Both seams call the one
+        /// method CompanyLists.RouteDisplayPlanIfChanged. CompanyLists dedupes by the plan's
         /// serialised shape, so a plain re-selection sends nothing - and HQ-PARITY-1 c3 gives the OWNER's leg
         /// the SAME dedupe (CompanyLists.OwnPlanChanged), because LoadPlan also runs on every plain click
         /// (LogisticsManagersPlanList.SelectPlan :228) and a pure read must never publish.</summary>
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI), "LoadPlan")]
         public static class Patch_LogisticsPlanLoad_MergerRoute
         {
-            static void Postfix(Buildings.Office.Headquarters.LogisticsManagerPlan plan)
+            /// <summary>HQ-PARITY-2 FOLD b3, THE PANE REGISTER (review MAJOR-4/5).  The call-window scope
+            /// is gone: it was open only for the length of one LoadPlan, so it covered the FIRST draw and
+            /// nothing else - AddDestination (:227-237, which re-reads MaxDestinations at :235 and through
+            /// AddDestinationEntry at :265) and UpdateSelectedBusiness (:566-575, which calls LoadProducts
+            /// and so CountResourcesInPallets at :296) both run from a CLICK handler with no LoadPlan around
+            /// them, and drew a new row at half alpha with the add button dead and stale stock beside it.
+            /// This postfix now only REMEMBERS the pane object; the two prefixes below answer off the PLAN.</summary>
+            static void Postfix(Buildings.Office.Headquarters.LogisticsManagerPlan plan,
+                                UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI __instance)
             {
                 try
                 {
+                    CompanyPlans.NoteLogisticsPane(__instance);
                     if (MergerFlip.FlippedCount == 0) return;   // inert without a merger
                     // HQ-PARITY-1 P5b: a DISPLAY copy is routed (and the runner's apply marks urgent at the
                     // far end); a plan of this machine's OWN is edited natively and RoutePlanEdit returns at
                     // once - which is exactly the commit a co-member is waiting on.  c3: only a CHANGED own
                     // plan commits; opening one is a read, and a read publishes nothing.
-                    if (CompanyLists.IsDisplayPlan(plan)) CompanyLists.RoutePlanEdit(plan, "plan edited");
+                    if (CompanyLists.IsDisplayPlan(plan)) CompanyLists.RouteDisplayPlanIfChanged(plan, "plan edited");
                     else if (CompanyLists.OwnPlanChanged(plan)) CompanyPlans.OwnEditCommitted("logistics plan edited");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan-load route: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>HQ-PARITY-2 P2 PREFIX (a) — THE CAPACITY.  `LogisticsManagerPlan.MaxDestinations`
+        /// (decompile LogisticsManagerPlan.cs:43) is `CalculateMaxDestinations(targetAddress,
+        /// assignedEmployeeId)`, whose first term is the warehouse's `vehicleSlots.Sum(s =&gt;
+        /// s.DestinationsThatCanDeliver)` (:151) and that needs `SaveGameManager.Current.VehicleInstances
+        /// .Find(vehicleInstanceId)` (Entities/VehicleSlot.cs:13-22).  A partner's VehicleInstances are
+        /// deliberately NOT in this machine's save list, so the sum is 0, the method short-circuits at :152-154
+        /// and the pane greys every destination row and kills the add-destination button.  FOLD b3: the
+        /// answer follows THE PLAN, not a call window - whenever `__instance` is a tagged display copy whose
+        /// owner has published numbers the OWNER's figure answers, so the reads AddDestination (:235) and
+        /// AddDestinationEntry (:265) make from a CLICK handler are answered too.  Outside that - my own
+        /// plans, the delivery pass's own reads (GetPlannedDeliveries :54/:63), every machine off a merger -
+        /// there is no display copy at all and the prefix returns true on its first test.</summary>
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.LogisticsManagerPlan), "MaxDestinations", MethodType.Getter)]
+        public static class Patch_LogisticsMaxDestinations_DisplayScope
+        {
+            static bool Prefix(Buildings.Office.Headquarters.LogisticsManagerPlan __instance, ref int __result)
+            {
+                try
+                {
+                    int max;
+                    if (!CompanyPlans.ScopedMaxDestinations(__instance, out max)) return true;
+                    __result = max;
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics capacity: {ex.Message}"); return true; }
+            }
+        }
+
+        /// <summary>HQ-PARITY-2 P2 PREFIX (b) — THE STOCK.  `BuildingHelper.CountResourcesInPallets`
+        /// (Helpers/BuildingHelper.cs:391-413) sums this machine's item instances for the address; a partner
+        /// warehouse's replica is seeded once at world-live and refreshed only while somebody is inside it,
+        /// so the pane's product rows (LogisticsManagerPlanUI.cs:296-298, and GetRunsOutIn off the same
+        /// number) draw stale or empty.  FOLD b3: the condition is THE PANE, not a call window - the pane is
+        /// active in the hierarchy, its `_currentPlan` is a display copy, and `address` is that plan's own
+        /// source warehouse (key compare); every other address and every other caller falls through.  That
+        /// also covers LoadProducts called straight from UpdateSelectedBusiness (:566-575), which the window
+        /// missed.  INERT OUTSIDE: off a session and on my own plans there are no display copies at all; the
+        /// delivery pass never runs on one (the plan-pass gate above lifts them out); and a co-member's own
+        /// delivery arithmetic never counts pallets in a PARTNER's warehouse.  The one remaining coincidence
+        /// - some other read of THAT warehouse while the pane shows it - gets the owner's number, which is
+        /// the better answer anyway.  An item the owner does not hold is 0 there and is answered 0 here.</summary>
+        [HarmonyPatch(typeof(Helpers.BuildingHelper), "CountResourcesInPallets")]
+        public static class Patch_CountResourcesInPallets_DisplayScope
+        {
+            static bool Prefix(Address address, string resourceName, ref int __result)
+            {
+                try
+                {
+                    if (!CompanyPlans.LogisticsPaneTracked || address == null) return true;
+                    string key = ""; try { key = GameStateReader.AddressKey(address); } catch { }
+                    if (key.Length == 0) return true;
+                    int count;
+                    if (!CompanyPlans.ScopedStock(key, resourceName, out count)) return true;
+                    __result = count;
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock: {ex.Message}"); return true; }
+            }
+        }
+
+        /// <summary>HQ-PARITY-2 FOLD b1 — THE SECOND SEAM: ONE COMMIT POINT FOR EVERY PANE MUTATION.
+        /// `SaveGameManager.MarkChange()` (SaveGameManager.cs:586) is what EVERY logistics control ends at,
+        /// including the three that reach nothing else: the per-item target field's onEndEdit / plus / minus
+        /// delegates (LogisticsManagerPlanUI.cs:387/:406/:424), AddDestination (:227-237, which calls
+        /// AddDestinationEntry + Reinitialize + MarkChange and never LoadPlan) and UpdateSelectedBusiness
+        /// (:566-575).  Before this fold a target typed on a partner's plan was never sent and reverted at the
+        /// next fan-out, and a destination added but left unpicked simply vanished (review MAJOR-1/2).
+        /// MarkChange fires on everything the game saves, so the gates are ordered cheapest first:
+        /// (a) a merger is up and this machine is a member - one int compare, which is the whole cost off a
+        /// session; (b) the logistics pane object this mod registered in the LoadPlan postfix above is alive
+        /// and active in the hierarchy; (c) its `_currentPlan` (read live, LogisticsManagerPlanUI.cs:71) is a
+        /// tagged display copy.  Only then does it cost a dictionary lookup and one JSON signature, and only
+        /// while a PARTNER's logistics pane is open - and RouteDisplayPlanIfChanged is a no-op when the shape
+        /// is unchanged (the `_lastSentPlan` early return), so a plain redraw sends nothing.</summary>
+        [HarmonyPatch(typeof(SaveGameManager), nameof(SaveGameManager.MarkChange))]
+        public static class Patch_SaveGameMarkChange_LogisticsSeam
+        {
+            static void Postfix()
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || !MergerSync.IAmMember) return;   // (a)
+                    var plan = CompanyPlans.PaneDisplayPlan();                           // (b) + (c)
+                    if (plan != null) CompanyLists.RouteDisplayPlanIfChanged(plan, "logistics pane edit");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics pane commit: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>HQ-PARITY-2 P3 — THE ONE CONTROL THAT DOES NOT REACH LoadPlan.  `ChangeLogisticsManager`
+        /// (LogisticsManagersPlanList.cs:193-200) writes `plan.assignedEmployeeId` and calls MarkChange, but
+        /// never LoadPlan - so a manager changed on a PARTNER's row reached nobody until some later click
+        /// re-routed the whole plan, and a manager changed on MY OWN row waited out the 30 s dirty cadence.
+        /// Both now leave from here, on the same two paths every other logistics control takes.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList), "ChangeLogisticsManager")]
+        public static class Patch_LogisticsManagerChange_MergerRoute
+        {
+            static void Postfix(Buildings.Office.Headquarters.LogisticsManagerPlan plan)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return;   // inert without a merger
+                    if (CompanyLists.IsDisplayPlan(plan)) CompanyLists.RoutePlanEdit(plan, "logistics manager changed");
+                    else if (CompanyLists.OwnPlanChanged(plan)) CompanyPlans.OwnEditCommitted("logistics manager changed");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics manager route: {ex.Message}"); }
             }
         }
 
