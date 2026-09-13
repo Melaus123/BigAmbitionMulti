@@ -1286,6 +1286,13 @@ namespace BigAmbitionsMP
                     SetField(e, "amount", ln.Amount);
                     SetField(e, "amountOrderedLastWeek", ln.AmountOrderedLastWeek);
                     SetField(e, "amountOrderedThisWeek", ln.AmountOrderedThisWeek);
+                    // HQ-PARITY-1 P1: the DESIGNATED WAREHOUSE travels too.  Without it an installed
+                    // partnership drew "Unassigned" with 0 stock, and ImportProduct.GetAmountToBuy
+                    // (decompile ImportProduct.cs:44-53) fell back to the raw target because a null
+                    // warehouse has nothing to subtract.  A line type that has no such field (the
+                    // itemName/targetAmount shapes) is simply not touched - SetAddr no-ops on a missing
+                    // field - and an unresolvable key leaves null, exactly as no warehouse does.
+                    SetAddr(e, "assignedWarehouse", ln.AssignedWarehouseKey);
                     list.Add(e);
                 }
             }

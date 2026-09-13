@@ -3765,6 +3765,21 @@ namespace BigAmbitionsMP
         public List<PwLogisticsDestination> Destinations { get; set; } = new();
     }
 
+    /// <summary>HQ-PARITY-1 P2: one row of PricingManagerPlan.cachedSuggestions (decompile
+    /// Buildings.Office.Headquarters/PriceSuggestion.cs - all six of its fields).  The pricing pane's
+    /// product table IS that list (PricingManagerProductsScrollerController.LoadPlan :70-79 builds one
+    /// model per suggestion), so without it a partner's table draws EMPTY and the routed manualprice /
+    /// suggestedprice ops have no row to sit on.</summary>
+    public class PwPriceSuggestion
+    {
+        public string ItemName            { get; set; } = "";
+        public float  SuggestedMin        { get; set; }
+        public float  SuggestedMax        { get; set; }
+        public float  RivalReferencePrice { get; set; }
+        public bool   IsPlayerSelling     { get; set; }
+        public List<string> SellingBusinessTypes { get; set; } = new();
+    }
+
     public class PwPricingPlan
     {
         public string Id                     { get; set; } = "";
@@ -3774,6 +3789,13 @@ namespace BigAmbitionsMP
         public int    NextUpdateDay          { get; set; }
         public int    NextUpdateHour         { get; set; }
         public List<string> ManuallyPricedItems { get; set; } = new();
+        // HQ-PARITY-1 P2, ADDITIVE (an older sender simply leaves them at these defaults; Version stays 23).
+        public List<PwPriceSuggestion> CachedSuggestions { get; set; } = new();
+        /// <summary>How many originalStorePrices the OWNER's plan holds.  PricingManagerPlanUI :100 tests
+        /// `_currentPlan.originalStorePrices.Count > 0` and reads no entry, so the display copy carries the
+        /// COUNT and rebuilds that many empty entries - the change-neighbourhood confirmation then appears
+        /// on a partner's plan exactly where it appears on the owner's.</summary>
+        public int    OriginalStorePriceCount { get; set; }
     }
 
     public class PwHrPlan
@@ -3808,6 +3830,10 @@ namespace BigAmbitionsMP
         public bool   AutomaticallyReplaceOnResign { get; set; }
         public int    RemainingCandidatesToRecruit { get; set; }
         public int    AmountOfCandidatesToRecruitPreference { get; set; }
+        // HQ-PARITY-1 c4: neither HeadhunterPlan.nextRecruit (decompile HeadhunterPlan.cs:35) nor
+        // headhunterReplacementDataList (:45) is carried - no decompiled screen the display path can reach
+        // reads either, so the three NextRecruit* fields P3 added are gone again, unused on the wire by any
+        // release.  No Op, no MessageType and no ProtocolInfo.Version change: the dev line is unreleased.
     }
 
     public class PwInstallContract

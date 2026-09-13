@@ -164,30 +164,38 @@ namespace BigAmbitionsMP
             {
                 if (string.IsNullOrEmpty(ownerPid)) return;
                 if (!CompanyHqPageOpen(out _, out _)) return;     // U1: every company HQ page shows this owner's rows
-                if (EditWindowOpen())
+                string why = EditWindowOpen();
+                if (why.Length > 0)
                 {
-                    // HO-1a H5: a rebuild under an open list or dropdown closes it under the player's hand.
-                    if (_pendingRedraw != ownerPid)
-                        Plugin.Logger.LogInfo($"[Plans] redraw for '{ownerPid}' DEFERRED - an edit window is open.");
-                    _pendingRedraw = ownerPid;                       // last writer wins: a redraw is a full rebuild
+                    // HO-1a H5: a rebuild under a HALF-TYPED edit throws the player's own input away.  Since
+                    // HQ-PARITY-1 P6 that is ALL it waits for - an open pane is rebuilt and RESELECTED below.
+                    if (_pendingRedraw != ownerPid || _pendingReason != why)
+                        Plugin.Logger.LogInfo($"[Plans] redraw for '{ownerPid}' DEFERRED - {why}.");
+                    _pendingRedraw = ownerPid; _pendingReason = why;  // last writer wins: a redraw is a full rebuild
                     return;
                 }
+                _pendingReason = "";
                 var ui = InstanceBehavior<UI.UIs>.Instance;
                 var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
                 if (bm == null) return;
-                int n = 0;
-                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList>(true), "RefreshPlansList");
-                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList>(true), "RefreshManagersList");
-                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList>(true), "RefreshManagersList");
-                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList>(true), "RefreshManagersList");
-                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList>(true), "RefreshManagersList");   // U4: logistics joined the union
-                if (n > 0) Plugin.Logger.LogInfo($"[Plans] redrew {n} open tab(s) for '{ownerPid}' - a newer feed arrived.");
+                int n = 0, kept = 0;
+                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList>(true), "RefreshPlansList", ref kept);
+                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList>(true), "RefreshManagersList", ref kept);
+                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList>(true), "RefreshManagersList", ref kept);
+                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList>(true), "RefreshManagersList", ref kept);
+                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList>(true), "RefreshManagersList", ref kept);   // U4: logistics joined the union
+                if (n > 0) Plugin.Logger.LogInfo($"[Plans] redrew {n} open tab(s) for '{ownerPid}' - a newer feed arrived"
+                                               + (kept > 0 ? $"; {kept} open pane(s) reselected." : "."));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] redraw for '{ownerPid}': {ex.Message}"); }
         }
 
         /// <summary>HO-1a H5.  The owner whose redraw is waiting for the player to finish an edit; "" = none.</summary>
         private static string _pendingRedraw = "";
+
+        /// <summary>P6: WHY the pending redraw is waiting, so a deferral logs once per REASON rather than
+        /// once per feed.</summary>
+        private static string _pendingReason = "";
 
         /// <summary>HO-1c L4.9: SharedShopWorkTabs.Tick runs EVERY FRAME (MPCanvasUI.cs:813, no cadence gate) and
         /// the state re-read below costs two GetComponentsInChildren sweeps plus reflection, so the check itself is
@@ -204,8 +212,8 @@ namespace BigAmbitionsMP
                 if (_pendingRedraw.Length == 0) return;
                 if (UnityEngine.Time.unscaledTime < _nextDeferredCheck) return;
                 _nextDeferredCheck = UnityEngine.Time.unscaledTime + 1f;
-                if (!CompanyHqPageOpen(out _, out _)) { _pendingRedraw = ""; return; }
-                if (EditWindowOpen()) return;
+                if (!CompanyHqPageOpen(out _, out _)) { _pendingRedraw = ""; _pendingReason = ""; return; }
+                if (EditWindowOpen().Length > 0) return;
                 string owner = _pendingRedraw;
                 _pendingRedraw = "";
                 Plugin.Logger.LogInfo($"[Plans] deferred redraw for '{owner}' RUNS - the edit window closed.");
@@ -221,24 +229,39 @@ namespace BigAmbitionsMP
         /// (:200 `optionsPanelParentRect.gameObject.activeSelf`); and purchasing's expanded product row, which
         /// carries NO flag at all - its only readable state is the cell's own LayoutElement.minHeight, 200 while
         /// open (PurchasingAgentProductCellView.cs:99) against 100 while closed (:140).</summary>
-        private static bool EditWindowOpen()
+        private static string EditWindowOpen()
         {
             try
             {
                 var ui = InstanceBehavior<UI.UIs>.Instance;
                 var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
-                if (bm == null) return false;
+                if (bm == null) return "";
 
                 var hr = bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI>(true);
-                if (hr != null && hr.gameObject.activeInHierarchy && hr.IsAssignEmployeesListOpen) return true;
+                if (hr != null && hr.gameObject.activeInHierarchy && hr.IsAssignEmployeesListOpen)
+                    return "the HR assign list is open";
 
-                // HQ-UNION-2 review (carried, CROSS-HR-1 S5): RefreshOpenTabsFor now rebuilds the LOGISTICS
-                // list on a partner feed as well, and LogisticsManagersPlanList.RefreshManagersList opens
-                // with logisticsManagerPlanUI.Hide() (decompile :94), which is gameObject.SetActive(false)
-                // (LogisticsManagerPlanUI.cs:589-593) - so an open logistics plan pane would be closed under
-                // the player's hand.  Its open state IS that gameObject's active state; the redraw waits.
-                var lg = bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI>(true);
-                if (lg != null && lg.gameObject.activeInHierarchy) return true;
+                // HQ-PARITY-1 c2: the HEADHUNTER family is the one list whose rows carry NO readable plan
+                // identity.  Its selection is `private Transform _selectedEntry` (HeadhuntersPlanList.cs:32),
+                // its rows are bare Instantiate clones whose only plan reference is the click closure
+                // (SetUpPlanEntry :91-94) and its `SelectPlan(Transform, HeadhunterPlan)` is private (:213);
+                // a row ORDINAL is no identity either, because the partner rows drawn through that same
+                // builder are synthesised plans GetAssignedPlansForHeadquarters never returns.  With no honest
+                // reselect available, an OPEN headhunter plan DEFERS the redraw - TickDeferredRedraw lands it
+                // the moment the player closes the pane, and the blind sibling index (which could land on the
+                // Add-plan row that `buttonEntry.SetAsLastSibling()` :82 parks among the entries) is gone.
+                foreach (var hh in bm.GetComponentsInChildren<UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList>(true))
+                {
+                    if (hh == null || !hh.gameObject.activeInHierarchy) continue;
+                    var sf = typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList)
+                                 .GetField("_selectedEntry", BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (sf != null && sf.GetValue(hh) != null) return "a headhunter plan is open";
+                }
+
+                // HQ-PARITY-1 P6: the LOGISTICS clause is GONE.  It read "a logistics pane is open at all",
+                // which is true for the whole time the player is on that plan - so the very page the feed was
+                // about was the one page that never refreshed.  A rebuild now RESELECTS the open plan
+                // (Rebuild -> Reselect), which is what the player wanted: the same pane, the fresh numbers.
 
                 var dd = UI.Elements.Dropdown.currentDropdown;
                 if (dd != null && dd.gameObject.activeInHierarchy)
@@ -246,9 +269,12 @@ namespace BigAmbitionsMP
                     var f = typeof(UI.Elements.Dropdown).GetField("optionsPanelParentRect",
                                 BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                     var rect = f != null ? f.GetValue(dd) as RectTransform : null;
-                    if (rect != null && rect.gameObject.activeSelf) return true;
+                    if (rect != null && rect.gameObject.activeSelf) return "a dropdown is open";
                 }
 
+                // An EXPANDED purchasing product row IS the target-amount input field, so a rebuild there
+                // would throw away a half-typed number: this one still defers, and TickDeferredRedraw lands
+                // the redraw the moment the row closes.
                 foreach (var cell in bm.GetComponentsInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductCellView>(false))
                 {
                     if (cell == null) continue;
@@ -256,24 +282,190 @@ namespace BigAmbitionsMP
                     object le = lf != null ? lf.GetValue(cell) : null;
                     if (le == null) continue;
                     var mh = le.GetType().GetProperty("minHeight");
-                    if (mh != null && mh.GetValue(le) is float h && h > 100f) return true;
+                    if (mh != null && mh.GetValue(le) is float h && h > 100f) return "a purchasing product row is expanded";
                 }
-                return false;
+                return "";
             }
-            catch { return false; }
+            catch { return ""; }
         }
 
-        private static int Rebuild(Component list, string method)
+        private static int Rebuild(Component list, string method, ref int reselected)
         {
             try
             {
                 if (list == null || !list.gameObject.activeInHierarchy) return 0;   // only the tab on screen
                 var m = list.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
                 if (m == null) return 0;
+                // HQ-PARITY-1 P6: every one of the five refresh bodies opens with a PlanUI.Hide() and clears
+                // its selection (PurchasingAgentsPlanList.RefreshManagersList :73 and its four twins), so a
+                // rebuild CLOSES the pane the player is reading.  Note which plan is open first, then put the
+                // player back on it through the list's OWN entry click, so the pane returns with the values
+                // the feed just brought instead of vanishing.
+                var open = OpenPlanOf(list);
                 m.Invoke(list, null);
+                if (open.Id.Length > 0)
+                    if (Reselect(list, open)) reselected++;
                 return 1;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {method}: {ex.Message}"); return 0; }
+        }
+
+        /// <summary>P6: which plan one of the five lists has OPEN, in the one form all five can answer.  Id
+        /// is the plan id wherever the list makes it readable - the entry component's public Plan (pricing
+        /// and logistics entries), the _entriesByPlanIds map (HrManagersPlanList :105) or the entry object's
+        /// NAME, which purchasing sets to the plan id (PurchasingAgentsPlanList.SetUpPlanEntry :87) - and ""
+        /// for headhunter, whose entries carry no id at all - that family never reselects, it DEFERS
+        /// (EditWindowOpen).  c2: there is NO sibling-index fallback; a position is not an identity.</summary>
+        private struct OpenPlan { public string Id; }
+
+        private static OpenPlan OpenPlanOf(Component list)
+        {
+            var r = new OpenPlan { Id = "" };
+            try
+            {
+                var f = list.GetType().GetField("_selectedEntry", BindingFlags.Instance | BindingFlags.NonPublic);
+                object sel = f != null ? f.GetValue(list) : null;
+                var t = TransformOf(sel);
+                if (t == null) return r;
+                r.Id = PlanIdOfEntry(list, sel, t);
+            }
+            catch { }
+            return r;
+        }
+
+        private static Transform TransformOf(object entry)
+        {
+            var t = entry as Transform; if (t != null) return t;
+            var c = entry as Component;  return c != null ? c.transform : null;
+        }
+
+        /// <summary>P6, the ONE entry-to-plan-id resolver for all five families, in order of certainty.</summary>
+        private static string PlanIdOfEntry(Component list, object entry, Transform t)
+        {
+            try
+            {
+                if (entry != null && !(entry is Transform))
+                {
+                    var pp = entry.GetType().GetProperty("Plan", BindingFlags.Instance | BindingFlags.Public);
+                    object plan = pp != null ? pp.GetValue(entry) : null;
+                    if (plan != null)
+                    {
+                        var idf = plan.GetType().GetField("id", BindingFlags.Instance | BindingFlags.Public);
+                        var id = idf != null ? idf.GetValue(plan) as string : null;
+                        if (!string.IsNullOrEmpty(id)) return id;
+                    }
+                }
+                var mf = list.GetType().GetField("_entriesByPlanIds", BindingFlags.Instance | BindingFlags.NonPublic);
+                if (mf != null && mf.GetValue(list) is System.Collections.IDictionary map && t != null)
+                    foreach (System.Collections.DictionaryEntry kv in map)
+                        if (ReferenceEquals(TransformOf(kv.Value), t) && kv.Key is string k && k.Length > 0) return k;
+                // Purchasing NAMES its entry for the plan (`entry.name = plan.id`,
+                // PurchasingAgentsPlanList.SetUpPlanEntry :87).  Every other family leaves the name
+                // Instantiate gave it, which ends in "(Clone)" and is the SAME on every row - taking that
+                // as a plan id would have matched the first row of the list every time, so it is rejected
+                // here.
+                if (t != null && t.name.Length > 0 && !t.name.EndsWith("(Clone)", StringComparison.Ordinal)) return t.name;
+            }
+            catch { }
+            return "";
+        }
+
+        /// <summary>P6: put the player back on the plan the rebuild just closed, through the LIST'S OWN
+        /// selection path, so nothing here duplicates the native selection.  False = the plan is gone from
+        /// the rebuilt list (deleted at its owner), the one case where the pane is meant to stay shut.
+        /// c1: the path is PER FAMILY - only three of the five wire the click to the entry ROOT.</summary>
+        private static bool Reselect(Component list, OpenPlan open)
+        {
+            try
+            {
+                if (open.Id.Length == 0) return false;
+                string fam = list.GetType().Name;
+
+                // PRICING wires its click to a SERIALIZED CHILD, never the root: `notSelectedButton.onClick
+                // .AddListener(... onSelected?.Invoke(this))` (PricingManagersPlanListEntry.cs:46-50), so a
+                // press on the entry root fires nothing.  The list selects for us instead:
+                // `public void SelectPlanById(string planId)` (PricingManagersPlanList.cs:144) walks _entries
+                // and calls its own private SelectPlan - one call, no row hunting here.
+                if (fam == "PricingManagersPlanList")
+                {
+                    var sel = list.GetType().GetMethod("SelectPlanById", BindingFlags.Instance | BindingFlags.Public,
+                                                       null, new[] { typeof(string) }, null);
+                    if (sel == null) return false;
+                    sel.Invoke(list, new object[] { open.Id });
+                    var f = list.GetType().GetField("_selectedEntry", BindingFlags.Instance | BindingFlags.NonPublic);
+                    return f != null && f.GetValue(list) != null;
+                }
+
+                var parent = EntryParentOf(list);
+                if (parent == null) return false;
+                Transform hit = null; Component hitEntry = null;
+                for (int i = 0; i < parent.childCount; i++)
+                {
+                    var c = parent.GetChild(i);
+                    if (!c.gameObject.activeSelf) continue;
+                    var ec = EntryComponentOf(c);
+                    if (PlanIdOfEntry(list, ec, c) != open.Id) continue;
+                    hit = c; hitEntry = ec; break;
+                }
+                if (hit == null) return false;
+
+                // LOGISTICS wires its click to the same serialized CHILD (LogisticsManagersPlanListEntry.cs:44-48).
+                // Its public selection takes the row AND the plan: `public void SelectPlan(Transform
+                // entryTransform, LogisticsManagerPlan plan)` (LogisticsManagersPlanList.cs:207), and the plan is
+                // the rebuilt row's own `public LogisticsManagerPlan Plan { get; private set; }` (entry :36).
+                if (fam == "LogisticsManagersPlanList")
+                {
+                    var pp = hitEntry != null ? hitEntry.GetType().GetProperty("Plan", BindingFlags.Instance | BindingFlags.Public) : null;
+                    object plan = pp != null ? pp.GetValue(hitEntry) : null;
+                    if (plan == null) return false;
+                    var sel = list.GetType().GetMethod("SelectPlan", BindingFlags.Instance | BindingFlags.Public,
+                                                       null, new[] { typeof(Transform), pp.PropertyType }, null);
+                    if (sel == null) return false;
+                    sel.Invoke(list, new object[] { hit, plan });
+                    return true;
+                }
+
+                // Purchasing (PurchasingAgentsPlanList.cs:91), HR (HrManagersPlanList.cs:101) and headhunter
+                // (HeadhuntersPlanList.cs:91) put the listener on the entry ROOT, so the root Button IS that
+                // list's SelectPlan.  (Headhunter never reaches here: it carries no id and defers instead.)
+                var btn = hit.GetComponent<UnityEngine.UI.Button>();
+                if (btn == null) return false;
+                btn.onClick.Invoke();
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] reselect: {ex.Message}"); return false; }
+        }
+
+        /// <summary>Every entry is instantiated under the TEMPLATE's parent (all five SetUpPlanEntry bodies
+        /// do exactly that), so the template field is the handle on the row container.</summary>
+        private static Transform EntryParentOf(Component list)
+        {
+            try
+            {
+                foreach (var f in list.GetType().GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public))
+                {
+                    if (f.Name != "entryTemplate") continue;
+                    var t = TransformOf(f.GetValue(list));
+                    if (t != null && t.parent != null) return t.parent;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>The entry COMPONENT on a rebuilt row, where that family has one (pricing, logistics).</summary>
+        private static Component EntryComponentOf(Transform t)
+        {
+            try
+            {
+                foreach (var c in t.GetComponents<Component>())
+                {
+                    if (c == null) continue;
+                    if (c.GetType().Name.EndsWith("PlanListEntry", StringComparison.Ordinal)) return c;
+                }
+            }
+            catch { }
+            return null;
         }
 
         // -- H1: is the open BizMan page a PARTNER's headquarters? -------------
@@ -335,6 +527,174 @@ namespace BigAmbitionsMP
                 return true;
             }
             catch { pageHq = ""; pageOwner = ""; return false; }
+        }
+
+        // -- HQ-PARITY-1 P7: ONE HEADQUARTERS CARD PER COMPANY ----------------
+
+        /// <summary>P7, THE ONE DECISION POINT (manager ruling, 2026-09-12).  WHICH headquarters backs the
+        /// company's single card in the BizMan hub: this machine's OWN headquarters if it has one (an own
+        /// card is never hidden), otherwise the headquarters of the FIRST pid in MergerSync.MyMemberPidsOrdered
+        /// (MergerSync.cs:203 - host-ordered, so every machine picks the same one) that has a resolvable
+        /// FLIPPED headquarters registration here.  Ties inside one pid break on ascending
+        /// GameStateReader.AddressKey.  False = no company card can be named (not a member, or no flipped
+        /// headquarters resolves to an owner) - and then NOTHING is hidden, which is the pre-P7 behaviour.
+        /// The hub lists every RentedByPlayer headquarters registration (decompile HeadquartersList.cs:26),
+        /// and the flip makes a partner's registration RentedByPlayer here, which is why the company was
+        /// showing one card per member.</summary>
+        public static bool BackingHq(out string hqKey, out string ownerPid)
+        {
+            hqKey = ""; ownerPid = "";
+            try
+            {
+                if (!MergerSync.IAmMember) return false;
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.BuildingRegistrations == null) return false;
+                string own = "";
+                var byPid = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null || reg.businessTypeName != "ba:businesstype_headquarters") continue;
+                    bool rented; try { rented = reg.RentedByPlayer; } catch { continue; }
+                    if (!rented) continue;
+                    string k = GameStateReader.AddressKey(reg);
+                    if (string.IsNullOrEmpty(k)) continue;
+                    if (MergerFlip.TrulyMine(reg))
+                    { if (own.Length == 0 || string.CompareOrdinal(k, own) < 0) own = k; continue; }
+                    if (!MergerFlip.IsFlipped(k)) continue;
+                    if (!CompanyLists.TryOwnerOfAddress(k, out var pid) || string.IsNullOrEmpty(pid)) continue;
+                    if (!byPid.TryGetValue(pid, out var cur) || string.CompareOrdinal(k, cur) < 0) byPid[pid] = k;
+                }
+                if (own.Length > 0) { hqKey = own; ownerPid = MPConfig.PlayerId; return true; }
+                foreach (var pid in MergerSync.MyMemberPidsOrdered)
+                    if (!string.IsNullOrEmpty(pid) && byPid.TryGetValue(pid, out var k2))
+                    { hqKey = k2; ownerPid = pid; return true; }
+                return false;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyPlans] backing headquarters: {ex.Message}"); hqKey = ""; ownerPid = ""; return false; }
+        }
+
+        /// <summary>P7: EVERY headquarters this company holds on this machine - my own plus every flipped
+        /// partner one.  The union counters on the company card are summed over exactly these.</summary>
+        public static List<Address> CompanyHqAddresses()
+        {
+            var list = new List<Address>();
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.BuildingRegistrations == null) return list;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null || reg.businessTypeName != "ba:businesstype_headquarters") continue;
+                    bool rented; try { rented = reg.RentedByPlayer; } catch { continue; }
+                    if (!rented || reg.Address == null) continue;
+                    if (!MergerFlip.TrulyMine(reg) && !MergerFlip.IsFlipped(GameStateReader.AddressKey(reg))) continue;
+                    list.Add(reg.Address);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyPlans] company headquarters: {ex.Message}"); }
+            return list;
+        }
+
+        /// <summary>P7: the five card counters, summed over the whole company with the SAME native helper the
+        /// card itself uses (HeadquartersList.SetUpEmployeeCounter :69-83) - one query per headquarters,
+        /// same query info, so nothing here re-implements what counts as an employee.</summary>
+        public static int UnionCounterFor(string skill)
+        {
+            int n = 0;
+            try
+            {
+                foreach (var a in CompanyHqAddresses())
+                    n += EmployeeHelper.GetEmployeeInstances(new EmployeeInstancesQueryInfo
+                    {
+                        withAssignedAddress = a,
+                        withSkills = new string[1] { skill },
+                        excludeBeingReplaced = true,
+                    }).Count;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyPlans] union counter '{skill}': {ex.Message}"); }
+            return n;
+        }
+
+        /// <summary>P7: the registration whose card the hub is building RIGHT NOW - recorded by the hub's
+        /// entry prefix so the counter postfix, which cannot name an Address of its own, knows whose card it
+        /// is filling in.  Set and read on the main thread inside one SetUpEntry call.</summary>
+        private static string _cardBeingDrawn = "";
+        public static void NoteHqCardDrawn(string hqKey) { _cardBeingDrawn = hqKey ?? ""; }
+        public static bool DrawingCompanyCard()
+        {
+            try { return BackingHq(out var k, out _) && k.Length > 0 && string.Equals(k, _cardBeingDrawn, StringComparison.OrdinalIgnoreCase); }
+            catch { return false; }
+        }
+
+        /// <summary>P7: should the hub SKIP this headquarters registration?  True only for a FLIPPED partner
+        /// headquarters that is not the backing one.  An own headquarters is never hidden, a non-member and
+        /// an off-session machine hide nothing, and when no backing headquarters can be named nothing is
+        /// hidden either.</summary>
+        public static bool HideExtraHqCard(BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg == null || !MergerSync.IAmMember) return false;
+                if (MergerFlip.TrulyMine(reg)) return false;
+                string k = GameStateReader.AddressKey(reg);
+                if (string.IsNullOrEmpty(k) || !MergerFlip.IsFlipped(k)) return false;
+                if (!BackingHq(out var backing, out _) || backing.Length == 0) return false;
+                if (string.Equals(k, backing, StringComparison.OrdinalIgnoreCase)) return false;
+                _hiddenThisPass++;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static int _hiddenThisPass;
+        private static string _hqCardLogged = "";
+
+        /// <summary>P7: the hub finished a pass.  The card state is LOGGED ONCE and again whenever it
+        /// changes - a member joining or leaving, a headquarters bought or sold, all of which change either
+        /// the flip table or the member order and therefore this string.  There is no timer and no sweep:
+        /// the hub redraws the list itself whenever any of that happens.</summary>
+        public static void HqCardPassDone()
+        {
+            try
+            {
+                if (!MergerSync.IAmMember) { _hqCardLogged = ""; _hiddenThisPass = 0; return; }
+                BackingHq(out var k, out var pid);
+                string state = $"{k}|{pid}|{_hiddenThisPass}";
+                if (state != _hqCardLogged)
+                {
+                    _hqCardLogged = state;
+                    Plugin.Logger.LogInfo($"[CompanyPlans] company headquarters card backed by '{k}' ({pid}); {_hiddenThisPass} partner card(s) hidden.");
+                }
+                _hiddenThisPass = 0;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyPlans] headquarters card pass: {ex.Message}"); _hiddenThisPass = 0; }
+        }
+
+        public static void HqCardPassBegin() { _hiddenThisPass = 0; _cardBeingDrawn = ""; }
+
+        /// <summary>P8: `hqcards` - what the hub would draw, off the SAME BackingHq and the same registration
+        /// filter, so the rig reads the rule and not a copy of it.</summary>
+        public static string HqCardsLine()
+        {
+            try
+            {
+                bool has = BackingHq(out var k, out var pid);
+                int visible = 0;
+                var gi = SaveGameManager.Current;
+                if (gi != null && gi.BuildingRegistrations != null)
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null || reg.businessTypeName != "ba:businesstype_headquarters") continue;
+                        bool rented; try { rented = reg.RentedByPlayer; } catch { continue; }
+                        if (!rented) continue;
+                        if (GameStatePatcher.HideFromOwnAssetLists(reg)) continue;   // the hub's own prefix, first test
+                        if (HideExtraHqCard(reg)) continue;                          // P7, second test
+                        visible++;
+                    }
+                _hiddenThisPass = 0;   // the lever is a READ: it must not disturb the card pass counter
+                return $"OK hqcards visible={visible} backing={(has ? k : "-")} owner={(has ? pid : "-")}";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
         }
 
         /// <summary>U1 DRIVER (the union).  Build the rows of one family for EVERY company headquarters
@@ -701,6 +1061,32 @@ namespace BigAmbitionsMP
             SetId(pl, d.Id);
             if (pl.manuallyPricedItems != null)
                 foreach (var s in d.ManuallyPricedItems ?? new List<string>()) if (!string.IsNullOrEmpty(s)) pl.manuallyPricedItems.Add(s);
+            // HQ-PARITY-1 P2.  The pane's product table is built ONE MODEL PER cachedSuggestion
+            // (PricingManagerProductsScrollerController.LoadPlan :70-79), so an empty list is an empty
+            // table - and the routed manualprice / suggestedprice ops then have no row to be clicked on.
+            if (pl.cachedSuggestions != null)
+            {
+                pl.cachedSuggestions.Clear();
+                foreach (var s in d.CachedSuggestions ?? new List<PwPriceSuggestion>())
+                {
+                    if (s == null || string.IsNullOrEmpty(s.ItemName)) continue;
+                    var sg = new PriceSuggestion
+                    {
+                        itemName = s.ItemName, suggestedMin = s.SuggestedMin, suggestedMax = s.SuggestedMax,
+                        rivalReferencePrice = s.RivalReferencePrice, isPlayerSelling = s.IsPlayerSelling,
+                        sellingBusinessTypes = new HashSet<string>(s.SellingBusinessTypes ?? new List<string>(), StringComparer.Ordinal),
+                    };
+                    pl.cachedSuggestions.Add(sg);
+                }
+            }
+            // The change-neighbourhood confirmation is a COUNT test and nothing else (PricingManagerPlanUI
+            // :100 `if (_currentPlan.originalStorePrices.Count > 0)`), so the display copy carries that many
+            // EMPTY entries: no entry of it is ever read on this machine.
+            if (pl.originalStorePrices != null)
+            {
+                pl.originalStorePrices.Clear();
+                for (int i = 0; i < d.OriginalStorePriceCount; i++) pl.originalStorePrices.Add(new OriginalStorePrice());
+            }
             return pl;
         }
 
@@ -723,6 +1109,33 @@ namespace BigAmbitionsMP
             // `BuildingHelper.GetBuildingRegistration(plan.importAddress)` then `.BusinessName`): a row
             // whose importer this machine cannot resolve would throw inside the native builder.
             if (ip.importAddress == null) return null;
+            // HQ-PARITY-1 P1.  WITHOUT the product lines the native LoadProducts
+            // (PurchasingAgentProductsScrollerController.cs:14-35) calls AddMissingImportProducts()
+            // (ImportPartnership.cs:400-406), which mints a zero-amount, NULL-warehouse row per item: target
+            // 0, warehouse "Unassigned", stock 0 (PurchasingAgentProductModel.UpdateWarehouse :66 answers 0
+            // for a null warehouse) and a $0 next-delivery total (ImportPartnership.cs:71).  The owner's
+            // lines are on the wire already (PwImportPartnership.Products), so the display copy carries them
+            // - warehouse included, resolved through AddrOf, the ONE key->Address resolver this file uses.
+            if (ip.products != null)
+            {
+                ip.products.Clear();
+                foreach (var ln in d.Products ?? new List<PwItemOrderLine>())
+                {
+                    if (ln == null || string.IsNullOrEmpty(ln.ItemName)) continue;
+                    ip.products.Add(new ImportProduct
+                    {
+                        itemName = ln.ItemName,
+                        amount = ln.Amount,
+                        amountOrderedLastWeek = ln.AmountOrderedLastWeek,
+                        amountOrderedThisWeek = ln.AmountOrderedThisWeek,
+                        // A partner's warehouse IS resolvable here: the flip makes its registration
+                        // RentedByPlayer (MergerFlip.cs:138/:277), which is what the cell's warehouse
+                        // dropdown lists (PurchasingAgentProductCellView.cs:19) and matches its selection
+                        // against (:209-211).  An unresolvable key leaves null, exactly as no warehouse does.
+                        assignedWarehouse = AddrOf(ln.AssignedWarehouseKey),
+                    });
+                }
+            }
             return ip;
         }
 
@@ -744,10 +1157,23 @@ namespace BigAmbitionsMP
                     planType = (Entities.HealthInsurancePlanType)d.HealthInsurancePlanType,
                     pricePerDayAndEmployee = d.PricePerDayAndEmployee,
                 };
+            // HQ-PARITY-1 P4.  HrManagerPlan.EmployeeInstances (decompile HrManagerPlan.cs:38) maps every
+            // assigned id through EmployeeHelper.GetEmployeeById and does NOT null-filter, so an id that was
+            // never injected onto this machine throws inside HrManagerPlanUI.SetUpBasicData :137
+            // (employees.Average(...)) - and SwallowPaneOpen turns that into a pane that silently refuses to
+            // open.  The display copy therefore lists only the people this machine can actually resolve.
             if (pl.assignedEmployees != null)
             {
                 pl.assignedEmployees.Clear();
-                foreach (var s in d.AssignedEmployees ?? new List<string>()) if (!string.IsNullOrEmpty(s)) pl.assignedEmployees.Add(s);
+                int missing = 0;
+                foreach (var s in d.AssignedEmployees ?? new List<string>())
+                {
+                    if (string.IsNullOrEmpty(s)) continue;
+                    if (!ResolvesHere(s)) { missing++; continue; }
+                    pl.assignedEmployees.Add(s);
+                }
+                if (missing > 0)
+                    Plugin.Logger.LogInfo($"[CompanyPlans] hr plan '{d.Id}': {missing} assignee(s) not present here - row shown without them.");
             }
             return pl;
         }
@@ -776,6 +1202,8 @@ namespace BigAmbitionsMP
                 pl.dealBreakerTypes.Clear();
                 foreach (var s in d.DealBreakerTypes ?? new List<string>()) if (!string.IsNullOrEmpty(s)) pl.dealBreakerTypes.Add(s);
             }
+            // c4: nextRecruit is NOT carried.  No screen the display path can reach reads it, so the three
+            // timer fields were dead on the wire; the copy leaves it null, as a never-recruited plan has it.
             return pl;
         }
 
@@ -794,6 +1222,15 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
+        }
+
+        /// <summary>HQ-PARITY-1 P4: does this employee id name a record THIS machine can resolve?  The one
+        /// question every "drop what is not here" filter asks; `showError: false` because a miss is the
+        /// normal case for a partner's staff and must not raise the game's own error toast.</summary>
+        private static bool ResolvesHere(string employeeId)
+        {
+            try { return !string.IsNullOrEmpty(employeeId) && EmployeeHelper.GetEmployeeById(employeeId, showError: false) != null; }
+            catch { return false; }
         }
 
         private static Address AddrOf(string key)
@@ -1075,24 +1512,87 @@ namespace BigAmbitionsMP
             if (!_byOwner.TryGetValue(ownerPid, out var p) || p == null) return $"ERR no plans held for '{ownerPid}'";
             MaterialiseRows(ownerPid);   // r2c: the rows exist only once drawn; the rig draws nothing
             var parts = new List<string>();
-            void Take(string fam, string id, string dtoName)
+            void Take(string fam, string id, string dtoName, string detail = "")
             {
                 if (string.IsNullOrEmpty(id)) return;
                 if (family.Length > 0 && !string.Equals(fam, family, StringComparison.Ordinal)) return;
                 string name = null;
                 if (_rows.TryGetValue(ownerPid + "|" + fam + "|" + id, out var row) && row != null) name = RowName(row, fam);
                 if (string.IsNullOrEmpty(name)) name = dtoName;
-                parts.Add($"{fam}:{id}:{RowFieldSafe(name)}");
+                parts.Add($"{fam}:{id}:{RowFieldSafe(name)}{detail}");
             }
-            foreach (var d in p.PricingManagerPlans ?? new List<PwPricingPlan>()) Take("pricing", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""));
+            foreach (var d in p.PricingManagerPlans ?? new List<PwPricingPlan>())
+                // HQ-PARITY-1 P8: the suggestion count IS the pricing pane's product table
+                // (PricingManagerProductsScrollerController.LoadPlan :70-79), so a zero here is the empty table.
+                Take("pricing", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""), $"#suggestions={d?.CachedSuggestions?.Count ?? 0}");
             foreach (var d in p.ImportPartnerships ?? new List<PwImportPartnership>())
             {
                 string who = EmpName(d?.EmployeeInstanceId ?? "");
-                Take("purchasing", d?.Id, who.Length > 0 ? who : (d?.ImportAddressKey ?? ""));
+                Take("purchasing", d?.Id, who.Length > 0 ? who : (d?.ImportAddressKey ?? ""), ProductLines(d));
             }
             foreach (var d in p.HrManagerPlans ?? new List<PwHrPlan>()) Take("hr", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""));
             foreach (var d in p.HeadhunterPlans ?? new List<PwHeadhunterPlan>()) Take("headhunter", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""));
             return $"OK plans '{ownerPid}' rows=[{string.Join(",", parts)}]";
+        }
+
+        /// <summary>P8: one purchasing plan's product lines as the OWNER published them, plus the stock this
+        /// machine can see in the named warehouse - the four values a partner row was drawing empty before
+        /// P1 (target 0, "Unassigned", 0 stock).  The row format's three reserved characters are stripped
+        /// from every field, so a warehouse key cannot split a row.</summary>
+        private static string ProductLines(PwImportPartnership d)
+        {
+            try
+            {
+                var lines = d?.Products;
+                if (lines == null || lines.Count == 0) return "#lines=[]";
+                var sb = new System.Text.StringBuilder("#lines=[");
+                for (int i = 0; i < lines.Count; i++)
+                {
+                    var ln = lines[i];
+                    if (ln == null) continue;
+                    var wh = AddrOf(ln.AssignedWarehouseKey);
+                    int stock = 0;
+                    if (wh != null) { try { stock = BuildingHelper.CountResourcesInPallets(wh, ln.ItemName); } catch { stock = 0; } }
+                    if (sb.Length > 8) sb.Append(';');
+                    sb.Append($"item={RowFieldSafe(ln.ItemName)} amount={ln.Amount} ")
+                      .Append($"wh={(wh == null ? "none" : RowFieldSafe(ln.AssignedWarehouseKey))} stock={stock}");
+                }
+                return sb.Append(']').ToString();
+            }
+            catch { return "#lines=[]"; }
+        }
+
+        /// <summary>P8, THE OWNER-SIDE LEVER: `hqtarget <planId> <item> <n>` changes a target on one of
+        /// THIS machine's OWN purchasing plans, exactly where the pane's own ChangeTarget lands
+        /// (PurchasingAgentProductCellView.cs:234-240 -> UpdateAmount, which writes ImportProduct.amount -
+        /// the rest of that body is label refresh).  It exists because every other plan lever routes to
+        /// somebody ELSE's machine, and P5's immediacy is about the owner's own edit.</summary>
+        public static string TestDriveHqTarget(string arg)
+        {
+            try
+            {
+                var a = (arg ?? "").Trim().Split(new[] { ' ' }, 3, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 3 || !int.TryParse(a[2], out var want)) return "ERR usage: hqtarget <planId> <itemName> <amount>";
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.importPartnerships == null) return "ERR no game instance here";
+                foreach (var ip in gi.importPartnerships)
+                {
+                    if (ip == null || ip.id != a[0]) continue;
+                    if (CompanyLists.IsDisplayPlan(ip)) return $"ERR '{a[0]}' is a partner's display copy here - use `planedit purchasing {a[0]} target ...`";
+                    if (ip.products != null)
+                        foreach (var pr in ip.products)
+                            if (pr != null && (pr.itemName == a[1] || RowFieldSafe(pr.itemName) == a[1]))   // fold b: the rig
+                            {                                                                                   // captures the row-safe spelling
+                                pr.amount = want;
+                                SaveGameManager.MarkChange();
+                                OwnEditCommitted("hqtarget lever");
+                                return $"OK hqtarget {a[0]} {a[1]} amount={want} (own plan; published at the urgent cadence)";
+                            }
+                    return $"ERR item '{a[1]}' is not on partnership '{a[0]}' here";
+                }
+                return $"ERR no purchasing plan '{a[0]}' of my own here";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
         }
 
         private static string HqsLine(string ownerPid)
@@ -1367,7 +1867,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!IsOverlayPlan(plan)) return false;                       // my own plan: nothing changes
+                if (!IsOverlayPlan(plan)) { OwnEditCommitted("pane edit"); return false; }   // my own plan: nothing changes here, but the company is watching
                 if (!_rowInfo.TryGetValue(plan, out var ri) || ri == null)
                 { Refused(family, op, "?", "the row is no longer in the registry"); return true; }
                 if (mutate != null) { try { mutate(plan); } catch (Exception mx) { Plugin.Logger.LogWarning($"[Plans] {family} {op} display: {mx.Message}"); } }
@@ -1381,6 +1881,21 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[Merger] {family} {op} route failed and the local commit was refused: {ex.Message}");
                 return true;
             }
+        }
+
+        /// <summary>HQ-PARITY-1 P5, THE ONE DECISION POINT for "the owner just changed something on a
+        /// headquarters plan of their own".  Every such commit used to reach the mod and then do nothing:
+        /// the bundle was marked dirty only by Order.Pay (PaperworkSync.cs:847) and GameManager.NewDay
+        /// (:862), so a co-member saw the change up to thirty seconds later - or not until the next day.
+        /// SaveGameManager.MarkChange is deliberately NOT patched (it fires on everything); the four
+        /// families' own-plan returns and the logistics plan-load postfix call HERE instead, and the
+        /// publish then rides the existing 2 s urgent cadence (:38) into MPServer.StorePaperwork, whose
+        /// FanOutCompanyLists (MPServer.cs:619-620) is the co-members' redraw.  Off a merger this costs a
+        /// single bool test.</summary>
+        public static void OwnEditCommitted(string why)
+        {
+            try { if (MergerSync.IAmMember) PaperworkSync.MarkUrgent(); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyPlans] own edit '{why}': {ex.Message}"); }
         }
 
         // ── D2, THE CONFIRMATION FOLD ────────────────────────────────────────────────────────────────
@@ -1400,7 +1915,10 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!IsOverlayPlan(plan) || !_rowInfo.ContainsKey(plan)) return false;
+                // HQ-PARITY-1 P5a: `end` and `urgent` on a purchasing partnership are the two pane commits
+                // that reach the routing layer HERE and not through RoutePaneEdit, so an OWN plan's confirm
+                // would otherwise publish at the 30 s cadence.  Same one hook.
+                if (!IsOverlayPlan(plan) || !_rowInfo.ContainsKey(plan)) { OwnEditCommitted("confirmed pane edit"); return false; }
                 _confirmRow = plan; _confirmFamily = family ?? ""; _confirmOp = op ?? ""; _confirmWhat = what ?? "";
                 return true;
             }
@@ -1427,7 +1945,9 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!PartnerHqOpen(out var hq, out var owner)) return false;
+                // HQ-PARITY-1 P5a: 'Add plan' on MY OWN headquarters is the third own-plan commit that does
+                // not pass through RoutePaneEdit.
+                if (!PartnerHqOpen(out var hq, out var owner)) { OwnEditCommitted("plan created"); return false; }
                 return Send(family, Guid.NewGuid().ToString("N"), hq, owner, "add", "add plan", null, "", 0, 0f, false);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {family} create route: {ex.Message}"); return true; }
@@ -2314,7 +2834,13 @@ namespace BigAmbitionsMP
                 string tail = sp > 0 ? rest.Substring(sp + 1) : "";
                 if (sp > 0 && float.TryParse(tail, System.Globalization.NumberStyles.Float,
                                              System.Globalization.CultureInfo.InvariantCulture, out var parsed))
-                { num = parsed; str = rest.Substring(0, sp); }
+                {
+                    num = parsed; str = rest.Substring(0, sp);
+                    // HQ-PARITY-1 P8, found while wiring the scenario: a WHOLE-number tail filled Estimate
+                    // only, so every op that reads IntValue - `planedit purchasing <id> target <item> <n>`
+                    // above all - was handed a target of 0 from the rig.  The same tail now fills both.
+                    int.TryParse(tail, out iv);
+                }
                 // CROSS-HR-3 A5: an id AND a bool - `planedit hr <planId> assign <employeeId> true`.  The number
                 // case already split a trailing value off the string; a trailing true/false was not split, so
                 // bool.TryParse ran on the WHOLE rest, answered false, and the HR assign applier was handed an
@@ -2322,6 +2848,15 @@ namespace BigAmbitionsMP
                 else if (sp > 0 && bool.TryParse(tail, out var parsedBool))
                 { bv = parsedBool; str = rest.Substring(0, sp).Trim(); }
                 else { bool.TryParse(rest, out bv); int.TryParse(rest, out iv); }
+                // Fold b (HQ-PARITY-1 rig run 3): the rig captures item names off `plans ... rows`, which prints them
+                // through RowFieldSafe (':' -> '_'); translate that spelling back to the REAL name off the display
+                // copy this sender holds, so the runner's exact match receives what the owner's plan holds.
+                if (fam == "purchasing" && row is ImportPartnership tip && tip.products != null && (op == "target" || op == "warehouse"))
+                {
+                    string want = str.Trim();
+                    foreach (var pr in tip.products)
+                        if (pr != null && pr.itemName != want && RowFieldSafe(pr.itemName) == want) { str = pr.itemName; break; }
+                }
                 bool routed = op == "add" ? RoutePlanCreateAt(fam, str.Trim())   // r2b: the HQ key is the argument (no pane on the rig)
                                           : RoutePaneEdit(fam, "planedit verb", row, op, str, iv, num, bv);
                 return $"OK planedit {fam} {id} {op} routed={routed}";

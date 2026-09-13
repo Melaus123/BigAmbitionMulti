@@ -4539,7 +4539,9 @@ namespace BigAmbitionsMP
         /// `_logisticsManagerPlanUI.LoadPlan(_currentPlan)`) all end there, and every one of them mutates
         /// the STORED plan object in place and calls SaveGameManager.MarkChange. Routing from this one
         /// point covers them without patching each anonymous delegate. CompanyLists dedupes by the plan's
-        /// serialised shape, so a plain re-selection sends nothing.</summary>
+        /// serialised shape, so a plain re-selection sends nothing - and HQ-PARITY-1 c3 gives the OWNER's leg
+        /// the SAME dedupe (CompanyLists.OwnPlanChanged), because LoadPlan also runs on every plain click
+        /// (LogisticsManagersPlanList.SelectPlan :228) and a pure read must never publish.</summary>
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI), "LoadPlan")]
         public static class Patch_LogisticsPlanLoad_MergerRoute
         {
@@ -4548,7 +4550,12 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (MergerFlip.FlippedCount == 0) return;   // inert without a merger
-                    CompanyLists.RoutePlanEdit(plan, "plan edited");
+                    // HQ-PARITY-1 P5b: a DISPLAY copy is routed (and the runner's apply marks urgent at the
+                    // far end); a plan of this machine's OWN is edited natively and RoutePlanEdit returns at
+                    // once - which is exactly the commit a co-member is waiting on.  c3: only a CHANGED own
+                    // plan commits; opening one is a read, and a read publishes nothing.
+                    if (CompanyLists.IsDisplayPlan(plan)) CompanyLists.RoutePlanEdit(plan, "plan edited");
+                    else if (CompanyLists.OwnPlanChanged(plan)) CompanyPlans.OwnEditCommitted("logistics plan edited");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan-load route: {ex.Message}"); }
             }
@@ -6037,8 +6044,51 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(BuildingRegistration headquarters)
             {
-                try { return !GameStatePatcher.HideFromOwnAssetLists(headquarters); } catch { return true; }
+                try
+                {
+                    if (GameStatePatcher.HideFromOwnAssetLists(headquarters)) return false;
+                    // HQ-PARITY-1 P7: the flip makes every partner headquarters RentedByPlayer here, and the
+                    // hub lists every such registration (decompile HeadquartersList.cs:26) - so a merged
+                    // company was drawing one card per member.  ONE card now: the backing headquarters
+                    // (CompanyPlans.BackingHq), which is my own where I have one.
+                    if (CompanyPlans.HideExtraHqCard(headquarters)) return false;
+                    CompanyPlans.NoteHqCardDrawn(GameStateReader.AddressKey(headquarters));
+                    return true;
+                }
+                catch { return true; }
             }
+        }
+
+        /// <summary>HQ-PARITY-1 P7.  The company's ONE card must count the company's PEOPLE: the native
+        /// counter queries one headquarters address (HeadquartersList.SetUpEmployeeCounter :69-83), so the
+        /// five labels on the backing card are re-summed over every company headquarters - my own and every
+        /// flipped partner one - with that same native helper.  Only the backing card is touched; an own
+        /// second headquarters, a non-member and an off-session machine keep the native number.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HeadquartersList), "SetUpEmployeeCounter")]
+        public static class Patch_BizManHQList_UnionCounters
+        {
+            static void Postfix(UnityEngine.Transform entry, string tabName, string skill)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || entry == null) return;   // inert without a merger
+                    if (!CompanyPlans.DrawingCompanyCard()) return;
+                    var button = entry.GetButtonByName("EmployeeCounter/" + tabName);
+                    if (button == null) return;
+                    button.transform.GetLabelByName("Count").text = CompanyPlans.UnionCounterFor(skill).ToString();
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[BizMan] headquarters counter union: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>HQ-PARITY-1 P7: the hub's list pass, which is where the card state is logged - once, and
+        /// again whenever it changes (a member joins or leaves, a headquarters is bought or sold; the hub
+        /// rebuilds on all of them).</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HeadquartersList), "Load")]
+        public static class Patch_BizManHQList_CardPass
+        {
+            static void Prefix() { try { CompanyPlans.HqCardPassBegin(); } catch { } }
+            static void Postfix() { try { CompanyPlans.HqCardPassDone(); } catch { } }
         }
 
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.WarehouseList), "SetUpEntry")]

@@ -827,6 +827,23 @@ namespace BigAmbitionsMP
                     return CompanyPlans.TestDriveLine(arg);
                 }
 
+                case "hqcards":
+                {
+                    // HQ-PARITY-1 P8. Read-only. What the BizMan hub's headquarters list would DRAW here:
+                    // how many cards survive the two filters, and which headquarters (and whose) backs the
+                    // company's single card. Same CompanyPlans.BackingHq the hub's own prefix uses.
+                    return CompanyPlans.HqCardsLine();
+                }
+
+                case "hqtarget":
+                {
+                    // HQ-PARITY-1 P8 - TEST LEVER. `hqtarget <planId> <itemName> <amount>` changes a target on
+                    // one of THIS machine's OWN purchasing plans, where the pane's own ChangeTarget writes it,
+                    // and marks the bundle urgent exactly as the pane commit does. Every other plan lever
+                    // routes to another machine; this one is the owner's own edit, which is what P5 is about.
+                    return CompanyPlans.TestDriveHqTarget(arg);
+                }
+
                 case "planedit":
                 {
                     // MERGER PHASE 4c part 2a (E5). `planedit <family> <planId> <op> [args]` sends exactly the

@@ -463,7 +463,7 @@ namespace BigAmbitionsMP
                     foreach (var pl in gi.pricingManagerPlans)
                     {
                         if (pl == null || !mine.Contains(Key(pl.headquartersAddress))) continue;
-                        l.PricingManagerPlans.Add(new PwPricingPlan
+                        var pw = new PwPricingPlan
                         {
                             Id = pl.id, AssignedEmployeeId = pl.assignedEmployeeId,
                             HeadquartersAddressKey = Key(pl.headquartersAddress),
@@ -471,7 +471,22 @@ namespace BigAmbitionsMP
                             NextUpdateDay = pl.nextUpdateDay, NextUpdateHour = pl.nextUpdateHour,
                             ManuallyPricedItems = pl.manuallyPricedItems == null
                                 ? new List<string>() : new List<string>(pl.manuallyPricedItems),
-                        });
+                            // HQ-PARITY-1 P2: the pane's product table IS cachedSuggestions, and the
+                            // change-neighbourhood confirmation is a COUNT test on originalStorePrices.
+                            OriginalStorePriceCount = pl.originalStorePrices == null ? 0 : pl.originalStorePrices.Count,
+                        };
+                        if (pl.cachedSuggestions != null)
+                            foreach (var cs in pl.cachedSuggestions)
+                                if (cs != null)
+                                    pw.CachedSuggestions.Add(new PwPriceSuggestion
+                                    {
+                                        ItemName = cs.itemName, SuggestedMin = cs.suggestedMin,
+                                        SuggestedMax = cs.suggestedMax, RivalReferencePrice = cs.rivalReferencePrice,
+                                        IsPlayerSelling = cs.isPlayerSelling,
+                                        SellingBusinessTypes = cs.sellingBusinessTypes == null
+                                            ? new List<string>() : new List<string>(cs.sellingBusinessTypes),
+                                    });
+                        l.PricingManagerPlans.Add(pw);
                     }
 
                 if (gi.hrManagerPlans != null)
@@ -510,6 +525,7 @@ namespace BigAmbitionsMP
                             AutomaticallyReplaceOnResign = pl.automaticallyReplaceOnResign,
                             RemainingCandidatesToRecruit = pl.remainingCandidatesToRecruit,
                             AmountOfCandidatesToRecruitPreference = pl.amountOfCandidatesToRecruitPreference,
+                            // c4: nextRecruit is not extracted - nothing on the display path reads it.
                         });
                     }
 
@@ -1129,7 +1145,36 @@ namespace BigAmbitionsMP
         /// <summary>One line per plan whose emptied target was ignored - not once per LoadPlan.</summary>
         private static readonly HashSet<string> _loggedEmptyTarget = new();
 
-        /// <summary>One live plan as the wire DTO — the same mapping PaperworkSync.Build uses.</summary>
+        /// <summary>HQ-PARITY-1 c3: plan id -> the shape this machine last saw on one of its OWN plans.
+        /// LogisticsManagerPlanUI.LoadPlan re-runs on every CLICK (LogisticsManagersPlanList.SelectPlan
+        /// :228), so the owner's leg must mark urgent only when the plan really CHANGED.</summary>
+        private static readonly Dictionary<string, string> _lastOwnPlan = new();
+
+        /// <summary>c3: did this OWN plan change since the last LoadPlan?  The signature is the wire DTO's
+        /// own shape - manager id, target address key, isFactory, and each destination's address key with its
+        /// item/amount lines IN ORDER (PlanToDto below) - which is exactly the dedupe the display leg already
+        /// runs on `_lastSentPlan` (RoutePlanEdit: "nothing changed").  The FIRST sight of a plan records its
+        /// shape and publishes nothing; a shape that cannot be serialised publishes, so a real edit is never
+        /// swallowed by a failure to compare.</summary>
+        public static bool OwnPlanChanged(Buildings.Office.Headquarters.LogisticsManagerPlan plan)
+        {
+            if (plan == null) return false;
+            try
+            {
+                string id = plan.id ?? "";
+                string shape = Newtonsoft.Json.JsonConvert.SerializeObject(PlanToDto(plan));
+                bool seen = _lastOwnPlan.TryGetValue(id, out var was);
+                _lastOwnPlan[id] = shape;
+                return seen && was != shape;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Merger] own plan signature: {ex.Message}");
+                return true;
+            }
+        }
+
+        /// <summary>One live plan as the wire DTO - the same mapping PaperworkSync.Build uses.</summary>
         public static PwLogisticsPlan PlanToDto(Buildings.Office.Headquarters.LogisticsManagerPlan pl)
         {
             var pp = new PwLogisticsPlan

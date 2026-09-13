@@ -4547,7 +4547,10 @@ namespace BigAmbitionsMP
                 if (n == 0)
                 { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}' (plan {plan.Id}): the installer built nothing."); return; }
                 SaveGameManager.MarkChange();
-                PaperworkSync.MarkDirty();
+                // HQ-PARITY-1 P5c: somebody on another machine pressed this button and is watching the row.
+                // MarkDirty published at the 30 s cadence; the routed pane edits already mark urgent
+                // (CompanyPlans.ApplyRouted :1641-1644) and the logistics leg must match them.
+                PaperworkSync.MarkUrgent();
                 Plugin.Logger.LogInfo($"[Merger] plan edit applied for '{p.AddressKey}' from '{p.PlayerId}' (plan {plan.Id}; {removed} replaced, "
                                     + $"{forgotten} tag record(s) released) - "
                                     + (standIn.Length == 0 ? "my own agreement, installed untagged."

@@ -1,0 +1,264 @@
+{
+  "id": "T-HQPARITY1",
+  "title": "HQ-PARITY-1, two players: the company shows ONE headquarters card on both machines, a partner's purchasing plan draws the owner's own product lines (target, designated warehouse, stock), and a target changed on either side is visible on the other inside four seconds; ends dissolved, NO save",
+  "preconditions": "Fixture save1. FIXTURE REQUIREMENT for steps 16-22: the host's own headquarters holds at least one purchasing partnership with at least one product line whose target is above zero AND whose designated warehouse is set - that is what the owner sees, and the whole point of P1 is that the member now sees the same. If the fixture has no such line, seed it BEFORE the run on the host's own machine (BizMan > Purchasing Agents: set a target and designate a warehouse) - it cannot be seeded from the rig, because the warehouse op carries its warehouse in StationId and `planedit` has no way to set it. Build HQ-PARITY-1 deployed on both machines. Steps 13-15 are UI rules read through the `hqcards` lever, which answers off the SAME CompanyPlans.BackingHq the hub's own entry prefix uses; the rig draws no screen.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[CompanyPlans\\] .*(failed|exception|threw)",
+    "pane.*refus",
+    "\\[Merger\\] accept .* REFUSED"
+  ],
+  "oracles_report": [
+    "\\[CompanyPlans\\] company headquarters card",
+    "\\[CompanyPlans\\] hr plan",
+    "\\[Plans\\] redrew",
+    "\\[Plans\\] redraw for .* DEFERRED",
+    "\\[Merger\\] plan edit applied"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST HQPARITY1 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "sleep_s": 30,
+      "note": "the worlds settle and the first paperwork bundles cross"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "hqcards",
+      "expect_result": "^OK hqcards visible=1 backing=[^ ]",
+      "note": "P7: the client owns no headquarters in this fixture, so the ONE card it draws is the backing partner one - the flip had been giving it a card per member"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "hqcards",
+      "expect_result": "^OK hqcards visible=1 .*owner=${hostPid}",
+      "note": "P7: the host HAS its own headquarters, so its own card is the company card and every flipped partner card is hidden - an own card is never hidden"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "plans ${hostPid} hqs",
+      "expect_result": "^OK plans .* hqs=\\[[^\\]]",
+      "capture": {
+        "hostHq": "hqs=\\[([^,\\]]+)"
+      },
+      "note": "the host's headquarters key, off the client's own DTOs"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows purchasing",
+      "expect_result": "purchasing:[^:]+:[^#]*#lines=\\[item=",
+      "capture": {
+        "planId": "purchasing:([^:]+):",
+        "item": "item=([^ ]+) amount=[1-9]"
+      },
+      "note": "c5: `item` is captured from a line whose amount is ABOVE ZERO, so the immediacy leg at step 22 edits a real target. P1/P8: the partner row now carries the OWNER's product lines. Before this build `ip.products` was never filled, the native LoadProducts called AddMissingImportProducts() and every line drew target 0 / warehouse Unassigned / stock 0"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows purchasing",
+      "expect_result": "#lines=\\[[^\\]]*amount=[1-9]",
+      "note": "P1: a target ABOVE ZERO - the owner's number, not the minted zero"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows purchasing",
+      "note": "P1: at least one line's designated warehouse resolved here (the flip makes a partner warehouse RentedByPlayer). Run 1 showed the fixture plan legitimately holds SOME lines with no warehouse (the owner never designated one for them), so the check is 'a resolved warehouse exists', not 'no line lacks one'.",
+      "expect_result": "#lines=\\[[^\\]]*wh=[0-9]+ ba_street"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows pricing",
+      "expect_result": "^OK plans .*rows=\\[(pricing:[^:]+:[^#]*#suggestions=[0-9].*|)\\]",
+      "note": "P2: the pricing suggestions are on the wire. The fixture host HQ holds NO pricing plan (run 2: rows=[]), so this step only proves the lever line; a plan, if present, must carry #suggestions=<n>. The pricing field parity is REVIEW-VERIFIED ONLY on this fixture."
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "mark TEST HQPARITY1 IMMEDIACY-OWNER",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "hqtarget ${planId} ${item} 77",
+      "expect_result": "^OK hqtarget .* amount=77",
+      "note": "P5a: the OWNER changes a target on its OWN plan. Before this build nothing marked the bundle dirty for an own plan edit at all - the co-member saw it at the next day change The client's receive line is expected within 8 s of this edit (the 2 s urgent cadence + fan-out).",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] received ${hostPid}:",
+          "within_s": 8
+        }
+      ]
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "sleep_s": 4,
+      "note": "the 2 s urgent publish interval plus the host's store-and-fan-out"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows purchasing",
+      "expect_result": "item=${item} amount=77 ",
+      "note": "IMMEDIACY, the owner's own edit: inside four seconds"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "mark TEST HQPARITY1 RECEIVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "plans ${hostPid}",
+      "expect_result": "^OK plans",
+      "note": "the fan-out's receive line is asserted on step 21 (it lands 2-3 s after the owner's edit, before this step's mark)"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "mark TEST HQPARITY1 IMMEDIACY-MEMBER",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "planedit purchasing ${planId} target ${item} 91",
+      "expect_result": "routed=True",
+      "note": "the reverse leg: the MEMBER routes a target change onto the host's plan"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "sleep_s": 4,
+      "note": "apply at the runner, MarkUrgent, publish, fan out, redraw"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows purchasing",
+      "expect_result": "item=${item} amount=91 ",
+      "note": "IMMEDIACY, the member's routed edit: back inside four seconds"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "plans ${hostHq}",
+      "expect_result": "^OK plans .* purchasing:[1-9]",
+      "note": "the host still runs its own plans; nothing here was written on the client"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved; NO save. The host's fixture target is left at 91 in memory and is never written to disk"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "hqcards",
+      "expect_result": "^OK hqcards visible=[1-9]",
+      "note": "off a merger BackingHq answers false and nothing is hidden - the native list is untouched"
+    },
+    {
+      "seq": 35,
+      "role": "both",
+      "cmd": "mark TEST HQPARITY1 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
