@@ -1,0 +1,450 @@
+{
+  "id": "T-HQPARITY3",
+  "title": "HQ-PARITY-3, two players: OPENING a partner's logistics plan sends nothing and can never overwrite the owner's plan; a single destination edit still travels as one op; and every setting a control writes - purchasing repeating/auto-stock, HR replace-absent and training target, headhunter deal-breakers - is on the other machine inside four seconds, in both directions; ends dissolved with nothing left behind, NO save",
+  "preconditions": "Fixture save1. Build HQ-PARITY-3 deployed on both machines. FIXTURE REQUIREMENT: the HOST's own headquarters must hold (a) one LOGISTICS plan (not a factory plan) with a manager, a source warehouse, a truck AND a driver in one of that warehouse's vehicle slots - only that makes MaxDestinations non-zero - and at least one destination row; (b) one PURCHASING plan (import partnership); (c) one HR plan; (d) one HEADHUNTER plan. Steps 14-19 are the LOAD-IS-NOT-AN-EDIT assertions and need only (a). Steps 20-25 are the destination round trip and need (a) with a destination. Steps 26-34 are the per-control publish and need (b), (c) and (d): drop the family's two steps if the fixture has no plan of it. The rig draws no screen: hqlog load drives the open seam directly when no plan list is on screen and says which path it took, and every setting is read back through `plans <owner> rows <family>`, which prints the values the panes' own controls are drawn from.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[CompanyPlans\\] .*(failed|exception|threw)",
+    "whole plan:",
+    "installed untagged",
+    "\\[Plans\\] redraw for .* DEFERRED - a headhunter plan is open",
+    "\\[Plans\\] redraw for .* DEFERRED - a purchasing product row is expanded",
+    "\\[Merger\\] accept .* REFUSED",
+    "the HR controls are not hooked"
+  ],
+  "oracles_report": [
+    "\\[Merger\\] plan edit applied",
+    "\\[Merger\\] plan edit routed",
+    "\\[Merger\\] plan .* cannot be expressed as logistics ops",
+    "\\[Plans\\] logistics plan .* nothing to send",
+    "\\[Plans\\] refreshed the open .* pane in place",
+    "\\[Plans\\] received"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST HQPARITY3 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "sleep_s": 30,
+      "note": "the worlds settle and the first paperwork bundles cross"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "plans ${hostPid} hqs",
+      "expect_result": "^OK plans .* hqs=\\[[^\\]]",
+      "capture": {
+        "hostHq": "hqs=\\[([^,\\]]+)"
+      }
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "logistics:[^:]+:[^#]*#max=[1-9]",
+      "capture": {
+        "planId": "logistics:([^:]+):",
+        "dests0": "#max=[0-9]+ dests=([0-9]+)"
+      },
+      "note": "the host's logistics plan as the client holds it, with the OWNER's capacity (A6 keeps that number once it has been seen, so a momentarily absent DTO can no longer grey every row)"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "plans ${hostHq}",
+      "expect_result": "^OK plans .* logistics:[1-9]",
+      "capture": {
+        "hostLog0": "logistics:([0-9]+)"
+      },
+      "note": "the owner's own plan count BEFORE the client so much as looks at it"
+    },
+    {
+      "seq": 16,
+      "role": "both",
+      "cmd": "mark TEST HQPARITY3 LOAD-IS-NOT-AN-EDIT",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "hqlog ${planId} shape",
+      "expect_result": "^OK hqlog .* shape (identical|differs at [0-9]+|no-baseline)",
+      "note": "A1 DIAGNOSTIC, A REPORT NOT A FAIL. `identical` is expected on a plan whose open has already been captured; `differs at <n>` names the first byte at which the copy's serialised shape and this machine's baseline part, which is exactly the asymmetry that used to turn an OPEN into a whole-plan edit. Either answer passes: what step 18 asserts is that the load sends nothing whatever the shapes say."
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "hqlog ${planId} load",
+      "expect_result": "^OK hqlog load sends=0",
+      "note": "A1, THE ASSERTION: running the real open of a partner's display copy sends ZERO legs. Before this build the load postfix routed, and the hands-on run caught it sending a WHOLE-PLAN replace with no user edit at all (host :3105-3108, client :2750). `via=` says whether the list's own SelectPlan ran or the seam was driven directly - the rig opens no screen, so `via=seam` is the ordinary answer."
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 6,
+      "note": "longer than the 2 s urgent publish plus the host's store-and-fan-out: if anything HAD been routed, it would have landed by now"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "plans ${hostHq}",
+      "expect_result": "^OK plans .* logistics:${hostLog0}",
+      "note": "A2, THE OWNER'S PLAN IS UNTOUCHED: the count is the one captured at step 15. The `whole plan:` line and the `installed untagged` line of the replace-by-id install are both in oracles_absent for the WHOLE run, so a single whole-plan leg anywhere in this scenario fails it."
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "logistics:${planId}:[^#]*#max=[1-9][0-9]* dests=${dests0}",
+      "note": "and the client's own copy still shows the same destinations it showed before the load"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "mark TEST HQPARITY3 MEMBER-REMOVES-DESTINATION",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "hqlog ${planId} destremove 0",
+      "expect_result": "^OK hqlog .* routed to '${hostPid}'",
+      "note": "A2: a REAL edit still travels, and as a single op on the mergerplanedit carrier",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied .*logistics destremove",
+          "within_s": 4
+        },
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] received ${hostPid}:",
+          "within_s": 8
+        }
+      ]
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "sleep_s": 4
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "logistics:${planId}:[^#]*#max=[1-9][0-9]* dests=[0-9]+",
+      "refute_result": "logistics:${planId}:[^#]*#max=[1-9][0-9]* dests=${dests0} ",
+      "note": "the member's own copy shows the removal came back through the owner's urgent publish"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "hqlog ${planId} destadd",
+      "expect_result": "^OK hqlog .* applied",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] received ${hostPid}:",
+          "within_s": 8
+        }
+      ]
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "sleep_s": 4
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "logistics:${planId}:[^#]*#max=[1-9][0-9]* dests=${dests0}",
+      "note": "8 -> 7 -> 8: the round trip closes, and no whole-plan leg was sent in either direction"
+    },
+    {
+      "seq": 29,
+      "role": "both",
+      "cmd": "mark TEST HQPARITY3 EVERY-SETTING-TRAVELS",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows purchasing",
+      "expect_result": "purchasing:[^:]+:[^#]*#lines=.*carried=([0-9]+|none)",
+      "capture": {
+        "puPlan": "purchasing:([^:]+):"
+      },
+      "note": "B6: the purchasing rows now print `rep=<bool> auto=<bool>`, the two toggles the owner drives"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "hqtoggle purchasing ${puPlan} repeating true",
+      "expect_result": "^OK hqtoggle purchasing .* repeating=True",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] received ${hostPid}:",
+          "within_s": 4
+        }
+      ],
+      "note": "B4/B6: the owner-side control commits at the urgent cadence instead of riding the 30 s dirty publish"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "sleep_s": 4
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows purchasing",
+      "expect_result": "purchasing:${puPlan}:[^,]*rep=True"
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows hr",
+      "expect_result": "hr:[^:]+:[^#]*#replace=(True|False) train=[0-9]+",
+      "capture": {
+        "hrPlan": "hr:([^:]+):"
+      }
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "hqtoggle hr ${hrPlan} replaceabsent true",
+      "expect_result": "^OK hqtoggle hr .* replaceabsent=True",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] received ${hostPid}:",
+          "within_s": 4
+        }
+      ]
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "sleep_s": 4
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows hr",
+      "expect_result": "hr:${hrPlan}:[^,]*replace=True",
+      "note": "B5's field, published from the owner"
+    },
+    {
+      "seq": 38,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows headhunter",
+      "expect_result": "headhunter:[^:]+:[^#]*#dealbreakers=[0-9]+",
+      "capture": {
+        "hhPlan": "headhunter:([^:]+):",
+        "db0": "#dealbreakers=([0-9]+)"
+      }
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "hqtoggle headhunter ${hhPlan} dealbreaker ba:dealbreakertype_smoker true",
+      "expect_result": "^OK hqtoggle headhunter .* dealbreaker .*=True count=[0-9]+",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] received ${hostPid}:",
+          "within_s": 4
+        }
+      ]
+    },
+    {
+      "seq": 40,
+      "role": "c",
+      "sleep_s": 4
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows headhunter",
+      "expect_result": "headhunter:${hhPlan}:[^,]*dealbreakers=[0-9]+",
+      "refute_result": "headhunter:${hhPlan}:[^,]*dealbreakers=${db0}",
+      "note": "the count went up by the one the owner just added"
+    },
+    {
+      "seq": 42,
+      "role": "c",
+      "cmd": "mark TEST HQPARITY3 MEMBER-EDITS-HR",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "planedit hr ${hrPlan} replaceabsent false",
+      "expect_result": "^OK planedit hr .* routed=True",
+      "note": "B5, THE OTHER DIRECTION: the member presses the HR toggle on the partner's plan. Before this build the control had no patch at all - its listener is an anonymous lambda inside HrManagerPlanUI.LoadPlan - and the press wrote the detached copy and was dropped.",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied .*hr replaceabsent",
+          "within_s": 4
+        }
+      ]
+    },
+    {
+      "seq": 44,
+      "role": "c",
+      "sleep_s": 4
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows hr",
+      "expect_result": "hr:${hrPlan}:[^,]*replace=False",
+      "note": "the owner's REAL plan took the member's edit and published it back"
+    },
+    {
+      "seq": 46,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved; NO save. The host's settings are left as the run left them in memory and are never written to disk"
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 48,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST HQPARITY3 DISSOLVE-LEAVES-NOTHING",
+      "expect_result": "OK MARK",
+      "seq": 49
+    },
+    {
+      "role": "c",
+      "cmd": "plans",
+      "expect_result": "^OK plans own=.* partners=\\{\\}$",
+      "note": "DISSOLVE LEG (user question 2026-09-12): off the merger the member holds NO partner rows at all - the display copies, their baselines and the held edits all cleared with the company",
+      "seq": 50
+    },
+    {
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "^ERR no plans held for",
+      "note": "the ex-partner's logistics rows are gone from this machine",
+      "seq": 51
+    },
+    {
+      "role": "c",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0",
+      "note": "nothing left for the teardown to change: no lingering plan links, no bench copies, no offers",
+      "seq": 52
+    },
+    {
+      "role": "h",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0",
+      "seq": 53
+    },
+    {
+      "role": "c",
+      "cmd": "planedit hr ${hrPlan} replaceabsent true",
+      "expect_result": "routed=False|^ERR no hr row .* in the registry here",
+      "note": "A LATE EDIT after leaving is refused, not applied: the ex-partner's row is no longer held here, so the lever cannot even name it (run 1 answered `ERR no hr row ... in the registry here`) - and because the lever refuses before any send, nothing can reach the owner (the host's own-plan rows are not readable through `plans rows`, which lists HELD partner rows only)",
+      "seq": 54
+    },
+    {
+      "seq": 55,
+      "role": "h",
+      "cmd": "plans ${hostHq}",
+      "expect_result": "^OK plans .* logistics:${hostLog0}",
+      "note": "off the merger the host's own plan count is exactly what it was at step 15: nothing this run did replaced a plan object"
+    },
+    {
+      "seq": 56,
+      "role": "both",
+      "cmd": "mark TEST HQPARITY3 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

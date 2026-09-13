@@ -2087,8 +2087,14 @@ namespace BigAmbitionsMP
             return ok;
         }
 
+        /// <summary>HQ-PARITY-3: how many edit legs have LEFT this machine.  Every routed leg of every
+        /// family goes through this one envelope, so a lever can bracket a call and say honestly whether it
+        /// sent anything - which is what `hqlog load` asserts about merely opening a partner's plan.</summary>
+        public static long LegsSent { get; private set; }
+
         internal static void SendEdit(SharedWorkEditPayload p)   // wave 4: CompanyLists routes plan edits through the same envelope
         {
+            LegsSent++;
             _lastEditSentAt = Time.unscaledTime;
             // W3-7: one line per edit routed off a merger-flipped partner building. A direct-grant shop is the
             // shared-shop feature's own traffic and stays as quiet as it was.
@@ -4514,7 +4520,15 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] sell-all REFUSED for '{p.AddressKey}': {ex.Message}"); }
         }
 
-        /// <summary>OPERATOR, MAIN THREAD (V2c). One whole logistics plan, REPLACE-BY-ID: the old plan object
+        /// <summary>HQ-PARITY-3 A2: THE ONE REMAINING CALLER of this is plan CREATION
+        /// (CompanyLists.RoutePlanCreate, PaperworkSync.cs, which sends an EMPTY plan with a fresh id and no
+        /// destinations) plus the absence/stand-in installs it shares an installer with.  NO LOGISTICS
+        /// DISPLAY PATH REACHES IT ANY MORE: RoutePlanEdit's `mergerplan` fallback is deleted, so a member's
+        /// pane can only ever send single `mergerplanedit` ops.  That fallback was the mechanism that
+        /// replaced an owner's real plan object from a member's copy - losing the manager, the warehouse and
+        /// `isUiCollapsed`, greying the owner's own rows and leaving the owner's open pane holding the
+        /// removed orphan.
+        /// OPERATOR, MAIN THREAD (V2c). One whole logistics plan, REPLACE-BY-ID: the old plan object
         /// leaves gi.logisticsManagerPlans and the incoming one is built by the absence installer. The
         /// out-of-company refusal already happened at the host (MPServer.PlanCrossesCompanies) and on the member;
         /// this is the belt-and-braces re-check on the machine that will actually run the legs.

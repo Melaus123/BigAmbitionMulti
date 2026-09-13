@@ -854,6 +854,16 @@ namespace BigAmbitionsMP
                     return CompanyPlans.TestDriveHqLog(arg);
                 }
 
+                case "hqtoggle":
+                {
+                    // HQ-PARITY-3 B6 - TEST LEVER. `hqtoggle <family> <planId> <field> [<arg>] <value>` makes
+                    // one CONTROL's own write on one of THIS machine's OWN headquarters plans and takes the
+                    // same commitment seam the patched pane controls take, so the rig can prove the owner-side
+                    // publish per control: purchasing repeating|autostock, hr replaceabsent|trainingtarget,
+                    // headhunter dealbreaker <type>.
+                    return CompanyPlans.TestDriveHqToggle(arg);
+                }
+
                 case "planedit":
                 {
                     // MERGER PHASE 4c part 2a (E5). `planedit <family> <planId> <op> [args]` sends exactly the

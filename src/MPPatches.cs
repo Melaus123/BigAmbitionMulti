@@ -4554,21 +4554,141 @@ namespace BigAmbitionsMP
             /// and so CountResourcesInPallets at :296) both run from a CLICK handler with no LoadPlan around
             /// them, and drew a new row at half alpha with the add button dead and stale stock beside it.
             /// This postfix now only REMEMBERS the pane object; the two prefixes below answer off the PLAN.</summary>
+            /// <summary>HQ-PARITY-3 A1 — THE DELETED MECHANISM: a LOAD no longer commits anything.  This
+            /// postfix used to call RouteDisplayPlanIfChanged, which made a pure READ a commit point protected
+            /// by nothing but a byte-exact JSON dedupe between a baseline seeded one way and a shape built
+            /// another; the hands-on run caught it sending a WHOLE-PLAN replace on a plain open and wrecking
+            /// the owner's real plan.  LoadPlan writes nothing to the plan (decompile :127-155): SetOptions
+            /// never raises onOptionSelected (Dropdown.cs:304-322) and the stock targets are only ever added
+            /// inside the click/onEndEdit delegates (:378-383/:399-402).  So the load SHUTS the seam (Prefix),
+            /// and when it is the OPENING of a plan - the list's own SelectPlan is on the stack - it CAPTURES
+            /// the copy exactly as it now stands as the baseline every later edit is diffed against.  The
+            /// commit points that remain are UpdateSelectedBusiness, OnChangedWarehouse, ChangeLogisticsManager
+            /// and SaveGameManager.MarkChange outside a load.</summary>
+            static void Prefix() { CompanyLists.LoadingPlan = true; }
+
+            static void Finalizer() { CompanyLists.LoadingPlan = false; }
+
             static void Postfix(Buildings.Office.Headquarters.LogisticsManagerPlan plan,
                                 UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI __instance)
             {
                 try
                 {
                     CompanyPlans.NoteLogisticsPane(__instance);
-                    if (MergerFlip.FlippedCount == 0) return;   // inert without a merger
-                    // HQ-PARITY-1 P5b: a DISPLAY copy is routed (and the runner's apply marks urgent at the
-                    // far end); a plan of this machine's OWN is edited natively and RoutePlanEdit returns at
-                    // once - which is exactly the commit a co-member is waiting on.  c3: only a CHANGED own
-                    // plan commits; opening one is a read, and a read publishes nothing.
-                    if (CompanyLists.IsDisplayPlan(plan)) CompanyLists.RouteDisplayPlanIfChanged(plan, "plan edited");
-                    else if (CompanyLists.OwnPlanChanged(plan)) CompanyPlans.OwnEditCommitted("logistics plan edited");
+                    if (MergerFlip.FlippedCount == 0 || plan == null) return;   // inert without a merger
+                    if (!CompanyLists.IsDisplayPlan(plan))
+                    {
+                        // HQ-PARITY-1 c3: only a CHANGED own plan commits; opening one is a read.
+                        if (CompanyLists.OwnPlanChanged(plan)) CompanyPlans.OwnEditCommitted("logistics plan edited");
+                        return;
+                    }
+                    // HQ-PARITY-3 A3: A REORDER IS IMPOSSIBLE ON A PARTNER'S PLAN.  The pane's destination
+                    // rows are the one set this mod never stripped - the drag handle strip was applied only to
+                    // plan-LIST rows - and a drag there rewrites the owner's order through a diff the runner
+                    // cannot express (its destchange Resets every row it rewrites).  The handle comes off each
+                    // row the instant the pane has drawn it, exactly as it does for a partner's list rows.
+                    StripDestinationDrag(__instance);
+                    if (Patch_LogisticsSelectPlan_Opening.Opening) CompanyLists.CaptureLogisticsBaseline(plan);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan-load route: {ex.Message}"); }
+            }
+
+            private static System.Reflection.FieldInfo? _fEntries;
+
+            private static void StripDestinationDrag(object ui)
+            {
+                try
+                {
+                    if (ui == null) return;
+                    if (_fEntries == null)
+                        _fEntries = ui.GetType().GetField("_destinationEntries",
+                                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    var rows = _fEntries != null ? _fEntries.GetValue(ui) as System.Collections.IEnumerable : null;
+                    if (rows == null) return;
+                    foreach (var r in rows)
+                    {
+                        var c = r as UnityEngine.Component;
+                        if (c != null) CompanyPlans.StripDragHandle(c.transform);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] destination drag strip: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>HQ-PARITY-3 A1: WHICH LoadPlan is an OPENING.  `LogisticsManagersPlanList.SelectPlan
+        /// (Transform, LogisticsManagerPlan)` (decompile :207) is the one path a click on a plan row takes,
+        /// and it ends at LoadPlan; every OTHER LoadPlan is a redraw that FOLLOWS a mutation (the warehouse
+        /// dropdown :223, the destination remove button LogisticsManagerDestinationUI.cs:60, a reorder :115),
+        /// and re-taking the baseline there would swallow the very edit the following MarkChange is about to
+        /// route.  So the capture is gated on the opening, and on nothing else.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList), "SelectPlan",
+                      new[] { typeof(UnityEngine.Transform), typeof(Buildings.Office.Headquarters.LogisticsManagerPlan) })]
+        public static class Patch_LogisticsSelectPlan_Opening
+        {
+            internal static bool Opening;
+            static void Prefix() { Opening = true; }
+            static void Finalizer() { Opening = false; }
+        }
+
+        /// <summary>HQ-PARITY-3 A3: the drop itself.  `OnDestinationReordered` (decompile
+        /// LogisticsManagerPlanUI.cs:107-117) moves a destination in the list and re-loads the pane; on a
+        /// PARTNER's plan the change cannot travel (a permutation is refused by the op diff, because the
+        /// runner's destchange Resets the runtime state of every row it rewrites) and under A2 it is now
+        /// sent nowhere at all - so the drop must not happen on the copy either, or the pane would show an
+        /// order the owner does not have.  Refusing in the prefix lets the list finish its own drag cleanup.
+        /// FOLD b B5 (review F7): AND THE ROWS GO BACK.  The refusal stopped the DATA move but left the
+        /// ReorderableList's own visual move standing, so the rows sat in an order the plan did not have.  The
+        /// prefix now re-loads the pane from the unchanged plan - exactly what the native handler does after
+        /// its own data move (decompile LogisticsManagerPlanUI.cs:113-116) - and that load is inert under A1's
+        /// loading flag, so it routes nothing.
+        /// Belt and braces with the handle strip above; silent to the player, one INFO line per plan.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI), "OnDestinationReordered")]
+        public static class Patch_LogisticsReorder_DisplayRefuse
+        {
+            private static readonly System.Collections.Generic.HashSet<string> _logged = new System.Collections.Generic.HashSet<string>();
+
+            /// <summary>B6: the plan ids of a dissolved owner leave the once-per-plan set with them.</summary>
+            internal static void Forget(System.Collections.Generic.IEnumerable<string> ids)
+            {
+                if (ids == null) return;
+                foreach (var id in ids) if (!string.IsNullOrEmpty(id)) _logged.Remove(id);
+            }
+
+            static bool Prefix(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI __instance,
+                               Buildings.Office.Headquarters.LogisticsManagerPlan ____currentPlan)
+            {
+                try
+                {
+                    if (____currentPlan == null || !CompanyLists.IsDisplayPlan(____currentPlan)) return true;
+                    if (_logged.Add(____currentPlan.id ?? "?"))
+                        Plugin.Logger.LogInfo($"[Merger] logistics plan '{____currentPlan.id}': a destination reorder is not made on a partner's plan - the order is the owner's and no single op can carry it.");
+                    if (__instance != null) __instance.LoadPlan(____currentPlan);   // B5: the rows go back to the owner's order
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] destination reorder gate: {ex.Message}"); return true; }
+            }
+        }
+
+        /// <summary>HQ-PARITY-3 A5 — RUNS OUT IN.  `LogisticsManagerPlan.GetRunsOutIn(string, int)` (decompile
+        /// :180-195) divides the stock by the LOCAL seven-day sales of every BuildingRegistration on this
+        /// machine.  A partner's sales are in none of them, so the pane drew "never" beside a stock figure
+        /// that was already the owner's.  Gated exactly as the pallet count is - the plan asked about must be
+        /// the display copy the pane is showing - and answering with the decompile's own outcomes off the
+        /// weekly sales the owner published.</summary>
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.LogisticsManagerPlan), "GetRunsOutIn")]
+        public static class Patch_LogisticsRunsOutIn_DisplayScope
+        {
+            static bool Prefix(Buildings.Office.Headquarters.LogisticsManagerPlan __instance,
+                               string product, int currentStock, ref int __result)
+            {
+                try
+                {
+                    int days;
+                    if (!CompanyPlans.ScopedRunsOutIn(__instance, product, currentStock, out days)) return true;
+                    __result = days;
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics runs-out-in: {ex.Message}"); return true; }
             }
         }
 
@@ -4610,9 +4730,15 @@ namespace BigAmbitionsMP
         /// also covers LoadProducts called straight from UpdateSelectedBusiness (:566-575), which the window
         /// missed.  INERT OUTSIDE: off a session and on my own plans there are no display copies at all; the
         /// delivery pass never runs on one (the plan-pass gate above lifts them out); and a co-member's own
-        /// delivery arithmetic never counts pallets in a PARTNER's warehouse.  The one remaining coincidence
-        /// - some other read of THAT warehouse while the pane shows it - gets the owner's number, which is
-        /// the better answer anyway.  An item the owner does not hold is 0 there and is answered 0 here.</summary>
+        /// delivery arithmetic never counts pallets in a PARTNER's warehouse.
+        /// FOLD b B4 (review F5): THE OUTER GATE IS THE PANE AGAIN.  It had become `MergerFlip.FlippedCount
+        /// == 0`, which is up for the whole session, so the purchasing answer below was consulted for EVERY
+        /// caller of this method while a partner's purchasing plan happened to be on screen - the simulation's
+        /// own (Entities/ImportProduct.cs:45, Entities/Warehouse.cs:121) included, and a co-member's local
+        /// ordering maths would then have been done with the OWNER's pallet count.  The comment that used to
+        /// stand here said that was "the better answer anyway": it was not, it was the defect.  Nothing is
+        /// scoped now unless a logistics pane is tracked or the purchasing pane's own product model is on the
+        /// stack.  An item the owner does not hold is 0 there and is answered 0 here.</summary>
         [HarmonyPatch(typeof(Helpers.BuildingHelper), "CountResourcesInPallets")]
         public static class Patch_CountResourcesInPallets_DisplayScope
         {
@@ -4620,15 +4746,68 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!CompanyPlans.LogisticsPaneTracked || address == null) return true;
+                    if (address == null || !(CompanyPlans.LogisticsPaneTracked || CompanyPlans.PurchasingModelScope)) return true;
                     string key = ""; try { key = GameStateReader.AddressKey(address); } catch { }
                     if (key.Length == 0) return true;
                     int count;
-                    if (!CompanyPlans.ScopedStock(key, resourceName, out count)) return true;
-                    __result = count;
-                    return false;
+                    if (CompanyPlans.LogisticsPaneTracked && CompanyPlans.ScopedStock(key, resourceName, out count))
+                    { __result = count; return false; }
+                    // HQ-PARITY-3 A7 — THE SECOND GATE, PURCHASING.  PurchasingAgentProductModel.UpdateWarehouse
+                    // (decompile :66-70) counts LOCAL pallets in the product's assigned warehouse, so a
+                    // partner's purchasing rows drew this machine's stale replica.  The gate is the same shape
+                    // as the logistics one: the purchasing pane is active, its `_currentImportPartnership`
+                    // (read live) is a partner's display row, and the address is one of that partnership's own
+                    // assigned warehouses.  Everything else falls through to the native count.  FOLD b B4: and
+                    // only for the pane's OWN caller, PurchasingAgentProductModel.UpdateWarehouse.
+                    if (CompanyPlans.PurchasingModelScope && CompanyPlans.ScopedPurchasingStock(key, resourceName, out count))
+                    { __result = count; return false; }
+                    return true;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock: {ex.Message}"); return true; }
+            }
+        }
+
+        /// <summary>FOLD b B4 — THE PURCHASING PANE'S OWN PALLET READ, AND NO OTHER.
+        /// `PurchasingAgentProductModel.UpdateWarehouse()` (decompile
+        /// UI.Smartphone.Apps.BizMan.PurchasingAgent/PurchasingAgentProductModel.cs:63-67) is the one place the
+        /// purchasing product rows get their `WarehouseStock` number, and it is the only caller of
+        /// CountResourcesInPallets that should ever be answered with a PARTNER's count.  The flag is raised for
+        /// the length of that call and dropped in a FINALIZER, which Harmony 2.3.3 runs whether the body
+        /// returned or threw - a postfix would leak the flag on a throw and hand the owner's numbers to the
+        /// simulation.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductModel), "UpdateWarehouse")]
+        public static class Patch_PurchasingProductModel_StockScope
+        {
+            static void Prefix() { CompanyPlans.PurchasingModelScope = true; }
+            static void Finalizer() { CompanyPlans.PurchasingModelScope = false; }
+        }
+
+        /// <summary>FOLD b B5 (review F7) — A DESTINATION ROW ADDED AFTER THE LOAD.  `AddDestinationEntry(int)`
+        /// (decompile LogisticsManagerPlanUI.cs:262-269) instantiates the row, adds it to `_destinationEntries`
+        /// and calls LoadProducts - it never goes through LoadPlan, so the postfix that strips the drag handles
+        /// off a partner's rows never saw it and the new row stayed draggable.  Its handle comes off here, the
+        /// same way and with the same helper.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI), "AddDestinationEntry")]
+        public static class Patch_LogisticsAddDestEntry_StripDrag
+        {
+            private static System.Reflection.FieldInfo? _fEntries;
+
+            static void Postfix(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI __instance,
+                                Buildings.Office.Headquarters.LogisticsManagerPlan ____currentPlan)
+            {
+                try
+                {
+                    if (__instance == null || ____currentPlan == null) return;
+                    if (!CompanyLists.IsDisplayPlan(____currentPlan)) return;
+                    if (_fEntries == null)
+                        _fEntries = __instance.GetType().GetField("_destinationEntries",
+                                        System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                    var rows = _fEntries != null ? _fEntries.GetValue(__instance) as System.Collections.IList : null;
+                    if (rows == null || rows.Count == 0) return;
+                    var last = rows[rows.Count - 1] as UnityEngine.Component;
+                    if (last != null) CompanyPlans.StripDragHandle(last.transform);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] destination row drag strip: {ex.Message}"); }
             }
         }
 
@@ -11246,7 +11425,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     var ip = MergerPurchasingPlan();
-                    if (!CompanyPlans.IsOverlayPlan(ip)) return true;
+                    if (!CompanyPlans.IsOverlayPlan(ip)) { CompanyPlans.OwnEditCommitted("purchasing pane control"); return true; }   // HQ-PARITY-3 B4
                     var data = MergerCellModel(__instance);
                     if (data == null || data.productRef == null) return true;
                     string item = data.productRef.itemName ?? "";
@@ -11268,7 +11447,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     var ip = MergerPurchasingPlan();
-                    if (!CompanyPlans.IsOverlayPlan(ip)) return true;
+                    if (!CompanyPlans.IsOverlayPlan(ip)) { CompanyPlans.OwnEditCommitted("purchasing pane control"); return true; }   // HQ-PARITY-3 B4
                     var data = MergerCellModel(__instance);
                     if (data == null || data.productRef == null) return true;
                     string item = data.productRef.itemName ?? "";
@@ -11297,7 +11476,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     var ip = MergerPurchasingPlan();
-                    if (!CompanyPlans.IsOverlayPlan(ip)) return true;
+                    if (!CompanyPlans.IsOverlayPlan(ip)) { CompanyPlans.OwnEditCommitted("purchasing pane control"); return true; }   // HQ-PARITY-3 B4
                     // HO-1c L4.11: native returns while the contract is ACTIVE (decompile
                     // PurchasingAgentProductsMassActionsUI.cs:105-108) - a private STATIC property, so reflection
                     // reads it without an instance.  Skipping the body and sending nothing is what native does.
@@ -11423,11 +11602,133 @@ namespace BigAmbitionsMP
                 try
                 {
                     var plan = ___planUI != null ? ___planUI.currentPlan : null;
-                    if (plan == null || !CompanyPlans.IsOverlayPlan(plan)) return;
+                    if (plan == null || !CompanyPlans.IsOverlayPlan(plan))   // HQ-PARITY-3 B4
+                    { if (plan != null) CompanyPlans.OwnEditCommitted("headhunter pane control"); return; }
                     CompanyPlans.RoutePaneEdit("headhunter", __originalMethod?.Name ?? "recruiting settings",
                                                plan, "settings");
                 }
                 catch { }
+            }
+        }
+
+        /// <summary>HQ-PARITY-3 B5 — THE TWO HR CONTROLS THAT HAD NO PATCH AT ALL.  "Replace absent
+        /// employees" and "train up to" are registered as ANONYMOUS LAMBDAS inside HrManagerPlanUI.LoadPlan
+        /// (decompile :86-89 `replaceAbsentEmployeesToggle.onValueChanged.AddListener(delegate(bool value)
+        /// { _currentPlan.replaceAbsentEmployees = value; })` and :92-97 the slider's twin), so there was no
+        /// method to patch and a PARTNER's press wrote the detached display copy and was silently dropped at
+        /// the next fan-out.  The native registration is `RemoveAllListeners()` followed by `AddListener`, so
+        /// a postfix can take the pair off again and put back wrappers that make the GAME'S OWN WRITE and then
+        /// take the one commitment seam: RoutePaneEdit sends the op for a partner's row and, for a plan of
+        /// this machine's own, answers false and marks the bundle urgent (OwnEditCommitted).  The slider
+        /// commits on RELEASE - an EventTrigger for EndDrag and PointerUp on the slider itself - so a drag
+        /// across the range is one leg, not one per step; the value and its label follow the drag as they
+        /// always did.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI), "LoadPlan")]
+        public static class Patch_HrPlanLoad_ControlsRoute
+        {
+            private static System.Reflection.FieldInfo? _fToggle, _fSlider, _fValue;
+            private static bool _loggedMissing;   // B7 (F9): one line, not one per LoadPlan
+
+            static void Postfix(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI __instance,
+                                Buildings.Office.Headquarters.HrManagerPlan plan)
+            {
+                try
+                {
+                    if (__instance == null || plan == null) return;
+                    var t = __instance.GetType();
+                    const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Instance
+                                                           | System.Reflection.BindingFlags.NonPublic;
+                    if (_fToggle == null) _fToggle = t.GetField("replaceAbsentEmployeesToggle", F);
+                    if (_fSlider == null) _fSlider = t.GetField("trainingTargetSlider", F);
+                    if (_fValue  == null) _fValue  = t.GetField("trainingTargetValue", F);
+                    // FOLD b B7 (review F9): a RENAMED FIELD used to make this whole postfix a silent no-op -
+                    // the two controls simply stayed native and a partner's press went nowhere, with nothing
+                    // in the log to say why.  One WARNING, once per session, naming the field that is missing.
+                    if (_fToggle == null || _fSlider == null || _fValue == null)
+                    {
+                        if (!_loggedMissing)
+                        {
+                            _loggedMissing = true;
+                            string missing = (_fToggle == null ? "replaceAbsentEmployeesToggle " : "")
+                                           + (_fSlider == null ? "trainingTargetSlider " : "")
+                                           + (_fValue  == null ? "trainingTargetValue " : "");
+                            Plugin.Logger.LogWarning($"[Merger] the HR controls are not hooked: field {missing.Trim()} not found on {t.Name}.");
+                        }
+                        return;
+                    }
+                    var tg  = _fToggle.GetValue(__instance) as UnityEngine.UI.Toggle;
+                    var sl  = _fSlider.GetValue(__instance) as UnityEngine.UI.Slider;
+                    var lbl = _fValue.GetValue(__instance)  as TMPro.TMP_Text;
+                    if (tg != null)
+                    {
+                        tg.onValueChanged.RemoveAllListeners();          // the native lambda, :86-89
+                        tg.onValueChanged.AddListener(v =>
+                        {
+                            plan.replaceAbsentEmployees = v;             // the game's own write, :88
+                            CompanyPlans.RoutePaneEdit("hr", "replace absent employees", plan, "replaceabsent", "", 0, 0f, v);
+                        });
+                        tg.SetIsOnWithoutNotify(plan.replaceAbsentEmployees);
+                    }
+                    if (sl != null)
+                    {
+                        sl.onValueChanged.RemoveAllListeners();          // the native lambda, :92-97
+                        sl.onValueChanged.AddListener(v =>
+                        {
+                            int n = UnityEngine.Mathf.RoundToInt(v);
+                            plan.trainingTarget = n;                     // the game's own write, :94
+                            if (lbl != null) lbl.text = $"{n}%";          // and its own label, :95
+                        });
+                        sl.SetValueWithoutNotify(plan.trainingTarget);
+                        ArmSliderCommit(sl, plan);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] hr pane controls: {ex.Message}"); }
+            }
+
+            private static void ArmSliderCommit(UnityEngine.UI.Slider sl, Buildings.Office.Headquarters.HrManagerPlan plan)
+            {
+                try
+                {
+                    var trig = sl.gameObject.GetComponent<UnityEngine.EventSystems.EventTrigger>();
+                    if (trig == null) trig = sl.gameObject.AddComponent<UnityEngine.EventSystems.EventTrigger>();
+                    if (trig.triggers == null)
+                        trig.triggers = new System.Collections.Generic.List<UnityEngine.EventSystems.EventTrigger.Entry>();
+                    trig.triggers.Clear();                                // the pane is re-loaded for a new plan
+                    // FOLD c C1: a re-arm IS a fresh load - the pane cannot be re-loaded in the middle of a
+                    // drag - so the hold starts false, and the slider it is armed on is remembered so the
+                    // gate can test the game's own activity instead of the flag alone.
+                    CompanyPlans.HrSliderGo = sl.gameObject;
+                    CompanyPlans.HrSliderHeld = false;
+                    // FOLD d E1: and Unity's own lifecycle ends the hold when the pointer-up cannot.  The
+                    // guard's OnDisable fires the moment this object or any ancestor is deactivated or
+                    // destroyed - the missed-pointer-up case exactly.  One per slider: it is added once and
+                    // left there, unlike the triggers above, which are rebuilt for each plan.
+                    if (sl.gameObject.GetComponent<HrSliderHoldGuard>() == null)
+                        sl.gameObject.AddComponent<HrSliderHoldGuard>();
+                    // FOLD b B2 (d): the SAME pointer events say the slider is HELD, so a bundle arriving
+                    // mid-drag defers its redraw instead of re-seating the slider from the plan
+                    // (HrManagerPlanUI.LoadPlan :98) and having the release below publish that reset value.
+                    foreach (var down in new[] { UnityEngine.EventSystems.EventTriggerType.PointerDown,
+                                                 UnityEngine.EventSystems.EventTriggerType.BeginDrag })
+                    {
+                        var d = new UnityEngine.EventSystems.EventTrigger.Entry { eventID = down };
+                        d.callback.AddListener(_ => CompanyPlans.HrSliderHeld = true);
+                        trig.triggers.Add(d);
+                    }
+                    foreach (var kind in new[] { UnityEngine.EventSystems.EventTriggerType.EndDrag,
+                                                 UnityEngine.EventSystems.EventTriggerType.PointerUp })
+                    {
+                        var e = new UnityEngine.EventSystems.EventTrigger.Entry { eventID = kind };
+                        e.callback.AddListener(_ =>
+                        {
+                            CompanyPlans.HrSliderHeld = false;
+                            CompanyPlans.RoutePaneEdit("hr", "training target", plan,
+                                                       "trainingtarget", "", UnityEngine.Mathf.RoundToInt(sl.value));
+                        });
+                        trig.triggers.Add(e);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] hr training slider commit: {ex.Message}"); }
             }
         }
 
@@ -11473,7 +11774,8 @@ namespace BigAmbitionsMP
                 try
                 {
                     var plan = ___planUI != null ? ___planUI.currentPlan : null;
-                    if (plan == null || !CompanyPlans.IsOverlayPlan(plan)) return;
+                    if (plan == null || !CompanyPlans.IsOverlayPlan(plan))   // HQ-PARITY-3 B4
+                    { if (plan != null) CompanyPlans.OwnEditCommitted("headhunter pane control"); return; }
                     CompanyPlans.RoutePaneEdit("headhunter", __originalMethod?.Name ?? "automatic replacement",
                                                plan, "settings");
                 }

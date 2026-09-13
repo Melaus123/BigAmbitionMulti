@@ -3740,6 +3740,13 @@ namespace BigAmbitionsMP
         public bool   IsUrgentOrder          { get; set; }
         public bool   IsTarget               { get; set; }
         public List<PwItemOrderLine> Products { get; set; } = new();
+        /// <summary>HQ-PARITY-3 A7, ADDITIVE (Version stays 23).  One line per (assigned warehouse, item) of
+        /// this partnership, counted on the OWNER's machine exactly as `BuildingHelper.CountResourcesInPallets`
+        /// counts it.  The purchasing pane draws that count per product row
+        /// (PurchasingAgentProductModel.UpdateWarehouse, decompile :66-70) and a co-member's replica of a
+        /// partner warehouse is stale or empty there.  An item absent from this list is zero at the owner too.
+        /// </summary>
+        public List<PwStockLine> Stock { get; set; } = new();
     }
 
     /// <summary>One row of gi.itemsOrderedThisWeekByImporter (an Address-keyed dictionary).</summary>
@@ -3765,6 +3772,13 @@ namespace BigAmbitionsMP
         public string AddressKey { get; set; } = "";   // the warehouse/factory the count was taken in
         public string ItemName   { get; set; } = "";
         public int    Count      { get; set; }
+        /// <summary>HQ-PARITY-3 A5, ADDITIVE (Version stays 23; an older sender leaves it 0).  Units of this
+        /// item sold across the OWNER's company in the last seven days - the denominator
+        /// `LogisticsManagerPlan.GetRunsOutIn` (decompile :180-195) builds inline from
+        /// `SaveGameManager.Current.BuildingRegistrations`' own `orderHistory`, which on a co-member's machine
+        /// holds that company's sales for nobody.  With it the pane's "runs out in" beside a partner's stock
+        /// figure is the owner's arithmetic, not a local guess.</summary>
+        public int    SoldPerWeek { get; set; }
     }
 
     public class PwLogisticsPlan

@@ -421,6 +421,20 @@ namespace BigAmbitionsMP
                                         AmountOrderedThisWeek = pr.amountOrderedThisWeek,
                                         AssignedWarehouseKey = Key(pr.assignedWarehouse),
                                     });
+                        // HQ-PARITY-3 A7: the pallet count the purchasing pane draws per product row, measured
+                        // HERE.  One line per (assigned warehouse, item); a product with no warehouse has none,
+                        // which is the pane's own 0.
+                        if (ip.products != null)
+                            foreach (var pr in ip.products)
+                            {
+                                if (pr == null || pr.assignedWarehouse == null || string.IsNullOrEmpty(pr.itemName)) continue;
+                                string wk = Key(pr.assignedWarehouse);
+                                if (wk.Length == 0) continue;
+                                int cnt = 0;
+                                try { cnt = Helpers.BuildingHelper.CountResourcesInPallets(pr.assignedWarehouse, pr.itemName); }
+                                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] purchasing stock for '{wk}': {ex.Message}"); }
+                                pi.Stock.Add(new PwStockLine { AddressKey = wk, ItemName = pr.itemName, Count = cnt });
+                            }
                         l.ImportPartnerships.Add(pi);
                     }
 
@@ -1178,6 +1192,52 @@ namespace BigAmbitionsMP
         /// <summary>One line per plan whose emptied target was ignored - not once per LoadPlan.</summary>
         private static readonly HashSet<string> _loggedEmptyTarget = new();
 
+        /// <summary>HQ-PARITY-3 A2: one line per plan whose change no op could express - not once per edit.
+        /// Cleared for that plan the moment an op DOES express a change, so a later inexpressible one says so
+        /// again.</summary>
+        private static readonly HashSet<string> _loggedInexpressible = new();
+
+        /// <summary>FOLD b B6 (review F8): a dissolved owner's plan ids leave the once-per-plan sets with
+        /// them, so a company re-formed with the same plan ids says everything it has to say again.  Only
+        /// `_loggedInexpressible` is dealt with here: `_planById`, `_lastSentPlan` and `_pendingPlan` are
+        /// already re-derived from the remaining owners by the RebuildOwnerMap("") that ClearOwner runs
+        /// immediately after CompanyPlans.ClearOwner, and clearing them twice would be a second mechanism
+        /// doing the same job.</summary>
+        public static void ForgetPlans(IEnumerable<string> ids)
+        {
+            if (ids == null) return;
+            foreach (var id in ids) if (!string.IsNullOrEmpty(id)) _loggedInexpressible.Remove(id);
+        }
+
+        /// <summary>HQ-PARITY-3 A1, THE LOAD FLAG.  `LogisticsManagerPlanUI.LoadPlan` writes NOTHING to the
+        /// plan (decompile :127-155): it reads the plan and draws it, and `Dropdown.SetOptions` (:304-322)
+        /// never raises onOptionSelected.  A LOAD IS THEREFORE NOT AN EDIT - it is the moment the display
+        /// copy's own shape becomes the baseline every later edit is diffed against, and the seam is shut
+        /// while it runs so that no asymmetry between the three paths that build, serialise and seed a copy
+        /// can ever read as the player having changed something.</summary>
+        public static bool LoadingPlan { get; set; }
+
+        /// <summary>A1: the display copy AS IT WAS JUST DRAWN becomes both baselines - `_planById` (what the
+        /// op diff compares against) and `_lastSentPlan` (the byte dedupe) - and no pending mark is set,
+        /// because nothing was sent.  This is the one place the two baselines are seeded from the SAME path
+        /// that produces the shape they are compared with, which is what made an open into an edit before.</summary>
+        public static void CaptureLogisticsBaseline(Buildings.Office.Headquarters.LogisticsManagerPlan plan)
+        {
+            try
+            {
+                if (plan == null || string.IsNullOrEmpty(plan.id)) return;
+                var dto = PlanToDto(plan);
+                _planById[plan.id] = dto;
+                _lastSentPlan[plan.id] = Newtonsoft.Json.JsonConvert.SerializeObject(dto);
+                _pendingPlan.Remove(plan.id);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan baseline capture: {ex.Message}"); }
+        }
+
+        /// <summary>A1's LEVER READ: the baseline this machine holds for one plan id, "" when it holds none.</summary>
+        public static string BaselineShapeOf(string planId)
+            => !string.IsNullOrEmpty(planId) && _lastSentPlan.TryGetValue(planId, out var s) ? s : "";
+
         /// <summary>FOLD c1 (re-review MAJOR-1): plan id -> the optimistic baseline still waiting for its
         /// echo.  A bundle the owner published BEFORE applying my op (their ordinary dirty publish, or a
         /// co-member's urgent one) lands AFTER my Send and, re-seeding both baselines from it, puts the
@@ -1279,10 +1339,66 @@ namespace BigAmbitionsMP
                         totals[ci.itemName] = had + ci.amount;
                     }
                 }
+                var sold = SoldPerWeekMap();
                 foreach (var kv in totals)
-                    pp.Stock.Add(new PwStockLine { AddressKey = wkey, ItemName = kv.Key, Count = kv.Value });
+                {
+                    int sw; sold.TryGetValue(kv.Key, out sw);
+                    pp.Stock.Add(new PwStockLine { AddressKey = wkey, ItemName = kv.Key, Count = kv.Value, SoldPerWeek = sw });
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock for plan {pl.id}: {ex.Message}"); }
+        }
+
+        /// <summary>HQ-PARITY-3 A5, THE DENOMINATOR.  `LogisticsManagerPlan.GetRunsOutIn` (decompile
+        /// :180-195) sums, over EVERY BuildingRegistration, the order-history entries whose dayNumber lies in
+        /// [Day-7, Day] and within them every itemSales report for the product - one sweep per product on the
+        /// native path.  Here the whole map is built ONCE and re-used by every plan of the same publish: the
+        /// cache key is the FRAME, so a bundle costs one sweep and nothing is ever a frame stale.  No timer:
+        /// the next publish is the next event, and it rebuilds.</summary>
+        private static int _soldFrame = -1;
+        private static Dictionary<string, int>? _soldMap;
+
+        private static Dictionary<string, int> SoldPerWeekMap()
+        {
+            try
+            {
+                if (_soldMap != null && _soldFrame == UnityEngine.Time.frameCount) return _soldMap;
+                var m = new Dictionary<string, int>(StringComparer.Ordinal);
+                var gi = SaveGameManager.Current;
+                if (gi != null && gi.BuildingRegistrations != null)
+                {
+                    int day = gi.Day, from = gi.Day - 7;
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null || reg.orderHistory == null) continue;
+                        foreach (var oh in reg.orderHistory)
+                        {
+                            if (oh == null || oh.dayNumber < from || oh.dayNumber > day || oh.itemSales == null) continue;
+                            // FOLD b B7 (review F10): ONE ROW PER ITEM PER ENTRY.  Native sums
+                            // `itemSales.FirstOrDefault(x => x.itemName == item)?.amountSold` per order-history
+                            // entry (decompile LogisticsManagerPlan.cs:186-188) - it takes the FIRST matching
+                            // row and ignores any later duplicate; this summed every one of them, so a partner
+                            // saw a larger weekly figure than the owner and a shorter "runs out in".
+                            var seen = new HashSet<string>(StringComparer.Ordinal);
+                            foreach (var it in oh.itemSales)
+                            {
+                                if (it == null || string.IsNullOrEmpty(it.itemName)) continue;
+                                if (!seen.Add(it.itemName)) continue;
+                                m.TryGetValue(it.itemName, out var had);
+                                m[it.itemName] = had + it.amountSold;
+                            }
+                        }
+                    }
+                }
+                _soldFrame = UnityEngine.Time.frameCount; _soldMap = m;
+                return m;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Merger] weekly sales sweep: {ex.Message}");
+                _soldFrame = UnityEngine.Time.frameCount; _soldMap = new Dictionary<string, int>(StringComparer.Ordinal);
+                return _soldMap;
+            }
         }
 
         /// <summary>HQ-PARITY-2 P1: one received plan WITHOUT the owner-measured numbers - exactly the shape
@@ -1373,7 +1489,11 @@ namespace BigAmbitionsMP
         public static void RouteDisplayPlanIfChanged(Buildings.Office.Headquarters.LogisticsManagerPlan plan,
                                                      string why = "logistics pane edit")
         {
-            if (plan == null || !IsDisplayPlan(plan)) return;
+            // HQ-PARITY-3 A1: A LOAD IS NOT AN EDIT.  While LogisticsManagerPlanUI.LoadPlan is running,
+            // the seam is shut: the load writes nothing to the plan (decompile :127-155) and every asymmetry
+            // between the path that BUILDS a display copy, the path that SERIALISES it and the path that
+            // SEEDED its baseline used to read as the player having changed something.
+            if (plan == null || LoadingPlan || !IsDisplayPlan(plan)) return;
             RoutePlanEdit(plan, why);
         }
 
@@ -1456,20 +1576,52 @@ namespace BigAmbitionsMP
                                            + $"'{key}' is not run by '{hqOwner}' or a co-member of theirs — an end outside the company.");
                     return;
                 }
-                if (shape.Length > 0) _lastSentPlan[dto.Id ?? ""] = shape;
                 // HQ-PARITY-2 P3: THE ONE FORK.  Every logistics control on a display plan ends at this same
                 // route (the pane's LoadPlan catch-all, the destination dropdown's postfix, the manager
                 // change).  What changed against the owner's last-known shape is expressed as SINGLE OPS -
                 // the same family mechanism pricing/purchasing/hr/headhunter use, so two members editing one
-                // plan no longer overwrite each other with a whole-plan replace.  A change no op covers
-                // (a reorder, several controls at once) still rides the whole-plan leg, and says so.
-                PwLogisticsPlan? wasDto = _planById.TryGetValue(dto.Id ?? "", out var prev) ? Bare(prev) : null;
-                if (wasDto != null && CompanyPlans.RouteLogisticsOps(wasDto, dto, hqOwner, why)) { AdvanceBaseline(dto); return; }
-                SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
-                { PlayerId = MPConfig.PlayerId, AddressKey = dto.HeadquartersAddressKey, Op = "mergerplan", Plan = dto });
-                AdvanceBaseline(dto);
-                Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{hqOwner}' for '{dto.HeadquartersAddressKey}' (plan {dto.Id}) — {why}"
-                                    + (wasDto == null ? " (whole plan: nothing known here to compare it with)" : " (whole plan: the change is not one of the logistics ops)"));
+                // plan no longer overwrite each other with a whole-plan replace.
+                // FOLD b B3 (review F3): THE DIFF NOW ANSWERS THREE THINGS, and "nothing to send" is no
+                // longer treated as "sent".  A zero-op diff used to advance the baseline AND mark it
+                // PENDING, so the re-seed from the owner's own bundles was blocked for three of them while
+                // no echo could ever arrive - the pending shape is built with Bare() (six stock-target
+                // fields) and the shape a route builds with PlanToDto carries two, so they could never
+                // match.  Nothing sent now leaves nothing in flight: the baseline follows the copy and the
+                // byte dedupe is NOT written, so the very next real edit still routes.
+                string planKey = dto.Id ?? "";
+                PwLogisticsPlan? wasDto = _planById.TryGetValue(planKey, out var prev) ? Bare(prev) : null;
+                var verdict = wasDto == null ? CompanyPlans.LogisticsRoute.Inexpressible
+                                             : CompanyPlans.RouteLogisticsOps(wasDto, dto, hqOwner, why);
+                if (verdict == CompanyPlans.LogisticsRoute.Sent)
+                {
+                    if (shape.Length > 0) _lastSentPlan[planKey] = shape;
+                    _loggedInexpressible.Remove(planKey);
+                    AdvanceBaseline(dto);
+                    return;
+                }
+                if (verdict == CompanyPlans.LogisticsRoute.Nothing)
+                {
+                    _planById[planKey] = dto;
+                    _loggedInexpressible.Remove(planKey);
+                    return;
+                }
+                if (shape.Length > 0) _lastSentPlan[planKey] = shape;
+                // HQ-PARITY-3 A2, THE DELETED MECHANISM: a display copy NEVER sends a whole plan.  The
+                // `mergerplan` fallback replaced the owner's real plan object from the sender's copy - manager,
+                // warehouse, destinations and stock targets all - and the hands-on run showed it firing on a
+                // plain OPEN, greying the owner's own rows and leaving the owner's pane holding an orphan.  A
+                // change no op can express is therefore not sent at all: the owner's plan is left exactly as it
+                // is, this machine's baseline is re-captured from the copy so the next edit diffs against what
+                // the player can see, and the next fan-out puts the owner's truth back on the screen.
+                // FOLD b B3 narrowed WHAT reaches here to two cases: a diff of more than MaxLogisticsOps ops
+                // (logged as a WARNING by the diff itself), and a destination REORDER - which the pane refuses
+                // at the drop, so it should never travel this far.  Any destination count change, of any
+                // size, is now derived and sent.
+                if (_loggedInexpressible.Add(dto.Id ?? ""))
+                    Plugin.Logger.LogInfo($"[Merger] plan {dto.Id} for '{dto.HeadquartersAddressKey}': {why} cannot be expressed as logistics ops"
+                                        + (wasDto == null ? " (nothing known here to compare it with)" : "")
+                                        + " - nothing sent; the owner's plan is left alone and the baseline is re-taken from this copy.");
+                _planById[dto.Id ?? ""] = dto;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan edit route: {ex.Message}"); }
         }

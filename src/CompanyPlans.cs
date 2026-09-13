@@ -101,6 +101,34 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(ownerPid)) return;
                 bool had = _byOwner.Remove(ownerPid);
                 _suspended.Remove(ownerPid);
+                // FOLD b B6 (review F8): THE PER-PLAN TABLES GO WITH THE OWNER.  ClearAll wiped them, but a
+                // single dissolve left every one of them holding that company's plan ids - the last
+                // capacity (_lastMax) would still answer for a plan nobody publishes any more, and the
+                // once-per-plan log sets would stay armed, so a company re-formed with the same ids said
+                // nothing the second time round.  Collected BEFORE DropRowsOf, which is what destroys the
+                // keys they are read out of.
+                var ids = new List<string>();
+                string pfx = ownerPid + "|";
+                foreach (var kv in _rows)
+                {
+                    if (!kv.Key.StartsWith(pfx, StringComparison.Ordinal)) continue;
+                    int cut = kv.Key.IndexOf('|', pfx.Length);
+                    if (cut < 0) continue;
+                    string fam = kv.Key.Substring(pfx.Length, cut - pfx.Length), pid = kv.Key.Substring(cut + 1);
+                    if (pid.Length == 0) continue;
+                    ids.Add(pid);
+                    _lastMax.Remove(pid);
+                    _loggedNothingToSend.Remove(pid);
+                    _loggedOverCap.Remove(pid);
+                    _refreshLogged.Remove(fam + "|" + pid);
+                    _lastRefreshedShape.Remove(fam + "|" + pid);
+                }
+                if (ids.Count > 0)
+                {
+                    try { CompanyLists.ForgetPlans(ids); } catch { }
+                    try { MPPatches.Patch_LogisticsReorder_DisplayRefuse.Forget(ids); } catch { }
+                    Plugin.Logger.LogInfo($"[Plans] forgot {ids.Count} plan id(s) of '{ownerPid}' - the per-plan tables go with the owner.");
+                }
                 DropRowsOf(ownerPid);
                 DropShadowRows(ownerPid);                    // CROSS-HR-1 S4: the shadows go with them
                 if (had) Plugin.Logger.LogInfo($"[Plans] cleared ({why}: '{ownerPid}')");
@@ -113,6 +141,11 @@ namespace BigAmbitionsMP
             if (_byOwner.Count == 0 && _rows.Count == 0) { _suspended.Clear(); return; }
             _byOwner.Clear(); _suspended.Clear(); _rows.Clear(); _rowOwner.Clear(); _refusalLogged.Clear(); _stale.Clear(); _drawn.Clear();
             _rowInfo.Clear(); _seq.Clear(); _applied.Clear(); _shadowRows.Clear();   // CROSS-HR-1 S4
+            _lastMax.Clear(); _refreshLogged.Clear(); _loggedNothingToSend.Clear();   // HQ-PARITY-3 A6/A2/B1
+            _lastRefreshedShape.Clear(); _loggedOverCap.Clear();                      // FOLD b B1/B3
+            HrSliderHeld = false; _sliderReleaseLogged = false;                       // FOLD d E1: no hold survives a
+            // reload - but HrSliderGo STANDS: the slider object outlives the session, and the guard on it
+            // is what ends a hold the pointer-up never did.
             _seqBase = NewSeqBase();                      // r2 MAJOR-2: a reload must never restart a sender's seq LOWER
             Plugin.Logger.LogInfo($"[Plans] cleared ({why})");
         }
@@ -186,6 +219,28 @@ namespace BigAmbitionsMP
                 n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList>(true), "RefreshManagersList", ref kept);   // U4: logistics joined the union
                 if (n > 0) Plugin.Logger.LogInfo($"[Plans] redrew {n} open tab(s) for '{ownerPid}' - a newer feed arrived"
                                                + (kept > 0 ? $"; {kept} open pane(s) reselected." : "."));
+                // HQ-PARITY-3 B1: the list rebuild above restores the SELECTION; this restores the PANE.
+                // Every family's own load re-reads every control from the plan it is handed (purchasing
+                // :115-117/:164, HR :86-98, headhunter :36-39, pricing and logistics the same), so the
+                // settings that "did not match" were never a drawing bug - the load simply never ran.  ONE
+                // method, all five families, and the same one the runner's own pane goes through after a
+                // partner's routed edit (ApplyRouted).
+                _refreshLogged.Clear();
+                // FOLD b B1 (review F6): a pane is reloaded ONLY when this bundle CHANGED that plan.  The
+                // game's own LoadPlan is not a repaint - it re-fires the unmanaged-plan popup, re-seats the
+                // training slider mid-drag, drops the scroll position and recomputes the pricing suggestions
+                // - so running it on every bundle (2 s apart at the urgent cadence) was destructive on its
+                // own.  The test is the OWNER'S PUBLISHED SHAPE for that plan; a plan never seen before
+                // counts as changed, and the shape is recorded only where the refresh actually RUNS.
+                foreach (var fam in PaneFamilies)
+                {
+                    string openId = OpenPanePlanId(fam);
+                    if (openId.Length == 0) continue;
+                    string shapeKey = fam + "|" + openId, shape = DtoShapeOf(fam, openId);
+                    if (_lastRefreshedShape.TryGetValue(shapeKey, out var seenShape) && seenShape == shape) continue;
+                    RefreshOpenPaneInPlace(fam, openId);
+                    _lastRefreshedShape[shapeKey] = shape;
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] redraw for '{ownerPid}': {ex.Message}"); }
         }
@@ -222,47 +277,43 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] deferred redraw: {ex.Message}"); }
         }
 
-        /// <summary>H5.  Is the player mid-edit on the headquarters page?  Three NATIVE states, no flag of our
-        /// own: HR's assign list (decompile HrManagerPlanUI.cs:74 `IsAssignEmployeesListOpen =>
-        /// assignEmployeesList.gameObject.activeInHierarchy`); any open dropdown (UI.Elements/Dropdown.cs:116
-        /// `public static Dropdown currentDropdown`, set :229 and nulled :276) whose panel is still showing
-        /// (:200 `optionsPanelParentRect.gameObject.activeSelf`); and purchasing's expanded product row, which
-        /// carries NO flag at all - its only readable state is the cell's own LayoutElement.minHeight, 200 while
-        /// open (PurchasingAgentProductCellView.cs:99) against 100 while closed (:140).</summary>
+        /// <summary>B1: `family|planId` -> the owner's published shape of that plan AS OF THE LAST REFRESH
+        /// THAT RAN.  A plan absent from here has never been refreshed on this machine and counts as
+        /// changed.</summary>
+        private static readonly Dictionary<string, string> _lastRefreshedShape = new(StringComparer.Ordinal);
+
+        /// <summary>HQ-PARITY-3 B2, THE GATE NARROWED TO ONE REAL CONFLICT.  This used to be a single
+        /// GLOBAL reason that deferred the redraw of EVERY family, and two of its clauses held while a player
+        /// merely LOOKED: "a headhunter plan is open" was true for the whole time a headhunter plan was
+        /// selected (proven in the hands-on host log, `[Plans] redraw for 'Client1' DEFERRED - a headhunter
+        /// plan is open`), and the purchasing "expanded product row" test LATCHED, because the recycled
+        /// scroller cell's SetData never resets `_layoutElement.minHeight` (decompile
+        /// PurchasingAgentProductCellView.cs:169-179) - so once a row had been expanded and scrolled the
+        /// reason held for the rest of the session and nothing anywhere ever refreshed again.  BOTH CLAUSES
+        /// ARE DELETED: a rebuild now RE-LOADS the open pane in place (RefreshOpenPaneInPlace), which
+        /// re-reads every control from the new copy.
+        /// FOLD b B2, THE CARRY-ACROSS IS GONE AND THE GATES ARE THE GAME'S OWN STATE.  The half-typed text
+        /// used to be captured by PATH and written back after the load; review F2 killed that: the purchasing
+        /// pane's LoadPlan defers its product rows by a frame (`CoroutineUtility.RunAfterOneFrame(RefreshItems)`,
+        /// decompile PurchasingAgentPlanUI.cs:103), so a synchronous restore was overwritten a frame later,
+        /// and the path runs over RECYCLED scroller cells, so it could land on a different product's row.  A
+        /// field being edited is therefore a DEFERRAL like every other reason, and TickDeferredRedraw lands
+        /// the redraw the moment it clears.  The four reasons, first match wins, each read off the state the
+        /// game itself keeps:
+        /// (a) an OPEN DROPDOWN (UI.Elements/Dropdown.cs:116 `public static Dropdown currentDropdown`, set
+        ///     :229 and nulled :276) whose options panel is still showing (:200);
+        /// (b) a TEXT FIELD being edited - the EventSystem's selected object carries a focused TMP_InputField
+        ///     or legacy InputField and sits under the same bizMan root the redraw rebuilds;
+        /// (c) the HR ASSIGN-EMPLOYEES LIST open - `HrManagerPlanUI.IsAssignEmployeesListOpen` (decompile
+        ///     :74), the game's own property, because that pane's LoadPlan calls CloseAssignEmployeesList()
+        ///     (:99) and would slam the picker shut under the player's hand (review F1);
+        /// (d) the TRAINING SLIDER held - the mod's own EventTrigger pointer events (HrSliderHeld), not a
+        ///     timer, because LoadPlan re-seats `trainingTargetSlider.value` from the plan (:98) and the
+        ///     PointerUp commit would then publish the value the reload put there.</summary>
         private static string EditWindowOpen()
         {
             try
             {
-                var ui = InstanceBehavior<UI.UIs>.Instance;
-                var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
-                if (bm == null) return "";
-
-                var hr = bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI>(true);
-                if (hr != null && hr.gameObject.activeInHierarchy && hr.IsAssignEmployeesListOpen)
-                    return "the HR assign list is open";
-
-                // HQ-PARITY-1 c2: the HEADHUNTER family is the one list whose rows carry NO readable plan
-                // identity.  Its selection is `private Transform _selectedEntry` (HeadhuntersPlanList.cs:32),
-                // its rows are bare Instantiate clones whose only plan reference is the click closure
-                // (SetUpPlanEntry :91-94) and its `SelectPlan(Transform, HeadhunterPlan)` is private (:213);
-                // a row ORDINAL is no identity either, because the partner rows drawn through that same
-                // builder are synthesised plans GetAssignedPlansForHeadquarters never returns.  With no honest
-                // reselect available, an OPEN headhunter plan DEFERS the redraw - TickDeferredRedraw lands it
-                // the moment the player closes the pane, and the blind sibling index (which could land on the
-                // Add-plan row that `buttonEntry.SetAsLastSibling()` :82 parks among the entries) is gone.
-                foreach (var hh in bm.GetComponentsInChildren<UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList>(true))
-                {
-                    if (hh == null || !hh.gameObject.activeInHierarchy) continue;
-                    var sf = typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList)
-                                 .GetField("_selectedEntry", BindingFlags.Instance | BindingFlags.NonPublic);
-                    if (sf != null && sf.GetValue(hh) != null) return "a headhunter plan is open";
-                }
-
-                // HQ-PARITY-1 P6: the LOGISTICS clause is GONE.  It read "a logistics pane is open at all",
-                // which is true for the whole time the player is on that plan - so the very page the feed was
-                // about was the one page that never refreshed.  A rebuild now RESELECTS the open plan
-                // (Rebuild -> Reselect), which is what the player wanted: the same pane, the fresh numbers.
-
                 var dd = UI.Elements.Dropdown.currentDropdown;
                 if (dd != null && dd.gameObject.activeInHierarchy)
                 {
@@ -271,22 +322,244 @@ namespace BigAmbitionsMP
                     var rect = f != null ? f.GetValue(dd) as RectTransform : null;
                     if (rect != null && rect.gameObject.activeSelf) return "a dropdown is open";
                 }
-
-                // An EXPANDED purchasing product row IS the target-amount input field, so a rebuild there
-                // would throw away a half-typed number: this one still defers, and TickDeferredRedraw lands
-                // the redraw the moment the row closes.
-                foreach (var cell in bm.GetComponentsInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentProductCellView>(false))
-                {
-                    if (cell == null) continue;
-                    var lf = cell.GetType().GetField("_layoutElement", BindingFlags.Instance | BindingFlags.NonPublic);
-                    object le = lf != null ? lf.GetValue(cell) : null;
-                    if (le == null) continue;
-                    var mh = le.GetType().GetProperty("minHeight");
-                    if (mh != null && mh.GetValue(le) is float h && h > 100f) return "a purchasing product row is expanded";
-                }
+                if (TextFieldBeingEdited()) return "a text field is being edited";
+                var hr = PaneOf("hr") as UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI;
+                if (hr != null && hr.gameObject.activeInHierarchy && hr.IsAssignEmployeesListOpen)
+                    return "the HR assign list is open";
+                if (HrSliderHeldNow()) return "the training slider is held";
                 return "";
             }
             catch { return ""; }
+        }
+
+        /// <summary>B2 (b): is the player typing into a field of the headquarters screen right now?  The
+        /// focus is the EventSystem's, the "being edited" is the input field's OWN `isFocused`, and the
+        /// descendant test uses the very root RefreshOpenTabsFor rebuilds - a field anywhere else on the
+        /// phone is not this redraw's business.</summary>
+        private static bool TextFieldBeingEdited()
+        {
+            try
+            {
+                var es = UnityEngine.EventSystems.EventSystem.current;
+                var go = es != null ? es.currentSelectedGameObject : null;
+                if (go == null) return false;
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
+                if (bm == null || !go.transform.IsChildOf(bm.transform)) return false;
+                var tmp = go.GetComponentInParent<TMPro.TMP_InputField>();
+                if (tmp != null) return tmp.isFocused;
+                var leg = go.GetComponentInParent<UnityEngine.UI.InputField>();
+                return leg != null && leg.isFocused;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>B2 (d): true between the training slider's PointerDown/BeginDrag and its PointerUp/EndDrag,
+        /// set from the EventTrigger the HR pane patch arms (Patch_HrPlanLoad_ControlsRoute.ArmSliderCommit).
+        /// The game's own pointer events, so nothing here waits on a clock.  FOLD d E1: the hold is ARMED by
+        /// those pointer events and ENDED three ways, every one of them an event of the game's own - the
+        /// matching pointer-up, the pane's next load (a re-arm IS a fresh load, never mid-drag), and Unity's
+        /// OnDisable on the HrSliderHoldGuard below when the slider leaves the screen under the player's
+        /// hand.  So it cannot latch.  Never read it directly; the gate is HrSliderHeldNow, and ClearAll
+        /// clears it.</summary>
+        public static bool HrSliderHeld;
+
+        /// <summary>FOLD c C1: the slider GameObject the EventTrigger was armed on, stored by
+        /// ArmSliderCommit.  FOLD d E1: the hold is believed only about a slider that is still on screen -
+        /// and about NOTHING ELSE.  The EventSystem's selection is deliberately not consulted: a Selectable
+        /// is selected on pointer-down only when its navigation mode allows it (unknowable for this prefab),
+        /// and a right- or middle-click during the drag moves the selection away while the drag is still
+        /// live - either would report "not held" in the middle of a real drag.  The object outlives a
+        /// session, so ClearAll leaves it standing.</summary>
+        public static GameObject? HrSliderGo;
+
+        /// <summary>FOLD c C1: one line per session for a hold that ended without its pointer-up.</summary>
+        private static bool _sliderReleaseLogged;
+
+        /// <summary>FOLD d E1: the hold ended without its pointer-up - the slider was deactivated or
+        /// destroyed under the player's hand, and ExecuteEvents skips an inactive component.  Clears the
+        /// flag and says so once per session.  Called by HrSliderHoldGuard.OnDisable (the moment it
+        /// happens) and by the gate below (the backstop, for a slider that went away some other way).</summary>
+        internal static void SliderHoldEndedWithoutPointerUp()
+        {
+            if (!HrSliderHeld) return;
+            HrSliderHeld = false;
+            if (_sliderReleaseLogged) return;
+            _sliderReleaseLogged = true;
+            Plugin.Logger.LogInfo("[Plans] training slider hold released - the slider left the screen mid-drag.");
+        }
+
+        /// <summary>B2 (d), THE LIVE READ (FOLD d E1).  True only when the flag is set AND the armed slider
+        /// still exists and is `activeInHierarchy`.  A slider that is not on screen cannot be under a
+        /// pointer, so the hold is over and the flag is CLEARED here rather than left to defer every
+        /// family's redraw for the rest of the session.</summary>
+        private static bool HrSliderHeldNow()
+        {
+            try
+            {
+                if (!HrSliderHeld) return false;
+                var go = HrSliderGo;
+                if (go != null && go.activeInHierarchy) return true;
+                SliderHoldEndedWithoutPointerUp();          // nothing else would clear it
+                return false;
+            }
+            catch { HrSliderHeld = false; return false; }
+        }
+
+        /// <summary>The five plan panes, in tab order.  Unlike `Families` this one HOLDS logistics: the
+        /// in-place refresh is about the pane, and the logistics pane is a pane like any other.</summary>
+        private static readonly string[] PaneFamilies = { "pricing", "purchasing", "hr", "headhunter", "logistics" };
+
+        /// <summary>B1: one line per (family, plan) per FEED, not per call.</summary>
+        private static readonly HashSet<string> _refreshLogged = new(StringComparer.Ordinal);
+
+        /// <summary>HQ-PARITY-3 B1, THE ONE REFRESH.  Hand the pane that is open on `planId` the NEW copy of
+        /// that plan and let the pane's OWN load redraw it.  Used by the receive path (all five families,
+        /// after the lists rebuild) and by ApplyRouted (the RUNNER's own pane, after a partner's op landed on
+        /// the runner's real plan - A4), so a member and an owner watching the same plan both see a change
+        /// the moment it is made.  Nothing here draws anything itself: it calls the game's own LoadPlan.</summary>
+        public static void RefreshOpenPaneInPlace(string family, string planId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(family) || string.IsNullOrEmpty(planId)) return;
+                var pane = PaneOf(family);
+                if (pane == null || !pane.gameObject.activeInHierarchy) return;
+                if (!string.Equals(OpenPanePlanId(family, pane), planId, StringComparison.Ordinal)) return;
+                object? plan = PlanObjectOf(family, planId);
+                if (plan == null) return;
+                switch (family)
+                {
+                    case "pricing":
+                    {
+                        var ui = pane as UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerPlanUI;
+                        var pl = plan as PricingManagerPlan;
+                        if (ui == null || pl == null) return;
+                        ui.LoadPlan(pl); break;
+                    }
+                    case "purchasing":
+                    {
+                        var ui = pane as UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentPlanUI;
+                        var pl = plan as ImportPartnership;
+                        if (ui == null || pl == null) return;
+                        ui.LoadPlan(pl); break;
+                    }
+                    case "hr":
+                    {
+                        var ui = pane as UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI;
+                        var pl = plan as HrManagerPlan;
+                        if (ui == null || pl == null) return;
+                        ui.LoadPlan(pl); break;
+                    }
+                    case "headhunter":
+                    {
+                        var ui = pane as HeadhunterPlanUI;
+                        var pl = plan as HeadhunterPlan;
+                        if (ui == null || pl == null) return;
+                        ui.LoadPlan(pl); break;
+                    }
+                    case "logistics":
+                    {
+                        var ui = pane as UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI;
+                        var pl = plan as Buildings.Office.Headquarters.LogisticsManagerPlan;
+                        if (ui == null || pl == null) return;
+                        ui.LoadPlan(pl);
+                        CompanyLists.CaptureLogisticsBaseline(pl);   // A1: the redrawn copy IS the new baseline
+                        break;
+                    }
+                    default: return;
+                }
+                if (_refreshLogged.Add(family + "|" + planId))
+                    Plugin.Logger.LogInfo($"[Plans] refreshed the open {family} pane in place for plan {planId} - it changed.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] in-place {family} refresh: {ex.Message}"); }
+        }
+
+        private static Component? PaneOf(string family)
+        {
+            try
+            {
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
+                if (bm == null) return null;
+                switch (family)
+                {
+                    case "pricing":    return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerPlanUI>(true);
+                    case "purchasing": return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentPlanUI>(true);
+                    case "hr":         return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI>(true);
+                    case "headhunter": return bm.GetComponentInChildren<HeadhunterPlanUI>(true);
+                    case "logistics":  return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI>(true);
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public static string OpenPanePlanId(string family) => OpenPanePlanId(family, PaneOf(family));
+
+        /// <summary>HQ-PARITY-3 B3: WHICH plan each pane is showing, read off the pane itself.  The headhunter
+        /// family carries no id on its ROWS at all (its entries are bare clones and its selection is a private
+        /// Transform), which is why it used to defer instead of refreshing - but the PANE holds the plan in the
+        /// open: `public HeadhunterPlan currentPlan` (decompile HeadhunterPlanUI.cs:26, set in LoadPlan :38).
+        /// There is no sibling-index or name guess anywhere here: a position is not an identity.</summary>
+        private static string OpenPanePlanId(string family, Component? pane)
+        {
+            try
+            {
+                if (pane == null || !pane.gameObject.activeInHierarchy) return "";
+                if (family == "headhunter")
+                {
+                    var hh = pane as HeadhunterPlanUI;
+                    return hh != null && hh.currentPlan != null ? (hh.currentPlan.id ?? "") : "";
+                }
+                string fn = family == "purchasing" ? "_currentImportPartnership" : "_currentPlan";
+                var f = pane.GetType().GetField(fn, BindingFlags.Instance | BindingFlags.NonPublic);
+                object? pl = f != null ? f.GetValue(pane) : null;
+                if (pl == null) return "";
+                var idf = pl.GetType().GetField("id", BindingFlags.Instance | BindingFlags.Public);
+                return idf != null ? (idf.GetValue(pl) as string ?? "") : "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>The plan object with that id AS IT STANDS NOW: the machine's own lists first (which is
+        /// where an own plan and a tagged logistics display copy both live), then the screen-layer registry's
+        /// materialised rows, which is where the other four families' partner copies live.</summary>
+        private static object? PlanObjectOf(string family, string planId)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi != null)
+                    switch (family)
+                    {
+                        case "pricing":
+                            if (gi.pricingManagerPlans != null)
+                                foreach (var x in gi.pricingManagerPlans) if (x != null && x.id == planId) return x;
+                            break;
+                        case "purchasing":
+                            if (gi.importPartnerships != null)
+                                foreach (var x in gi.importPartnerships) if (x != null && x.id == planId) return x;
+                            break;
+                        case "hr":
+                            if (gi.hrManagerPlans != null)
+                                foreach (var x in gi.hrManagerPlans) if (x != null && x.id == planId) return x;
+                            break;
+                        case "headhunter":
+                            if (gi.headhunterPlans != null)
+                                foreach (var x in gi.headhunterPlans) if (x != null && x.id == planId) return x;
+                            break;
+                        case "logistics":
+                            if (gi.logisticsManagerPlans != null)
+                                foreach (var x in gi.logisticsManagerPlans) if (x != null && x.id == planId) return x;
+                            break;
+                    }
+                string tail = "|" + family + "|" + planId;
+                foreach (var kv in _rows)
+                    if (kv.Key.EndsWith(tail, StringComparison.Ordinal) && kv.Value != null) return kv.Value;
+            }
+            catch { }
+            return null;
         }
 
         private static int Rebuild(Component list, string method, ref int reselected)
@@ -877,7 +1150,7 @@ namespace BigAmbitionsMP
         /// instant it is built: DestroyImmediate, not Destroy, because Destroy only takes effect at the end of
         /// the current frame and would leave the component alive for anything that re-initialises the list
         /// synchronously in this same frame; DestroyImmediate guarantees InitializeItems can never see it.</summary>
-        private static void StripDragHandle(Transform entry)
+        public static void StripDragHandle(Transform entry)
         {
             try
             {
@@ -1529,7 +1802,9 @@ namespace BigAmbitionsMP
             {
                 if (d == null) continue;
                 string who = EmpName(d.EmployeeInstanceId ?? "");
-                Take("purchasing", d.Id ?? "", who.Length > 0 ? who : (d.ImportAddressKey ?? ""), ProductLines(d));
+                // HQ-PARITY-3 B6: the two purchasing toggles the hqtoggle lever drives.
+                Take("purchasing", d.Id ?? "", who.Length > 0 ? who : (d.ImportAddressKey ?? ""),
+                     ProductLines(d) + $" rep={d.IsRepeatingOrder} auto={d.IsTarget}");
             }
             // HQ-PARITY-2 P4: the logistics rows were never listed here.  Each carries the two numbers a
             // co-member cannot compute, so the rig can assert the capacity and the stock it is drawing with.
@@ -1538,8 +1813,14 @@ namespace BigAmbitionsMP
                 if (d == null) continue;
                 Take("logistics", d.Id ?? "", EmpName(d.AssignedEmployeeId ?? ""), LogisticsDetail(d));
             }
-            foreach (var d in p.HrManagerPlans ?? new List<PwHrPlan>()) Take("hr", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""));
-            foreach (var d in p.HeadhunterPlans ?? new List<PwHeadhunterPlan>()) Take("headhunter", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""));
+            // HQ-PARITY-3 B6: the HR pair (B5) and the headhunter deal-breaker count, so the rig can assert
+            // the owner-side publish per CONTROL rather than per plan.
+            foreach (var d in p.HrManagerPlans ?? new List<PwHrPlan>())
+                Take("hr", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""),
+                     $"#replace={d?.ReplaceAbsentEmployees ?? false} train={d?.TrainingTarget ?? 0}");
+            foreach (var d in p.HeadhunterPlans ?? new List<PwHeadhunterPlan>())
+                Take("headhunter", d?.Id, EmpName(d?.AssignedEmployeeId ?? ""),
+                     $"#dealbreakers={d?.DealBreakerTypes?.Count ?? 0}");
             return $"OK plans '{ownerPid}' rows=[{string.Join(",", parts)}]";
         }
 
@@ -1561,9 +1842,17 @@ namespace BigAmbitionsMP
                     var wh = AddrOf(ln.AssignedWarehouseKey);
                     int stock = 0;
                     if (wh != null) { try { stock = BuildingHelper.CountResourcesInPallets(wh, ln.ItemName); } catch { stock = 0; } }
+                    // FOLD b B8: and the number the PANE actually draws - the owner's own count for that
+                    // warehouse and item, carried on the bundle.  `stock=` is the LOCAL replica's count, so
+                    // without this the rig could not see whether the carry was happening at all.
+                    string carried = "none";
+                    foreach (var st in d?.Stock ?? new List<PwStockLine>())
+                        if (st != null && Same(st.AddressKey, ln.AssignedWarehouseKey)
+                            && string.Equals(st.ItemName, ln.ItemName ?? "", StringComparison.Ordinal))
+                        { carried = st.Count.ToString(System.Globalization.CultureInfo.InvariantCulture); break; }
                     if (sb.Length > 8) sb.Append(';');
                     sb.Append($"item={RowFieldSafe(ln.ItemName)} amount={ln.Amount} ")
-                      .Append($"wh={(wh == null ? "none" : RowFieldSafe(ln.AssignedWarehouseKey))} stock={stock}");
+                      .Append($"wh={(wh == null ? "none" : RowFieldSafe(ln.AssignedWarehouseKey))} stock={stock} carried={carried}");
                 }
                 return sb.Append(']').ToString();
             }
@@ -1618,7 +1907,9 @@ namespace BigAmbitionsMP
                 {
                     if (ln == null || string.IsNullOrEmpty(ln.ItemName)) continue;
                     if (n++ > 0) sb.Append(';');
-                    sb.Append($"{RowFieldSafe(ln.ItemName)}={ln.Count}");
+                    // FOLD b B8: `<item>=<count>/<soldPerWeek>` - the second number is the denominator the
+                    // pane's "runs out in" column is computed from (ScopedRunsOutIn), and it was invisible.
+                    sb.Append($"{RowFieldSafe(ln.ItemName)}={ln.Count}/{ln.SoldPerWeek}");
                 }
                 return sb.Append(']').ToString();
             }
@@ -1636,8 +1927,10 @@ namespace BigAmbitionsMP
             try
             {
                 var a = (arg ?? "").Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                if (a.Length < 2) return "ERR usage: hqlog <planId> <manager|warehouse|destadd|destremove|destchange|target> [args]";
+                if (a.Length < 2) return "ERR usage: hqlog <planId> <shape|load|manager|warehouse|destadd|destremove|destchange|target> [args]";
                 string id = a[0], op = a[1].ToLowerInvariant();
+                if (op == "shape") return HqLogShape(id);
+                if (op == "load")  return HqLogLoad(id);
                 string s = ""; int iv = 0, dest = -1;
                 switch (op)
                 {
@@ -1690,6 +1983,169 @@ namespace BigAmbitionsMP
                 SaveGameManager.MarkChange();
                 OwnEditCommitted("hqlog lever");
                 return $"OK hqlog {id} {op} applied (own plan; published at the urgent cadence)";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        /// <summary>HQ-PARITY-3 DIAGNOSTIC: the two strings whose asymmetry turned an OPEN into an EDIT.
+        /// `SerializeObject(PlanToDto(copy))` is what every route compares; the baseline is what this machine
+        /// seeded.  Before A1 the two were built by different paths (PlanToDto against Bare(receivedDto), on a
+        /// copy assembled by a third, MergerAbsence.FillDestinations/SetAddr) and any single differing byte
+        /// read as the player having changed something.  A1 makes the OPEN itself the capture, so this should
+        /// now say `identical` on a plan that has just been opened.</summary>
+        private static string HqLogShape(string id)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.logisticsManagerPlans == null) return "ERR no game instance here";
+                Buildings.Office.Headquarters.LogisticsManagerPlan? pl = null;
+                foreach (var x in gi.logisticsManagerPlans) if (x != null && x.id == id) { pl = x; break; }
+                if (pl == null) return $"ERR no logistics plan '{id}' here";
+                string now = Newtonsoft.Json.JsonConvert.SerializeObject(CompanyLists.PlanToDto(pl));
+                string was = CompanyLists.BaselineShapeOf(id);
+                if (was.Length == 0) return $"OK hqlog {id} shape no-baseline copy={now.Length}";
+                if (was == now) return $"OK hqlog {id} shape identical len={now.Length}";
+                int i = 0;
+                while (i < now.Length && i < was.Length && now[i] == was[i]) i++;
+                return $"OK hqlog {id} shape differs at {i} copy={now.Length} baseline={was.Length}";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        /// <summary>HQ-PARITY-3 A1's ASSERTION: run the REAL load of a display copy and prove it sends
+        /// NOTHING.  The list's own `SelectPlan(Transform, LogisticsManagerPlan)` is the path a click takes
+        /// (LogisticsManagersPlanList.cs:207 -> LoadPlan), so when the list is on screen that is what runs.
+        /// With no list drawn - the rig never opens a screen - the SEAM is driven instead: the copy is
+        /// captured exactly as the LoadPlan postfix captures it and then offered to the route, which is the
+        /// pair the open performs.  Either way the count of legs that LEFT this machine is the answer.</summary>
+        private static string HqLogLoad(string id)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.logisticsManagerPlans == null) return "ERR no game instance here";
+                Buildings.Office.Headquarters.LogisticsManagerPlan? pl = null;
+                foreach (var x in gi.logisticsManagerPlans) if (x != null && x.id == id) { pl = x; break; }
+                if (pl == null) return $"ERR no logistics plan '{id}' here";
+                if (!CompanyLists.IsDisplayPlan(pl)) return $"ERR '{id}' is one of this machine's own plans - a load of it is not routed at all";
+                long before = SharedShopWorkTabs.LegsSent;
+                string how = "seam";
+                var pane = PaneOf("logistics");
+                var lists = pane == null ? null : pane.GetComponentInParent<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList>();
+                bool ran = false;
+                if (lists != null && lists.gameObject.activeInHierarchy)
+                {
+                    var parent = EntryParentOf(lists);
+                    if (parent != null)
+                        for (int i = 0; i < parent.childCount && !ran; i++)
+                        {
+                            var c = parent.GetChild(i);
+                            if (!c.gameObject.activeSelf) continue;
+                            var ec = EntryComponentOf(c);
+                            if (PlanIdOfEntry(lists, ec!, c) != id) continue;
+                            lists.SelectPlan(c, pl);
+                            ran = true; how = "SelectPlan";
+                        }
+                }
+                if (!ran)
+                {
+                    CompanyLists.CaptureLogisticsBaseline(pl);
+                    CompanyLists.RouteDisplayPlanIfChanged(pl, "hqlog load lever");
+                }
+                return $"OK hqlog load sends={SharedShopWorkTabs.LegsSent - before} via={how}";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        /// <summary>HQ-PARITY-3 B6, THE PER-CONTROL OWNER LEVER: `hqtoggle &lt;family&gt; &lt;planId&gt; &lt;field&gt;
+        /// [&lt;arg&gt;] &lt;value&gt;` makes the write the GAME's own handler makes on one of THIS machine's OWN
+        /// plans and then takes the very seam every patched own-plan return now takes (RoutePaneEdit answers
+        /// false for an own plan and calls OwnEditCommitted on the way), so the rig proves the owner-side
+        /// publish CONTROL BY CONTROL instead of plan by plan.  The handlers themselves cannot be invoked
+        /// headless - each needs a loaded pane whose label and scroller refreshes would throw with no screen -
+        /// so what is driven is the write, at the same commitment point.
+        /// Fields: purchasing repeating|autostock &lt;bool&gt;; hr replaceabsent &lt;bool&gt; | trainingtarget &lt;n&gt;;
+        /// headhunter dealbreaker &lt;type&gt; &lt;bool&gt;.</summary>
+        public static string TestDriveHqToggle(string arg)
+        {
+            try
+            {
+                var a = (arg ?? "").Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 4) return "ERR usage: hqtoggle <purchasing|hr|headhunter> <planId> <field> [<arg>] <value>";
+                string fam = a[0].ToLowerInvariant(), id = a[1], field = a[2].ToLowerInvariant();
+                string last = a[a.Length - 1];
+                bool bv = string.Equals(last, "true", StringComparison.OrdinalIgnoreCase);
+                var gi = SaveGameManager.Current;
+                if (gi == null) return "ERR no game instance here";
+                switch (fam)
+                {
+                    case "purchasing":
+                    {
+                        if (gi.importPartnerships == null) return "ERR no purchasing plans here";
+                        foreach (var ip in gi.importPartnerships)
+                        {
+                            if (ip == null || ip.id != id) continue;
+                            if (CompanyLists.IsDisplayPlan(ip) || IsOverlayPlan(ip)) return $"ERR '{id}' is a partner's copy here";
+                            // decompile PurchasingAgentPlanUI.cs:276-286, the two toggle handlers' own writes
+                            if (field == "repeating") ip.isRepeatingOrder = bv;
+                            else if (field == "autostock") ip.isTarget = bv;
+                            else return $"ERR no purchasing field '{field}'";
+                            SaveGameManager.MarkChange();
+                            RoutePaneEdit("purchasing", "hqtoggle lever", ip, field);
+                            return $"OK hqtoggle purchasing {id} {field}={bv} (own plan; published at the urgent cadence)";
+                        }
+                        return $"ERR no purchasing plan '{id}' of my own here";
+                    }
+                    case "hr":
+                    {
+                        if (gi.hrManagerPlans == null) return "ERR no hr plans here";
+                        foreach (var pl in gi.hrManagerPlans)
+                        {
+                            if (pl == null || pl.id != id) continue;
+                            if (IsOverlayPlan(pl)) return $"ERR '{id}' is a partner's copy here";
+                            // decompile HrManagerPlanUI.cs:86-89 and :92-97, the two lambdas' own writes
+                            // FOLD b B8: `echo` is the value AS THE PLAN NOW HOLDS IT, not the raw token -
+                            // purchasing prints bool.ToString() ("True") and this printed "true", so the rig
+                            // needed two spellings for one thing; the int is printed CLAMPED, which is what
+                            // was actually written.
+                            string echo;
+                            if (field == "replaceabsent") { pl.replaceAbsentEmployees = bv; echo = bv.ToString(); }
+                            else if (field == "trainingtarget")
+                            {
+                                if (!int.TryParse(last, out var n)) return "ERR usage: hqtoggle hr <planId> trainingtarget <0-100>";
+                                pl.trainingTarget = n < 0 ? 0 : (n > 100 ? 100 : n);
+                                echo = pl.trainingTarget.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                            }
+                            else return $"ERR no hr field '{field}'";
+                            SaveGameManager.MarkChange();
+                            RoutePaneEdit("hr", "hqtoggle lever", pl, field);
+                            return $"OK hqtoggle hr {id} {field}={echo} (own plan; published at the urgent cadence)";
+                        }
+                        return $"ERR no hr plan '{id}' of my own here";
+                    }
+                    case "headhunter":
+                    {
+                        if (gi.headhunterPlans == null) return "ERR no headhunter plans here";
+                        if (field != "dealbreaker") return $"ERR no headhunter field '{field}'";
+                        if (a.Length < 5) return "ERR usage: hqtoggle headhunter <planId> dealbreaker <type> <bool>";
+                        string type = a[3];
+                        foreach (var pl in gi.headhunterPlans)
+                        {
+                            if (pl == null || pl.id != id) continue;
+                            if (IsOverlayPlan(pl)) return $"ERR '{id}' is a partner's copy here";
+                            if (pl.dealBreakerTypes == null) return $"ERR plan '{id}' holds no deal-breaker list";
+                            // decompile HeadhuntersRecruitingTab.cs:328-337, ToggleDealBreaker's own writes
+                            if (bv) { if (!pl.dealBreakerTypes.Contains(type)) pl.dealBreakerTypes.Add(type); }
+                            else pl.dealBreakerTypes.Remove(type);
+                            SaveGameManager.MarkChange();
+                            RoutePaneEdit("headhunter", "hqtoggle lever", pl, "settings");
+                            return $"OK hqtoggle headhunter {id} dealbreaker {type}={bv} count={pl.dealBreakerTypes.Count} (own plan; published at the urgent cadence)";
+                        }
+                        return $"ERR no headhunter plan '{id}' of my own here";
+                    }
+                }
+                return $"ERR no family '{fam}'";
             }
             catch (Exception ex) { return "ERR " + ex.Message; }
         }
@@ -2016,10 +2472,20 @@ namespace BigAmbitionsMP
             var lg = plan as Buildings.Office.Headquarters.LogisticsManagerPlan;
             if (lg == null || string.IsNullOrEmpty(lg.id) || !CompanyLists.IsDisplayPlan(lg)) return false;
             var dto = LogisticsDtoOf(lg.id);
-            if (dto == null) return false;
-            max = dto.MaxDestinations;
-            return true;
+            if (dto != null) { max = dto.MaxDestinations; _lastMax[lg.id] = max; return true; }
+            // HQ-PARITY-3 A6: a plan whose owner's DTO is momentarily absent - between a dissolve-and-rejoin,
+            // or in the gap while a bundle is being rebuilt - used to fall through to the NATIVE getter, and
+            // the native answer on a co-member is always 0 because a partner's VehicleInstances are not in
+            // this machine's save list: every destination row greyed and the add button died.  The last number
+            // the owner published answers instead.  Only a plan this machine has NEVER seen a number for
+            // reaches native.
+            if (_lastMax.TryGetValue(lg.id, out var seen)) { max = seen; return true; }
+            return false;
         }
+
+        /// <summary>A6: plan id -> the last capacity its owner published.  Cleared with the registry itself,
+        /// so a dissolved company leaves nothing behind.</summary>
+        private static readonly Dictionary<string, int> _lastMax = new(StringComparer.Ordinal);
 
         /// <summary>PREFIX (b)'s answer: the owner's pallet count for the SOURCE WAREHOUSE OF THE PLAN THE
         /// PANE IS SHOWING and for no other address; every other address falls through to the native count.
@@ -2039,31 +2505,259 @@ namespace BigAmbitionsMP
             return true;
         }
 
+        /// <summary>HQ-PARITY-3 A5, RUNS OUT IN.  `LogisticsManagerPlan.GetRunsOutIn` (decompile :180-195)
+        /// sums the LOCAL seven-day `orderHistory` of every BuildingRegistration - a partner's sales are not in
+        /// this machine's registrations at all, so the pane drew "never" (-2) beside a stock figure that IS the
+        /// owner's.  Gated exactly as ScopedStock is: the plan asked about must be the very display copy the
+        /// pane is showing.  The returns are the decompile's own: -1 for no stock, -2 for nothing sold, else
+        /// ceil(stock / (sold / 7)).</summary>
+        public static bool ScopedRunsOutIn(object plan, string product, int currentStock, out int days)
+        {
+            days = 0;
+            try
+            {
+                var pane = PaneDisplayPlan();
+                if (pane == null || !ReferenceEquals(pane, plan)) return false;
+                var dto = LogisticsDtoOf(pane.id ?? "");
+                if (dto == null) return false;
+                if (currentStock == 0) { days = -1; return true; }        // decompile :182-185
+                int sold = 0;
+                foreach (var ln in dto.Stock ?? new List<PwStockLine>())
+                    if (ln != null && string.Equals(ln.ItemName, product, StringComparison.Ordinal)) { sold = ln.SoldPerWeek; break; }
+                if (sold <= 0) { days = -2; return true; }                // decompile :191-194
+                days = (int)Mathf.Ceil(currentStock / ((float)sold / 7f));
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics runs-out-in: {ex.Message}"); return false; }
+        }
+
+        /// <summary>HQ-PARITY-3 A7, PURCHASING STOCK.  `PurchasingAgentProductModel.UpdateWarehouse` (decompile
+        /// :66-70) counts THIS machine's pallets in the product's assigned warehouse, which for a partner's
+        /// warehouse is a replica seeded once at world-live.  The gate is the PURCHASING pane: it is active,
+        /// its `_currentImportPartnership` (read live, decompile :55) is one of the registry's display rows,
+        /// and the address asked about is one of that partnership's own assigned warehouses.  An item absent
+        /// from the owner's list is zero at the owner, so it is answered zero here rather than falling through
+        /// to the replica.</summary>
+        private static FieldInfo? _purchPlanField;
+
+        /// <summary>FOLD b B4 (review F5): true only while `PurchasingAgentProductModel.UpdateWarehouse`
+        /// (decompile :63-67) is on the stack - the ONE caller of CountResourcesInPallets that draws the
+        /// purchasing pane's own stock figure.  Before this, the purchasing answer was consulted for EVERY
+        /// caller while a partner's purchasing plan happened to be showing, including the simulation's
+        /// Entities/ImportProduct.cs:45 and Entities/Warehouse.cs:121, so local ordering maths could be done
+        /// with the OWNER's pallet count.  Set by a prefix and cleared by a FINALIZER, which Harmony 2.3.3
+        /// runs on the throwing path too (a postfix does not).</summary>
+        public static bool PurchasingModelScope;
+
+        public static bool ScopedPurchasingStock(string addressKey, string itemName, out int count)
+        {
+            count = 0;
+            try
+            {
+                if (_byOwner.Count == 0 || string.IsNullOrEmpty(addressKey)) return false;
+                var pane = PaneOf("purchasing");
+                if (pane == null || !pane.gameObject.activeInHierarchy) return false;
+                if (_purchPlanField == null)
+                    _purchPlanField = pane.GetType().GetField("_currentImportPartnership", BindingFlags.Instance | BindingFlags.NonPublic);
+                var ip = _purchPlanField != null ? _purchPlanField.GetValue(pane) as ImportPartnership : null;
+                if (ip == null || !IsOverlayPlan(ip)) return false;
+                var dto = PurchasingDtoOf(ip.id ?? "");
+                if (dto == null) return false;
+                bool mine = false;
+                foreach (var ln in dto.Products ?? new List<PwItemOrderLine>())
+                    if (ln != null && Same(ln.AssignedWarehouseKey, addressKey)) { mine = true; break; }
+                if (!mine) return false;
+                foreach (var st in dto.Stock ?? new List<PwStockLine>())
+                    if (st != null && Same(st.AddressKey, addressKey)
+                        && string.Equals(st.ItemName, itemName ?? "", StringComparison.Ordinal)) { count = st.Count; return true; }
+                return true;   // the owner holds none of it there
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] purchasing stock: {ex.Message}"); return false; }
+        }
+
+        private static PwImportPartnership? PurchasingDtoOf(string planId)
+        {
+            if (string.IsNullOrEmpty(planId)) return null;
+            foreach (var kv in _byOwner)
+                foreach (var g in kv.Value?.ImportPartnerships ?? new List<PwImportPartnership>())
+                    if (g != null && string.Equals(g.Id, planId, StringComparison.Ordinal)) return g;
+            return null;
+        }
+
+        /// <summary>FOLD b B1: the owner's published row for one plan, serialised - the test the change-gated
+        /// refresh runs.  "" = the registry holds no such plan (one of this machine's own, or an owner whose
+        /// bundle has not arrived), and "" compares equal to "" so such a pane is refreshed once and then
+        /// left alone until the feed really carries it.
+        /// FOLD c C2 (review F2): the shape is the EDITABLE shape - "what a CONTROL writes changed", not
+        /// "the row changed".  The rows carry live simulation counters (warehouse stock and its
+        /// sold-per-week, the pricing clock and its cached suggestions, the headhunter's remaining
+        /// candidates), and keying on those redrew an open pane - losing its scroll, re-collapsing its rows
+        /// and recomputing its suggestions - while the business merely traded.  With them blanked an open
+        /// page still follows every edit the moment it lands, and the stock figures it shows are those of its
+        /// LAST LOAD - exactly what the owner sees on their own page, whose native load draws them once.</summary>
+        private static string DtoShapeOf(string family, string planId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(family) || string.IsNullOrEmpty(planId)) return "";
+                foreach (var kv in _byOwner)
+                {
+                    var p = kv.Value;
+                    if (p == null) continue;
+                    object? row = null;
+                    switch (family)
+                    {
+                        case "pricing":
+                            foreach (var g in p.PricingManagerPlans ?? new List<PwPricingPlan>())
+                                if (g != null && string.Equals(g.Id, planId, StringComparison.Ordinal)) { row = g; break; }
+                            break;
+                        case "purchasing":
+                            foreach (var g in p.ImportPartnerships ?? new List<PwImportPartnership>())
+                                if (g != null && string.Equals(g.Id, planId, StringComparison.Ordinal)) { row = g; break; }
+                            break;
+                        case "hr":
+                            foreach (var g in p.HrManagerPlans ?? new List<PwHrPlan>())
+                                if (g != null && string.Equals(g.Id, planId, StringComparison.Ordinal)) { row = g; break; }
+                            break;
+                        case "headhunter":
+                            foreach (var g in p.HeadhunterPlans ?? new List<PwHeadhunterPlan>())
+                                if (g != null && string.Equals(g.Id, planId, StringComparison.Ordinal)) { row = g; break; }
+                            break;
+                        case "logistics":
+                            foreach (var g in p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
+                                if (g != null && string.Equals(g.Id, planId, StringComparison.Ordinal)) { row = g; break; }
+                            break;
+                    }
+                    if (row != null) return Newtonsoft.Json.JsonConvert.SerializeObject(EditableShapeOf(row));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {family} shape for {planId}: {ex.Message}"); }
+            return "";
+        }
+
+        /// <summary>FOLD c C2: `MemberwiseClone` reached by reflection, so a row can be blanked for the shape
+        /// test without a hand-written copy of every field - and so a field ADDED to a DTO later is copied
+        /// without anybody remembering to come back here.  Null (the method could not be reached) means the
+        /// caller serialises the original, which is the fold-b behaviour, never a wrong shape.</summary>
+        private static readonly MethodInfo? _memberwiseClone =
+            typeof(object).GetMethod("MemberwiseClone", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        private static T? ShallowCopy<T>(T row) where T : class
+            => _memberwiseClone == null ? null : _memberwiseClone.Invoke(row, null) as T;
+
+        /// <summary>FOLD c C2 (review F2): a SHALLOW COPY of the registry row with the fields no control
+        /// writes - the ones the simulation moves on its own - blanked.  The row in `_byOwner` is never
+        /// touched; only the copy is serialised.
+        /// logistics `Stock` (pallets moving and the week's sales) - `MaxDestinations` is KEPT, a capacity
+        /// change is rare and is worth the redraw; purchasing `Stock` (the same counts, per partnership),
+        /// `NextDeliveryDay` (every delivery that arrives moves it) and the two per-product week counters
+        /// `AmountOrderedLastWeek`/`AmountOrderedThisWeek` (every order the owner's importer places moves
+        /// them) - FOLD d E2, without which an open purchasing page of a partner reloaded while the owner
+        /// merely traded.  That partnership's control-written fields (`DaysUntilRepeat`, `IsActive`,
+        /// `IsRepeatingOrder`, `IsTarget`, `IsUrgentOrder`) all STAY: a run starting or ending is a state
+        /// change worth the redraw.  A page follows what a CONTROL writes; an order placed or a delivery
+        /// arriving is drawn at the page's next load, exactly as on the owner's own page;
+        /// pricing `CachedSuggestions` and `NextUpdateDay`/`NextUpdateHour` (the pricing clock rolls an hour
+        /// with nobody editing anything); headhunter `RemainingCandidatesToRecruit`, which the recruiting
+        /// run decrements by itself - the control writes `AmountOfCandidatesToRecruitPreference`, and a
+        /// start/stop moves `IsRecruiting`, so no edit loses its redraw.  `PwHrPlan` has NOTHING to blank:
+        /// every one of its fields (the assigned list, the absent-replacement flag, the training target, the
+        /// two insurance fields) is written by a control and by nothing else.</summary>
+        private static object EditableShapeOf(object row)
+        {
+            try
+            {
+                switch (row)
+                {
+                    case PwLogisticsPlan lp:
+                    {
+                        var c = ShallowCopy(lp);
+                        if (c != null) { c.Stock = null!; return c; }
+                        break;
+                    }
+                    case PwImportPartnership ip:
+                    {
+                        var c = ShallowCopy(ip);
+                        if (c != null)
+                        {
+                            c.Stock = null!;
+                            c.NextDeliveryDay = 0;
+                            // FOLD d E2: the shallow copy SHARES the registry row's product list, so the two
+                            // week counters have to be blanked on COPIES of the lines - the original row and
+                            // its lines are never touched.  Everything a control writes (the item, its box
+                            // count, its target amount, its assigned warehouse) is carried across.
+                            var lines = new List<PwItemOrderLine>();
+                            foreach (var p in ip.Products ?? new List<PwItemOrderLine>())
+                            {
+                                if (p == null) continue;
+                                lines.Add(new PwItemOrderLine
+                                {
+                                    ItemName             = p.ItemName,
+                                    Boxes                = p.Boxes,
+                                    Amount               = p.Amount,
+                                    AssignedWarehouseKey = p.AssignedWarehouseKey,
+                                });
+                            }
+                            c.Products = lines;
+                            return c;
+                        }
+                        break;
+                    }
+                    case PwPricingPlan pp:
+                    {
+                        var c = ShallowCopy(pp);
+                        if (c != null) { c.CachedSuggestions = null!; c.NextUpdateDay = 0; c.NextUpdateHour = 0; return c; }
+                        break;
+                    }
+                    case PwHeadhunterPlan hh:
+                    {
+                        var c = ShallowCopy(hh);
+                        if (c != null) { c.RemainingCandidatesToRecruit = 0; return c; }
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] editable shape: {ex.Message}"); }
+            return row;
+        }
+
         // ── HQ-PARITY-2 P3: LOGISTICS EDITS AS SINGLE OPS ──────────────────────────────────
 
-        private const int MaxLogisticsOps = 8;
+        /// <summary>FOLD b B3: the cap on ONE plan's diff.  Eight was small enough that an ordinary mass edit
+        /// - a target typed on every item of a destination - fell off it and was silently dropped; the ops are
+        /// tiny and idempotent at the runner, so the ceiling is now 64 and going over it is logged.</summary>
+        private const int MaxLogisticsOps = 64;
+
+        /// <summary>FOLD b B3 (review F3): what one diff DID.  `Nothing` and `Inexpressible` used to share
+        /// `false`, and the caller treated both as "sent", marking a baseline pending that no echo could ever
+        /// match - so re-seeding from the owner was blocked for three of the owner's bundles after a diff that
+        /// had sent nothing at all.  Three answers, three different things for the caller to do.</summary>
+        public enum LogisticsRoute { Nothing, Sent, Inexpressible }
 
         /// <summary>THE DIFF.  `was` is the owner's last-known shape, `now` is the display copy as the player
         /// just left it; what changed between them becomes ONE op per control, sent on the same
-        /// `mergerplanedit` carrier the other four families use.  True = every difference was expressed and
-        /// sent, so the whole-plan `mergerplan` leg is not needed.  False = the change is not one of these
-        /// ops (several controls at once beyond the cap) and the caller falls back.  FOLD b: a DRAG REORDER
-        /// IS expressible here, as `destchange` plus `target` ops - but the runner's `destchange` calls
-        /// Reset() on the destination it rewrites, which would wipe the runtime state of every moved row, so
-        /// a permutation is refused by IsReorder below and rides the whole-plan leg instead.
+        /// `mergerplanedit` carrier the other four families use.  FOLD b B3, THREE ANSWERS: `Sent` = every
+        /// difference was expressed and the ops are on the wire; `Nothing` = the two shapes agree on every
+        /// control this diff carries, so nothing was sent and nothing is in flight; `Inexpressible` = the
+        /// change cannot travel as ops and the caller leaves the owner's plan alone.  Only TWO things are
+        /// inexpressible now: a DRAG REORDER (expressible as `destchange` plus `target` ops, but the runner's
+        /// `destchange` calls Reset() on the destination it rewrites and would wipe the runtime state of
+        /// every moved row - so IsReorder refuses it, and the drop itself is refused at the pane before it
+        /// mutates anything), and a diff of more than MaxLogisticsOps ops, which is logged.  A destination
+        /// count change of ANY size is derived by the greedy walk below.
         /// The controls are NOT patched one by one: three of the six (the destination remove button, the
         /// add-destination button, the per-item target field) are anonymous delegates built inside
         /// LogisticsManagerDestinationUI.SetUp and LogisticsManagerPlanUI.LoadProducts and have no method to
         /// patch.  Only the remove button comes back through LoadPlan; the target field (:387/:406/:424) and
         /// AddDestination (:227-237) end at SaveGameManager.MarkChange, and BOTH seams call
         /// CompanyLists.RouteDisplayPlanIfChanged, which is where this diff sits.</summary>
-        public static bool RouteLogisticsOps(PwLogisticsPlan? was, PwLogisticsPlan? now, string owner, string why)
+        public static LogisticsRoute RouteLogisticsOps(PwLogisticsPlan? was, PwLogisticsPlan? now, string owner, string why)
         {
             try
             {
-                if (was == null || now == null) return false;
+                if (was == null || now == null) return LogisticsRoute.Inexpressible;
                 string id = now.Id ?? "", hq = now.HeadquartersAddressKey ?? "";
-                if (id.Length == 0 || hq.Length == 0) return false;
+                if (id.Length == 0 || hq.Length == 0) return LogisticsRoute.Inexpressible;
                 var ops = new List<LogOp>();
                 if (!Same(was.AssignedEmployeeId, now.AssignedEmployeeId))
                     ops.Add(new LogOp { Op = "manager", S = now.AssignedEmployeeId ?? "" });
@@ -2071,30 +2765,9 @@ namespace BigAmbitionsMP
                     ops.Add(new LogOp { Op = "warehouse", S = now.TargetAddressKey ?? "" });
                 var wd = was.Destinations ?? new List<PwLogisticsDestination>();
                 var nd = now.Destinations ?? new List<PwLogisticsDestination>();
-                if (nd.Count == wd.Count + 1)
+                if (nd.Count == wd.Count)
                 {
-                    for (int i = 0; i < wd.Count; i++) if (!SameDest(wd[i], nd[i])) return false;
-                    ops.Add(new LogOp { Op = "destadd", S = nd[nd.Count - 1] == null ? "" : (nd[nd.Count - 1].DeliveryTargetAddressKey ?? "") });
-                }
-                else if (nd.Count == wd.Count - 1)
-                {
-                    int gone = -1;
-                    for (int i = 0; i < wd.Count; i++)
-                    {
-                        bool fits = true;
-                        for (int a = 0, b = 0; a < wd.Count; a++)
-                        {
-                            if (a == i) continue;
-                            if (!SameDest(wd[a], nd[b++])) { fits = false; break; }
-                        }
-                        if (fits) { gone = i; break; }
-                    }
-                    if (gone < 0) return false;
-                    ops.Add(new LogOp { Op = "destremove", Iv = gone });
-                }
-                else if (nd.Count == wd.Count)
-                {
-                    if (IsReorder(wd, nd)) return false;   // fold b: destchange's Reset() would wipe runtime state
+                    if (IsReorder(wd, nd)) return LogisticsRoute.Inexpressible;   // fold b: destchange's Reset() would wipe runtime state
                     for (int i = 0; i < nd.Count; i++)
                     {
                         string wk = wd[i] == null ? "" : wd[i].DeliveryTargetAddressKey;
@@ -2104,21 +2777,105 @@ namespace BigAmbitionsMP
                             ops.Add(new LogOp { Op = "target", S = t.Key, Iv = t.Value, St = i.ToString(System.Globalization.CultureInfo.InvariantCulture) });
                     }
                 }
-                else return false;
-                if (ops.Count == 0 || ops.Count > MaxLogisticsOps) return false;
+                else
+                {
+                    // FOLD b B3 (review F4): THE COMPLETE DERIVATION.  The count branches this replaces
+                    // handled exactly +1 and -1 and answered "cannot express" for everything else - so
+                    // removing two rows, or adding two, was dropped silently and reverted at the next
+                    // fan-out.  ONE greedy walk covers every unequal count: walk the two lists together,
+                    // emit a `destremove` for each old row the new list no longer has, then a `destadd` for
+                    // every new row left over.  The ops are applied IN ORDER by the runner, so a remove's
+                    // index is its position in the list AS THE EARLIER REMOVES HAVE ALREADY LEFT IT - that
+                    // is what `a - removed` is.  FOLD c C3 (review F3): a row whose target amounts also
+                    // changed is NOT carried by the add/remove pair - the runner's `destadd` builds a FRESH
+                    // LogisticsManagerPlanDestination with an empty stockTargets list, so a re-added row
+                    // would arrive with no amounts at all.  Each `destadd` is therefore followed by one
+                    // `target` op per stock target of the row it adds.  A mid-list insertion comes out of
+                    // this walk as remove-the-rest-then-re-add: more ops than strictly needed, but the end
+                    // state is right - and the pane can only APPEND a destination, so it never arises from a
+                    // control.  FOLD d E3: the walk MATCHES ON THE DESTINATION KEY ALONE.  Matching on key
+                    // AND targets (`SameDest`) made a kept row whose amounts had merely been edited look
+                    // like a different row, so a target edit arriving together with a count change tore out
+                    // and re-added every row from that point on - many times the ops, and a big plan's burst
+                    // could pass MaxLogisticsOps and be dropped whole.  A row matched by key is KEPT and
+                    // carries its own `target` ops instead, so the walk is minimal per row.  `SameDest` now
+                    // belongs to the equal-count branch alone (IsReorder).
+                    int b = 0, removed = 0;
+                    for (int a = 0; a < wd.Count; a++)
+                    {
+                        if (b < nd.Count && Same(wd[a] == null ? "" : wd[a].DeliveryTargetAddressKey,
+                                                 nd[b] == null ? "" : nd[b].DeliveryTargetAddressKey))
+                        {
+                            // `St` is the row's index AT APPLY TIME, and that index is exactly `b`: the
+                            // removes ahead of this row have already been applied (they are what closed the
+                            // gap), and every remove still to come is BELOW it, so none of them moves it.
+                            foreach (var t in TargetChanges(wd[a], nd[b]))
+                                ops.Add(new LogOp { Op = "target", S = t.Key, Iv = t.Value,
+                                                    St = b.ToString(System.Globalization.CultureInfo.InvariantCulture) });
+                            b++; continue;
+                        }
+                        ops.Add(new LogOp { Op = "destremove", Iv = a - removed });
+                        removed++;
+                    }
+                    for (; b < nd.Count; b++)
+                    {
+                        ops.Add(new LogOp { Op = "destadd", S = nd[b] == null ? "" : (nd[b].DeliveryTargetAddressKey ?? "") });
+                        // `St` is the row's index AT APPLY TIME, and that index is exactly `b`: every
+                        // `destremove` of this walk precedes every `destadd`, the removes leave the kept rows
+                        // as nd[0..] in order, and each add APPENDS - so the row added for nd[b] lands at b.
+                        // TargetChanges against nothing is "every non-zero target of the new row" - a zero is
+                        // the absence of a target, and the fresh destination already has none.
+                        foreach (var t in TargetChanges(null, nd[b]))
+                            ops.Add(new LogOp { Op = "target", S = t.Key, Iv = t.Value,
+                                                St = b.ToString(System.Globalization.CultureInfo.InvariantCulture) });
+                    }
+                }
+                // HQ-PARITY-3 A2: "NOTHING TO EXPRESS" IS NOT "CANNOT EXPRESS".  A zero-op diff used to
+                // answer false, and false was the whole-plan `mergerplan` leg - which is how merely OPENING a
+                // partner's plan replaced the owner's real plan object from the sender's copy.  Nothing
+                // changed means nothing is sent, and the caller is told the diff succeeded.
+                if (ops.Count == 0)
+                {
+                    _loggedOverCap.Remove(id);   // FOLD c C4 (review F5): a plan that diffs to nothing is no
+                                                 // longer over the cap, so its warning is re-armed for the
+                                                 // next diff that really does go over.
+                    if (_loggedNothingToSend.Add(id))
+                        Plugin.Logger.LogInfo($"[Plans] logistics plan {id}: nothing to send - the copy matches the baseline ({why}).");
+                    return LogisticsRoute.Nothing;
+                }
+                if (ops.Count > MaxLogisticsOps)
+                {
+                    if (_loggedOverCap.Add(id))
+                        Plugin.Logger.LogWarning($"[Plans] logistics plan {id}: {ops.Count} ops is over the {MaxLogisticsOps} cap ({why}) - "
+                                               + "nothing sent; the owner's plan is left alone.");
+                    return LogisticsRoute.Inexpressible;
+                }
+                _loggedNothingToSend.Remove(id);
+                _loggedOverCap.Remove(id);
                 foreach (var o in ops) Send("logistics", id, hq, owner ?? "", o.Op, why ?? "", null, o.S, o.Iv, 0f, false, o.St);
-                return true;
+                return LogisticsRoute.Sent;
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics op diff: {ex.Message}"); return false; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics op diff: {ex.Message}"); return LogisticsRoute.Inexpressible; }
         }
 
         private sealed class LogOp { public string Op = ""; public string S = ""; public int Iv; public string St = ""; }
 
+        /// <summary>A2: one "nothing to send" line per plan id, cleared the moment that plan really does send
+        /// something, so the next quiet stretch says so again.</summary>
+        private static readonly HashSet<string> _loggedNothingToSend = new(StringComparer.Ordinal);
+
+        /// <summary>B3: one WARNING per plan whose diff went over the op cap, cleared the moment that plan
+        /// does send something.</summary>
+        private static readonly HashSet<string> _loggedOverCap = new(StringComparer.Ordinal);
+
         /// <summary>FOLD b: a DRAG REORDER (OnDestinationReordered, LogisticsManagerPlanUI.cs:107-115) leaves
         /// the SAME destinations in a new order.  The equal-count branch above would express it as a run of
         /// `destchange` ops, each of which Reset()s the destination it rewrites at the runner and so would
-        /// throw away every moved row's runtime state; a permutation therefore goes on the whole-plan leg.
-        /// True only for a genuine re-ordering: an unchanged list and any real edit both answer false.</summary>
+        /// throw away every moved row's runtime state.  It is refused here - and the DROP ITSELF is refused
+        /// at the pane (Patch_LogisticsReorder_DisplayRefuse) before it ever mutates the copy, so in practice
+        /// this branch only catches a reorder that arrived some other way; there is no whole-plan leg left
+        /// for it to ride.  True only for a genuine re-ordering: an unchanged list and any real edit both
+        /// answer false.</summary>
         private static bool IsReorder(List<PwLogisticsDestination> wd, List<PwLogisticsDestination> nd)
         {
             if (wd.Count != nd.Count || wd.Count < 2) return false;
@@ -2476,6 +3233,11 @@ namespace BigAmbitionsMP
                 // out the 30 s dirty interval - MarkUrgent publishes at 2 s, and a burst coalesces into one.
                 PaperworkSync.MarkUrgent();
                 Plugin.Logger.LogInfo($"[Merger] plan edit applied for '{p.AddressKey}' from '{p.PlayerId}' ({fam} {op}, plan {id}, seq {p.EditSeq}).");
+                // HQ-PARITY-3 A4: the RUNNER is excluded from its own fan-out (Receive :81), so nothing used
+                // to redraw the owner's own open pane after a partner pressed a button on it - and for
+                // logistics the pane went on holding the plan object the apply had replaced.  It follows the
+                // edit now, through the one refresh every family uses (B1).
+                RefreshOpenPaneInPlace(fam, id);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED: {ex.Message}"); }
         }
@@ -2928,6 +3690,11 @@ namespace BigAmbitionsMP
                     try { HrTagFanOutClear(pl, "the plan was deleted"); HrManagerHelper.DeletePlan(id); }
                     finally { _hrDeleteFanOut.Remove(id); }
                     return true;
+                // HQ-PARITY-3 B5: the two HR controls that had no patch at all.  Their listeners are
+                // anonymous lambdas built inside HrManagerPlanUI.LoadPlan (decompile :86-89 and :92-97) and a
+                // partner's press wrote the detached copy and was dropped.  The writes here are the game's own.
+                case "replaceabsent": pl.replaceAbsentEmployees = p.BoolValue; return true;
+                case "trainingtarget": pl.trainingTarget = p.IntValue < 0 ? 0 : (p.IntValue > 100 ? 100 : p.IntValue); return true;
                 case "insurance-cancel":  pl.CancelHealthInsurancePlan(); return true;
                 case "insurance-upgrade": pl.UpgradeHealthInsurancePlan(); return true;
                 case "assign":
@@ -3447,6 +4214,21 @@ namespace BigAmbitionsMP
             internal static readonly ReferenceComparer Instance = new ReferenceComparer();
             public new bool Equals(object a, object b) => ReferenceEquals(a, b);
             public int GetHashCode(object o) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(o);
+        }
+    }
+
+    /// <summary>FOLD d E1: UNITY'S OWN END FOR THE TRAINING-SLIDER HOLD.  Added to the slider's GameObject
+    /// by ArmSliderCommit, alongside the EventTrigger that arms the hold.  Unity calls OnDisable on a
+    /// component the moment its GameObject or ANY ancestor is deactivated or destroyed - which is exactly
+    /// the case where the pointer-up never reaches the slider (a tab switch, the phone closing, the plan
+    /// deselected mid-drag), because ExecuteEvents skips an inactive component.  One component per slider,
+    /// added once and left there for the object's life.</summary>
+    public sealed class HrSliderHoldGuard : MonoBehaviour
+    {
+        private void OnDisable()
+        {
+            try { CompanyPlans.SliderHoldEndedWithoutPointerUp(); }
+            catch { }
         }
     }
 }
