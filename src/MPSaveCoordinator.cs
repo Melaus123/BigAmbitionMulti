@@ -74,6 +74,21 @@ namespace BigAmbitionsMP
         /// thread.  Resolves/creates the session name, tells every client to
         /// save, and performs the host's own save + manifest write on the main
         /// thread.</summary>
+        /// <summary>WALLET-DUPE-1 (rig): the rotation slot the NEXT `autosave` will write, derived exactly as
+        /// HostSaveNow derives it (the active base session, suffix by NextAutoSlotSuffix) so a scenario can
+        /// load the slot it just wrote instead of guessing one. Read-only; nothing is written.</summary>
+        internal static string NextAutoSlotName()
+        {
+            string session;
+            lock (_lock)
+            {
+                if (string.IsNullOrEmpty(_activeSessionName)) _activeSessionName = DefaultSessionName();
+                session = _activeSessionName;
+            }
+            string clean = StripAutoSuffix(session);
+            return clean + NextAutoSlotSuffix(clean);
+        }
+
         public static void HostSaveNow(string reason = "manual")
         {
             MPFrameRhythm.MarkBeat("save");   // round-207: save beats are a classic hitch source
@@ -1763,21 +1778,116 @@ namespace BigAmbitionsMP
             {
                 var gi = SaveGameManager.Current;
                 if (gi == null) return;
-                gi.Money = _pendingCashApply;   // apply verbatim — $0 and overdraft are legitimate authoritative balances
-                Plugin.Logger.LogInfo($"[MPSave] Applied restored cash ${_pendingCashApply:F0}.");
+                // WALLET-DUPE-1 (W4): once a company balance has been MIRRORED into this world's Money, the
+                // restored-cash overlay must not land on top of it. The overlay carries this member's SHARE
+                // (W2) and would shrink the shared wallet on this machine until the next 10 s wallet
+                // heartbeat healed it — and a client's apply can arrive AFTER the mirror, so the race is real.
+                if (MergerSync.IAmMember && MergerWallet.WalletMirrored)
+                    Plugin.Logger.LogInfo("[MPSave] restored cash skipped — the company wallet is already mirrored.");
+                else
+                {
+                    gi.Money = _pendingCashApply;   // apply verbatim — $0 and overdraft are legitimate authoritative balances
+                    Plugin.Logger.LogInfo($"[MPSave] Applied restored cash ${_pendingCashApply:F0}.");
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] TickCashApply: {ex.Message}"); }
             _hasPendingCash   = false;
             _pendingCashApply = 0f;
         }
 
-        /// <summary>The freshest cash we know for a player: the live-streamed value
-        /// if the host still has it this session, else the manifest slot's.</summary>
+        /// <summary>The freshest cash we know for a player: their merged company's equal SHARE while they
+        /// are in a merger (WALLET-DUPE-1 — see SavedCashFor), else the live-streamed value if the host
+        /// still has it this session, else the manifest slot's.</summary>
         internal static float BestCashFor(MpManifest m, string stableId)
         {
+            if (TryMergedShare(stableId, out var share)) return share;   // W2: a merged member's live figure is the wallet MIRROR (the whole company balance), never their own cash
             if (MPServer.CashByStableId.TryGetValue(stableId, out var live)) return live;   // a live figure (incl. a genuine $0) wins; only fall back to the slot when we have NO live cash at all
             var slot = m.Slots.Find(s => s.StableId == stableId);
             return slot?.Money ?? 0f;
+        }
+
+        /// <summary>WALLET-DUPE-1 (W2), user ruling D43 (2026-09-13): what a member's PERSONAL cash is worth
+        /// when it is SAVED. While merged, every member's local Money is a MIRROR of the whole company balance
+        /// (MergerWallet.SetMirror), so recording it as personal cash wrote the balance once PER MEMBER — and a
+        /// load on which the merger did not restore handed each of them the full pot, which a re-formed merger
+        /// then pooled twice. The saved figure is that member's EQUAL SHARE instead: balance / member count,
+        /// rounded to cents, the group's FOUNDER taking the remainder so the shares sum EXACTLY to the balance
+        /// and no load path can mint money. Same maths as the leave split (MPServer.cs HostMergerAction "leave").
+        /// Outside a merged group this is BestCashFor verbatim; with no manifest it falls back to the live
+        /// CashByStableId figure (the .hsg wrap passes null — see MergerShareSave.cs).</summary>
+        internal static float SavedCashFor(string stableId, MpManifest? m)
+        {
+            if (TryMergedShare(stableId, out var share)) return share;
+            if (m != null) return BestCashFor(m, stableId);
+            return MPServer.CashByStableId.TryGetValue(stableId ?? "", out var live) ? live : 0f;
+        }
+
+        /// <summary>WALLET-DUPE-1 (W2): the member's share of their merged company, or false when they are in
+        /// no merger this machine can answer for. TWO legs, because the merger store is HOST-ONLY
+        /// (MergerSync): the HOST reads the durable roster and the authoritative ledger and can answer for
+        /// ANY member; a CLIENT can answer only for ITSELF, from its own mirrored Money (which IS the balance)
+        /// and the roster the host's state message carries. Both legs use the one formula below.
+        ///
+        /// FOLD b X1 (r1 F1/F5), the CONTRACT: true means "I KNOW this member's share" — never "they look
+        /// merged". The host leg already required an authoritative ledger figure (TryWalletBalance); the
+        /// CLIENT leg now also requires MergerWallet.WalletMirrored, i.e. the wallet state for THIS world has
+        /// actually been applied, because until then local Money is whatever the .hsg restored — on a client
+        /// between world-ready and the first wallet state that is the member's own restored SHARE, and
+        /// dividing it again wrote share/2 into the save file. MergerShareSave's prefix calls this DIRECTLY
+        /// and leaves the save alone when it answers false.</summary>
+        internal static bool TryMergedShare(string stableId, out float share)
+        {
+            share = 0f;
+            if (string.IsNullOrEmpty(stableId)) return false;
+            try
+            {
+                string g = MergerSync.GroupOfStable(stableId);
+                if (!string.IsNullOrEmpty(g) && MPServer.TryWalletBalance(g, out var bal))
+                {
+                    var roster = MergerSync.JoinOrderOfGroup(g);
+                    if (roster.Count > 0)
+                    {
+                        string holder = MergerSync.FounderOfGroup(g);
+                        bool known = false;
+                        foreach (var r in roster) if (r == holder) { known = true; break; }
+                        if (!known) holder = roster[0];   // an old manifest carries no founder: join-order 0 takes the remainder
+                        share = EqualShare(bal, roster.Count, stableId == holder);
+                        return true;
+                    }
+                }
+                // X1: WalletMirrored is the exact state the client leg needs — the company balance has been
+                // mirrored into THIS world's Money, so dividing gi.Money is dividing the balance.
+                if (!MPServer.IsRunning && stableId == MPConfig.StableId && MergerSync.IAmMember
+                    && MergerWallet.WalletMirrored)
+                {
+                    var gi = SaveGameManager.Current;
+                    var grp = MergerSync.MyGroup;
+                    int count = grp?.MemberNamesOrdered?.Count ?? 0;
+                    if (gi != null && count > 0)
+                    {
+                        share = EqualShare(gi.Money, count, MergerSync.MyGroupFounderPid == MPConfig.PlayerId);
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] merged share: {ex.Message}"); }
+            return false;
+        }
+
+        /// <summary>THE share formula (the only new arithmetic in WALLET-DUPE-1): balance / members rounded to
+        /// cents, and the remainder holder takes whatever is left so the shares sum EXACTLY to the balance.
+        ///
+        /// FOLD b X8 (r1 F8, ACCEPTED not fixed): the sum is exact in DOUBLE, but the shares are handed back as
+        /// float, and float carries only ~7 significant digits — above roughly $167,772 a cent is below the
+        /// representable step, so for 3+ members the rounded-and-stored shares can miss the balance by a few
+        /// cents either way. A TWO-member split is exact at any size (one share is stored, the other is the
+        /// remainder of the same subtraction). Accepted: cents on a company balance, against a game whose own
+        /// Money field is the same float.</summary>
+        internal static float EqualShare(float balance, int members, bool takesRemainder)
+        {
+            if (members <= 1) return balance;
+            double each = Math.Round((double)balance / members, 2, MidpointRounding.AwayFromZero);
+            return (float)(takesRemainder ? (double)balance - each * (members - 1) : each);
         }
 
         // ── Round-184: the ONE save-serving ladder ───────────────────────────────
@@ -1854,8 +1964,9 @@ namespace BigAmbitionsMP
             try
             {
                 var sm = MPSaveManager.ReadManifest(servedFrom);
-                cash = sm != null ? BestCashFor(sm, stableId)
-                     : (MPServer.CashByStableId.TryGetValue(stableId, out var c) ? c : 0f);
+                // WALLET-DUPE-1 (W2): serving a MERGED member their save serves their equal SHARE, not the
+                // company balance their mirror was showing. The manifest/live fallbacks are unchanged.
+                cash = SavedCashFor(stableId, sm);
             }
             catch { }
             return verdict;
@@ -3706,6 +3817,8 @@ namespace BigAmbitionsMP
         /// before one happened) never reached the manifest and was lost on load (Grants=[], user 2026-06-30). This
         /// is called on every grant change. No-op until a session name exists (the first coordinated save covers
         /// pre-save grants). Cheap: writes only the small manifest, under the same lock as the coordinated save.</summary>
+        private static bool _keptMergerOnDisk;   // WALLET-DUPE-1 (W5): the keep-what-is-on-disk notice is logged once per streak
+
         public static void PersistGrantsNow()
         {
             try
@@ -3718,9 +3831,36 @@ namespace BigAmbitionsMP
                     m.Grants = new List<MpGrant>();
                     foreach (var e in GrantSync.AllStoreEntries())
                         m.Grants.Add(new MpGrant { Kind = e.Kind, Owner = e.Owner, Grantee = e.Grantee, GranteeName = GrantSync.NameOf(e.Grantee) });
-                    m.Merger = BuildMergerManifest();   // merger membership rides the same persist-on-change
-                    m.MergerWalletBalance     = MPServer.SnapshotWalletBalances();      // slice 4: pooling/payout
-                    m.MergerWalletContributed = MPServer.SnapshotWalletContributed();   // states persist immediately
+                    // WALLET-DUPE-1 (W5), DEFENSIVE: this method REPLACES the manifest's merger rows and wallet
+                    // dicts from the live store. When the live store is empty because the session has not
+                    // restored yet (a persist firing between the load and the roster restore), blanking them
+                    // would destroy the only record of the company AND of the contributed-set — the one guard
+                    // that stops a restored roster pooling every wallet a second time. Keep what is on disk —
+                    // but ONLY while this process has not yet established the truth for itself (X3 gate below).
+                    var liveMerger = BuildMergerManifest();   // merger membership rides the same persist-on-change
+                    var liveBal    = MPServer.SnapshotWalletBalances();      // slice 4: pooling/payout
+                    var liveCon    = MPServer.SnapshotWalletContributed();   // states persist immediately
+                    bool liveEmpty = liveMerger.Count == 0 && liveBal.Count == 0 && liveCon.Count == 0;
+                    bool diskHas   = (m.Merger != null && m.Merger.Count > 0)
+                                  || (m.MergerWalletBalance != null && m.MergerWalletBalance.Count > 0)
+                                  || (m.MergerWalletContributed != null && m.MergerWalletContributed.Count > 0);
+                    // FOLD b X3 (r1 F3): the keep is a "nothing has been restored YET" guard, so it may only apply
+                    // while this process has not established the merger state's truth. A two-member DISSOLVE
+                    // legitimately empties all three live stores, and the unconditional keep left the dead company
+                    // on disk at its old balance for a later base-slot load to resurrect. MergerStateAuthoritative
+                    // rises at the end of the manifest restore and on every FORM / leave / dissolve, so after any
+                    // of those an empty live store IS the truth and is written through.
+                    if (liveEmpty && diskHas && !MPServer.MergerStateAuthoritative)
+                    {
+                        if (!_keptMergerOnDisk) { _keptMergerOnDisk = true; Plugin.Logger.LogInfo("[MPSave] kept the manifest's merger state — the live store is empty and nothing has been restored yet."); }
+                    }
+                    else
+                    {
+                        m.Merger = liveMerger;
+                        m.MergerWalletBalance     = liveBal;
+                        m.MergerWalletContributed = liveCon;
+                        _keptMergerOnDisk = false;
+                    }
                     m.Paperwork = MPServer.SnapshotPaperwork();   // phase 3-A: the store rides the model, so a grants-only write cannot drop it (no flush here — this path is not guaranteed main-thread)
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): same reason - a grants-only write must not drop the books store
@@ -3736,7 +3876,7 @@ namespace BigAmbitionsMP
                     // silently un-marked abandoned-timeline slots (rig-proven, twice).
                     MPSaveManager.WriteManifest(_activeSessionName, m);
                     PersistCargoTransitAfterStamp();   // r4 (I3): the tail follows the stamp in the same moment
-                    Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) + {m.Merger.Count} merger member(s) + {m.Loans.Count} loan(s) to '{_activeSessionName}' on change.");
+                    Plugin.Logger.LogInfo($"[MPSave] Persisted {m.Grants.Count} grant(s) + {m.Merger?.Count ?? 0} merger member(s) + {m.Loans.Count} loan(s) to '{_activeSessionName}' on change.");
                     session = _activeSessionName;
                     manifestJson = Newtonsoft.Json.JsonConvert.SerializeObject(m);
                     pid = m.PlaythroughId ?? "";
@@ -3827,7 +3967,9 @@ namespace BigAmbitionsMP
 
         /// <summary>Stamp each slot with the host's most-current known cash for
         /// that player (live-streamed), so even a slot whose .hsg is stale (e.g. a
-        /// player who dropped) carries near-current money to restore on reconnect.</summary>
+        /// player who dropped) carries near-current money to restore on reconnect.
+        /// WALLET-DUPE-1 (W2): for a MERGED member that figure is their equal SHARE of the company
+        /// balance — the sampled value is the wallet mirror, i.e. the whole balance, once per member.</summary>
         /// <summary>Round-224: the local player's live wallet (0 if unreadable) — slots
         /// are born with the real figure instead of a $0 placeholder. Main thread.</summary>
         private static float LocalWalletOr0()
@@ -3841,8 +3983,13 @@ namespace BigAmbitionsMP
             try
             {
                 foreach (var s in m.Slots)
-                    if (MPServer.CashByStableId.TryGetValue(s.StableId, out var c))
-                        s.Money = c;
+                    // FOLD b X5 (r1 F6): a MERGED member is stamped whether or not this session has a live cash
+                    // figure for them. An ABSENT roster member has no CashByStableId entry, so the old gate skipped
+                    // them and their slot kept whatever was written last — under an older build that was the whole
+                    // wallet mirror, i.e. the full company balance sitting in one member's slot. TryMergedShare is
+                    // the "I know this member's share" contract (X1); nothing here creates slots.
+                    if (MPServer.CashByStableId.ContainsKey(s.StableId) || TryMergedShare(s.StableId, out _))
+                        s.Money = SavedCashFor(s.StableId, m);   // W2: the SHARE while merged, the live figure otherwise
             }
             catch { }
         }

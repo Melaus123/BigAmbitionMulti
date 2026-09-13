@@ -1,0 +1,322 @@
+{
+  "id": "T-WALLETDUPE",
+  "title": "WALLET-DUPE-1, two players: a merged company's money is CONSERVED across a save and a load - each member's .hsg and manifest slot record their EQUAL SHARE, the reloaded company still holds exactly the balance it held before the save (not twice it), the contributed-set survives the round trip so nobody pools a second time, and a leave still splits what is there",
+  "preconditions": "Fixture save1, non-zero cash on BOTH machines (the whole test is about a NON-ZERO pooled balance: with B=0 the step-28/29 refutes cannot tell B from B/2). Build WALLET-DUPE-1 deployed on both machines. FIXTURE HYGIENE: this run writes ONE scratch slot, the autosave rotation slot '${session}-auto' - the fixture's own '${session}' .hsg is never overwritten (the 'autosave' verb calls HostSaveNow(\"autosave\"), which always writes a SIBLING session, never the manual base). `python tools/fixture_reset.py --session ${session}` blanks the merger sections of ${session}* manifests, the auto siblings included. SLOT DETERMINISM: the autosave lever prints the slot it writes and step 21 loads that slot; the -auto siblings may exist.NextAutoSlotSuffix returns the FIRST EMPTY rotation slot and only falls back to overwriting the oldest when every slot holds save files - so the '${session}-auto*' sibling FOLDERS must be absent (or empty) before the run for step 19 to load the slot step 17 just wrote. If a stale sibling makes the rotation pick '-auto-2' or '-auto-3' instead, step 19 loads an older world and the money assertions fail loudly rather than passing wrongly.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception"
+  ],
+  "oracles_report": [
+    "\\[MergerWallet\\] save wrote this member's share",
+    "\\[EconProbe\\] wallet POOL",
+    "\\[EconProbe\\] wallet ledger",
+    "\\[EconProbe\\] wallet restored",
+    "\\[MPSave\\] restored cash skipped",
+    "\\[MPSave\\] kept the manifest's merger state",
+    "\\[MPSave\\] Applied restored cash"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST WALLETDUPE START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True",
+      "capture": {
+        "grp": "group='([^']+)'"
+      },
+      "note": "the group id is captured HERE and re-asserted after the load: the point of the test is that the SAME company comes back, not a fresh one"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "sleep_s": 30,
+      "note": "the worlds settle; both wallets have pooled and the mirror has landed on both machines"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "both",
+      "cmd": "mark TEST WALLETDUPE BALANCE-BEFORE-SAVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "^OK money=[0-9]+\\.[0-9]{2} merged=True",
+      "capture": {
+        "B": "money=([0-9]+\\.[0-9]{2})"
+      },
+      "note": "B = the company balance. The 'money' verb prints `OK money=<F2, invariant> merged=<bool> wallet=<F2> (mirror)` (TestDrive.cs case \"money\"): while merged the money figure IS the mirrored company balance, so B is the pot both members are showing"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "^OK money=${B} merged=True",
+      "note": "the mirror: BOTH members show the whole balance on screen. That is correct live behaviour and exactly why saving it verbatim recorded the pot twice"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "walletdump",
+      "expect_result": "^OK walletdump groups=\\[${grp}:balance=${B} contributed=2/2\\]$",
+      "note": "W6. The host's ledger and pooling guard: one group, the balance the mirrors are showing, and BOTH members recorded as having pooled. `walletdump` prints `OK walletdump groups=[<group>:balance=<F2> contributed=<k>/<members>;...]` and is host-only (a client answers `ERR host only`)"
+    },
+    {
+      "seq": 17,
+      "role": "both",
+      "cmd": "mark TEST WALLETDUPE SAVE-WRITES-SHARES",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "autosave",
+      "expect_result": "^OK HostSaveNow\\('autosave'\\) invoked slot=[^ ]+",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[MergerWallet\\] save wrote this member's share",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[MergerWallet\\] save wrote this member's share",
+          "within_s": 30
+        }
+      ],
+      "note": "W3, THE ASSERTION: the .hsg wrap fires on BOTH machines - the host for its own world, the client for the save the SaveNow broadcast makes it write. Each writes its own equal share into the save file and restores the mirror in the finalizer, so nothing on screen changes",
+      "capture": {
+        "slot": "slot=([^ ]+)"
+      }
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the client's upload reaches the host and the slot manifest is stamped before the load"
+    },
+    {
+      "seq": 20,
+      "role": "both",
+      "cmd": "mark TEST WALLETDUPE RELOAD",
+      "expect_result": "OK MARK"
+    },
+    {
+      "role": "c",
+      "drop": true,
+      "note": "WALLET-DUPE-1 run 1 showed an IN-GAME client served a reload exits to the menu and disconnects (MPCanvasUI.TickGameLoadDetect) - the realistic next-session flow is: the member is gone, the host loads the save, the member comes back and joins",
+      "seq": 21
+    },
+    {
+      "role": "h",
+      "sleep_s": 8,
+      "note": "the host notices the drop",
+      "seq": 22
+    },
+    {
+      "role": "h",
+      "cmd": "hostload ${slot}",
+      "expect_result": "^OK StartLoadGame\\('${slot}'\\) invoked",
+      "note": "the rotation slot the autosave lever REPORTED it wrote (captured at step 18)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "wallet restored [1-9] group balance\\(s\\) from manifest",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "Restored [0-9]+ access grant\\(s\\) \\+ 2 merger member\\(s\\) from manifest",
+          "within_s": 60
+        }
+      ],
+      "seq": 23
+    },
+    {
+      "role": "h",
+      "sleep_s": 40,
+      "note": "the host's world loads",
+      "seq": 24
+    },
+    {
+      "role": "c",
+      "relaunch": true,
+      "note": "the member returns",
+      "seq": 25
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 26
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 27
+    },
+    {
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "note": "a later joiner parks for the host's approval popup; the lever accepts it",
+      "seq": 28
+    },
+    {
+      "role": "c",
+      "sleep_s": 45,
+      "note": "the client is served the slot's save and settles",
+      "seq": 29
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*group='${grp}'",
+      "note": "the SAME company came back off the manifest, not a new one"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "walletdump",
+      "expect_result": "^OK walletdump groups=\\[${grp}:balance=${B} contributed=2/2\\]$",
+      "note": "W1+W5, THE CONSERVATION ASSERTION: the ledger came back at exactly B (not 2B - nobody re-pooled) and the contributed-set survived the round trip FULL. contributed=1/2 here would mean the missing member is free to pool their restored wallet again, which is the bug this build closes"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "^OK money=${B} merged=True",
+      "note": "W2+W4: the host's .hsg held its SHARE, the restored-cash overlay did not stamp a stale figure over the mirror, and the mirror is back at the whole balance B. rigrun does no arithmetic, so 2B cannot be written here as a refute - asserting money EXACTLY equals B is the same statement: had either member's share been recorded as the whole pot, the re-formed company would read 2B and this equality would fail"
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "^OK money=${B} merged=True",
+      "note": "and the member sees the same one pot"
+    },
+    {
+      "seq": 35,
+      "role": "both",
+      "cmd": "mark TEST WALLETDUPE LEAVE-SPLITS",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent"
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 38,
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "^OK money=[0-9]+\\.[0-9]{2} merged=False",
+      "refute_result": "money=${B} ",
+      "note": "the ratified equal split still pays the leaver balance/members. rigrun cannot add, so the SUM of the two payouts cannot be asserted here: what is asserted is that neither ex-member walks away with the WHOLE pot. The sum is covered where it can be: the shares are computed by the one formula in MPSaveCoordinator.EqualShare, whose remainder leg makes them sum exactly to the balance"
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "^OK money=[0-9]+\\.[0-9]{2} merged=False",
+      "refute_result": "money=${B} "
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 42,
+      "role": "both",
+      "cmd": "mark TEST WALLETDUPE END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

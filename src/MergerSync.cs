@@ -486,6 +486,7 @@ namespace BigAmbitionsMP
             _groupInfo  = new Dictionary<string, MergerGroupInfo>();
             _sig = ""; _foreignSig = "\u0001";   // r2/R3+R5: model gone, cache invalid
             _wasMember = false;
+            MergerWallet.ResetMirrorFlag();   // WALLET-DUPE-1 (W4): a new world has mirrored no company balance yet
             HealedThisWorld = false;  // FOLD e: a new world instance heals again on its first non-member state;
                                       // StateSeen and HealPending SURVIVE the scene (the state may have landed mid-load)
             _lastStatsPushDay = -1;   // B1: a new scene pushes again on the next state message

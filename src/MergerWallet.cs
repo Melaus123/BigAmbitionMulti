@@ -33,6 +33,18 @@ namespace BigAmbitionsMP
         /// directly — but the guard makes that structural).</summary>
         private static bool _applyingReconcile;
 
+        /// <summary>WALLET-DUPE-1 (W4): has an authoritative COMPANY balance been mirrored into this world's
+        /// Money yet? Set the moment a group wallet state is actually WRITTEN into this world's Money (X7:
+        /// a state that arrives with no world mirrors nothing and does not raise it), cleared with the scene
+        /// (MergerSync.ResetSceneState). MPSaveCoordinator.TickCashApply reads it: the restored-cash overlay
+        /// carries one member's SHARE and must never overwrite a mirror that has already landed.
+        /// FOLD b X1: MPSaveCoordinator.TryMergedShare reads it too — on a CLIENT this flag IS the proof that
+        /// local Money is the company balance, so it is what decides whether the share-save wrap may run.</summary>
+        public static bool WalletMirrored { get; private set; }
+
+        /// <summary>SCENE reset: a new world has mirrored nothing yet.</summary>
+        public static void ResetMirrorFlag() => WalletMirrored = false;
+
         // ── Outbound: native money changes → host ledger ──────────────────────
 
         /// <summary>The single runtime chokepoint: every native mutation (ChangeMoneySafe, cheats,
@@ -168,7 +180,11 @@ namespace BigAmbitionsMP
                 if (!string.IsNullOrEmpty(p.GroupId))
                 {
                     if (!MergerSync.IAmMember || p.GroupId != MergerSync.MyGroupId) return;   // another company's (or stale) state
-                    SetMirror(p.Balance, "company balance");
+                    // FOLD b X7 (r1 F9): the flag follows the WRITE, not the message. It still rises on the
+                    // no-drift early return (the mirror IS in force then), but a state that lands with NO WORLD
+                    // (gi == null — between scenes) mirrors nothing, and calling that "mirrored" is exactly what
+                    // let the share-save wrap trust a figure that was never the company balance.
+                    if (SetMirror(p.Balance, "company balance")) WalletMirrored = true;
                 }
                 else
                     SetMirror(p.Balance, "leave payout — personal wallet");
@@ -178,13 +194,15 @@ namespace BigAmbitionsMP
 
         /// <summary>Write the mirror. Direct field set (the proven MPHub.ApplyMoneyDelta pattern) —
         /// NEVER through ChangeMoney: that would re-run TaxHelper.TrackTransaction and the transaction
-        /// log for money whose origin machine already recorded both (the §11 double-count class).</summary>
-        private static void SetMirror(float balance, string why)
+        /// log for money whose origin machine already recorded both (the §11 double-count class).
+        /// Returns TRUE when this world's Money now HOLDS the given balance — including the no-drift case,
+        /// where it already did — and FALSE only when there is no world to write to (X7).</summary>
+        private static bool SetMirror(float balance, string why)
         {
             var gi = SaveGameManager.Current;
-            if (gi == null) return;
+            if (gi == null) return false;
             float diff = balance - gi.Money;
-            if (Math.Abs(diff) < 0.005f) return;
+            if (Math.Abs(diff) < 0.005f) return true;
             _applyingReconcile = true;
             try
             {
@@ -192,6 +210,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[EconProbe] wallet SET ${balance:N0} ({why}; local drift {(diff >= 0 ? "+" : "")}{diff:N0}).");
             }
             finally { _applyingReconcile = false; }
+            return true;
         }
     }
 }

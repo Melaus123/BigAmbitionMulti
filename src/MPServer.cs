@@ -259,9 +259,16 @@ namespace BigAmbitionsMP
                 _walletBalance[g] = bal + amount;
                 Plugin.Logger.LogInfo($"[EconProbe] wallet ledger '{g}' {(amount >= 0 ? "+" : "")}{amount:N0} '{key}'{(contribution ? " (pool)" : "")} → ${_walletBalance[g]:N0}.");
                 BroadcastWalletGroup(g);
-                // No per-delta manifest write (deltas are frequent): the balance persists with every
-                // coordinated save + on merger membership changes — the same staleness window as the
-                // slot-cash mirrors it must stay consistent with.
+                // ORDINARY deltas still write no manifest (they are frequent): the balance persists with
+                // every coordinated save + on merger membership changes — the same staleness window as
+                // the slot-cash mirrors it must stay consistent with.
+                // WALLET-DUPE-1 (W1): a CONTRIBUTION is not an ordinary delta. The contributed-set is the
+                // ONLY guard that stops a RESTORED roster pooling a member's wallet a second time, and it
+                // reached the manifest only through RefreshGrantsAndBroadcast — which runs BETWEEN the
+                // host's own pool and a remote member's, so a write landing in that window persisted a
+                // HALF-FILLED set and the missing member pooled again on the next load (the double-money
+                // class). Persist the set the instant a pool lands.
+                if (contribution) MPSaveCoordinator.PersistGrantsNow();
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Wallet] HostWalletDelta: {ex.Message}"); }
         }
@@ -292,6 +299,23 @@ namespace BigAmbitionsMP
             return d;
         }
 
+        /// <summary>WALLET-DUPE-1 (W2): ONE group's authoritative balance, false when the host holds none.
+        /// The single read MPSaveCoordinator.SavedCashFor needs — the ledger itself stays private.</summary>
+        public static bool TryWalletBalance(string groupId, out float balance)
+            => _walletBalance.TryGetValue(groupId ?? "", out balance);
+
+        /// <summary>FOLD b X3 (r1 F3): has THIS process established what the merger state is? False from the
+        /// moment a world begins until the manifest restore finishes; true afterwards, and true the instant a
+        /// company is FORMED, joined, left or dissolved. Read by MPSaveCoordinator.PersistGrantsNow: its
+        /// "keep whatever the manifest already holds when the live store is empty" guard exists only to survive
+        /// the gap before the restore, so once this is true an EMPTY live store is the truth and must be written
+        /// through — otherwise a dissolved company survives on disk and a later load resurrects it.</summary>
+        public static bool MergerStateAuthoritative { get; private set; }
+
+        /// <summary>The live merger/wallet stores now say what is true (restore finished, or a form/leave/dissolve
+        /// just changed them). One-way within a world; cleared only at a world boundary.</summary>
+        internal static void MarkMergerStateAuthoritative() => MergerStateAuthoritative = true;
+
         /// <summary>HOST: restore the wallet ledger from a manifest (clear-then-apply, beside the
         /// merger store restore).</summary>
         public static void RestoreWalletFromManifest(MpManifest m)
@@ -301,11 +325,29 @@ namespace BigAmbitionsMP
                 foreach (var kv in m.MergerWalletBalance) _walletBalance[kv.Key] = kv.Value;
             if (m.MergerWalletContributed != null)
                 foreach (var kv in m.MergerWalletContributed) _walletContributed[kv.Key] = new HashSet<string>(kv.Value ?? new List<string>());
+            // FOLD b X4 (r1 F4): the contributed-set is what stops the membership rising edge pooling a wallet
+            // twice, and restoring it from the manifest ALONE left a hole — a roster member the manifest never
+            // listed as contributed pooled its RESTORED personal cash on the edge, and that cash is a SHARE of a
+            // balance the restored figure already contains. Structural close: a restored group's balance is by
+            // definition the whole company, so EVERY member of that restored roster has already contributed to
+            // it. The merger store restore runs before this call (RestoreOwnershipFromManifest: StoreRestore
+            // :~427, this :~461), so MergerSync is the roster of record here.
+            int marked = 0;
+            foreach (var g in new List<string>(_walletBalance.Keys))
+            {
+                if (!MergerSync.StoreGroups.TryGetValue(g, out var roster) || roster == null) continue;
+                if (!_walletContributed.TryGetValue(g, out var set)) { set = new HashSet<string>(); _walletContributed[g] = set; }
+                foreach (var stable in roster) if (!string.IsNullOrEmpty(stable) && set.Add(stable)) marked++;
+            }
+            if (marked > 0)
+                Plugin.Logger.LogInfo($"[EconProbe] wallet restore: {marked} member(s) marked contributed from the roster.");
             if (_walletBalance.Count > 0)
                 Plugin.Logger.LogInfo($"[EconProbe] wallet restored {_walletBalance.Count} group balance(s) from manifest.");
         }
 
-        public static void ResetWallet() { _walletBalance.Clear(); _walletContributed.Clear(); }
+        /// <summary>World boundary: the ledger goes, and with it this process's claim to know the merger state
+        /// (X3) — the next world must re-earn it through a manifest restore or a fresh FORM.</summary>
+        public static void ResetWallet() { _walletBalance.Clear(); _walletContributed.Clear(); MergerStateAuthoritative = false; }
 
         /// <summary>Host: rebuild the live ownership map from a session manifest
         /// (re-keying the stableId-keyed owners back to the live playerIds of
@@ -447,6 +489,7 @@ namespace BigAmbitionsMP
                 try { PaperworkSync.Reset(); } catch { }   // and this machine's publisher forgets the previous world's day/edge
                 PruneOffers("session state restored");   // r4: the restored store decides which offers still stand
                 RestoreWalletFromManifest(m);   // slice 4: ledger BEFORE the broadcast below (members snap to it)
+                MarkMergerStateAuthoritative(); // X3: store + wallet are both restored — an empty live store now MEANS empty
                 MPHub.RestoreLoans(m.Loans);    // sweep 2026-08-18: the loaded slot's loans are the timeline truth
                 RefreshGrantsAndBroadcast();
                 Plugin.Logger.LogInfo($"[Server] Restored {gn} access grant(s) + {mn} merger member(s) from manifest ({(m.Grants?.Count ?? 0)} grants in file).");
@@ -6323,6 +6366,7 @@ namespace BigAmbitionsMP
                         // inside the survivor, are retired by PruneOffers below — AFTER the store change, because
                         // the validator asks the store what is still answerable rather than guessing per case.
                         MergerSync.StoreUnion(group, other);
+                        MarkMergerStateAuthoritative();   // X3: a UNION is this process deciding the merger state
                         // r2 (review #3): cooldowns keyed on the absorbed id follow it to the survivor.
                         var rekey = new List<string>();
                         foreach (var ck in _mergerCooldown.Keys) if (ck.EndsWith("|" + other, StringComparison.Ordinal)) rekey.Add(ck);
@@ -6355,6 +6399,7 @@ namespace BigAmbitionsMP
                         BroadcastWalletGroup(group);
                         break;
                     }
+                    MarkMergerStateAuthoritative();   // X3: a company was FORMED or GROWN here — the live store is now the truth
                     PruneOffers("unanswerable after a merger accept");
                     RefreshGrantsAndBroadcast();   // carries the pruned offer table with the new membership
                     break;
@@ -6393,6 +6438,14 @@ namespace BigAmbitionsMP
                         if (members > 0)
                         {
                             float share = bal / members;
+                            // FOLD b X2 (r1 F2): EVERY payout decided here is written into CashByStableId at once,
+                            // online or offline. Only the OFFLINE member's figure used to be recorded, so an ONLINE
+                            // member kept the full-pot MIRROR as their "last known cash" until the 3 s resync
+                            // (MPCanvasUI.cs:4359) — and a coordinated save or MergeSlot upload inside that window
+                            // stamped the WHOLE balance into their slot, handing each of them the full pot on the
+                            // next load. The leaver goes first: they are leaving the group, so from this instant
+                            // CashByStableId is the only thing that answers for them.
+                            CashByStableId[s] = share;
                             var payout = new MergerWalletStatePayload { GroupId = "", Balance = share };
                             if (actorPid == MPConfig.PlayerId) MergerWallet.ApplyState(payout);
                             else SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerWalletState, "host", payout));
@@ -6408,7 +6461,9 @@ namespace BigAmbitionsMP
                                 var rest = new MergerWalletStatePayload { GroupId = "", Balance = bal - share };
                                 if (otherPid == MPConfig.PlayerId) MergerWallet.ApplyState(rest);
                                 else if (otherPid != "") SendToPid(otherPid, MessageEnvelope.Create(MessageType.MergerWalletState, "host", rest));
-                                else if (other != "") CashByStableId[other] = bal - share;   // offline member: their restore figure
+                                // X2: the remaining member's figure regardless of who they are — the company is gone,
+                                // so CashByStableId is their only record, exactly as for the leaver above.
+                                if (other != "") CashByStableId[other] = bal - share;
                                 Plugin.Logger.LogInfo($"[EconProbe] wallet DISSOLVE '{g0}': remaining member gets ${bal - share:N0}.");
                                 _walletBalance.Remove(g0);
                                 _walletContributed.Remove(g0);
@@ -6417,6 +6472,20 @@ namespace BigAmbitionsMP
                             {
                                 _walletBalance[g0] = bal - share;
                                 if (_walletContributed.TryGetValue(g0, out var cset)) cset.Remove(s);
+                                // X2: the company SURVIVES, so the members who stay are re-shared over the reduced
+                                // pot and count. Their live figure is written too, so CashByStableId never holds the
+                                // pre-leave full pot for anybody. The remainder holder is the founder, or — when the
+                                // founder is the one leaving — the next member in join order, which is exactly what
+                                // MergerSync.StoreRemove installs a few lines below.
+                                var stay = new List<string>();
+                                foreach (var mem in MergerSync.JoinOrderOfGroup(g0)) if (mem != s) stay.Add(mem);
+                                if (stay.Count > 0)
+                                {
+                                    string keeper = MergerSync.FounderOfGroup(g0);
+                                    if (keeper == s || !stay.Contains(keeper)) keeper = stay[0];
+                                    foreach (var mem in stay)
+                                        CashByStableId[mem] = MPSaveCoordinator.EqualShare(bal - share, stay.Count, mem == keeper);
+                                }
                                 BroadcastWalletGroup(g0);
                             }
                         }
@@ -6452,6 +6521,7 @@ namespace BigAmbitionsMP
                         foreach (var mem in lset) if (!string.IsNullOrEmpty(mem)) exStables.Add(mem);
 
                     MergerSync.StoreRemove(s);
+                    MarkMergerStateAuthoritative();   // X3: a leave — and the DISSOLVE it may be — is this process deciding the merger state, so the empty store it can leave behind must be persisted, not kept off disk
                     foreach (var xp in exPids)
                     {
                         GameStatePatcher.EnqueueOnMainThread(() => HostForgetPressesOf(xp));
