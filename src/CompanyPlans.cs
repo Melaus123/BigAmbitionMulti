@@ -129,6 +129,7 @@ namespace BigAmbitionsMP
                     try { MPPatches.Patch_LogisticsReorder_DisplayRefuse.Forget(ids); } catch { }
                     Plugin.Logger.LogInfo($"[Plans] forgot {ids.Count} plan id(s) of '{ownerPid}' - the per-plan tables go with the owner.");
                 }
+                foreach (var f in PaneFamilies) _lastRowSetShape.Remove(ownerPid + "|" + f);   // FOLD b G1
                 DropRowsOf(ownerPid);
                 DropShadowRows(ownerPid);                    // CROSS-HR-1 S4: the shadows go with them
                 if (had) Plugin.Logger.LogInfo($"[Plans] cleared ({why}: '{ownerPid}')");
@@ -143,6 +144,7 @@ namespace BigAmbitionsMP
             _rowInfo.Clear(); _seq.Clear(); _applied.Clear(); _shadowRows.Clear();   // CROSS-HR-1 S4
             _lastMax.Clear(); _refreshLogged.Clear(); _loggedNothingToSend.Clear();   // HQ-PARITY-3 A6/A2/B1
             _lastRefreshedShape.Clear(); _loggedOverCap.Clear();                      // FOLD b B1/B3
+            _lastRowSetShape.Clear();                                                 // FOLD b G1
             HrSliderHeld = false; _sliderReleaseLogged = false;                       // FOLD d E1: no hold survives a
             // reload - but HrSliderGo STANDS: the slider object outlives the session, and the guard on it
             // is what ends a hold the pointer-up never did.
@@ -190,7 +192,12 @@ namespace BigAmbitionsMP
         /// LogisticsManagersPlanList.RefreshManagersList :87 the logistics union now hangs off) - the same seam
         /// SharedShopWorkTabs uses for the warehouse tabs.  Each rebuild runs the overlay postfix, which
         /// drops that family's stale rows and re-adds them from the new feed.  MAIN THREAD: the only caller
-        /// is Receive, which CompanyLists already enqueues.</summary>
+        /// is Receive, which CompanyLists already enqueues.
+        /// FOLD b G1 (review F1): BOTH HALVES ARE NOW GATED ON WHAT A CONTROL WRITES.  The list rebuild
+        /// below runs for a family only when that owner's published ROW SET for it changed (RebuildIfChanged
+        /// / RowSetShapeOf), and the pane loop under it only when the open plan's own published shape changed
+        /// (DtoShapeOf) - so a partner merely TRADING no longer destroys and rebuilds every row every two
+        /// seconds, with the reselect firing the game's SelectPlan -&gt; LoadPlan on the pane being read.</summary>
         private static void RefreshOpenTabsFor(string ownerPid)
         {
             try
@@ -212,11 +219,17 @@ namespace BigAmbitionsMP
                 var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
                 if (bm == null) return;
                 int n = 0, kept = 0;
-                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList>(true), "RefreshPlansList", ref kept);
-                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList>(true), "RefreshManagersList", ref kept);
-                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList>(true), "RefreshManagersList", ref kept);
-                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList>(true), "RefreshManagersList", ref kept);
-                n += Rebuild(bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList>(true), "RefreshManagersList", ref kept);   // U4: logistics joined the union
+                // HQ-PARITY-4 P1: the list is the one the GAME last refreshed (registered by that family's
+                // own refresh postfix); the hierarchy sweep is only the fallback.
+                var reselected = new HashSet<string>(StringComparer.Ordinal);
+                // FOLD b G2: the plan each pane had open BEFORE its list rebuild hid it - filled by Rebuild,
+                // so it names only the families that actually rebuilt on this feed.
+                var openBefore = new Dictionary<string, string>(StringComparer.Ordinal);
+                n += RebuildIfChanged(ownerPid, ListOf("pricing"),    "RefreshPlansList",    "pricing",    ref kept, reselected, openBefore);
+                n += RebuildIfChanged(ownerPid, ListOf("purchasing"), "RefreshManagersList", "purchasing", ref kept, reselected, openBefore);
+                n += RebuildIfChanged(ownerPid, ListOf("hr"),         "RefreshManagersList", "hr",         ref kept, reselected, openBefore);
+                n += RebuildIfChanged(ownerPid, ListOf("headhunter"), "RefreshManagersList", "headhunter", ref kept, reselected, openBefore);
+                n += RebuildIfChanged(ownerPid, ListOf("logistics"),  "RefreshManagersList", "logistics",  ref kept, reselected, openBefore);   // U4: logistics joined the union
                 if (n > 0) Plugin.Logger.LogInfo($"[Plans] redrew {n} open tab(s) for '{ownerPid}' - a newer feed arrived"
                                                + (kept > 0 ? $"; {kept} open pane(s) reselected." : "."));
                 // HQ-PARITY-3 B1: the list rebuild above restores the SELECTION; this restores the PANE.
@@ -232,11 +245,36 @@ namespace BigAmbitionsMP
                 // - so running it on every bundle (2 s apart at the urgent cadence) was destructive on its
                 // own.  The test is the OWNER'S PUBLISHED SHAPE for that plan; a plan never seen before
                 // counts as changed, and the shape is recorded only where the refresh actually RUNS.
+                // FOLD b G1 (review F1): the LIST rebuild above is gated the same way now, on the family's
+                // whole row set - both halves of the redraw follow what a CONTROL writes, and neither one
+                // moves for the counters the simulation turns on its own.
                 foreach (var fam in PaneFamilies)
                 {
                     string openId = OpenPanePlanId(fam);
+                    // FOLD b G2 (review F2): THE HEADHUNTER PANE COMES BACK.  Every list refresh opens with
+                    // planUI.Hide() (decompile HeadhuntersPlanList.RefreshManagersList:75) and the headhunter
+                    // list carries NO id on its rows - only a private _selectedEntry (:32), "(Clone)" names
+                    // and no Plan property - so Reselect cannot find the row, and the id read here is "" for
+                    // the now-INACTIVE pane (OpenPanePlanId's activeInHierarchy guard).  The pane is reloaded
+                    // directly instead, from the id captured before the invoke.  The list HIGHLIGHT is NOT
+                    // restored: the list offers nothing to match a row on, and a position is not an identity.
+                    // Only families the rebuild RAN for are in openBefore, so this fires only where G1 let
+                    // the rebuild hide the pane.
+                    if (openId.Length == 0 && fam == "headhunter"
+                        && openBefore.TryGetValue(fam, out var hidden) && hidden.Length > 0)
+                    {
+                        ReopenHeadhunterPane(hidden);
+                        _lastRefreshedShape[fam + "|" + hidden] = DtoShapeOf(fam, hidden);
+                        continue;
+                    }
                     if (openId.Length == 0) continue;
                     string shapeKey = fam + "|" + openId, shape = DtoShapeOf(fam, openId);
+                    // HQ-PARITY-4 P4, ONE OBJECT PER PLAN, ONE LOAD PER BUNDLE.  A family the rebuild above
+                    // RESELECTED has already been loaded by the list's OWN SelectPlan, with the row object
+                    // that refresh just built; loading it again here would hand the pane a second object for
+                    // the same plan and re-fire everything a load re-fires.  The shape is still recorded, so
+                    // the change gate stays honest on the next bundle.
+                    if (reselected.Contains(fam)) { _lastRefreshedShape[shapeKey] = shape; continue; }
                     if (_lastRefreshedShape.TryGetValue(shapeKey, out var seenShape) && seenShape == shape) continue;
                     RefreshOpenPaneInPlace(fam, openId);
                     _lastRefreshedShape[shapeKey] = shape;
@@ -275,6 +313,32 @@ namespace BigAmbitionsMP
                 RefreshOpenTabsFor(owner);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] deferred redraw: {ex.Message}"); }
+        }
+
+        /// <summary>FOLD c I2 (review H2): DROP ONE OWNER'S CHANGE GATES.  A refusal changes nothing in
+        /// _byOwner, so that owner's row-set shape still equals _lastRowSetShape (no list rebuild) and every
+        /// open plan's shape still equals _lastRefreshedShape (no pane load) - the refusal redraw was a no-op
+        /// and the screen went on showing an edit that never happened.  Forgetting the recorded shapes is what
+        /// makes the very next RefreshOpenTabsFor run for real.  Nothing is logged here: the refusal itself is
+        /// already one WARNING.</summary>
+        public static void InvalidateShapes(string ownerPid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerPid)) return;
+                foreach (var f in PaneFamilies) _lastRowSetShape.Remove(ownerPid + "|" + f);
+                string pfx = ownerPid + "|";
+                foreach (var kv in _rows)                       // keys are owner|family|planId
+                {
+                    if (!kv.Key.StartsWith(pfx, StringComparison.Ordinal)) continue;
+                    int cut = kv.Key.IndexOf('|', pfx.Length);
+                    if (cut < 0) continue;
+                    string fam = kv.Key.Substring(pfx.Length, cut - pfx.Length), pid = kv.Key.Substring(cut + 1);
+                    if (pid.Length == 0) continue;
+                    _lastRefreshedShape.Remove(fam + "|" + pid);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] invalidate shapes for '{ownerPid}': {ex.Message}"); }
         }
 
         /// <summary>B1: `family|planId` -> the owner's published shape of that plan AS OF THE LAST REFRESH
@@ -417,7 +481,10 @@ namespace BigAmbitionsMP
         /// that plan and let the pane's OWN load redraw it.  Used by the receive path (all five families,
         /// after the lists rebuild) and by ApplyRouted (the RUNNER's own pane, after a partner's op landed on
         /// the runner's real plan - A4), so a member and an owner watching the same plan both see a change
-        /// the moment it is made.  Nothing here draws anything itself: it calls the game's own LoadPlan.</summary>
+        /// the moment it is made.  Nothing here draws anything itself: it calls the game's own LoadPlan.
+        /// HQ-PARITY-4 P4: on the receive path this is now SKIPPED for any family the list rebuild already
+        /// reselected - that reselect went through the list's own SelectPlan, which loaded the pane with the
+        /// fresh row object, and a second load would be a second object for the one plan.</summary>
         public static void RefreshOpenPaneInPlace(string family, string planId)
         {
             try
@@ -475,7 +542,112 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] in-place {family} refresh: {ex.Message}"); }
         }
 
+        /// <summary>FOLD b G2 (review F2): put the headhunter pane back on the plan its list rebuild just
+        /// hid.  HeadhunterPlanUI.LoadPlan ENDS in gameObject.SetActive(true) itself (decompile
+        /// HeadhunterPlanUI.cs:48), so the load IS the show - the pane has no Show() to call, only a Hide()
+        /// (:63-67), and the list's own SelectPlan (HeadhuntersPlanList.cs:213-228) shows it the same way,
+        /// through LoadPlan.  What SelectPlan also does - recolour the row, swap its name label for its
+        /// dropdown, re-point the no-manager popup - belongs to a ROW, and there is no row to find here.
+        /// FOLD c I1 (review H1): AND THAT IS WHY A PLAN WITH NO HEADHUNTER IS NOT REOPENED AT ALL.  LoadPlan
+        /// calls noManagerAssignedPopUp.Show() when the plan's own assignedEmployeeId is null (decompile
+        /// HeadhunterPlanUI.cs:40-42), and that popup's onChooseEmployee is still the closure
+        /// HeadhuntersPlanList.SelectPlan built over the ROW the player clicked (decompile
+        /// HeadhuntersPlanList.cs:213-228); its tail reaches into entry.Find("ManagerName/UnassignedManagerIcon"),
+        /// and the rebuild has DESTROYED that row - so choosing an employee in the reopened popup throws a
+        /// MissingReferenceException inside the game's own dropdown listener, AFTER the plan write already
+        /// happened, with no mod try/catch anywhere on that path.  The pane is left hidden instead and the
+        /// player is told to click the row, which is what builds the closure over a row that exists.
+        /// One INFO per plan per feed: _refreshLogged is cleared at the top of every pane loop.</summary>
+        private static void ReopenHeadhunterPane(string planId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(planId)) return;
+                var pane = PaneOf("headhunter") as HeadhunterPlanUI;
+                if (pane == null) return;
+                var pl = PlanObjectOf("headhunter", planId) as HeadhunterPlan;
+                if (pl == null) return;
+                // I1: the GAME'S OWN gate, read off the game's own field before the load - LoadPlan fires the
+                // stale-closure popup on exactly this test (`plan.assignedEmployeeId == null`), so the pane is
+                // left hidden rather than armed.
+                if (pl.assignedEmployeeId == null)
+                {
+                    if (_refreshLogged.Add("headhunter-unassigned|" + planId))
+                        Plugin.Logger.LogInfo($"[Plans] headhunter plan {planId} has no headhunter assigned - the pane is not reopened after the rebuild; click the row to reopen it.");
+                    return;
+                }
+                pane.LoadPlan(pl);
+                if (_refreshLogged.Add("headhunter|" + planId))
+                    Plugin.Logger.LogInfo($"[Plans] reopened the headhunter pane for plan {planId} after the list rebuild.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] reopen the headhunter pane: {ex.Message}"); }
+        }
+
+        // -- HQ-PARITY-4 P1: REGISTRIES, NOT SWEEPS ---------------------------
+
+        /// <summary>P1.  The PANE object the game itself last loaded for each family, recorded by a postfix
+        /// on that family's own LoadPlan.  The hierarchy sweep below never found the PURCHASING pane in
+        /// either hands-on session, so that pane never refreshed and the owner's warehouse count was never
+        /// substituted into it: the game holds a direct handle to it (decompile BizManBusiness.cs:98
+        /// `bizMan.business.purchasingAgentsPlanList.purchasingAgentPlanUISettings`) and never parents it
+        /// under the object the sweep starts from.  NOT cleared by ClearAll - these are Unity objects that
+        /// outlive a session, and every read of them is Unity-null-checked, which covers destruction.</summary>
+        private static readonly Dictionary<string, Component> _paneOf = new(StringComparer.Ordinal);
+
+        /// <summary>P1: the LIST object the game itself last refreshed for each family, recorded by the five
+        /// union postfixes on RefreshManagersList / RefreshPlansList.</summary>
+        private static readonly Dictionary<string, Component> _listOf = new(StringComparer.Ordinal);
+
+        /// <summary>P1, FOLD b G3 (review F3): the (family|registry) pairs whose registered object has
+        /// ALREADY been compared with the sweep's - written whether the two agreed or not, so the comparison
+        /// sweep runs once per family per registry per session either way.  Writing it only on a MISMATCH
+        /// left the agreeing families sweeping the hierarchy on every single call, for a line that was never
+        /// going to be logged.  The INFO itself is still one per pair per session.</summary>
+        private static readonly HashSet<string> _regCompared = new(StringComparer.Ordinal);
+
+        /// <summary>P1: called from the five pane LoadPlan postfixes with that patch's `__instance`.</summary>
+        public static void RegisterPane(string family, Component pane)
+        { try { if (!string.IsNullOrEmpty(family) && pane != null) _paneOf[family] = pane; } catch { } }
+
+        /// <summary>P1: called from the five list refresh postfixes with that patch's `__instance`.</summary>
+        public static void RegisterList(string family, Component list)
+        { try { if (!string.IsNullOrEmpty(family) && list != null) _listOf[family] = list; } catch { } }
+
+        /// <summary>P1: the REGISTERED pane while it is alive, else the sweep.  G3: the comparison costs
+        /// ONE sweep per family per session - the first call records that the pair has been compared,
+        /// agreement or not, and every call after it skips the sweep.</summary>
         private static Component? PaneOf(string family)
+        {
+            try
+            {
+                if (_paneOf.TryGetValue(family, out var reg) && reg != null)
+                {
+                    if (_regCompared.Add(family + "|pane") && !ReferenceEquals(reg, SweptPaneOf(family)))
+                        Plugin.Logger.LogInfo($"[Plans] {family}: the pane on screen is not the one the hierarchy search finds - using the registered one.");
+                    return reg;
+                }
+            }
+            catch { }
+            return SweptPaneOf(family);
+        }
+
+        /// <summary>P1: the REGISTERED list while it is alive, else the sweep.</summary>
+        private static Component? ListOf(string family)
+        {
+            try
+            {
+                if (_listOf.TryGetValue(family, out var reg) && reg != null)
+                {
+                    if (_regCompared.Add(family + "|list") && !ReferenceEquals(reg, SweptListOf(family)))
+                        Plugin.Logger.LogInfo($"[Plans] {family}: the list on screen is not the one the hierarchy search finds - using the registered one.");
+                    return reg;
+                }
+            }
+            catch { }
+            return SweptListOf(family);
+        }
+
+        private static Component? SweptPaneOf(string family)
         {
             try
             {
@@ -489,6 +661,26 @@ namespace BigAmbitionsMP
                     case "hr":         return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI>(true);
                     case "headhunter": return bm.GetComponentInChildren<HeadhunterPlanUI>(true);
                     case "logistics":  return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI>(true);
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static Component? SweptListOf(string family)
+        {
+            try
+            {
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
+                if (bm == null) return null;
+                switch (family)
+                {
+                    case "pricing":    return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList>(true);
+                    case "purchasing": return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList>(true);
+                    case "hr":         return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList>(true);
+                    case "headhunter": return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList>(true);
+                    case "logistics":  return bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList>(true);
                 }
             }
             catch { }
@@ -522,13 +714,19 @@ namespace BigAmbitionsMP
             catch { return ""; }
         }
 
-        /// <summary>The plan object with that id AS IT STANDS NOW: the machine's own lists first (which is
-        /// where an own plan and a tagged logistics display copy both live), then the screen-layer registry's
-        /// materialised rows, which is where the other four families' partner copies live.</summary>
+        /// <summary>The plan object with that id AS IT STANDS NOW.  HQ-PARITY-4 P4 reversed the order: the
+        /// screen-layer registry's materialised row comes FIRST, because that is the PARTNER's copy and the
+        /// copy the pane on a partner's headquarters is showing - the game's own lists could answer with a
+        /// same-id plan of this machine's own and hand the pane the wrong object.  For LOGISTICS the two are
+        /// the same object anyway (ShowLogisticsUnionRows draws the installed copies out of
+        /// `gi.logisticsManagerPlans`), so the change is harmless there and decisive for the other four.</summary>
         private static object? PlanObjectOf(string family, string planId)
         {
             try
             {
+                string tail = "|" + family + "|" + planId;
+                foreach (var kv in _rows)
+                    if (kv.Key.EndsWith(tail, StringComparison.Ordinal) && kv.Value != null) return kv.Value;
                 var gi = SaveGameManager.Current;
                 if (gi != null)
                     switch (family)
@@ -554,15 +752,56 @@ namespace BigAmbitionsMP
                                 foreach (var x in gi.logisticsManagerPlans) if (x != null && x.id == planId) return x;
                             break;
                     }
-                string tail = "|" + family + "|" + planId;
-                foreach (var kv in _rows)
-                    if (kv.Key.EndsWith(tail, StringComparison.Ordinal) && kv.Value != null) return kv.Value;
             }
             catch { }
             return null;
         }
 
-        private static int Rebuild(Component list, string method, ref int reselected)
+        /// <summary>P2: one line per family per session.</summary>
+        private static readonly HashSet<string> _destroyedRowLogged = new(StringComparer.Ordinal);
+
+        /// <summary>HQ-PARITY-4 P2 / R1.  The list still POINTS at a row, but the row behind the reference is
+        /// destroyed - the C# field is set and the Unity object is gone.  That is exactly what the previous
+        /// bundle left behind when its reselect landed on a row `RefreshManagersList` had already doomed
+        /// (`entryTemplate.transform.ResetTemplate()` destroys at end of frame, decompile
+        /// LogisticsManagersPlanList.cs:97), which is why the logistics pane vanished on every second
+        /// bundle.</summary>
+        private static bool SelectedEntryDestroyed(Component list)
+        {
+            try
+            {
+                var f = list.GetType().GetField("_selectedEntry", BindingFlags.Instance | BindingFlags.NonPublic);
+                object? sel = f != null ? f.GetValue(list) : null;
+                return !ReferenceEquals(sel, null) && TransformOf(sel) == null;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>FOLD b G1: `owner|family` -&gt; the ROW-SET shape that family's list was last REBUILT
+        /// from.  A pair absent from here has never been rebuilt on this machine and counts as changed.</summary>
+        private static readonly Dictionary<string, string> _lastRowSetShape = new(StringComparer.Ordinal);
+
+        /// <summary>FOLD b G1 (review F1), THE LIST REBUILD IS CHANGE-GATED TOO.  Rebuild was gated only on
+        /// the list being active, and Receive calls the redraw on EVERY bundle - so with a tab open a partner
+        /// merely trading destroyed and rebuilt every row every two seconds and the reselect fired the game's
+        /// own SelectPlan -&gt; LoadPlan on the pane being read: the reload-while-trading churn the pane loop's
+        /// change gate was built to remove.  The test is the owner's published ROW SET for the family
+        /// (RowSetShapeOf), so a row added, removed, reordered or edited redraws the list and a stock count
+        /// moving does not.  The shape is recorded only when the rebuild actually RAN - a list that is not on
+        /// screen, or a refresh method that could not be reached, leaves the record alone.</summary>
+        private static int RebuildIfChanged(string ownerPid, Component? list, string method, string fam,
+                                            ref int reselected, HashSet<string> reselectedFams,
+                                            Dictionary<string, string> openBefore)
+        {
+            string key = ownerPid + "|" + fam, shape = RowSetShapeOf(ownerPid, fam);
+            if (_lastRowSetShape.TryGetValue(key, out var seen) && seen == shape) return 0;
+            int ran = Rebuild(list, method, fam, ref reselected, reselectedFams, openBefore);
+            if (ran > 0) _lastRowSetShape[key] = shape;
+            return ran;
+        }
+
+        private static int Rebuild(Component? list, string method, string fam, ref int reselected, HashSet<string> reselectedFams,
+                                   Dictionary<string, string> openBefore)
         {
             try
             {
@@ -574,10 +813,28 @@ namespace BigAmbitionsMP
                 // rebuild CLOSES the pane the player is reading.  Note which plan is open first, then put the
                 // player back on it through the list's OWN entry click, so the pane returns with the values
                 // the feed just brought instead of vanishing.
+                // HQ-PARITY-4 P2: THE OPEN PLAN COMES FROM THE PANE FIRST.  The pane is what the player is
+                // actually reading and it answers off its own `_currentPlan`, which no list rebuild can
+                // destroy; the list's `_selectedEntry` is only the fallback, and it is the thing that goes
+                // Unity-null when the row under it was doomed by the previous refresh.
                 var open = OpenPlanOf(list);
+                if (open.Id.Length == 0 && SelectedEntryDestroyed(list) && _destroyedRowLogged.Add(fam))
+                    Plugin.Logger.LogInfo($"[Plans] {fam}: the list's selected row was destroyed - reselecting from the pane.");
+                string paneId = OpenPanePlanId(fam);
+                // FOLD b G2: the pre-invoke open id goes out to the caller - the headhunter refresh HIDES its
+                // pane and leaves nothing to read it off afterwards.
+                if (paneId.Length > 0) { open.Id = paneId; openBefore[fam] = paneId; }
+                // HQ-PARITY-4 P3: A RESELECT CAN ONLY LAND ON A LIVE ROW.  The rows standing here are the
+                // ones the refresh is about to destroy; they stay present and activeSelf for the rest of
+                // this frame and answer an id check perfectly, so the only safe rows are the ones NOT in
+                // this set - the rows born in the refresh below.
+                var before = new HashSet<Transform>();
+                var parentBefore = EntryParentOf(list);
+                if (parentBefore != null)
+                    for (int i = 0; i < parentBefore.childCount; i++) before.Add(parentBefore.GetChild(i));
                 m.Invoke(list, null);
                 if (open.Id.Length > 0)
-                    if (Reselect(list, open)) reselected++;
+                    if (Reselect(list, open, before)) { reselected++; reselectedFams.Add(fam); }
                 return 1;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {method}: {ex.Message}"); return 0; }
@@ -585,7 +842,8 @@ namespace BigAmbitionsMP
 
         /// <summary>P6: which plan one of the five lists has OPEN, in the one form all five can answer.  Id
         /// is the plan id wherever the list makes it readable - the entry component's public Plan (pricing
-        /// and logistics entries), the _entriesByPlanIds map (HrManagersPlanList :105) or the entry object's
+        /// and logistics entries), the id-to-row map (HR's `_entriesByPlanIds` :105 or logistics'
+        /// `_entriesById` :47) or the entry object's
         /// NAME, which purchasing sets to the plan id (PurchasingAgentsPlanList.SetUpPlanEntry :87) - and ""
         /// for headhunter, whose entries carry no id at all - that family never reselects, it DEFERS
         /// (EditWindowOpen).  c2: there is NO sibling-index fallback; a position is not an identity.</summary>
@@ -612,7 +870,15 @@ namespace BigAmbitionsMP
             var c = entry as Component;  return c != null ? c.transform : null;
         }
 
-        /// <summary>P6, the ONE entry-to-plan-id resolver for all five families, in order of certainty.</summary>
+        /// <summary>P3: the two names the five lists give their id-to-row map.</summary>
+        private static readonly string[] EntryMapNames = { "_entriesByPlanIds", "_entriesById" };
+
+        /// <summary>P6, the ONE entry-to-plan-id resolver for all five families, in order of certainty.
+        /// HQ-PARITY-4 P3: the MAP branch tries BOTH names.  HR's map is `_entriesByPlanIds`
+        /// (HrManagersPlanList.cs:105) but LOGISTICS names its own `_entriesById` (decompile
+        /// LogisticsManagersPlanList.cs:47, `Dictionary&lt;string, LogisticsManagersPlanListEntry&gt;`), so
+        /// looking for one name only meant the one map that is REFILLED WITH LIVE ROWS ONLY was never
+        /// consulted for the family whose pane was vanishing.</summary>
         private static string PlanIdOfEntry(Component list, object entry, Transform t)
         {
             try
@@ -628,10 +894,14 @@ namespace BigAmbitionsMP
                         if (id != null && id.Length > 0) return id;
                     }
                 }
-                var mf = list.GetType().GetField("_entriesByPlanIds", BindingFlags.Instance | BindingFlags.NonPublic);
-                if (mf != null && mf.GetValue(list) is System.Collections.IDictionary map && t != null)
+                foreach (var mapName in EntryMapNames)
+                {
+                    var mf = list.GetType().GetField(mapName, BindingFlags.Instance | BindingFlags.NonPublic);
+                    if (mf == null || t == null) continue;
+                    if (!(mf.GetValue(list) is System.Collections.IDictionary map)) continue;
                     foreach (System.Collections.DictionaryEntry kv in map)
                         if (ReferenceEquals(TransformOf(kv.Value), t) && kv.Key is string k && k.Length > 0) return k;
+                }
                 // Purchasing NAMES its entry for the plan (`entry.name = plan.id`,
                 // PurchasingAgentsPlanList.SetUpPlanEntry :87).  Every other family leaves the name
                 // Instantiate gave it, which ends in "(Clone)" and is the SAME on every row - taking that
@@ -646,8 +916,13 @@ namespace BigAmbitionsMP
         /// <summary>P6: put the player back on the plan the rebuild just closed, through the LIST'S OWN
         /// selection path, so nothing here duplicates the native selection.  False = the plan is gone from
         /// the rebuilt list (deleted at its owner), the one case where the pane is meant to stay shut.
-        /// c1: the path is PER FAMILY - only three of the five wire the click to the entry ROOT.</summary>
-        private static bool Reselect(Component list, OpenPlan open)
+        /// c1: the path is PER FAMILY - only three of the five wire the click to the entry ROOT.
+        /// HQ-PARITY-4 P3: `before` is the set of rows that existed BEFORE the refresh ran.  Those rows are
+        /// already destroyed - `ResetTemplate()` defers the destruction to the end of the frame - but they
+        /// are still present, still activeSelf and still answer their plan id, at LOWER sibling indices than
+        /// the new rows, so a first-match walk handed the game a doomed row and the pane died at the end of
+        /// the frame.  Only rows NOT in that set are considered here.</summary>
+        private static bool Reselect(Component list, OpenPlan open, HashSet<Transform> before)
         {
             try
             {
@@ -669,16 +944,31 @@ namespace BigAmbitionsMP
                     return f != null && f.GetValue(list) != null;
                 }
 
-                var parent = EntryParentOf(list);
-                if (parent == null) return false;
                 Transform? hit = null; Component? hitEntry = null;
-                for (int i = 0; i < parent.childCount; i++)
+
+                // HQ-PARITY-4 P3: LOGISTICS RESOLVES THROUGH THE LIST'S OWN MAP FIRST.  `_entriesById`
+                // (decompile LogisticsManagersPlanList.cs:47) is cleared at :96 and refilled by
+                // SetUpPlanEntry (:144) with the rows THIS refresh just built, so it cannot answer with a
+                // doomed row - and it is the same map the game's own SelectPlan falls back to (:215-222).
+                if (fam == "LogisticsManagersPlanList")
                 {
-                    var c = parent.GetChild(i);
-                    if (!c.gameObject.activeSelf) continue;
-                    var ec = EntryComponentOf(c);
-                    if (PlanIdOfEntry(list, ec, c) != open.Id) continue;
-                    hit = c; hitEntry = ec; break;
+                    var mapped = LogisticsEntryById(list, open.Id);
+                    if (mapped != null) { hitEntry = mapped; hit = mapped.transform; }
+                }
+
+                if (hit == null)
+                {
+                    var parent = EntryParentOf(list);
+                    if (parent == null) return false;
+                    for (int i = 0; i < parent.childCount; i++)
+                    {
+                        var c = parent.GetChild(i);
+                        if (before.Contains(c)) continue;          // P3: a row that predates the refresh is doomed
+                        if (!c.gameObject.activeSelf) continue;
+                        var ec = EntryComponentOf(c);
+                        if (PlanIdOfEntry(list, ec, c) != open.Id) continue;
+                        hit = c; hitEntry = ec; break;
+                    }
                 }
                 if (hit == null) return false;
 
@@ -707,6 +997,28 @@ namespace BigAmbitionsMP
                 return true;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] reselect: {ex.Message}"); return false; }
+        }
+
+        /// <summary>HQ-PARITY-4 P3: the LIVE row for a plan id, straight out of LogisticsManagersPlanList's
+        /// own `private readonly Dictionary&lt;string, LogisticsManagersPlanListEntry&gt; _entriesById`
+        /// (decompile :47).  Null = this refresh drew no row for that plan.</summary>
+        private static Component? LogisticsEntryById(Component list, string planId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(planId)) return null;
+                var f = list.GetType().GetField("_entriesById", BindingFlags.Instance | BindingFlags.NonPublic);
+                var map = f != null ? f.GetValue(list) as System.Collections.IDictionary : null;
+                if (map == null) return null;
+                foreach (System.Collections.DictionaryEntry kv in map)
+                    if (kv.Key is string k && string.Equals(k, planId, StringComparison.Ordinal))
+                    {
+                        var c = kv.Value as Component;
+                        return c != null ? c : null;              // a destroyed row compares equal to null
+                    }
+            }
+            catch { }
+            return null;
         }
 
         /// <summary>Every entry is instantiated under the TEMPLATE's parent (all five SetUpPlanEntry bodies
@@ -2058,6 +2370,35 @@ namespace BigAmbitionsMP
             catch (Exception ex) { return "ERR " + ex.Message; }
         }
 
+        /// <summary>HQ-PARITY-4 P5 - TEST LEVER, READ-ONLY.  What the mod believes about each of the five
+        /// headquarters pages RIGHT NOW: which object it would use for that family's list and for its pane
+        /// (the one the game registered when it last drew it, the one the hierarchy sweep finds, or none),
+        /// whether each of those is on screen, and which plan the pane has open.  Nothing is drawn, nothing
+        /// is written and nothing is sent - the rig draws no page, so this is the hands-on check.</summary>
+        public static string TestDriveHqPane(string arg)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                foreach (var fam in PaneFamilies)
+                {
+                    bool lreg = _listOf.TryGetValue(fam, out var lr) && lr != null;
+                    Component? list = lreg ? lr : SweptListOf(fam);
+                    bool preg = _paneOf.TryGetValue(fam, out var pr) && pr != null;
+                    Component? pane = preg ? pr : SweptPaneOf(fam);
+                    string openId = OpenPanePlanId(fam, pane);
+                    if (sb.Length > 0) sb.Append('\n');
+                    sb.Append(fam).Append(": list=").Append(list == null ? "none" : (lreg ? "registered" : "swept"))
+                      .Append(" active=").Append(list != null && list.gameObject.activeInHierarchy)
+                      .Append(" pane=").Append(pane == null ? "none" : (preg ? "registered" : "swept"))
+                      .Append(" active=").Append(pane != null && pane.gameObject.activeInHierarchy)
+                      .Append(" open=").Append(openId.Length > 0 ? openId : "-");
+                }
+                return sb.ToString();
+            }
+            catch (Exception ex) { return "hqpane: " + ex.Message; }
+        }
+
         /// <summary>HQ-PARITY-3 B6, THE PER-CONTROL OWNER LEVER: `hqtoggle &lt;family&gt; &lt;planId&gt; &lt;field&gt;
         /// [&lt;arg&gt;] &lt;value&gt;` makes the write the GAME's own handler makes on one of THIS machine's OWN
         /// plans and then takes the very seam every patched own-plan return now takes (RoutePaneEdit answers
@@ -2584,6 +2925,66 @@ namespace BigAmbitionsMP
             return null;
         }
 
+        /// <summary>FOLD b G1: the owner's published ROW SET for one family, serialised - the test the
+        /// change-gated LIST rebuild runs.  The concatenation, in the owner's own list order, of the
+        /// EDITABLE shape (DtoShapeOf) of every row of that family, so it moves when a row is added, removed,
+        /// reordered or edited and stays still while the simulation turns the counters those shapes blank.
+        /// "" = that owner publishes no row of this family; "?" - which is never equal to a real shape - =
+        /// the shape could not be read, and an unreadable shape REDRAWS rather than skipping.</summary>
+        private static string RowSetShapeOf(string ownerPid, string family)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerPid) || string.IsNullOrEmpty(family)) return "?";
+                if (!_byOwner.TryGetValue(ownerPid, out var p) || p == null) return "";
+                var sb = new System.Text.StringBuilder();
+                switch (family)
+                {
+                    case "pricing":
+                        foreach (var g in p.PricingManagerPlans ?? new List<PwPricingPlan>()) AppendRowShape(sb, g?.Id, g);
+                        break;
+                    case "purchasing":
+                        foreach (var g in p.ImportPartnerships ?? new List<PwImportPartnership>()) AppendRowShape(sb, g?.Id, g);
+                        break;
+                    case "hr":
+                        foreach (var g in p.HrManagerPlans ?? new List<PwHrPlan>()) AppendRowShape(sb, g?.Id, g);
+                        break;
+                    case "headhunter":
+                        foreach (var g in p.HeadhunterPlans ?? new List<PwHeadhunterPlan>()) AppendRowShape(sb, g?.Id, g);
+                        break;
+                    case "logistics":
+                        foreach (var g in p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>()) AppendRowShape(sb, g?.Id, g);
+                        break;
+                    default: return "?";
+                }
+                return sb.ToString();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {family} row-set shape for '{ownerPid}': {ex.Message}"); return "?"; }
+        }
+
+        /// <summary>G1: one row of the row-set shape - the id (so a REORDER moves the shape) and the row's
+        /// own editable shape.  A row with no id is not drawable and is skipped.  FOLD c I4 (review H5): the
+        /// ROW ITSELF is passed, so the shape is taken off the object already in hand instead of rescanning
+        /// every owner's list of this family for its id, once per row.</summary>
+        private static void AppendRowShape(System.Text.StringBuilder sb, string? id, object? row)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            sb.Append(id).Append('=').Append(DtoShapeOf(row)).Append('\u0001');
+        }
+
+        /// <summary>FOLD c I4: the editable shape of a row ALREADY IN HAND.  The id-based overload below is
+        /// this preceded by a lookup, and a caller holding the row must not pay for that lookup.  null (no
+        /// such row) serialises as "", exactly as the lookup's own miss does.</summary>
+        private static string DtoShapeOf(object? row)
+        {
+            try
+            {
+                if (row == null) return "";
+                return Newtonsoft.Json.JsonConvert.SerializeObject(EditableShapeOf(row));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] row shape: {ex.Message}"); return ""; }
+        }
+
         /// <summary>FOLD b B1: the owner's published row for one plan, serialised - the test the change-gated
         /// refresh runs.  "" = the registry holds no such plan (one of this machine's own, or an owner whose
         /// bundle has not arrived), and "" compares equal to "" so such a pane is refreshed once and then
@@ -2628,7 +3029,7 @@ namespace BigAmbitionsMP
                                 if (g != null && string.Equals(g.Id, planId, StringComparison.Ordinal)) { row = g; break; }
                             break;
                     }
-                    if (row != null) return Newtonsoft.Json.JsonConvert.SerializeObject(EditableShapeOf(row));
+                    if (row != null) return DtoShapeOf(row);
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {family} shape for {planId}: {ex.Message}"); }
@@ -3100,15 +3501,19 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Every refusal says why (rule 5) and re-reads the registry, so the screen goes back to the
-        /// owner's truth rather than sitting on an edit that never happened.</summary>
+        /// owner's truth rather than sitting on an edit that never happened.  FOLD c I2 / FOLD d: the refused
+        /// PLAN'S owner's recorded shapes are DROPPED first - a refusal moves nothing in _byOwner, so without it the redraw found both
+        /// change gates closed and did nothing at all.</summary>
         private static void Refused(string family, string op, string planId, string why)
         {
             Plugin.Logger.LogWarning($"[Merger] plan edit refused ({family} {op} {planId}): {why}.");
-            try { if (CompanyHqPageOpen(out _, out var owner)) RefreshOpenTabsFor(owner); } catch { }
+            try { if (CompanyHqPageOpen(out _, out var owner)) { InvalidateShapes(OwnerOfPlanRow(family, planId, owner)); RefreshOpenTabsFor(owner); } } catch { }
         }
 
         /// <summary>The member's answer leg: the runner could not apply the edit.  The rows on screen are
-        /// redrawn from the registry, which still holds the owner's truth.</summary>
+        /// redrawn from the registry, which still holds the owner's truth - FOLD c I2 / FOLD d: after the refused
+        /// plan's owner's recorded shapes are dropped, since a refusal changes nothing in _byOwner and the change gates would
+        /// otherwise skip both the list rebuild and the pane load.</summary>
         public static void ReceiveRefusal(string family, string planId, string reason)
         {
             Plugin.Logger.LogWarning($"[Merger] plan-edit-refused ({family} {planId}): {reason}.");
@@ -3118,7 +3523,24 @@ namespace BigAmbitionsMP
             // edit on this plan sends the whole truth instead.
             if (string.Equals(family, "logistics", StringComparison.Ordinal))
                 CompanyLists.ReseedLogisticsBaseline(planId ?? "");
-            try { if (CompanyHqPageOpen(out _, out var owner)) RefreshOpenTabsFor(owner); } catch { }
+            try { if (CompanyHqPageOpen(out _, out var owner)) { InvalidateShapes(OwnerOfPlanRow(family, planId ?? "", owner)); RefreshOpenTabsFor(owner); } } catch { }
+        }
+
+        /// <summary>FOLD d (re-check c, minor): the shapes to drop are the REFUSED PLAN'S owner's, not the page's -
+        /// a refusal arrives asynchronously and the player may have switched to another partner's page in
+        /// between.  The owner is read off the row registry (keys `owner|family|planId`); the page owner is the
+        /// fallback when the row is no longer held.</summary>
+        private static string OwnerOfPlanRow(string family, string planId, string fallback)
+        {
+            try
+            {
+                string tail = "|" + family + "|" + (planId ?? "");
+                foreach (var kv in _rows)
+                    if (kv.Key.EndsWith(tail, StringComparison.Ordinal))
+                        return kv.Key.Substring(0, kv.Key.Length - tail.Length);
+            }
+            catch { }
+            return fallback;
         }
 
         // -- the DTO of one temp row (the reverse of BuildPricing/BuildPurchasing/BuildHr/BuildHeadhunter) --

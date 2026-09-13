@@ -4575,6 +4575,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     CompanyPlans.NoteLogisticsPane(__instance);
+                    CompanyPlans.RegisterPane("logistics", __instance);          // HQ-PARITY-4 P1
                     if (MergerFlip.FlippedCount == 0 || plan == null) return;   // inert without a merger
                     if (!CompanyLists.IsDisplayPlan(plan))
                     {
@@ -10158,6 +10159,7 @@ namespace BigAmbitionsMP
                                 UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanListEntry ___entryTemplate,
                                 UnityEngine.Transform ___buttonEntry)
             {
+                CompanyPlans.RegisterList("pricing", __instance);   // HQ-PARITY-4 P1: registries, not sweeps
                 OverlayPlanRows("pricing", __instance,
                                 typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagersPlanList),
                                 ___entryTemplate != null ? ___entryTemplate.transform.parent : null, ___buttonEntry);
@@ -10174,6 +10176,7 @@ namespace BigAmbitionsMP
                                 UnityEngine.Transform ___entryTemplate,
                                 UnityEngine.GameObject ___noPartnershipsWarning)
             {
+                CompanyPlans.RegisterList("purchasing", __instance);   // HQ-PARITY-4 P1
                 int n = OverlayPlanRows("purchasing", __instance,
                                         typeof(UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList),
                                         ___entryTemplate != null ? ___entryTemplate.parent : null, null);
@@ -10192,6 +10195,7 @@ namespace BigAmbitionsMP
             static void Postfix(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList __instance,
                                 UnityEngine.Transform ___entryTemplate, UnityEngine.Transform ___buttonEntry)
             {
+                CompanyPlans.RegisterList("hr", __instance);   // HQ-PARITY-4 P1
                 // CROSS-HR-1b K3: the snapshot is an ARGUMENT, so it is taken before the overlay draws -
                 // it holds exactly the rows the NATIVE refresh built, shadows included.
                 OverlayPlanRows("hr", __instance, typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList),
@@ -10209,6 +10213,7 @@ namespace BigAmbitionsMP
             static void Postfix(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList __instance,
                                 UnityEngine.Transform ___entryTemplate, UnityEngine.Transform ___buttonEntry)
             {
+                CompanyPlans.RegisterList("headhunter", __instance);   // HQ-PARITY-4 P1
                 OverlayPlanRows("headhunter", __instance, typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList),
                                 ___entryTemplate != null ? ___entryTemplate.parent : null, ___buttonEntry);
             }
@@ -10247,6 +10252,9 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    // HQ-PARITY-4 P1: the registration is BEFORE every gate - the registry answers for the
+                    // pane-and-list levers and for the purchasing stock substitution, not only for a merger.
+                    CompanyPlans.RegisterList("logistics", __instance);
                     if (MergerFlip.FlippedCount == 0) return;                 // inert without a merger
                     if (string.IsNullOrEmpty(__state)) return;                // the ChangeTab re-entry already drew them
                     if (___entryTemplate == null) return;
@@ -10264,6 +10272,43 @@ namespace BigAmbitionsMP
                     if (n > 0 && ___buttonEntry != null) ___buttonEntry.SetAsLastSibling();   // the add button stays last
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics overlay: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>HQ-PARITY-4 P1 - THE PANE REGISTER for the three families that had no LoadPlan postfix.
+        /// One overload each, verified in the decompile: `PricingManagerPlanUI.LoadPlan(PricingManagerPlan)`
+        /// (:44), `PurchasingAgentPlanUI.LoadPlan(ImportPartnership)` (:91) and
+        /// `HeadhunterPlanUI.LoadPlan(HeadhunterPlan)` (:36).  HR and logistics register from the LoadPlan
+        /// postfixes they already have.  What this buys: the hierarchy search off `UIs.fullMenu.bizMan` never
+        /// found the PURCHASING pane in either hands-on session - the game reaches it through a direct handle
+        /// (BizManBusiness.cs:98) - so that pane never refreshed on a feed and the owner's warehouse count was
+        /// never substituted into it.  The pane the GAME just loaded is the pane the player is looking at.
+        /// `__instance` is declared as the common base so one patch covers all three; nothing is read off it
+        /// here beyond its type.</summary>
+        [HarmonyPatch]
+        public static class Patch_PlanPaneLoad_Register
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var a = AccessTools.Method(typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerPlanUI), "LoadPlan");
+                if (a != null) yield return a;
+                var b = AccessTools.Method(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentPlanUI), "LoadPlan");
+                if (b != null) yield return b;
+                var c = AccessTools.Method(typeof(HeadhunterPlanUI), "LoadPlan");
+                if (c != null) yield return c;
+            }
+
+            static void Postfix(UnityEngine.Component __instance)
+            {
+                try
+                {
+                    if (__instance == null) return;
+                    string fam = __instance is UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerPlanUI ? "pricing"
+                               : __instance is UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentPlanUI ? "purchasing"
+                               : __instance is HeadhunterPlanUI ? "headhunter" : "";
+                    if (fam.Length > 0) CompanyPlans.RegisterPane(fam, __instance);
+                }
+                catch { }
             }
         }
 
@@ -11634,7 +11679,9 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (__instance == null || plan == null) return;
+                    if (__instance == null) return;
+                    CompanyPlans.RegisterPane("hr", __instance);   // HQ-PARITY-4 P1
+                    if (plan == null) return;
                     var t = __instance.GetType();
                     const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Instance
                                                            | System.Reflection.BindingFlags.NonPublic;

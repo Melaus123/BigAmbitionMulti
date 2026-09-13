@@ -461,8 +461,12 @@ namespace BigAmbitionsMP
 
                 case "autosave":   // coordinated AUTO save — rotates the -auto slots like the scheduler
                     if (!MPServer.IsRunning) return "ERR host only";
+                    // WALLET-DUPE-1: name the rotation slot this save lands in (computed the way HostSaveNow
+                    // computes it, before the save so the answer is the slot written), so a scenario can
+                    // `hostload` exactly that slot.
+                    string autoSlot = MPSaveCoordinator.NextAutoSlotName();
                     MPSaveCoordinator.HostSaveNow("autosave");
-                    return "OK HostSaveNow('autosave') invoked";
+                    return $"OK HostSaveNow('autosave') invoked slot={autoSlot}";
 
                 case "blocksave":  // round-237 machinery test: simulate a native no-save state
                 {
@@ -790,6 +794,33 @@ namespace BigAmbitionsMP
                     return gsb.ToString();
                 }
 
+                case "walletdump":
+                {
+                    // WALLET-DUPE-1 (W6). HOST-ONLY: the shared-wallet LEDGER and the CONTRIBUTED-SET live on
+                    // the host (MPServer._walletBalance / _walletContributed, reachable through the two
+                    // snapshot accessors); a client holds only its own mirror, which the 'money' verb prints.
+                    // contributed=<k>/<members> is the pooling guard against the group's roster size: k<members
+                    // after a load means a member can still pool again, which is the double-money shape.
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    var wbal = MPServer.SnapshotWalletBalances();
+                    var wcon = MPServer.SnapshotWalletContributed();
+                    var wkeys = new System.Collections.Generic.List<string>(wbal.Keys);
+                    wkeys.Sort(StringComparer.Ordinal);
+                    var wsb = new StringBuilder("OK walletdump groups=[");
+                    for (int wi = 0; wi < wkeys.Count; wi++)
+                    {
+                        string wg = wkeys[wi];
+                        if (wi > 0) wsb.Append(';');
+                        int wmem = MergerSync.StoreGroups.TryGetValue(wg, out var wset) && wset != null ? wset.Count : 0;
+                        int wk   = wcon.TryGetValue(wg, out var wlist) && wlist != null ? wlist.Count : 0;
+                        wsb.Append(wg).Append(":balance=")
+                           .Append(wbal[wg].ToString("F2", System.Globalization.CultureInfo.InvariantCulture))
+                           .Append(" contributed=").Append(wk).Append('/').Append(wmem);
+                    }
+                    wsb.Append(']');
+                    return wsb.ToString();
+                }
+
                 case "books":
                 {
                     // MERGER PHASE 4a (B6). Read-only. With no argument: how much of the company
@@ -862,6 +893,16 @@ namespace BigAmbitionsMP
                     // publish per control: purchasing repeating|autostock, hr replaceabsent|trainingtarget,
                     // headhunter dealbreaker <type>.
                     return CompanyPlans.TestDriveHqToggle(arg);
+                }
+
+                case "hqpane":
+                {
+                    // HQ-PARITY-4 P5 - TEST LEVER. Read-only. What the mod believes about each of the five
+                    // headquarters pages right now: the list object and the pane object it would use for that
+                    // family (registered by the game's own draw, found by the hierarchy sweep, or missing),
+                    // whether each is on screen, and the plan the pane has open. The rig draws no page, so
+                    // this is the hands-on check - above all that the purchasing pane is now found at all.
+                    return CompanyPlans.TestDriveHqPane(arg);
                 }
 
                 case "planedit":
@@ -2295,7 +2336,7 @@ namespace BigAmbitionsMP
                 }
 
                 default:
-                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|hrtag|hrplanof|planown|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg|negotiations|dissolvecheck|dissolverun)";
+                    return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|walletdump|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|hrtag|hrplanof|planown|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg|negotiations|dissolvecheck|dissolverun)";
             }
         }
 
