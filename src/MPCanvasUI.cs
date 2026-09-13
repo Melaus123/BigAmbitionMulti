@@ -8097,7 +8097,8 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[UI] StyleSettingsPanel: {ex.Message}"); }
         }
-        private void OnStop()      { MPServer.Stop();          SetStatus("Stopped hosting.", false); }
+        // Host stop = this machine left the session: on the HOST the clock value is already its own preference (OptionsGuard.cs:55/:79), so this only clears the session bookkeeping (SessionMultiplier/_multTouched/LastBroadcastMult) - the same call the client's disconnect path makes.
+        private void OnStop()      { MPServer.Stop();          try { OptionsGuard.OnSessionLeft("host stop"); } catch { }   SetStatus("Stopped hosting.", false); }
         private void OnDisc()      { MPClient.Disconnect();    SetStatus("Disconnected.", false); }
 
         private void OnToggleEnforceCash()

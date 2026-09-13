@@ -1666,6 +1666,49 @@ namespace BigAmbitionsMP
                          + $" hostcopy={(CompanyMessages.LastRivalNewsHostKept ? "kept" : "suppressed")}";
                 }
 
+                // rivalmono <rivalId> (M4) - run the rival's OWN monologue path: the PUBLIC
+                // RivalsHelper.SendMessageToPlayer overload for the first timeline entry that has a clip and has
+                // not been sent yet, so the host-side monologue skip and the native tail (contact send +
+                // bookkeeping) are both exercised through the game's own code.
+                case "rivalmono":
+                {
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    string rmId = arg.Trim();
+                    if (rmId.Length == 0) return "ERR usage: rivalmono <rivalId>";
+                    BigAmbitions.Rivals.SpecialRival rmRival = null!;
+                    try { rmRival = BigAmbitions.Rivals.RivalsHelper.GetSpecialRival(rmId); }
+                    catch (Exception rmEx) { return $"ERR rivalmono: {rmEx.GetType().Name}: {rmEx.Message}"; }
+                    if (rmRival == null) return $"ERR unknown rival '{rmId}'";
+                    // TimelineEntry.messageLocalizationKey / .messageClip, out of RivalTimeline.allEntries (decompile
+                    // RivalTimeline.cs:55; its own send at :243). HasMessageBeenSent is the game's own sentMessageKeys
+                    // test (RivalsHelper.cs:529-531), so the lever and native can never disagree about what is unsent.
+                    string rmKey = "";
+                    UnityEngine.AudioClip rmClip = null!;
+                    try
+                    {
+                        var rmEntries = rmRival.timeline?.allEntries;
+                        if (rmEntries != null)
+                            foreach (var rmE in rmEntries)
+                            {
+                                if (rmE == null || rmE.messageClip == null) continue;
+                                // Fold c (user 2026-09-12): employee poaching is OFF in MP (MPRivalFairness.Patch_NoPoachingInMP
+                                // forces ActivateHireEmployees false, so the game never completes that entry and never sends
+                                // its announcement). The lever must not send it either - a rival promising to hire away
+                                // your staff, followed by nothing, is exactly the confusion the mechanic's removal avoids.
+                                if (rmE.defense == BigAmbitions.Rivals.DefensiveMechanic.HireBestEmployees) continue;
+                                string rmK = rmE.messageLocalizationKey ?? "";
+                                if (rmK.Length == 0) continue;
+                                if (BigAmbitions.Rivals.RivalsHelper.HasMessageBeenSent(rmId, rmK)) continue;
+                                rmKey = rmK; rmClip = rmE.messageClip; break;
+                            }
+                    }
+                    catch (Exception rmTx) { return $"ERR rivalmono timeline: {rmTx.GetType().Name}: {rmTx.Message}"; }
+                    if (rmKey.Length == 0) return $"ERR no unsent clipped timeline entry for '{rmId}'";
+                    try { BigAmbitions.Rivals.RivalsHelper.SendMessageToPlayer(rmId, rmKey, rmClip, null); }
+                    catch (Exception rmSx) { return $"ERR rivalmono send: {rmSx.GetType().Name}: {rmSx.Message}"; }
+                    return $"OK rivalmono {rmId} key={rmKey}";
+                }
+
                 case "negotiations":
                 {
                     // NEGO-ORPHAN: what StripOrphanNegotiations would take now - the salary negotiations whose embedded

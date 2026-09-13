@@ -1220,7 +1220,7 @@ namespace BigAmbitionsMP
             try { if (key == (rival.rentBuildingMessageKey ?? "") && key.Length > 0) return true; } catch { }
 
             var recipients = PlayersWithBusinessIn(nb);
-            bool hostKeeps = recipients.Contains(MPConfig.PlayerId);
+            bool hostKeeps = !HostCopyWouldBeSuppressed(rival, key);   // ONE DECISION POINT (the predicate below); the gateway acts on its answer.
             if (recipients.Count == 0)
             {
                 // A message must never be destroyed on EVERY machine.  With no recipient the relay
@@ -1270,6 +1270,64 @@ namespace BigAmbitionsMP
             LastRivalNewsCount = n; LastRivalNewsHostKept = hostKeeps;
             Plugin.Logger.LogInfo($"[RivalNews] '{key}' from rival '{rivalId}' ({nb}): relayed to {n} player(s) [{string.Join(",", sent)}]; host copy {(hostKeeps ? "kept" : "suppressed")}.");
             return hostKeeps;
+        }
+
+        /// <summary>ONE DECISION POINT for the rival-news neighbourhood rule (RIVAL-FAIR-2 M4).  TRUE when the
+        /// HOST'S own copy of this rival's message will be suppressed by the gateway above - i.e. the host holds no
+        /// business in the rival's neighbourhood while somebody else does.  FALSE for every case the gateway leaves
+        /// native: off-session, no rival, no key, no neighbourhood, the poach key, the rival's own rent key, and the
+        /// no-recipient case (there the host's copy is the single surviving one).  The gateway uses it for hostKeeps
+        /// and the monologue skip below uses the SAME answer, so the two can never disagree.</summary>
+        internal static bool HostCopyWouldBeSuppressed(BigAmbitions.Rivals.SpecialRival? rival, string key)
+        {
+            try
+            {
+                if (!MPServer.IsRunning) return false;
+                if (rival == null || string.IsNullOrEmpty(key)) return false;
+                string nb = "";
+                try { nb = rival.primaryNeighborhood ?? ""; } catch { return false; }
+                if (nb.Length == 0) return false;
+                if (key == "ba:messagetype_rivals_attempting_to_poach") return false;
+                try { string rent = rival.rentBuildingMessageKey ?? ""; if (rent.Length > 0 && key == rent) return false; } catch { }
+                var recipients = PlayersWithBusinessIn(nb);
+                if (recipients.Count == 0) return false;   // nobody to relay to - the host keeps the only copy
+                return !recipients.Contains(MPConfig.PlayerId);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] suppression test: {ex.GetType().Name}: {ex.Message}"); return false; }
+        }
+
+        /// <summary>The monologue key this machine must NOT play; set on the way INTO RivalsHelper.SendMessageToPlayer
+        /// and cleared on the way out (the patch pair at the foot of this file).</summary>
+        private static string? _skipMonologueKey;
+        /// <summary>Monologue keys already reported as skipped here - one line each.</summary>
+        private static readonly HashSet<string> _monoSkipLogged = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>HOST, on the way INTO the rival's send: decide once, here, whether the monologue about to be
+        /// enqueued belongs to a message whose host copy the gateway will suppress.</summary>
+        internal static void OnRivalMessageSendEnter(BigAmbitions.Rivals.SpecialRival rival, string key, AudioClip clip)
+        {
+            _skipMonologueKey = null;   // never inherit a key from an earlier call
+            if (clip == null) return;   // no clip = no monologue (native goes to SendMessageWithoutNotification)
+            try { if (HostCopyWouldBeSuppressed(rival, key)) _skipMonologueKey = key; }
+            catch { _skipMonologueKey = null; }
+        }
+
+        /// <summary>HOST, on the way OUT: an early native dedupe (no state / already sent / already planned) returns
+        /// before EnqueueMonologue is ever reached, so the key must never outlive the call that set it.</summary>
+        internal static void OnRivalMessageSendLeave() { _skipMonologueKey = null; }
+
+        /// <summary>HOST, on MonologueUI.EnqueueMonologue.  FALSE swallows the monologue and runs its finished-callback
+        /// at once - that callback IS the native tail (the contact send, sentMessageKeys, PlannedMessages.Remove,
+        /// SentMessages, onMessageSent, the rival-sent-message game event).</summary>
+        internal static bool OnMonologueEnqueue(string messageLocalizeKey, Action<string>? onMonologueFinished)
+        {
+            if (!MPServer.IsRunning) return true;
+            if (_skipMonologueKey == null || !string.Equals(messageLocalizeKey, _skipMonologueKey, StringComparison.Ordinal)) return true;
+            _skipMonologueKey = null;
+            try { if (_monoSkipLogged.Add(messageLocalizeKey)) Plugin.Logger.LogInfo($"[RivalNews] monologue '{messageLocalizeKey}' skipped on the host (no business in the rival's neighbourhood) - its message goes to the recipients."); } catch { }
+            try { onMonologueFinished?.Invoke(messageLocalizeKey); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] monologue '{messageLocalizeKey}' tail: {ex.GetType().Name}: {ex.Message}"); }
+            return false;
         }
 
         private static BigAmbitions.Rivals.SpecialRival? FindSpecialRivalByContactId(string contactId)
@@ -1672,6 +1730,52 @@ namespace BigAmbitionsMP
         {
             try { return CompanyMessages.OnRivalContactSend(__instance, textMessage, notify); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] gateway prefix: {ex.GetType().Name}: {ex.Message}"); return true; }
+        }
+    }
+
+    /// <summary>RIVAL-FAIR-2 M4: THE HOST'S MONOLOGUE MUST FOLLOW THE MESSAGE.
+    ///
+    /// The monologue cannot be stopped by suppressing the message, because native plays it FIRST and delivers the
+    /// TextMessage only from the monologue's own finished-callback (decompile BigAmbitions.Rivals/RivalsHelper.cs
+    /// :585-601).  By the time our gateway prefix sees the send, the host has already watched a monologue for news
+    /// it is not a recipient of.
+    ///
+    /// So the decision is taken one frame earlier, in the SAME call stack: this prefix asks the one predicate
+    /// (CompanyMessages.HostCopyWouldBeSuppressed) and, when the answer is yes AND there is a clip, names the key;
+    /// the postfix clears it, so an early native dedupe (null state / already sent / already planned, :564-582) can
+    /// never leave a stale key behind.  Nothing is skipped here - every native dedupe still runs exactly as before.
+    ///
+    /// The EnqueueMonologue prefix then swallows that one key and invokes the finished-callback itself.  That
+    /// callback IS the native tail, so the message still reaches the gateway, which suppresses the host's copy and
+    /// relays it to the players who do hold a business there.  Tutorial and side-quest monologues are untouched:
+    /// the key is only ever set on the rival path.</summary>
+    [HarmonyPatch(typeof(BigAmbitions.Rivals.RivalsHelper), "SendMessageToPlayer", new[] { typeof(BigAmbitions.Rivals.SpecialRival), typeof(string), typeof(AudioClip), typeof(Action) })]
+    public static class Patch_RivalsHelper_SendMessageToPlayer_MarkSkip
+    {
+        static void Prefix(BigAmbitions.Rivals.SpecialRival rival, string messageLocalizationKey, AudioClip clip)
+        {
+            try { CompanyMessages.OnRivalMessageSendEnter(rival, messageLocalizationKey, clip); } catch { }
+        }
+
+        // Fold b (review r1 MINOR-1): a FINALIZER, not a postfix - a postfix does not run when the original
+        // throws (e.g. a null monologueUI at RivalsHelper.cs:586, after PlannedMessages.Add), and a key left
+        // behind would swallow one later monologue with the identical key. A void finalizer runs on both the
+        // normal return and the throw, and lets the original exception propagate unchanged.
+        static void Finalizer()
+        {
+            try { CompanyMessages.OnRivalMessageSendLeave(); } catch { }
+        }
+    }
+
+    /// <summary>RIVAL-FAIR-2 M4: the swallow itself (see the pair above).  Off a session, and for every key this
+    /// machine was not told to skip, the monologue plays exactly as the game enqueued it.</summary>
+    [HarmonyPatch(typeof(UI.Monologues.MonologueUI), nameof(UI.Monologues.MonologueUI.EnqueueMonologue), new[] { typeof(string), typeof(AudioClip), typeof(Sprite), typeof(Action<string>) })]
+    public static class Patch_MonologueUI_EnqueueMonologue_SkipWhenNotRecipient
+    {
+        static bool Prefix(string messageLocalizeKey, Action<string> onMonologueFinished)
+        {
+            try { return CompanyMessages.OnMonologueEnqueue(messageLocalizeKey, onMonologueFinished); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] monologue prefix: {ex.GetType().Name}: {ex.Message}"); return true; }
         }
     }
 }

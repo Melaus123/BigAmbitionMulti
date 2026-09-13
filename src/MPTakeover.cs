@@ -189,9 +189,9 @@ namespace BigAmbitionsMP
             // which is the same scheduling native's UI wrapper performs.
             // T1 (bug bamp-bug-20260908, 2026-09-12): DROP THE AI BLUEPRINT BEFORE THE NATIVE CLAIM.
             // The host furnished this shop from its layout set and cleared reg.Layout on ITS copy only
-            // (HostFurnishClaimedShop :344); our copy still carries the AI blueprint name, because the
+            // (HostFurnishClaimedShop :364 (its reg.Layout = null at :381)); our copy still carries the AI blueprint name, because the
             // interior apply writes reg.Layout only when the payload's layout is non-empty
-            // (GameStatePatcher :1219-1220) and the entry-clear is player-run-shops only (:4874-4885).
+            // (GameStatePatcher :1328-1330) and the entry-clear is player-run-shops only (:5044-5060).
             // OvertakeBusiness -> BuildingRegistration.AddToPlayer -> InsertBusinessLayoutSet
             // (decompile BuildingRegistration :333) would then insert the WHOLE set a SECOND time with
             // fresh ids — the 336-applied / 672-in-the-next-snapshot doubling. With Layout null the

@@ -1,0 +1,129 @@
+{
+  "id": "T-MINORS2",
+  "title": "MINORS-2 (user ruling 2026-09-12): M4 - the rival's monologue and the host's message copy are decided by the SAME neighbourhood rule (CompanyMessages.HostCopyWouldBeSuppressed). COVERAGE GAP: the fixture cannot reach the SKIP leg (see notes), so this scenario asserts the NON-SKIP leg - the host IS a recipient, so the monologue must play and the skip line must never appear. M1 (host-stop clock bookkeeping) and M2 (comment cites) have no runtime surface and stay review-verified. NO merger; NO save.",
+  "preconditions": "Fixture save1 (the host melaus, Client1). MINORS-2 deployed (M1 + M2 + M4 + the rivalmono lever). Levers: rivalstate, rivalsig, rivalfire, rivalnews, rivalmono. FIXTURE HYGIENE: NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "hostShop": "6 ba:street_seventhstreet",
+    "clientShop": "3 ba:street_broadwaystreet"
+  },
+  "notes": "WHICH RIVAL, AND WHY THE SKIP LEG IS NOT REACHABLE HERE. The skip needs a special rival whose primaryNeighborhood holds a CLIENT business and NO host business. Fixture facts: the host melaus holds 6 seventhstreet (Murray Hill), 15 thirdavenue, 46/32 fifthavenue, 36 thirdstreet, 49 secondstreet; Client1 holds 3 broadwaystreet (Midtown), 20/48/52/56 fifthavenue, 21/46 fourthstreet, 34 fourthavenue. The only neighbourhood where the client holds a business and the host demonstrably holds none is Midtown - and Midtown has NO special rival (T-BATCH1 step 15 note, run 4: ActivateLowDemand threw natively there because GetSpecialRivalByNeighborhood returned null). Fifth Avenue is held by BOTH. Every other client street is in a neighbourhood this fixture does not pin down. So the rival used here is the one in the HOST's own neighbourhood (Murray Hill, proven to have a special rival by T-BATCH1 step 11, which fired result=True), discovered at runtime by the rivalfire capture below because primaryNeighborhood is asset data no lever reports. With the host a recipient the predicate must answer FALSE: the monologue plays, the host copy is KEPT, and the skip line must be absent. COVERAGE GAP: the skip leg itself (monologue swallowed, host copy suppressed, relayed copy delivered on the client) is NOT exercised by this fixture and stays review-verified.",
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[RivalNews\\] .*(failed|exception|threw)",
+    "\\[RivalNews\\] monologue '.*' skipped on the host"
+  ],
+  "oracles_report": [
+    "\\[RivalNews\\] ",
+    "\\[RivalSync\\] "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 90,
+      "note": "both worlds load and settle"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST MINORS2 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "rivalstate",
+      "expect_result": "^OK rivalstate rivals=[1-9]\\d* active=\\d+ defenses=\\d+",
+      "note": "the host's rival state exists at all"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "rivalfire price @${hostShop}",
+      "expect_result": "^OK rivalfire price nb='[^']+' rival='[^']+' result=(True|False)",
+      "capture": {
+        "hostNb": "nb='([^']+)'",
+        "hostRival": "rival='([^']+)'"
+      },
+      "note": "DISCOVERY ONLY: this names the special rival of the host shop's own neighbourhood (Murray Hill). primaryNeighborhood is asset data and no lever reports it, so the rival id is captured here instead of being hard-coded."
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 4
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "rivalmono ${hostRival}",
+      "expect_result": "^OK rivalmono ${hostRival} key=\\S+",
+      "capture": {
+        "monoKey": "key=(\\S+)"
+      },
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalNews\\] '${monoKey}' from rival '${hostRival}' \\([^)]*\\): relayed to \\d+ player\\(s\\) \\[[^\\]]*\\]; host copy kept\\.",
+          "within_s": 120
+        }
+      ],
+      "note": "M4 NON-SKIP LEG. The monologue is NOT swallowed here (the host holds 6 seventhstreet in this rival's neighbourhood, so it IS a recipient), which means the gateway line only appears after the monologue has FINISHED playing - the native TextMessage is delivered from the monologue's finished-callback (decompile RivalsHelper.cs:585-601). Hence the long within_s: the clip's own length plus the queue. 'host copy kept' is the evidence the predicate answered FALSE; the skip line in oracles_absent is the evidence the two patches did not fire."
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 10,
+      "note": "let any second queued monologue drain before the end mark"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "rivalmono ${hostRival}",
+      "expect_result": "^(OK rivalmono|ERR no unsent clipped timeline entry)",
+      "note": "REPORT: a second call takes the NEXT unsent clipped entry, or reports that the rival has none left. Either answer is acceptable; the point is that the lever's own dedupe follows the game's sentMessageKeys (RivalsHelper.HasMessageBeenSent) rather than a copy of it."
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "rivalsig",
+      "expect_result": "^OK rivalsig \\S+",
+      "note": "REPORT: the client's rival signature after the sends - the M4 patches must not have disturbed rival state replication"
+    },
+    {
+      "seq": 14,
+      "role": "both",
+      "cmd": "mark TEST MINORS2 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
