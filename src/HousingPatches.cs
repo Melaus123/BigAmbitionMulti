@@ -397,7 +397,12 @@ namespace BigAmbitionsMP
     /// stays in the box, nothing is routed, and there is nothing to undo. The guest fills a partner's fridge the
     /// ordinary way instead — through the fridge itself, i.e. the AddToStorage guard above, which has no undo.
     /// The refusal covers NESTED cargo too (a packed container): the native body would have added it to the
-    /// host's fridge locally, which is the desync this class exists to stop.</summary>
+    /// host's fridge locally, which is the desync this class exists to stop.
+    /// The refusal is VISIBLE (2026-09-16): because CargoStorageMoveResult.Failed shows the player nothing at
+    /// all, every refused ATTEMPT raises the approved warning notice through the game's own notification system
+    /// (UI.Notification.Notifications, as MPCanvasUI does) so the stack sitting back in the box is explained
+    /// rather than silent. The Show is wrapped in its own try/catch — a notice must never break the refusal —
+    /// and the explanatory INFO log line stays once per session.</summary>
     // The second argument is `out bool`, i.e. bool& — an attribute argument must be a constant/typeof, so
     // `typeof(bool).MakeByRefType()` cannot be written here. Harmony's own spelling for a by-ref argument is
     // the (Type[], ArgumentType[]) ctor overload, which is what pins this overload unambiguously.
@@ -422,6 +427,14 @@ namespace BigAmbitionsMP
                     _refusalLogged = true;
                     Plugin.Logger.LogInfo("[Housing] the package tool does not move cargo into a partner's fridge here - use the fridge itself (routed to the owner).");
                 }
+                // Once per ATTEMPT, not per session: the game's own Failed path is silent, so without this the
+                // stack just snaps back with no explanation. Its own try/catch — a notice must never break the refusal.
+                try
+                {
+                    UI.Notification.Notifications.Show(UI.Notification.NotificationType.Warning,
+                        "Not supported in multiplayer. Use the fridge itself to store food in a partner's home.");
+                }
+                catch { }
                 return false;                     // refused for a partner's fridge; skip the native local move
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] fridge package-tool route: {ex.Message}"); return true; }

@@ -5612,6 +5612,9 @@ namespace BigAmbitionsMP
         private static System.Reflection.PropertyInfo? _businessLogoKeyNameProp;
         private static System.Reflection.PropertyInfo? _businessLogoKeyIsPlayerProp;
         private static System.Reflection.MethodInfo? _businessLogoEntryRelease;
+        private static bool _businessLogoKeyNamePropWarned;
+        private static bool _businessLogoKeyIsPlayerPropWarned;
+        private static bool _businessLogoReleaseMethodWarned;
         private static System.Reflection.FieldInfo? _businessLogoEntryIsAddressable;
         private static bool _businessLogoIsAddressableWarned;
         private static bool _logoReleaseWarned;
@@ -5660,7 +5663,9 @@ namespace BigAmbitionsMP
         /// only ever invalidates PLAYER logos (renames, custom logos synced between machines), and those are
         /// always non-addressable (LoadLogoFile LogoHelper.cs:267 / StoreGeneratedTexture :325).  The addressable
         /// branch below is therefore unreachable in practice today and is kept only as a guard, in case a player
-        /// logo ever arrives through Addressables.  If the flag cannot be read the key is left alone.
+        /// logo ever arrives through Addressables.  If a key's flag reads as anything but true that key is left
+        /// alone; if either reflected key property (BusinessName / IsPlayerBusiness) is MISSING entirely, the
+        /// walk warns once per session naming the property and returns 0/0 rather than reporting a clean zero.
         ///
         /// What is dropped re-loads on the next UpdateSign (a small async cost); nothing that exists today is
         /// released, and a plain texture is left to the collector.  Textures still referenced by another
@@ -5677,9 +5682,10 @@ namespace BigAmbitionsMP
         /// <summary>As <see cref="ReleaseAndRemoveLogoEntries(string)"/>, but also reports the split:
         /// <paramref name="released"/> = Addressables-backed entries whose handle was given back (none exist
         /// today — player logos are never addressable),
-        /// <paramref name="dropped"/> = every entry removed WITHOUT a release: non-addressable (its texture
-        /// survives until the reload replaces it), `_isAddressable` unreadable, a Release() that threw, or a
-        /// null value in the dictionary.</summary>
+        /// <paramref name="dropped"/> = every entry handled WITHOUT a release: non-addressable (its texture
+        /// survives until the reload replaces it), `_isAddressable` unreadable, no Release() method on the
+        /// entry type, a null value in the dictionary, or an entry whose handling threw — that last one is the
+        /// only case where the entry may also still be in the cache.</summary>
         /// <returns>released + dropped.</returns>
         internal static int ReleaseAndRemoveLogoEntries(string businessName, out int released, out int dropped)
         {
@@ -5706,15 +5712,38 @@ namespace BigAmbitionsMP
                 {
                     if (k == null) continue;
                     if (_businessLogoKeyNameProp == null) _businessLogoKeyNameProp = k.GetType().GetProperty("BusinessName");
-                    if ((_businessLogoKeyNameProp?.GetValue(k) as string) != businessName) continue;
+                    if (_businessLogoKeyNameProp == null)
+                    {
+                        // The key struct no longer exposes the name: EVERY key would silently fail the match
+                        // below and the walk would report a clean zero. Say so once and give up honestly.
+                        if (!_businessLogoKeyNamePropWarned)
+                        {
+                            _businessLogoKeyNamePropWarned = true;
+                            Plugin.Logger.LogWarning("[Patcher] BusinessLogoCacheKey.BusinessName (property) was not found — no logo cache entry can be matched by name, so the cache is left untouched and a renamed business may keep drawing its old sign until the game is restarted.");
+                        }
+                        return 0;
+                    }
+                    if ((_businessLogoKeyNameProp.GetValue(k) as string) != businessName) continue;
                     // PLAYER entries only.  The key also carries IsPlayerBusiness (LogoHelper.cs:23); an
                     // AI business can share the name, and its entry is the game's — releasing it would
                     // unload a texture the mod never changed (the mod only ever invalidates player logos:
                     // renames and custom logos synced between machines).  Read the flag the same way as
-                    // the name, through a cached PropertyInfo on the private key struct; if it cannot be
-                    // read the key is LEFT ALONE (not touching an entry is always the safe side).
+                    // the name, through a cached PropertyInfo on the private key struct; if a key's flag reads
+                    // as anything but true the key is LEFT ALONE (not touching an entry is always the safe
+                    // side), and if the PROPERTY itself is missing the walk warns once and gives up (below).
                     if (_businessLogoKeyIsPlayerProp == null) _businessLogoKeyIsPlayerProp = k.GetType().GetProperty("IsPlayerBusiness");
-                    if (_businessLogoKeyIsPlayerProp?.GetValue(k) is bool isPlayer && isPlayer) kill.Add(k);
+                    if (_businessLogoKeyIsPlayerProp == null)
+                    {
+                        // Same reasoning as BusinessName: without the flag no key can be confirmed as a player
+                        // entry, so every one would be left alone and the walk would report a misleading zero.
+                        if (!_businessLogoKeyIsPlayerPropWarned)
+                        {
+                            _businessLogoKeyIsPlayerPropWarned = true;
+                            Plugin.Logger.LogWarning("[Patcher] BusinessLogoCacheKey.IsPlayerBusiness (property) was not found — a player logo entry cannot be told apart from an AI one, so the cache is left untouched and a renamed business may keep drawing its old sign until the game is restarted.");
+                        }
+                        return 0;
+                    }
+                    if (_businessLogoKeyIsPlayerProp.GetValue(k) is bool isPlayer && isPlayer) kill.Add(k);
                 }
                 foreach (var k in kill)
                 {
@@ -5742,8 +5771,22 @@ namespace BigAmbitionsMP
                                 // never addressable.  Kept as a guard in case one ever arrives that way.
                                 if (_businessLogoEntryRelease == null)
                                     _businessLogoEntryRelease = entry.GetType().GetMethod("Release", System.Type.EmptyTypes);
-                                _businessLogoEntryRelease?.Invoke(entry, null);
-                                released++;
+                                if (_businessLogoEntryRelease == null)
+                                {
+                                    // No Release() to call — the handle cannot be given back, so this is a DROP.
+                                    // Counting it as released would have claimed a refcount return that never happened.
+                                    if (!_businessLogoReleaseMethodWarned)
+                                    {
+                                        _businessLogoReleaseMethodWarned = true;
+                                        Plugin.Logger.LogWarning("[Patcher] BusinessLogoCacheEntry.Release() was not found — an addressable logo cache entry is dropped without it, which may leak an Addressables refcount per invalidation but never destroys a texture a sign is still drawing.");
+                                    }
+                                    dropped++;
+                                }
+                                else
+                                {
+                                    _businessLogoEntryRelease.Invoke(entry, null);
+                                    released++;
+                                }
                             }
                             else
                             {
@@ -5752,17 +5795,19 @@ namespace BigAmbitionsMP
                                 dropped++;
                             }
                         }
+                        dict.Remove(k);   // inside the try: a Remove that throws must not abandon the other entries
                     }
                     catch (Exception rex)
                     {
+                        // The try spans the _isAddressable read and the Remove as well as Release(), so name
+                        // neither: this entry could not be processed at all.
                         if (!_logoReleaseWarned)
                         {
                             _logoReleaseWarned = true;
-                            Plugin.Logger.LogWarning($"[Patcher] BusinessLogoCacheEntry.Release() failed for '{businessName}' — the entry is still dropped, but its Addressables handle is not given back: {rex.GetType().Name}: {rex.Message}");
+                            Plugin.Logger.LogWarning($"[Patcher] a logo cache entry for '{businessName}' could not be processed — it was not released and may still be in the cache; the remaining entries are still handled: {rex.GetType().Name}: {rex.Message}");
                         }
-                        dropped++;  // removed, but nothing was given back
+                        dropped++;  // counted as not-released; the walk carries on with the next entry
                     }
-                    dict.Remove(k);
                 }
                 return released + dropped;
             }
