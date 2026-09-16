@@ -128,6 +128,10 @@
     <Reference Include="UnityEngine.UI"><HintPath>$(ManagedDir)UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Unity.TextMeshPro"><HintPath>$(ManagedDir)Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Cinemachine"><HintPath>$(ManagedDir)Cinemachine.dll</HintPath><Private>false</Private></Reference>
+    <!-- TRAFFIC-GRID-1: GridManager.activeCameraPositions is a NativeArray<float3> — the
+         array Gley's GetCell(int) indexes — so the guard needs both of these to read it. -->
+    <Reference Include="Unity.Collections"><HintPath>$(ManagedDir)Unity.Collections.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.Mathematics"><HintPath>$(ManagedDir)Unity.Mathematics.dll</HintPath><Private>false</Private></Reference>
   </ItemGroup>
 
   <!-- Deploy to the official loader's local-mods folder (shared by both

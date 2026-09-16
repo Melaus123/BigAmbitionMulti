@@ -302,6 +302,10 @@ namespace BigAmbitionsMP
             // TRAFFIC-APART P7: a new world starts in GHOST mode with no handover running, whatever the last one ended in.
             ClientTrafficMode = ModeGhost; _handover = HandoverNone; _modeSeq = 0;
             _modeDeferLogged = false; _localDensityIssued = false; _localDensityWaitLogged = false; _localDensityUninitLogged = false;
+            // TRAFFIC-GRID-1 fold b: the once-per-key warning memory and the skip counter are per world. This is the
+            // reset that runs on EVERY disconnect (game load / scene change); HandBackToVanilla only runs on the
+            // offline fork, so the counters would otherwise carry a previous world's numbers into the next log.
+            _badDensityCameraLogged.Clear(); _offGridDensitySkips = 0;
         }
 
         /// <summary>Role-based step — called each frame in-game.</summary>
@@ -1662,6 +1666,9 @@ namespace BigAmbitionsMP
         // The guard replays the exact same math against the live grid dimensions and
         // skips anchors that would overflow, naming the anchor and position so the
         // next field log identifies WHERE the off-grid player actually was.
+        // Fold b: the grid dimensions are read from the GridManager Gley is actually
+        // using (its own `currentSceneData`, decompile GridManager.cs:13), never from
+        // CurrentSceneData.GetSceneInstance() — see PositionInGrid below for why.
         private static GleyUrbanAssets.CurrentSceneData? _gridScene;
         private static readonly HashSet<string> _badAnchorLogged = new();
         private static int _badAnchorSkips;
@@ -1675,18 +1682,38 @@ namespace BigAmbitionsMP
                 return LogBadAnchor(t, p, "non-finite position");
             try
             {
-                if (_gridScene == null) _gridScene = GleyUrbanAssets.CurrentSceneData.GetSceneInstance();
-                var sd = _gridScene;
-                var grid = sd != null ? sd.grid : null;
-                if (grid == null || grid.Length == 0 || sd!.gridCellSize <= 0)
-                    return true;   // no grid to judge against → vanilla behavior (feed)
-                int r = Mathf.FloorToInt(Mathf.Abs((sd.gridCorner.z - p.z) / sd.gridCellSize));
-                int c = Mathf.FloorToInt(Mathf.Abs((sd.gridCorner.x - p.x) / sd.gridCellSize));
-                if (r >= grid.Length || grid[r].row == null || c >= grid[r].row.Length)
-                    return LogBadAnchor(t, p, $"off-grid cell [{r},{c}] vs {grid.Length} rows");
+                // Fold b: judge against the grid of the manager Gley is really running (see PositionInGrid).
+                var gm = TrafficManager.HasInstance ? TrafficManager.Instance.densityManager?.gridManager : null;
+                if (!PositionInGrid(gm, p, out int r, out int c, out int rows))
+                    return LogBadAnchor(t, p, $"off-grid cell [{r},{c}] vs {rows} rows");
             }
             catch { }   // the guard must never break the feed itself
             return true;
+        }
+
+        /// <summary>Replays Gley's own cell math against the LIVE grid and says whether this position can be indexed
+        /// at all. Returns true with rows=0 when there is no grid to judge against — nothing to overflow, so vanilla
+        /// behaviour. Callers must wrap this in a try/catch: reading the scene data can throw.
+        /// <para>The scene data comes from the passed GridManager's OWN <c>currentSceneData</c> (decompile
+        /// GridManager.cs:13, protected, publicized) — the very grid whose <c>GetCell</c> would throw. It must NEVER
+        /// come from <c>CurrentSceneData.GetSceneInstance()</c>: when no grid component is in the scene that method
+        /// CREATES a dummy <c>GameObject("GleyTrafficSystem")</c> and puts a CurrentSceneData on it
+        /// (CurrentSceneData.cs:34-37); the extra component then trips Gley's "Multiple Grid components" path, which
+        /// aborts TrafficManager.Initialize (TrafficManager.cs:240-246) — the guard would break traffic outright.
+        /// <c>_gridScene</c> is just a cache of the manager's reference, re-seated whenever the manager's differs.</para></summary>
+        internal static bool PositionInGrid(GleyUrbanAssets.GridManager? gm, Vector3 p, out int r, out int c, out int rows)
+        {
+            r = 0; c = 0; rows = 0;
+            var sd = gm != null ? gm.currentSceneData : null;
+            if (sd == null) return true;                          // no manager / no scene data to judge against → vanilla behavior
+            if (!ReferenceEquals(_gridScene, sd)) _gridScene = sd;
+            var grid = sd.grid;
+            if (grid == null || grid.Length == 0 || sd.gridCellSize <= 0)
+                return true;   // no grid to judge against → vanilla behavior
+            rows = grid.Length;
+            r = Mathf.FloorToInt(Mathf.Abs((sd.gridCorner.z - p.z) / sd.gridCellSize));
+            c = Mathf.FloorToInt(Mathf.Abs((sd.gridCorner.x - p.x) / sd.gridCellSize));
+            return r < rows && grid[r].row != null && c < grid[r].row.Length;
         }
 
         private static bool LogBadAnchor(Transform t, Vector3 p, string why)
@@ -1699,6 +1726,72 @@ namespace BigAmbitionsMP
                     + $"({p.x:F1}, {p.y:F1}, {p.z:F1}) — would IndexOutOfRange TrafficManager.Update "
                     + $"every frame (round-199, skip #{_badAnchorSkips}).");
             return false;
+        }
+
+        // ── TRAFFIC-GRID-1 (3 host-log sightings, none on a mod frame, all right after "N player area(s)" grew) ──
+        // The real defect is a STALE ARRAY, not an off-grid camera. Two objects hold the camera-position
+        // array and only one of them is re-seated when it is replaced:
+        //   * TrafficManager.UpdateCamera (decompile TrafficManager.cs:655-666) allocates a BRAND NEW
+        //     NativeArray<float3> whenever the fed camera COUNT changes (:659-661) — which is exactly what
+        //     UpdateTrafficAnchors does when a player joins/leaves an area.
+        //   * GridManager keeps its OWN reference to that array (GridManager.cs:19) and is re-seated only by
+        //     UpdateActiveCells (:131-133), reached through UpdateGrid (:52) — which TrafficManager.Update
+        //     calls LAST (:1018).
+        // So for one frame after a re-feed the two disagree. Update fills the manager's NEW array
+        // (:1001-1004), draws activeCameraIndex = Random.Range(0, <new, longer length>) (:1010) and passes it
+        // to the density pass (:1011) → GridManager.GetCell(int) (:115-118) indexes the GridManager's STALE,
+        // SHORTER array. A NativeArray read is unchecked in the release player, so that is not an exception
+        // but garbage floats, which then blow up as `grid[num]` in CurrentSceneData.GetCell (:47-52). And
+        // because the throw aborts Update BEFORE :1018, the stale array is never re-seated — it recurs every
+        // frame until something else re-feeds the cameras.
+        // Hence the test below is a LENGTH test against the GridManager's own array, not a position test on a
+        // live camera transform (that transform is on-grid; the old predicate could never fire). Returning
+        // false skips just the density add, which lets Update run on to :1018 and re-seat the array — a
+        // one-frame self-heal. Skipping one add is harmless anyway: the pass runs every frame.
+        // The position/off-grid test is kept as the second line of defence for the round-199 case.
+        private static readonly HashSet<string> _badDensityCameraLogged = new();
+        private static int _offGridDensitySkips;
+
+        internal static bool DensityCameraFeedable(DensityManager dm, int idx)
+        {
+            try
+            {
+                if (dm == null) return true;
+                var gm = dm.gridManager;                       // DensityManager.cs:18 — the GridManager whose GetCell(int) the pass calls
+                if (gm == null) return true;
+                var tm = TrafficManager.HasInstance ? TrafficManager.Instance : null;
+                var arr = gm.activeCameraPositions;            // GridManager.cs:19 — the array GetCell(int) indexes
+                if (!arr.IsCreated) return true;
+                string reason, kind;
+                if (idx < 0 || idx >= arr.Length)
+                {
+                    kind   = "stale";
+                    reason = $"stale camera array: index {idx} of {arr.Length} (the manager now feeds {tm?.activeCameraPositions.Length})";
+                }
+                else
+                {
+                    UnityEngine.Vector3 p = arr[idx];
+                    if (float.IsNaN(p.x) || float.IsNaN(p.y) || float.IsNaN(p.z)
+                        || float.IsInfinity(p.x) || float.IsInfinity(p.y) || float.IsInfinity(p.z))
+                    {
+                        kind   = "nonfinite";
+                        reason = $"non-finite position ({p.x:F1}, {p.y:F1}, {p.z:F1})";
+                    }
+                    else if (!PositionInGrid(gm, p, out int r, out int c, out int rows))
+                    {
+                        kind   = "offgrid";
+                        reason = $"off-grid cell [{r},{c}] vs {rows} rows at ({p.x:F1}, {p.y:F1}, {p.z:F1})";
+                    }
+                    else return true;
+                }
+                _offGridDensitySkips++;
+                if (_badDensityCameraLogged.Add($"{kind}|{idx}") || _offGridDensitySkips % 600 == 0)
+                    Plugin.Logger.LogWarning(
+                        $"[TrafficSync] density pass skipped: camera {idx} {reason} - Gley's GetCell would "
+                        + $"IndexOutOfRange (TRAFFIC-GRID-1, skip #{_offGridDensitySkips}).");
+                return false;
+            }
+            catch { return true; }   // the guard must never break the density pass itself
         }
 
         /// <summary>The game's own despawn radius — two anchors closer than this share the cars around them, so
@@ -2379,10 +2472,13 @@ namespace BigAmbitionsMP
         internal const string HandoverNone    = "none";
         internal const string HandoverToLocal = "toLocal";
         internal const string HandoverToGhost = "toGhost";
-        private  const float  HandoverCeilingSeconds = 20f;   // a fade still unfinished by then is cut short and logged
-        // Review r1 MAJOR-2 + rig run 1: a car 70 m away is a few pixels, but a car STOPPED in view - queued behind
-        // the player, at a red light - never goes off-screen at all. Run 1 showed exactly that: 18.1 s for the last
-        // ghost, and one local car that hit the 20 s ceiling. Distance retires those; the ceiling is the residual.
+        // TRAFFIC-APART-2 (user 2026-09-16): a hand-over car must not vanish in plain view, so the two deadlines a
+        // fade has are NOT the same number any more. Review r1 MAJOR-2 + rig run 1: a car 70 m away is a few pixels,
+        // but a car STOPPED in view - queued behind the player, at a red light - never goes off-screen at all (run 1:
+        // 18.1 s for the last ghost, and one local car that hit the old 20 s ceiling). Distance still retires those
+        // stopped cars; the 90 s in-view cut is the last resort, by which time the player has long since moved on.
+        private  const float  HandoverArrivalCeilingSeconds = 20f;   // ghost mode only: stop waiting for the host's ghosts to arrive
+        private  const float  HandoverInViewCeilingSeconds  = 90f;   // the residual: a car STILL on screen this long is cut and logged
         private  const float  HandoverRetireDistance = 70f;
 
         /// <summary>Which traffic this machine runs: "ghost" (the host's) or "local" (its own). Ghost by default
@@ -2584,7 +2680,7 @@ namespace BigAmbitionsMP
             var rideT = PassengerRide.RideAnchorTransform();
             if (rideT != null) { me = rideT.position; haveMe = true; }
             else { try { me = PlayerHelper.GetPosition(); haveMe = true; } catch { } }
-            bool ceiling = now - _handoverAt >= HandoverCeilingSeconds;
+            bool hard = now - _handoverAt >= HandoverInViewCeilingSeconds;
             var gone = new List<int>(); int forced = 0;
             foreach (var kv in _ghosts)
             {
@@ -2593,13 +2689,19 @@ namespace BigAmbitionsMP
                 float d2   = haveMe ? (g.Go.transform.position - me).sqrMagnitude : 0f;
                 bool  far  = haveMe && d2 > GhostCullRadius * GhostCullRadius;
                 bool  away = haveMe && d2 > HandoverRetireDistance * HandoverRetireDistance;
+                // A ghost keeps the RENDERER test (not the game's per-car visibility flag): a ghost is a clone whose
+                // VisibilityScript is never Reset - the one Reset call sits in VehicleComponent.DeactivateVehicle
+                // (VehicleComponent.cs:221), i.e. Gley clears the flag as it PUTS A CAR AWAY, so a pooled car comes
+                // back out with neverBeenVisible=true, and a mod clone never goes through that path at all - so the
+                // flag would claim "in view" before the clone is ever drawn. The renderer flag is the truthful one
+                // for a clone.
                 if (far || away || !AnyRendererVisible(g.Go)) { gone.Add(kv.Key); continue; }
-                if (ceiling) { gone.Add(kv.Key); forced++; }
+                if (hard) { gone.Add(kv.Key); forced++; }
             }
             foreach (var k in gone) RetireGhost(k);
             if (_ghosts.Count > 0) return;
 
-            if (forced > 0) Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: local - {forced} ghost(s) still on screen after {HandoverCeilingSeconds:F0} s, removed.");
+            if (forced > 0) Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: local - {forced} ghost(s) still on screen after {HandoverInViewCeilingSeconds:F0} s, removed.");
             else             Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: local (ghosts handed over in {now - _handoverAt:F1} s).");
             _handover = HandoverNone;
             MPClient.SendTrafficModeAck(ModeLocal, _modeSeq);
@@ -2612,12 +2714,13 @@ namespace BigAmbitionsMP
         /// ClearClientTrafficExceptServiceCars: a routed car (presetPath) and the mod's service cars stay.</summary>
         private static bool TickGhostHandover(TrafficManager tm, float now)
         {
-            bool ceiling = now - _handoverAt >= HandoverCeilingSeconds;
+            bool arrival = now - _handoverAt >= HandoverArrivalCeilingSeconds;
+            bool hard    = now - _handoverAt >= HandoverInViewCeilingSeconds;
             // Review r1 MAJOR-2: _ghosts counts what is inside the 160 m cull ring, while the game's density request
             // is a whole-neighbourhood number, so half of it can never arrive and the gate plateaus below it (rig run
             // 1: 13 ghosts for a request of 18). Four ghosts in the ring already means "the host's cars are here".
             int want = ClientGameDensityRequest > 0 ? Math.Min((ClientGameDensityRequest + 1) / 2, 4) : 0;
-            if (want > 0 && _ghosts.Count < want && !ceiling) return false;
+            if (want > 0 && _ghosts.Count < want && !arrival) return false;
 
             // The same anchor ApplySnapshot uses: the ride anchor while riding, else the player body.
             Vector3 me = default; bool haveMe = false;
@@ -2625,11 +2728,14 @@ namespace BigAmbitionsMP
             if (rideT != null) { me = rideT.position; haveMe = true; }
             else { try { me = PlayerHelper.GetPosition(); haveMe = true; } catch { } }
 
-            // Fold c (re-check of fold b): the ceiling is the escape hatch, so under it the handover FINISHES no
-            // matter what - a car whose RemoveVehicle throws is counted and logged, never allowed to hold the
-            // handover open forever (local traffic beside the host's ghosts, no ack ever sent). Before the
-            // ceiling a failed removal is simply retried on the next beat. 'forced' counts only the cars that
-            // were still in view - a car already off-screen or far away would have gone regardless.
+            // Two deadlines, two jobs (TRAFFIC-APART-2). The ARRIVAL gate above still gives up after 20 s of
+            // waiting for the host's ghosts. The in-view cut below is now 90 s: before it, a car the player can
+            // actually see is KEPT, and only distance or leaving the screen retires it - nothing vanishes in
+            // plain view. Fold c (re-check of fold b): the hard cut is still the escape hatch, so past it the
+            // handover FINISHES no matter what - a car whose RemoveVehicle throws is counted and logged, never
+            // allowed to hold the handover open forever (local traffic beside the host's ghosts, no ack ever
+            // sent). Before it a failed removal is simply retried on the next beat. 'forced' counts only the
+            // cars that were still in view - a car already off-screen or far away would have gone regardless.
             int left = 0, forced = 0, failed = 0;
             var list = tm.trafficVehicles?.GetVehicleList();
             if (list != null)
@@ -2640,18 +2746,32 @@ namespace BigAmbitionsMP
                     if (v.presetPath != null) continue;
                     if (ServiceCars.IsClientKept(v.gameObject)) continue;
                     bool away = haveMe && (v.gameObject.transform.position - me).sqrMagnitude > HandoverRetireDistance * HandoverRetireDistance;
-                    bool inView = !away && AnyRendererVisible(v.gameObject);
-                    if (!ceiling && inView) { left++; continue; }
-                    try { tm.RemoveVehicle(v.gameObject); if (ceiling && inView) forced++; }
-                    catch { if (ceiling) failed++; else left++; }
+                    bool inView = !away && LocalCarInView(v);
+                    if (!hard && inView) { left++; continue; }
+                    try { tm.RemoveVehicle(v.gameObject); if (hard && inView) forced++; }
+                    catch { if (hard) failed++; else left++; }
                 }
             if (left > 0) return false;
 
-            if (failed > 0) Plugin.Logger.LogWarning($"[TrafficSync] traffic mode: ghost - {failed} local car(s) could not be removed at the {HandoverCeilingSeconds:F0} s ceiling; handing over anyway.");
-            if (forced > 0) Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: ghost - {forced} local car(s) still on screen after {HandoverCeilingSeconds:F0} s, removed.");
+            if (failed > 0) Plugin.Logger.LogWarning($"[TrafficSync] traffic mode: ghost - {failed} local car(s) could not be removed at the {HandoverInViewCeilingSeconds:F0} s ceiling; handing over anyway.");
+            if (forced > 0) Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: ghost - {forced} local car(s) still on screen after {HandoverInViewCeilingSeconds:F0} s, removed.");
             else             Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: ghost (local cars handed over in {now - _handoverAt:F1} s).");
             _handover = HandoverNone;
             return true;
+        }
+
+        /// <summary>Is this LOCAL (Gley-owned) car on screen? Uses the game's own per-car flag — the very one Gley's
+        /// TrafficManager.Update consults before it may remove a car (decompile TrafficManager.cs:1012 CanBeRemoved →
+        /// VehicleComponent.cs:344-348 → VisibilityScript.cs:11-17, driven by OnBecameVisible/OnBecameInvisible) — so
+        /// the mod and the game agree on what "in view" means. Falls back to the renderer test when the car has no
+        /// visibility script or reading it throws. Ghost clones must NOT use this: Reset is called only from
+        /// VehicleComponent.DeactivateVehicle (VehicleComponent.cs:221) - the de-activation path a pooled Gley car
+        /// takes on its way back to the pool (so it re-activates with neverBeenVisible=true) and one a mod clone
+        /// never takes, leaving its flag meaningless.</summary>
+        private static bool LocalCarInView(VehicleComponent v)
+        {
+            try { return v.visibilityScript != null ? !v.visibilityScript.IsNotInView() : AnyRendererVisible(v.gameObject); }
+            catch { return AnyRendererVisible(v.gameObject); }
         }
 
         /// <summary>True while any renderer of this body is on screen. A body with NO renderers has nothing that can

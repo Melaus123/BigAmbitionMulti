@@ -1022,6 +1022,13 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>TRAFFIC-GRID-1: skip Gley's per-frame density add for the one frame after a re-feed, while the
+        /// GridManager still holds the SHORTER camera-position array the TrafficManager has already replaced - its
+        /// GetCell(int) would index past the end (3 host-log sightings, all just after the player-area count grew).
+        /// Skipping lets Update reach the line that re-seats the array, so it heals itself. See TrafficSync.</summary>
+        [HarmonyPatch(typeof(DensityManager), nameof(DensityManager.UpdateVehicleDensity), new[] { typeof(UnityEngine.Vector3), typeof(UnityEngine.Vector3), typeof(int) })]
+        public static class Patch_DensityManager_CameraCellGuard { static bool Prefix(DensityManager __instance, int activeCameraIndex) => TrafficSync.DensityCameraFeedable(__instance, activeCameraIndex); }
+
         /// <summary>Client sim at zero ambient density (2026-09-02): every density request on a pure client becomes 0.
         /// Gley's DensityManager adds cars only while current &lt; max and its initial load loops to max, so 0 means
         /// no ambient car ever spawns locally; the client's service cars are loaded explicitly (LoadVehicle) and
