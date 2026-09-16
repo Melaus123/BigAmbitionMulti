@@ -4754,7 +4754,9 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (address == null || !(CompanyPlans.LogisticsPaneTracked || CompanyPlans.PurchasingModelScope)) return true;
+                    if (address == null) return true;
+                    if (!(CompanyPlans.LogisticsPaneTracked || CompanyPlans.PurchasingModelScope))
+                    { NoteStockNotSubstituted(address, resourceName, null); return true; }   // HQ-PARITY-6 P3
                     string key = ""; try { key = GameStateReader.AddressKey(address); } catch { }
                     if (key.Length == 0) return true;
                     int count;
@@ -4769,10 +4771,52 @@ namespace BigAmbitionsMP
                     // only for the pane's OWN caller, PurchasingAgentProductModel.UpdateWarehouse.
                     if (CompanyPlans.PurchasingModelScope && CompanyPlans.ScopedPurchasingStock(key, resourceName, out count))
                     { __result = count; return false; }
+                    NoteStockNotSubstituted(address, resourceName, key);   // HQ-PARITY-6 P3
                     return true;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock: {ex.Message}"); return true; }
             }
+        }
+
+        /// <summary>HQ-PARITY-6 P3 — THE SILENT MISS BECOMES A LINE.  When the pane draws a partner's plan it
+        /// asks this counter once per listed product (LogisticsManagerPlanUI.cs:296); if the substitution
+        /// above does not fire, the native count of a replica that holds no pallets draws 0 and NOTHING said
+        /// why - the factory tab showed 0 for every product from the start, and the warehouse tab fell to 0
+        /// after a destination removal, with no evidence either way. This says why, ONCE per plan-and-address
+        /// pair. Cost: nothing while no partner plan is on screen (PaneDisplayPlan answers null on a
+        /// registered-pane miss or a hidden pane before anything is allocated), and the message strings are
+        /// built only on a genuine miss.
+        /// FOLD b H3: the pair is the KEY, not a concatenated string - the dedupe test now runs before any
+        /// allocation at all, and before ScopedStockReason is asked (that call does real work to word the
+        /// reason, and on a pane the player leaves open it was being paid on every product of every frame
+        /// only to have its answer thrown away). The pair is recorded ONLY once a reason actually came back,
+        /// so a product that was in order the first time is still free to speak later. Cleared with the rest
+        /// of the merger state (CompanyPlans.ClearAll), so a new merger starts silent again.</summary>
+        private static readonly System.Collections.Generic.HashSet<(string id, string key)> _stockMissLogged = new();
+
+        /// <summary>FOLD b H3: called from CompanyPlans.ClearAll - every dissolve, disconnect and reload runs
+        /// through it, so the once-per-pair promise is per merger rather than per process.</summary>
+        internal static void ClearStockMissLog() { try { _stockMissLogged.Clear(); } catch { } }
+
+        private static void NoteStockNotSubstituted(Address address, string resourceName, string key)
+        {
+            try
+            {
+                if (MergerFlip.FlippedCount == 0) return;
+                var pl = CompanyPlans.PaneDisplayPlan();
+                if (pl == null || pl.targetAddress == null) return;
+                if (key == null) { try { key = GameStateReader.AddressKey(address); } catch { return; } }
+                if (string.IsNullOrEmpty(key)) return;
+                string tkey = ""; try { tkey = GameStateReader.AddressKey(pl.targetAddress); } catch { }
+                if (!string.Equals(tkey, key, StringComparison.OrdinalIgnoreCase)) return;   // some other building's count
+                string id = pl.id ?? "";
+                if (_stockMissLogged.Contains((id, key))) return;   // H3: said once already - ask nothing, build nothing
+                string? reason = CompanyPlans.ScopedStockReason(id, key, resourceName);
+                if (reason == null) return;   // the substitution was in order after all
+                _stockMissLogged.Add((id, key));
+                Plugin.Logger.LogInfo($"[Plans] logistics stock NOT substituted for display plan {id} at {key}: {reason}");
+            }
+            catch { }
         }
 
         /// <summary>FOLD b B4 — THE PURCHASING PANE'S OWN PALLET READ, AND NO OTHER.
@@ -10969,7 +11013,49 @@ namespace BigAmbitionsMP
             catch { return null; }
         }
 
-        private static UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI MergerHrPane()
+        /// <summary>HQ-PARITY-6 P2 — THE GATE USES THE REGISTERED PANE.  HQ-PARITY-4 P1 recorded each pane
+        /// as its LoadPlan drew (CompanyPlans.RegisterPane) for the redraw path; the EDIT gates kept their
+        /// own `GetComponentInChildren(true)` search, which walks inactive objects too and so can hand back
+        /// a different instance from the one the player is looking at ("the pane on screen is not the one
+        /// the hierarchy search finds", field log). The gate then read a null or stale `_currentPlan`,
+        /// decided the edit was this machine's own and never routed it. The registered pane is preferred
+        /// whenever it is alive AND on screen; the search stays as the fallback for the first open of a
+        /// session, before any LoadPlan has run. The mismatch is reported ONCE per family per session, and
+        /// the search only runs at all on that first comparison.
+        /// FOLD b H4(a): the "they disagree" line is only meaningful when the pane we are using really came
+        /// from the REGISTRY. PaneOf falls back to its own hierarchy sweep when nothing is registered yet, and
+        /// comparing that sweep's result against this gate's search was comparing two searches - a line that
+        /// says nothing. RegisteredPaneOf answers from the registry ONLY (null when empty), so the comparison
+        /// is made exactly when there is something to compare. The gate's own lookup still uses PaneOf.
+        /// FOLD b H4(b): the FALLBACK now judges what it found.  `GetComponentInChildren(true)` walks
+        /// INACTIVE objects, so before any LoadPlan has run it can return a prefab/template instance that is
+        /// not on screen; handing that to a gate is the original defect (a stale `_currentPlan` read off an
+        /// object nobody is looking at, and the edit never routed). An off-screen find is now no find.</summary>
+        private static readonly System.Collections.Generic.HashSet<string> _paneGateCompared =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+
+        private static T? MergerGatePane<T>(string family, Func<T?> search) where T : UnityEngine.Component
+        {
+            try
+            {
+                var reg = CompanyPlans.PaneOf(family) as T;
+                if (reg != null && reg.gameObject.activeInHierarchy)
+                {
+                    // H4(a): only worth saying when THIS pane is the registered one - otherwise both sides
+                    // of the comparison are hierarchy sweeps.
+                    if (CompanyPlans.RegisteredPaneOf(family) != null
+                        && _paneGateCompared.Add(family) && !ReferenceEquals(reg, search()))
+                        Plugin.Logger.LogInfo($"[Plans] {family} gate: the registered pane is used (the hierarchy search found another instance).");
+                    return reg;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {family} gate pane: {ex.Message}"); }
+            // H4(b): an inactive template must never be judged.
+            try { var found = search(); return found != null && found.gameObject.activeInHierarchy ? found : null; }
+            catch { return null; }
+        }
+
+        private static UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI? MergerHrPaneSearch()
         {
             try
             {
@@ -10980,8 +11066,11 @@ namespace BigAmbitionsMP
             catch { return null; }
         }
 
+        private static UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI? MergerHrPane()
+            => MergerGatePane("hr", MergerHrPaneSearch);
+
         /// <summary>decompile HrManagerPlanUI.cs:72 `private HrManagerPlan _currentPlan;`.</summary>
-        private static Buildings.Office.Headquarters.HrManagerPlan MergerHrCurrentPlan(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI ui)
+        private static Buildings.Office.Headquarters.HrManagerPlan MergerHrCurrentPlan(UI.Smartphone.Apps.BizMan.HRManagers.HrManagerPlanUI? ui)
         {
             try
             {
@@ -11392,15 +11481,28 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>decompile PricingManagerPlanUI.cs:24 `private PricingManagerPlan _currentPlan;` - the
-        /// scroller is told its rows, never its plan, so the pane is where the plan on screen lives.</summary>
-        private static Buildings.Office.Headquarters.PricingManagerPlan MergerPricingPlan()
+        private static UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerPlanUI? MergerPricingPaneSearch()
         {
             try
             {
                 var ui = InstanceBehavior<UI.UIs>.Instance;
                 var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
-                var pane = bm != null ? bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerPlanUI>(true) : null;
+                return bm != null ? bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerPlanUI>(true) : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>decompile PricingManagerPlanUI.cs:24 `private PricingManagerPlan _currentPlan;` - the
+        /// scroller is told its rows, never its plan, so the pane is where the plan on screen lives.
+        /// HQ-PARITY-6 P2: the pane itself comes from MergerGatePane - the registered one (HQ-PARITY-4 P1
+        /// records it as LoadPlan draws) while it is on screen, the hierarchy search only as the fallback,
+        /// because that search can find an inactive second instance whose `_currentPlan` is stale or null
+        /// and the edit then takes the own-edit path instead of being routed to the owner.</summary>
+        private static Buildings.Office.Headquarters.PricingManagerPlan MergerPricingPlan()
+        {
+            try
+            {
+                var pane = MergerGatePane("pricing", MergerPricingPaneSearch);
                 if (pane == null) return null;
                 var f = pane.GetType().GetField("_currentPlan", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                 return f != null ? f.GetValue(pane) as Buildings.Office.Headquarters.PricingManagerPlan : null;
@@ -11494,15 +11596,28 @@ namespace BigAmbitionsMP
         // (CompanyPlans.cs:1317).  The uses are disjoint: the host's forward branch gates on the "refused" op,
         // and `create` is its own op, so the warehouse key can never be read as either.
 
-        /// <summary>decompile PurchasingAgentPlanUI.cs:55 `private ImportPartnership _currentImportPartnership;`
-        /// - the product row and the mass-action bar both hang off that one pane.</summary>
-        private static Entities.ImportPartnership MergerPurchasingPlan()
+        private static UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentPlanUI? MergerPurchasingPaneSearch()
         {
             try
             {
                 var ui = InstanceBehavior<UI.UIs>.Instance;
                 var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
-                var pane = bm != null ? bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentPlanUI>(true) : null;
+                return bm != null ? bm.GetComponentInChildren<UI.Smartphone.Apps.BizMan.PurchasingAgent.PurchasingAgentPlanUI>(true) : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>decompile PurchasingAgentPlanUI.cs:55 `private ImportPartnership _currentImportPartnership;`
+        /// - the product row and the mass-action bar both hang off that one pane.
+        /// HQ-PARITY-6 P2: the pane comes from MergerGatePane now - the registered one (HQ-PARITY-4 P1) while
+        /// it is on screen, the hierarchy search only as the fallback. This is the family the field log
+        /// caught: the search found another instance, so the ChangeTarget edit on a partner's purchasing plan
+        /// read no partnership, took the own-edit path and was never routed.</summary>
+        private static Entities.ImportPartnership MergerPurchasingPlan()
+        {
+            try
+            {
+                var pane = MergerGatePane("purchasing", MergerPurchasingPaneSearch);
                 if (pane == null) return null;
                 var f = pane.GetType().GetField("_currentImportPartnership", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
                 return f != null ? f.GetValue(pane) as Entities.ImportPartnership : null;

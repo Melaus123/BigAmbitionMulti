@@ -915,6 +915,12 @@ namespace BigAmbitionsMP
         /// TestDrive verb and for the row tint's "whose business is this?" answer.</summary>
         private static readonly Dictionary<string, CompanyListsPayload> _byOwner = new();
 
+        /// <summary>HQ-PARITY-6 fold b H2: the owners whose LAST Apply left at least one address out because
+        /// the merger had not flipped it here yet ("N address(es) not flipped here").  Those - and only those -
+        /// are what the flip's ON edge re-applies, so one building coming on never re-installs every partner's
+        /// whole bundle, and a bundle that went in clean is never touched by the flip path at all.</summary>
+        private static readonly HashSet<string> _pendingFlip = new HashSet<string>(StringComparer.Ordinal);
+
         /// <summary>address key -> owner pid, for the row tint (V3).  Rebuilt on every apply.</summary>
         private static readonly Dictionary<string, string> _ownerOfAddr = new(StringComparer.OrdinalIgnoreCase);
 
@@ -995,6 +1001,10 @@ namespace BigAmbitionsMP
             }
 
             _byOwner[p.OwnerPid] = p;
+            // fold b H2: does this owner still have work waiting on a flip?  The answer is exactly the skip
+            // counter above, and it is re-decided on every Apply - a later bundle that installs clean takes
+            // the owner back out, so ReapplyOwnersPendingFlip stays bounded by what is genuinely incomplete.
+            if (skippedNotFlipped > 0) _pendingFlip.Add(p.OwnerPid); else _pendingFlip.Remove(p.OwnerPid);
             RebuildOwnerMap(p.OwnerPid);   // fold d: this bundle's owner - only ITS bundles count against a pending wait
             // 4c part 1 - AFTER the owner map: the registry's open-tab redraw asks TryOwnerOfAddress, which reads that map;
             // before it, the FIRST feed for an HQ new to the map could not redraw an open tab (re-check r2).
@@ -1005,6 +1015,16 @@ namespace BigAmbitionsMP
             try { CompanyPlans.Receive(p); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] registry update: {ex.Message}"); }
             Plugin.Logger.LogInfo($"[CompanyLists] installed {nContracts} contracts, {nPlans} logistics plans, {nHr} hr plans of '{p.OwnerPid}' (display copies; "
                                 + $"{installed} item(s) in, {lifted} replaced, {skippedNotFlipped} address(es) not flipped here, {skippedSimulated} simulated here).");
+            // HQ-PARITY-6 P3: what ARRIVED for the logistics screens, as the sender measured it. A plan that
+            // draws 0 for every product on the co-member is either a plan whose stock lines never left the
+            // owner or a plan whose numbers are being ignored on this side; without this line the two look
+            // identical in a log. One line per logistics plan of this bundle, at the moment it goes in.
+            foreach (var g in bundle.Lists.LogisticsManagerPlans)
+            {
+                if (g == null) continue;
+                Plugin.Logger.LogInfo($"[Plans] logistics plan {g.Id} ({(g.IsFactory ? "factory" : "warehouse")} source {g.TargetAddressKey}): "
+                                    + $"max={g.MaxDestinations} stock lines={g.Stock?.Count ?? 0} products={g.SourceProducts?.Count ?? 0}");
+            }
             RefreshOpenScreens();
         }
 
@@ -1017,6 +1037,7 @@ namespace BigAmbitionsMP
                 int n = 0;
                 try { n = MergerAbsence.RemoveInstalledForOwner(MergerAbsence.DisplayOwnerTag(ownerPid)); } catch { }
                 bool had = _byOwner.Remove(ownerPid);
+                _pendingFlip.Remove(ownerPid);   // fold b H2: nothing of theirs is waiting on a flip any more
                 try { CompanyPlans.ClearOwner(ownerPid, why); } catch { }   // 4c part 1: the HQ plan overlay goes with them
                 RebuildOwnerMap("");   // fold d: a departure is nobody's publish - no pending wait advances
                 if (n > 0 || had)
@@ -1050,7 +1071,12 @@ namespace BigAmbitionsMP
 
         /// <summary>WAVE 4 r2 (review MAJOR-2): the simulation for `ownerPid` has ended - put that owner's
         /// display copies back from the registry. Apply's own tests decide what is eligible (still flipped
-        /// here, not simulated here), so an address that stayed simulated brings nothing back.</summary>
+        /// here, not simulated here), so an address that stayed simulated brings nothing back.
+        /// FOLD b H1 - THE ONLY CALLER IS MergerAbsence.UndoLocal, AND THAT IS THE POINT.  Resuming the plan
+        /// overlay (CompanyPlans.ReinstallOwner = drop the suspension) is correct ONLY when this machine has
+        /// just STOPPED standing in for that owner, because the suspension is what keeps the overlay's display
+        /// rows from sitting beside the REAL plans the absence installer put in.  Nothing else may call this:
+        /// the flip path uses ReapplyOwnersPendingFlip below, which never touches the suspension.</summary>
         public static void ReinstallOwner(string ownerPid, string why)
         {
             try
@@ -1064,9 +1090,41 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] re-install '{ownerPid}': {ex.Message}"); }
         }
 
+        /// <summary>HQ-PARITY-6 P1.  Re-apply EVERY held bundle, for every owner in the registry.  Apply
+        /// installs a display copy only for an address the merger has already flipped onto this machine
+        /// (the `not flipped here` skip above), so a bundle that arrives BEFORE the flip lands empty and
+        /// nothing puts it back: the copies then wait for the owner's next publish, which can be a minute
+        /// away.  The flip itself is the event that un-skips them, so MergerFlip.Tick calls this the moment
+        /// it turns buildings on - no timer, no polling.
+        /// FOLD b H1 - IT MUST NOT GO THROUGH ReinstallOwner.  That method also drops the plan overlay's
+        /// SUSPENSION, and a flip landing while this machine STANDS IN for an absent partner would then put
+        /// that partner's overlay rows back beside the real plans the absence installer had already
+        /// installed - the exact double set CompanyPlans.SuspendOwner exists to prevent.  The suspension
+        /// belongs to the stand-in return leg (MergerAbsence.UndoLocal) alone; here we only re-run Apply.
+        /// FOLD b H2 - AND ONLY FOR THE OWNERS THAT NEED IT: the ones whose last Apply reported addresses
+        /// "not flipped here" (`_pendingFlip`).  One building coming on therefore costs one re-apply per
+        /// genuinely incomplete bundle, not a re-install of every partner's paperwork.  The key list is
+        /// copied first because Apply writes back into `_byOwner` and into `_pendingFlip`.</summary>
+        public static void ReapplyOwnersPendingFlip(string why)
+        {
+            if (_pendingFlip.Count == 0) return;
+            foreach (var pid in new List<string>(_pendingFlip))
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(pid) || !MergerSync.IAmMember) continue;
+                    if (!_byOwner.TryGetValue(pid, out var p) || p == null) { _pendingFlip.Remove(pid); continue; }
+                    Plugin.Logger.LogInfo($"[CompanyLists] re-applying the display copies of '{pid}' - {why}.");
+                    Apply(p);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] re-apply '{pid}': {ex.Message}"); }
+            }
+        }
+
         public static void ClearAll(string why)
         {
             try { CompanyPlans.ClearAll(why); } catch { }   // 4c part 1
+            _pendingFlip.Clear();   // fold b H2: both exits below leave no owner behind, so the wait list goes too
             if (_byOwner.Count == 0) { _ownerOfAddr.Clear(); _planById.Clear(); _lastSentPlan.Clear(); _pendingPlan.Clear(); return; }   // fold d: no owners left - nothing pending can echo
             foreach (var pid in new List<string>(_byOwner.Keys)) ClearOwner(pid, why);
             _byOwner.Clear(); _ownerOfAddr.Clear();
@@ -1306,10 +1364,12 @@ namespace BigAmbitionsMP
         /// <summary>HQ-PARITY-2 P1, OWNER SIDE.  The two numbers a co-member cannot compute, measured here at
         /// publish time and carried on the plan's DTO.  MaxDestinations is the plan's own getter
         /// (LogisticsManagerPlan.cs:43 -> CalculateMaxDestinations :145-157), which needs the warehouse's
-        /// VehicleInstances - present only on this machine.  Stock is one line per item the source warehouse
-        /// actually holds, summed exactly as BuildingHelper.CountResourcesInPallets does (Helpers/
+        /// VehicleInstances - present only on this machine.  Stock is one line per PRODUCT the pane will list,
+        /// each taken from `BuildingHelper.CountResourcesInPallets` itself (HQ-PARITY-6 P4 - the very call the
+        /// pane makes, so the two cannot disagree), plus a sweep of the registration's own cargo (Helpers/
         /// BuildingHelper.cs:391-413: every item instance tagged iswarehousestorage, every cargo instance in
-        /// it); an item absent from this list is zero HERE too, so the drawing side answers 0 for it instead
+        /// it) for anything the product list does not name.  An item absent from this list is zero HERE too,
+        /// so the drawing side answers 0 for it instead
         /// of reading its own replica.  Deliveries and sales move these figures on the ordinary dirty cadence
         /// (30 s); a plan COMMIT publishes urgently (HQ-PARITY-1 P5), so the numbers beside an edit are at
         /// most 2 s old.  NOT part of PlanToDto: that DTO's serialised shape is the edit dedupe, and a stock
@@ -1349,8 +1409,8 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics products for plan {pl.id}: {ex.Message}"); }
                 }
-                if (reg.itemInstances == null) return;
                 var totals = new Dictionary<string, int>(StringComparer.Ordinal);
+                if (reg.itemInstances != null)
                 foreach (var ii in reg.itemInstances.Values)
                 {
                     if (ii == null || ii.cargoInstances == null) continue;
@@ -1364,8 +1424,39 @@ namespace BigAmbitionsMP
                     }
                 }
                 var sold = SoldPerWeekMap();
+                // HQ-PARITY-6 P4: PUBLISH IT THE WAY THE PANE COUNTS IT.  The drawing side asks
+                // `BuildingHelper.CountResourcesInPallets(_currentPlan.targetAddress, product)` once for every
+                // product it lists (LogisticsManagerPlanUI.cs:296), so the answer a co-member needs is that
+                // call's answer, for exactly those products. The sweep below re-implements it from
+                // `reg.itemInstances`, and any disagreement between the two - a storage tag this sweep reads
+                // differently, a factory's pallets living somewhere the sweep does not look - lands as a
+                // missing line, which the receiving side is obliged to read as a true zero. Calling the game's
+                // own method makes the numbers identical by construction, factories included. (The call runs
+                // through our own pallet-count prefix, which substitutes only for a PARTNER's display copy at
+                // the address the pane is showing - never for this machine's own building, which is what is
+                // being measured here.) The sweep is kept for items the product list does not name, so cargo
+                // that is present but unlisted still travels; a name is published once and once only.
+                var named = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var product in pp.SourceProducts)
+                {
+                    if (string.IsNullOrEmpty(product) || !named.Add(product)) continue;
+                    int have = 0;
+                    try { have = Helpers.BuildingHelper.CountResourcesInPallets(pl.targetAddress, product); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock of '{product}' for plan {pl.id}: {ex.Message}"); }
+                    int psw; sold.TryGetValue(product, out psw);
+                    pp.Stock.Add(new PwStockLine { AddressKey = wkey, ItemName = product, Count = have, SoldPerWeek = psw });
+                }
+                // FOLD b H5 - WHAT NEITHER HALF NAMES DRAWS 0.  The two halves have different reaches: the
+                // loop above covers exactly `Warehouse.GetProducts()` (what the source warehouse is set up to
+                // hold), this sweep covers exactly what is physically in the pallets. A product the PANE lists
+                // beyond both - an import, or a destination target set positive for something not stocked and
+                // not configured - gets no line at all, and the receiving side is obliged to read a missing
+                // line as a true zero, so that row draws 0 on the partner's copy. That is not a lost number,
+                // it is an unmeasured one; when it happens the co-member's "logistics stock NOT substituted"
+                // diagnostic (MPPatches.NoteStockNotSubstituted) names the plan and the address.
                 foreach (var kv in totals)
                 {
+                    if (named.Contains(kv.Key)) continue;
                     int sw; sold.TryGetValue(kv.Key, out sw);
                     pp.Stock.Add(new PwStockLine { AddressKey = wkey, ItemName = kv.Key, Count = kv.Value, SoldPerWeek = sw });
                 }

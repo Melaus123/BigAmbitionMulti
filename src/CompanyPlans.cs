@@ -139,6 +139,10 @@ namespace BigAmbitionsMP
 
         public static void ClearAll(string why)
         {
+            // FOLD b H3: the "stock not substituted" line is once per plan-and-address PER MERGER, so its
+            // record dies with the merger state - before the early exit, because a dissolve with nothing
+            // drawn still ends the merger. The set itself lives beside the pallet-count patch that writes it.
+            try { MPPatches.ClearStockMissLog(); } catch { }
             if (_byOwner.Count == 0 && _rows.Count == 0) { _suspended.Clear(); return; }
             _byOwner.Clear(); _suspended.Clear(); _rows.Clear(); _rowOwner.Clear(); _refusalLogged.Clear(); _stale.Clear(); _drawn.Clear();
             _rowInfo.Clear(); _seq.Clear(); _applied.Clear(); _shadowRows.Clear();   // CROSS-HR-1 S4
@@ -722,8 +726,11 @@ namespace BigAmbitionsMP
 
         /// <summary>P1: the REGISTERED pane while it is alive, else the sweep.  G3: the comparison costs
         /// ONE sweep per family per session - the first call records that the pair has been compared,
-        /// agreement or not, and every call after it skips the sweep.</summary>
-        private static Component? PaneOf(string family)
+        /// agreement or not, and every call after it skips the sweep.
+        /// INTERNAL since HQ-PARITY-6 P2: the three EDIT gates in MPPatches (hr, pricing, purchasing) ask
+        /// this too, because their own hierarchy search was finding a DIFFERENT, inactive instance of the
+        /// pane and their edits then took the own-edit path instead of being routed.</summary>
+        internal static Component? PaneOf(string family)
         {
             try
             {
@@ -736,6 +743,16 @@ namespace BigAmbitionsMP
             }
             catch { }
             return SweptPaneOf(family);
+        }
+
+        /// <summary>FOLD b H4(a): the registry and NOTHING ELSE - null when this family has no live pane
+        /// recorded yet.  PaneOf answers with its own hierarchy sweep in that case, which is fine for finding
+        /// a pane but useless to a caller that wants to know whether the pane it holds CAME from the registry
+        /// (MergerGatePane, before it reports a disagreement with its own search).</summary>
+        internal static Component? RegisteredPaneOf(string family)
+        {
+            try { return _paneOf.TryGetValue(family, out var reg) && reg != null ? reg : null; }
+            catch { return null; }
         }
 
         /// <summary>P1: the REGISTERED list while it is alive, else the sweep.</summary>
@@ -3010,6 +3027,28 @@ namespace BigAmbitionsMP
                 foreach (var ln in dto.Stock ?? new List<PwStockLine>())
                     if (ln != null && string.Equals(ln.ItemName, itemName, StringComparison.Ordinal)) { count = ln.Count; break; }
             return true;
+        }
+
+        /// <summary>HQ-PARITY-6 P3, DIAGNOSTIC ONLY.  Why ScopedStock did NOT answer for the plan the pane is
+        /// showing - the field runs had the factory tab drawing 0 for every product and the warehouse tab
+        /// dropping to 0 after a destination removal, with no log line for either. NULL means the
+        /// substitution was in order (the caller then says nothing). Called only on the miss, never on the
+        /// happy path, so the strings it builds cost nothing while the numbers are right.</summary>
+        internal static string? ScopedStockReason(string planId, string addressKey, string itemName)
+        {
+            try
+            {
+                if (!LogisticsPaneTracked) return "no logistics pane tracked";
+                var dto = LogisticsDtoOf(planId ?? "");
+                if (dto == null) return "dto missing";
+                if (string.IsNullOrEmpty(dto.TargetAddressKey) || !Same(addressKey, dto.TargetAddressKey))
+                    return $"dto target {dto.TargetAddressKey} != {addressKey}";
+                if (dto.Stock == null || dto.Stock.Count == 0) return "dto has 0 stock lines";
+                foreach (var ln in dto.Stock)
+                    if (ln != null && string.Equals(ln.ItemName, itemName ?? "", StringComparison.Ordinal)) return null;
+                return $"item {itemName} has no stock line";
+            }
+            catch (Exception ex) { return "reason unavailable: " + ex.Message; }
         }
 
         /// <summary>HQ-PARITY-3 A5, RUNS OUT IN.  `LogisticsManagerPlan.GetRunsOutIn` (decompile :180-195)

@@ -109,6 +109,7 @@ namespace BigAmbitionsMP
                 var regs = SaveGameManager.Current?.BuildingRegistrations;
                 if (regs == null) return;
 
+                int flippedOnThisTick = 0;   // HQ-PARITY-6 P1
                 foreach (var reg in regs)
                 {
                     if (reg == null) continue;
@@ -137,6 +138,7 @@ namespace BigAmbitionsMP
                         reg.businessOwnerRivalId = "";
                         reg.RentedByPlayer = true;
                         RefreshPoi(reg);
+                        flippedOnThisTick++;
                         Plugin.Logger.LogInfo($"[Merger] flip ON  '{key}' (company building now shows as own).");
                     }
                     else if (_flipped.TryGetValue(key, out var parkedRival))
@@ -149,6 +151,23 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[Merger] flip OFF '{key}' (left merger / ownership changed).");
                     }
                 }
+
+                // HQ-PARITY-6 P1: THE FLIP IS THE EVENT THAT UN-SKIPS THE DISPLAY COPIES.  The list
+                // installer only copies a partner's paperwork onto an address the flip has ALREADY turned
+                // on (CompanyLists.Apply: "N address(es) not flipped here"), so the first bundle to arrive
+                // after a merge forms lands empty and the screens stay bare until the owner happens to
+                // publish again - over a minute in the field. Re-applying the held bundles right here,
+                // the moment buildings come on, closes that gap without a timer.
+                // FOLD b H1/H2: ReapplyOwnersPendingFlip, NOT ReinstallOwner - it re-runs Apply for the
+                // owners whose last install actually skipped addresses, and it deliberately leaves the plan
+                // overlay's suspension alone (that belongs to MergerAbsence.UndoLocal: resuming it here would
+                // double a stood-in-for partner's rows against the real plans the absence installer put in).
+                if (flippedOnThisTick > 0)
+                {
+                    try { CompanyLists.ReapplyOwnersPendingFlip(flippedOnThisTick + " building(s) flipped this tick"); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] re-install after flip: {ex.Message}"); }
+                }
+
                 // Flipped keys whose reg vanished (scene churn) — drop the stale tracking.
                 if (_flipped.Count > 0)
                 {
