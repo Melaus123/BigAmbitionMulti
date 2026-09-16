@@ -184,8 +184,14 @@
       "expect_log": [
         {
           "role": "h",
-          "regex": "\\[Merger\\] plan edit applied .*logistics destremove",
+          "regex": "\\[Merger\\] plan edit applied .*logistics destset",
           "within_s": 4
+        },
+        {
+          "role": "h",
+          "regex": "\\[Plans\\] own logistics (tab redrawn|redraw) after a routed destset from",
+          "within_s": 4,
+          "note": "HQ-PARITY-5 A1: the owner redraws its own page (or reports it closed) after a routed edit"
         },
         {
           "role": "c",
@@ -360,6 +366,12 @@
           "role": "h",
           "regex": "\\[Merger\\] plan edit applied .*hr replaceabsent",
           "within_s": 4
+        },
+        {
+          "role": "h",
+          "regex": "\\[Plans\\] own hr (tab redrawn|redraw) after a routed replaceabsent from",
+          "within_s": 4,
+          "note": "HQ-PARITY-5 A1: same oracle on the HR family"
         }
       ]
     },

@@ -197,7 +197,10 @@ namespace BigAmbitionsMP
         /// below runs for a family only when that owner's published ROW SET for it changed (RebuildIfChanged
         /// / RowSetShapeOf), and the pane loop under it only when the open plan's own published shape changed
         /// (DtoShapeOf) - so a partner merely TRADING no longer destroys and rebuilds every row every two
-        /// seconds, with the reselect firing the game's SelectPlan -&gt; LoadPlan on the pane being read.</summary>
+        /// seconds, with the reselect firing the game's SelectPlan -&gt; LoadPlan on the pane being read.
+        /// HQ-PARITY-5 A1: this loop MIRRORS OTHER OWNERS ONLY - Receive drops this machine's own pid (:85)
+        /// and _byOwner never holds it, so the OWNER'S OWN tabs after a partner's routed edit are redrawn by
+        /// RefreshOwnTabsAfterRoutedEdit off the apply itself, not from here.</summary>
         private static void RefreshOpenTabsFor(string ownerPid)
         {
             try
@@ -283,6 +286,86 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] redraw for '{ownerPid}': {ex.Message}"); }
         }
 
+        /// <summary>HQ-PARITY-5 A1, THE OWNER'S OWN PAGE.  A routed edit lands on the owner's REAL plan, and
+        /// the game redraws only on its OWN events - so the owner, sitting on the very page the partner just
+        /// changed, saw nothing.  The mirror loop above cannot help: it is keyed on _byOwner, and Receive
+        /// skips this machine's own pid (:85), so the owner is never in it.  Owner-&gt;partner already worked,
+        /// because the publish that follows the apply feeds the partner's rebuild.  This is the same rebuild
+        /// for the owner's own tab: the family's own list refresh (with its reselect), then the one pane
+        /// refresh every family goes through.  MAIN THREAD - the caller is ApplyRouted.</summary>
+        private static void RefreshOwnTabsAfterRoutedEdit(string fam, string planId, string fromPid, string op)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(fam) || string.IsNullOrEmpty(planId)) return;
+                if (!CompanyHqPageOpen(out _, out _))
+                {
+                    Plugin.Logger.LogInfo($"[Plans] own {fam} redraw after a routed {op} from '{fromPid}' (plan {planId}): page closed, nothing to draw.");
+                    return;
+                }
+                string why = EditWindowOpen();
+                // FOLD b G5 (review): THE LOGISTICS FAMILY NEVER DEFERS.  An open dropdown is itself one of
+                // EditWindowOpen's reasons (:306), so a logistics edit would wait behind the very control it
+                // has to correct - and a destset that SHORTENS pl.destinations while this pane still holds
+                // the longer _destinationEntries lets the game's own handler index a destination that is
+                // gone (decompile LogisticsManagerPlanUI.UpdateSelectedBusiness:567 indexes
+                // _currentPlan.destinations[destinationIndex] with no guard).  Reloading at once closes the
+                // dropdown and rebuilds the entries, which is what 750a001's bare in-place refresh did.
+                if (why.Length > 0 && fam != "logistics")
+                {
+                    // HO-1a H5's rule, for the owner's own tab: a rebuild under a half-typed edit throws the
+                    // player's own input away, so it waits on the UI state re-read in TickDeferredRedraw.
+                    // FOLD b G4 (review): ONE PENDING SLOT PER FAMILY.  A single slot meant a routed hr edit
+                    // arriving after a routed logistics edit, both under one open field, threw the first
+                    // family's redraw away.  Last writer wins WITHIN a family - a redraw is a whole-family
+                    // rebuild either way - and the line is logged once per changed (family, plan, op, from)
+                    // rather than per feed.
+                    if (!_pendingOwn.TryGetValue(fam, out var prev)
+                        || prev.plan != planId || prev.op != op || prev.from != fromPid)
+                        Plugin.Logger.LogInfo($"[Plans] own {fam} redraw after a routed {op} from '{fromPid}' (plan {planId}) DEFERRED - {why}.");
+                    _pendingOwn[fam] = (planId, op, fromPid);
+                    return;
+                }
+                int kept = 0;
+                var reselected = new HashSet<string>(StringComparer.Ordinal);
+                var openBefore = new Dictionary<string, string>(StringComparer.Ordinal);
+                int n = Rebuild(ListOf(fam), fam == "pricing" ? "RefreshPlansList" : "RefreshManagersList",
+                                fam, ref kept, reselected, openBefore);
+                // FOLD b G1 (review): THE HEADHUNTER PANE COMES BACK HERE TOO - the same branch the mirror
+                // loop runs (:258-271).  RefreshManagersList opens with planUI.Hide() (decompile
+                // HeadhuntersPlanList.cs:75) and headhunter rows carry no id, so Reselect cannot re-seat the
+                // pane and OpenPanePlanId answers "" for the now-inactive one; without this the OWNER's own
+                // headhunter pane stayed shut after a partner's edit.  openBefore exists for this branch
+                // alone - it is the id captured before the invoke, and only families the rebuild RAN for are
+                // in it.  The pane is reloaded from that id instead of through RefreshOpenPaneInPlace, which
+                // would find nothing open to refresh.  The list HIGHLIGHT is not restored: the list offers
+                // nothing to match a row on.
+                string reopenedId = "";
+                if (OpenPanePlanId(fam).Length == 0 && fam == "headhunter"
+                    && openBefore.TryGetValue(fam, out var hidden) && hidden.Length > 0)
+                {
+                    ReopenHeadhunterPane(hidden);
+                    reopenedId = hidden;
+                }
+                // HQ-PARITY-4 P4, ONE OBJECT PER PLAN, ONE LOAD: a family the rebuild RESELECTED has already
+                // been loaded by the list's own SelectPlan, and a second load would hand the pane a second
+                // object for the one plan and re-fire everything a load re-fires.
+                else if (!reselected.Contains(fam)) RefreshOpenPaneInPlace(fam, planId);
+                string openId = reopenedId.Length > 0 ? reopenedId : OpenPanePlanId(fam);
+                string pane = openId.Length == 0 ? "none"
+                            : (string.Equals(openId, planId, StringComparison.Ordinal) ? "open" : "other");
+                Plugin.Logger.LogInfo($"[Plans] own {fam} tab redrawn after a routed {op} from '{fromPid}' (plan {planId}): list={n} pane={pane}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] own {fam} redraw: {ex.Message}"); }
+        }
+
+        /// <summary>A1, per family since FOLD b G4.  The owner's OWN redraws waiting for the player to finish
+        /// an edit, keyed on family; an absent family = nothing pending for it.  Last writer wins WITHIN a
+        /// family (a redraw is a whole-family rebuild either way), but one family no longer throws away
+        /// another's pending redraw.  The logistics family is never in here - it redraws at once.</summary>
+        private static readonly Dictionary<string, (string plan, string op, string from)> _pendingOwn =
+            new Dictionary<string, (string plan, string op, string from)>(StringComparer.Ordinal);
+
         /// <summary>HO-1a H5.  The owner whose redraw is waiting for the player to finish an edit; "" = none.</summary>
         private static string _pendingRedraw = "";
 
@@ -297,20 +380,44 @@ namespace BigAmbitionsMP
 
         /// <summary>H5, EVENTS OVER TIMERS.  Called from SharedShopWorkTabs.Tick (per frame; gated to 1 Hz here):
         /// the deferred redraw waits on the AUTHORITATIVE UI state re-read here, never on a delay.  The pending
-        /// owner is cleared only when the rebuild actually ran, so no redraw is lost to a window that reopened.</summary>
+        /// owner is cleared only when the rebuild actually ran, so no redraw is lost to a window that reopened.
+        /// HQ-PARITY-5 A1: the owner's OWN deferred redraw waits on the same re-read and is replayed here too.</summary>
         public static void TickDeferredRedraw()
         {
             try
             {
-                if (_pendingRedraw.Length == 0) return;
+                if (_pendingRedraw.Length == 0 && _pendingOwn.Count == 0) return;
                 if (UnityEngine.Time.unscaledTime < _nextDeferredCheck) return;
                 _nextDeferredCheck = UnityEngine.Time.unscaledTime + 1f;
-                if (!CompanyHqPageOpen(out _, out _)) { _pendingRedraw = ""; _pendingReason = ""; return; }
+                if (!CompanyHqPageOpen(out _, out _))
+                {
+                    _pendingRedraw = ""; _pendingReason = "";
+                    _pendingOwn.Clear();
+                    return;
+                }
                 if (EditWindowOpen().Length > 0) return;
-                string owner = _pendingRedraw;
-                _pendingRedraw = "";
-                Plugin.Logger.LogInfo($"[Plans] deferred redraw for '{owner}' RUNS - the edit window closed.");
-                RefreshOpenTabsFor(owner);
+                if (_pendingRedraw.Length > 0)
+                {
+                    string owner = _pendingRedraw;
+                    _pendingRedraw = "";
+                    Plugin.Logger.LogInfo($"[Plans] deferred redraw for '{owner}' RUNS - the edit window closed.");
+                    RefreshOpenTabsFor(owner);
+                }
+                // A1: the owner's own tabs are replayed AFTER the mirror redraw - a feed that arrived while
+                // the window was open has then already rebuilt the partner rows, so the own rebuild is the
+                // last word on those tabs.  FOLD b G4: EVERY pending family is redrawn, not just the last
+                // one; the set is taken and cleared first, so a redraw that defers again (it cannot here -
+                // the window is shut - but a throw must not strand the rest) starts from an empty slot.
+                if (_pendingOwn.Count > 0)
+                {
+                    var due = new List<KeyValuePair<string, (string plan, string op, string from)>>(_pendingOwn);
+                    _pendingOwn.Clear();
+                    foreach (var kv in due)
+                    {
+                        Plugin.Logger.LogInfo($"[Plans] deferred own {kv.Key} redraw (plan {kv.Value.plan}) RUNS - the edit window closed.");
+                        RefreshOwnTabsAfterRoutedEdit(kv.Key, kv.Value.plan, kv.Value.from, kv.Value.op);
+                    }
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] deferred redraw: {ex.Message}"); }
         }
@@ -2232,6 +2339,10 @@ namespace BigAmbitionsMP
         /// pane's controls drive.  On a PARTNER's display copy it sends the op leg the diff would have sent
         /// (RouteLogisticsOps -> Send); on one of THIS machine's own plans it runs the same runner body the
         /// op would have run there and marks the bundle urgent, which is what the pane's own commit does.
+        /// HQ-PARITY-5 B4: the four DESTINATION ops keep their usage - an index is still how the lever names
+        /// a row - but the index is now applied to a LOCAL copy of the plan's own destination list, and what
+        /// leaves (or is applied) is ONE `destset` carrying the whole desired list, exactly as the pane's
+        /// diff now sends it.  No index crosses the wire any more.
         /// Ops: manager &lt;employeeId|->, warehouse &lt;addressKey|->, destadd [addressKey],
         /// destremove &lt;index&gt;, destchange &lt;index&gt; &lt;addressKey&gt;, target &lt;index&gt; &lt;item&gt; &lt;amount&gt;.</summary>
         public static string TestDriveHqLog(string arg)
@@ -2275,28 +2386,82 @@ namespace BigAmbitionsMP
                 // built there.
                 string strValue = op == "target" ? item : s;
                 string station = dest >= 0 ? dest.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
+                // B4: a destination op becomes the DESIRED LIST.  The index names a row in this machine's own
+                // copy of the plan's destinations, the edit is made there, and the whole list travels.
+                List<PwLogisticsDestination>? destinations = null;
+                string sendOp = op;
+                if (op == "destadd" || op == "destremove" || op == "destchange" || op == "target")
+                {
+                    destinations = DestinationsOf(pl);
+                    int at = op == "target" ? dest : iv;
+                    if (op != "destadd" && (at < 0 || at >= destinations.Count))
+                        return $"ERR destination {at} is not on plan '{id}' here ({destinations.Count} of them)";
+                    switch (op)
+                    {
+                        case "destadd":
+                            destinations.Add(new PwLogisticsDestination { DeliveryTargetAddressKey = s });
+                            break;
+                        case "destremove":
+                            destinations.RemoveAt(at);
+                            break;
+                        case "destchange":
+                            // UpdateSelectedBusiness Reset()s the row it re-points (LogisticsManagerPlanUI
+                            // .cs:568-571), so a re-pointed row loses its targets here too.
+                            destinations[at].DeliveryTargetAddressKey = s;
+                            destinations[at].StockTargets.Clear();
+                            break;
+                        default:
+                        {
+                            if (item.Length == 0) return "ERR usage: hqlog <planId> target <destIndex> <itemName> <amount>";
+                            var rows = destinations[at].StockTargets;
+                            PwItemOrderLine? row = null;
+                            foreach (var t in rows) if (t != null && t.ItemName == item) { row = t; break; }
+                            if (iv <= 0) { if (row != null) rows.Remove(row); }
+                            else if (row != null) row.Amount = iv;
+                            else rows.Add(new PwItemOrderLine { ItemName = item, Amount = iv });
+                            break;
+                        }
+                    }
+                    sendOp = "destset"; strValue = ""; iv = 0; station = "";
+                }
                 if (CompanyLists.IsDisplayPlan(pl))
                 {
                     string hq = KeyOf(pl.headquartersAddress);
                     if (hq.Length == 0) return $"ERR plan '{id}' names no headquarters here";
                     CompanyLists.TryOwnerOfAddress(hq, out var owner);
-                    Send("logistics", id, hq, owner ?? "", op, "hqlog lever", null, strValue, iv, 0f, false, station);
+                    Send("logistics", id, hq, owner ?? "", sendOp, "hqlog lever", null, strValue, iv, 0f, false, station, destinations);
                     return $"OK hqlog {id} {op} routed to '{(string.IsNullOrEmpty(owner) ? "?" : owner)}' for '{hq}'";
                 }
                 var pay = new SharedWorkEditPayload
                 {
                     PlayerId = MPConfig.PlayerId, Op = "mergerplanedit", Family = "logistics", PlanId = id,
-                    PlanOp = op, StrValue = strValue, IntValue = iv, StationId = station,
-                    AddressKey = KeyOf(pl.headquartersAddress),
+                    PlanOp = sendOp, StrValue = strValue, IntValue = iv, StationId = station,
+                    AddressKey = KeyOf(pl.headquartersAddress), Destinations = destinations,
                 };
                 _refusal = "";
-                if (!ApplyLogistics(gi, pl.headquartersAddress, pay, op, id))
+                if (!ApplyLogistics(gi, pl.headquartersAddress, pay, sendOp, id))
                     return $"ERR hqlog {id} {op} refused: {(_refusal.Length > 0 ? _refusal : "the runner refused the edit")}";
                 SaveGameManager.MarkChange();
                 OwnEditCommitted("hqlog lever");
                 return $"OK hqlog {id} {op} applied (own plan; published at the urgent cadence)";
             }
             catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        /// <summary>B4.  One plan's destinations in the shape the wire carries them - what `destset` takes,
+        /// and the starting point the lever applies its index edit to.</summary>
+        private static List<PwLogisticsDestination> DestinationsOf(Buildings.Office.Headquarters.LogisticsManagerPlan pl)
+        {
+            var list = new List<PwLogisticsDestination>();
+            foreach (var d in pl?.destinations ?? new List<Entities.LogisticsManagerPlanDestination>())
+            {
+                var pd = new PwLogisticsDestination { DeliveryTargetAddressKey = d == null ? "" : KeyOf(d.deliveryTargetAddress) };
+                foreach (var t in (d == null ? null : d.stockTargets) ?? new List<BigAmbitions.Items.ItemAmountTarget>())
+                    if (t != null && !string.IsNullOrEmpty(t.itemName))
+                        pd.StockTargets.Add(new PwItemOrderLine { ItemName = t.itemName, Amount = t.targetAmount });
+                list.Add(pd);
+            }
+            return list;
         }
 
         /// <summary>HQ-PARITY-3 DIAGNOSTIC: the two strings whose asymmetry turned an OPEN into an EDIT.
@@ -2793,8 +2958,9 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics pane read: {ex.Message}"); return null; }
         }
 
-        /// <summary>The OWNER's published DTO for one plan id, out of the registry the fan-out fills.</summary>
-        private static PwLogisticsPlan? LogisticsDtoOf(string planId)
+        /// <summary>The OWNER's published DTO for one plan id, out of the registry the fan-out fills.
+        /// INTERNAL since HQ-PARITY-5 C3: the product-list postfix in MPPatches reads SourceProducts off it.</summary>
+        internal static PwLogisticsPlan? LogisticsDtoOf(string planId)
         {
             foreach (var kv in _byOwner)
                 foreach (var g in kv.Value?.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
@@ -3049,7 +3215,10 @@ namespace BigAmbitionsMP
         /// <summary>FOLD c C2 (review F2): a SHALLOW COPY of the registry row with the fields no control
         /// writes - the ones the simulation moves on its own - blanked.  The row in `_byOwner` is never
         /// touched; only the copy is serialised.
-        /// logistics `Stock` (pallets moving and the week's sales) - `MaxDestinations` is KEPT, a capacity
+        /// logistics `Stock` (pallets moving and the week's sales) and `SourceProducts` (FOLD b G2: the
+        /// source warehouse's published product list, which gains and loses names with every delivery in and
+        /// out, and whose churn rebuilt a partner's logistics rows and re-fired LoadPlan on the pane they
+        /// were reading - exactly the churn blanking `Stock` was meant to stop) - `MaxDestinations` is KEPT, a capacity
         /// change is rare and is worth the redraw; purchasing `Stock` (the same counts, per partnership),
         /// `NextDeliveryDay` (every delivery that arrives moves it) and the two per-product week counters
         /// `AmountOrderedLastWeek`/`AmountOrderedThisWeek` (every order the owner's importer places moves
@@ -3073,7 +3242,7 @@ namespace BigAmbitionsMP
                     case PwLogisticsPlan lp:
                     {
                         var c = ShallowCopy(lp);
-                        if (c != null) { c.Stock = null!; return c; }
+                        if (c != null) { c.Stock = null!; c.SourceProducts = null!; return c; }
                         break;
                     }
                     case PwImportPartnership ip:
@@ -3140,12 +3309,14 @@ namespace BigAmbitionsMP
         /// `mergerplanedit` carrier the other four families use.  FOLD b B3, THREE ANSWERS: `Sent` = every
         /// difference was expressed and the ops are on the wire; `Nothing` = the two shapes agree on every
         /// control this diff carries, so nothing was sent and nothing is in flight; `Inexpressible` = the
-        /// change cannot travel as ops and the caller leaves the owner's plan alone.  Only TWO things are
-        /// inexpressible now: a DRAG REORDER (expressible as `destchange` plus `target` ops, but the runner's
-        /// `destchange` calls Reset() on the destination it rewrites and would wipe the runtime state of
-        /// every moved row - so IsReorder refuses it, and the drop itself is refused at the pane before it
-        /// mutates anything), and a diff of more than MaxLogisticsOps ops, which is logged.  A destination
-        /// count change of ANY size is derived by the greedy walk below.
+        /// change cannot travel as ops and the caller leaves the owner's plan alone.  HQ-PARITY-5 B2 leaves
+        /// exactly ONE inexpressible case: a diff of more than MaxLogisticsOps ops, which is logged.  The
+        /// destinations no longer diff into index ops at all - any difference in count, order, address key or
+        /// target amount becomes ONE `destset` carrying the whole desired list, so a reorder CAN travel in
+        /// one.  FOLD b G6 (review): none is produced today, though - the display copy's drag is still
+        /// refused at the source (src/MPPatches.cs:4653 Patch_LogisticsReorder_DisplayRefuse, and :4598
+        /// StripDestinationDrag takes the handles off), so a reordered list never reaches this diff on a
+        /// co-member.  The carrier is ready; the control is not open yet.
         /// The controls are NOT patched one by one: three of the six (the destination remove button, the
         /// add-destination button, the per-item target field) are anonymous delegates built inside
         /// LogisticsManagerDestinationUI.SetUp and LogisticsManagerPlanUI.LoadProducts and have no method to
@@ -3166,71 +3337,16 @@ namespace BigAmbitionsMP
                     ops.Add(new LogOp { Op = "warehouse", S = now.TargetAddressKey ?? "" });
                 var wd = was.Destinations ?? new List<PwLogisticsDestination>();
                 var nd = now.Destinations ?? new List<PwLogisticsDestination>();
-                if (nd.Count == wd.Count)
-                {
-                    if (IsReorder(wd, nd)) return LogisticsRoute.Inexpressible;   // fold b: destchange's Reset() would wipe runtime state
-                    for (int i = 0; i < nd.Count; i++)
-                    {
-                        string wk = wd[i] == null ? "" : wd[i].DeliveryTargetAddressKey;
-                        string nk = nd[i] == null ? "" : nd[i].DeliveryTargetAddressKey;
-                        if (!Same(wk, nk)) ops.Add(new LogOp { Op = "destchange", S = nk ?? "", Iv = i });
-                        foreach (var t in TargetChanges(wd[i], nd[i]))
-                            ops.Add(new LogOp { Op = "target", S = t.Key, Iv = t.Value, St = i.ToString(System.Globalization.CultureInfo.InvariantCulture) });
-                    }
-                }
-                else
-                {
-                    // FOLD b B3 (review F4): THE COMPLETE DERIVATION.  The count branches this replaces
-                    // handled exactly +1 and -1 and answered "cannot express" for everything else - so
-                    // removing two rows, or adding two, was dropped silently and reverted at the next
-                    // fan-out.  ONE greedy walk covers every unequal count: walk the two lists together,
-                    // emit a `destremove` for each old row the new list no longer has, then a `destadd` for
-                    // every new row left over.  The ops are applied IN ORDER by the runner, so a remove's
-                    // index is its position in the list AS THE EARLIER REMOVES HAVE ALREADY LEFT IT - that
-                    // is what `a - removed` is.  FOLD c C3 (review F3): a row whose target amounts also
-                    // changed is NOT carried by the add/remove pair - the runner's `destadd` builds a FRESH
-                    // LogisticsManagerPlanDestination with an empty stockTargets list, so a re-added row
-                    // would arrive with no amounts at all.  Each `destadd` is therefore followed by one
-                    // `target` op per stock target of the row it adds.  A mid-list insertion comes out of
-                    // this walk as remove-the-rest-then-re-add: more ops than strictly needed, but the end
-                    // state is right - and the pane can only APPEND a destination, so it never arises from a
-                    // control.  FOLD d E3: the walk MATCHES ON THE DESTINATION KEY ALONE.  Matching on key
-                    // AND targets (`SameDest`) made a kept row whose amounts had merely been edited look
-                    // like a different row, so a target edit arriving together with a count change tore out
-                    // and re-added every row from that point on - many times the ops, and a big plan's burst
-                    // could pass MaxLogisticsOps and be dropped whole.  A row matched by key is KEPT and
-                    // carries its own `target` ops instead, so the walk is minimal per row.  `SameDest` now
-                    // belongs to the equal-count branch alone (IsReorder).
-                    int b = 0, removed = 0;
-                    for (int a = 0; a < wd.Count; a++)
-                    {
-                        if (b < nd.Count && Same(wd[a] == null ? "" : wd[a].DeliveryTargetAddressKey,
-                                                 nd[b] == null ? "" : nd[b].DeliveryTargetAddressKey))
-                        {
-                            // `St` is the row's index AT APPLY TIME, and that index is exactly `b`: the
-                            // removes ahead of this row have already been applied (they are what closed the
-                            // gap), and every remove still to come is BELOW it, so none of them moves it.
-                            foreach (var t in TargetChanges(wd[a], nd[b]))
-                                ops.Add(new LogOp { Op = "target", S = t.Key, Iv = t.Value,
-                                                    St = b.ToString(System.Globalization.CultureInfo.InvariantCulture) });
-                            b++; continue;
-                        }
-                        ops.Add(new LogOp { Op = "destremove", Iv = a - removed });
-                        removed++;
-                    }
-                    for (; b < nd.Count; b++)
-                    {
-                        ops.Add(new LogOp { Op = "destadd", S = nd[b] == null ? "" : (nd[b].DeliveryTargetAddressKey ?? "") });
-                        // `St` is the row's index AT APPLY TIME, and that index is exactly `b`: every
-                        // `destremove` of this walk precedes every `destadd`, the removes leave the kept rows
-                        // as nd[0..] in order, and each add APPENDS - so the row added for nd[b] lands at b.
-                        // TargetChanges against nothing is "every non-zero target of the new row" - a zero is
-                        // the absence of a target, and the fresh destination already has none.
-                        foreach (var t in TargetChanges(null, nd[b]))
-                            ops.Add(new LogOp { Op = "target", S = t.Key, Iv = t.Value,
-                                                St = b.ToString(System.Globalization.CultureInfo.InvariantCulture) });
-                    }
-                }
+                // HQ-PARITY-5 B2: THE DESTINATIONS TRAVEL AS ONE LIST.  What stood here diffed the two
+                // snapshots into destchange / destremove / destadd / target ops, each naming a row by its
+                // INDEX in the sender's copy (`Iv = a - removed`), and the runner applied them with
+                // RemoveAt(i) / [i] against its own LIVE list.  Any gap between the two - a fan-out in
+                // flight, an edit the owner made in the same breath, a refusal already rolled back - put the
+                // change on the wrong destination, silently.  One `destset` carries the whole desired list
+                // instead; the runner matches it against its own BY ADDRESS KEY, so a row that is still
+                // wanted keeps its object and its runtime state, and a position is never an identity.
+                if (DestinationsDiffer(wd, nd))
+                    ops.Add(new LogOp { Op = "destset", D = nd });
                 // HQ-PARITY-3 A2: "NOTHING TO EXPRESS" IS NOT "CANNOT EXPRESS".  A zero-op diff used to
                 // answer false, and false was the whole-plan `mergerplan` leg - which is how merely OPENING a
                 // partner's plan replaced the owner's real plan object from the sender's copy.  Nothing
@@ -3253,13 +3369,37 @@ namespace BigAmbitionsMP
                 }
                 _loggedNothingToSend.Remove(id);
                 _loggedOverCap.Remove(id);
-                foreach (var o in ops) Send("logistics", id, hq, owner ?? "", o.Op, why ?? "", null, o.S, o.Iv, 0f, false, o.St);
+                foreach (var o in ops) Send("logistics", id, hq, owner ?? "", o.Op, why ?? "", null, o.S, 0, 0f, false, "", o.D);
                 return LogisticsRoute.Sent;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics op diff: {ex.Message}"); return LogisticsRoute.Inexpressible; }
         }
 
-        private sealed class LogOp { public string Op = ""; public string S = ""; public int Iv; public string St = ""; }
+        private sealed class LogOp
+        {
+            public string Op = "";
+            public string S = "";
+            /// <summary>B2: `destset`'s whole desired destination list; null on every other op.</summary>
+            public List<PwLogisticsDestination>? D;
+            // The `Iv` index and the `St` destination-index-as-string that used to sit here went with the
+            // index ops (HQ-PARITY-5 B2): manager and warehouse carry a string, destset carries a list, and
+            // nothing a logistics diff emits names a position any more.
+        }
+
+        /// <summary>B2.  Do the two destination lists differ in COUNT, in ORDER, in any address key, or in
+        /// any target amount?  The amount test is TargetChanges, the same comparison the per-row `target` op
+        /// used to be derived from.  True = send one `destset` with the new list.</summary>
+        private static bool DestinationsDiffer(List<PwLogisticsDestination> wd, List<PwLogisticsDestination> nd)
+        {
+            if (wd.Count != nd.Count) return true;
+            for (int i = 0; i < nd.Count; i++)
+            {
+                if (!Same(wd[i] == null ? "" : wd[i].DeliveryTargetAddressKey,
+                          nd[i] == null ? "" : nd[i].DeliveryTargetAddressKey)) return true;
+                if (TargetChanges(wd[i], nd[i]).Count > 0) return true;
+            }
+            return false;
+        }
 
         /// <summary>A2: one "nothing to send" line per plan id, cleared the moment that plan really does send
         /// something, so the next quiet stretch says so again.</summary>
@@ -3269,37 +3409,14 @@ namespace BigAmbitionsMP
         /// does send something.</summary>
         private static readonly HashSet<string> _loggedOverCap = new(StringComparer.Ordinal);
 
-        /// <summary>FOLD b: a DRAG REORDER (OnDestinationReordered, LogisticsManagerPlanUI.cs:107-115) leaves
-        /// the SAME destinations in a new order.  The equal-count branch above would express it as a run of
-        /// `destchange` ops, each of which Reset()s the destination it rewrites at the runner and so would
-        /// throw away every moved row's runtime state.  It is refused here - and the DROP ITSELF is refused
-        /// at the pane (Patch_LogisticsReorder_DisplayRefuse) before it ever mutates the copy, so in practice
-        /// this branch only catches a reorder that arrived some other way; there is no whole-plan leg left
-        /// for it to ride.  True only for a genuine re-ordering: an unchanged list and any real edit both
-        /// answer false.</summary>
-        private static bool IsReorder(List<PwLogisticsDestination> wd, List<PwLogisticsDestination> nd)
-        {
-            if (wd.Count != nd.Count || wd.Count < 2) return false;
-            bool sameOrder = true;
-            for (int i = 0; i < wd.Count; i++) if (!SameDest(wd[i], nd[i])) { sameOrder = false; break; }
-            if (sameOrder) return false;
-            var used = new bool[wd.Count];
-            for (int i = 0; i < nd.Count; i++)
-            {
-                int j = -1;
-                for (int k = 0; k < wd.Count; k++) if (!used[k] && SameDest(wd[k], nd[i])) { j = k; break; }
-                if (j < 0) return false;
-                used[j] = true;
-            }
-            return true;
-        }
-
-        private static bool SameDest(PwLogisticsDestination? a, PwLogisticsDestination? b)
-        {
-            string ak = a == null ? "" : a.DeliveryTargetAddressKey, bk = b == null ? "" : b.DeliveryTargetAddressKey;
-            if (!Same(ak, bk)) return false;
-            return TargetChanges(a, b).Count == 0;
-        }
+        // FOLD b's IsReorder / SameDest are GONE (HQ-PARITY-5 B2): both existed only to answer "this is a
+        // pure re-ordering, refuse it, because destchange's Reset() would wipe every moved row's runtime
+        // state".  There is no destchange any more - a reorder is just a different list inside one `destset`,
+        // and the runner re-uses each row's existing object by address key - so there is nothing left to
+        // refuse and nothing left to compare positionally.  FOLD b G6 (review): that is the CARRIER's
+        // answer.  No reorder actually arrives today, because the display copy's drag is refused at the
+        // source (src/MPPatches.cs:4653 Patch_LogisticsReorder_DisplayRefuse, with :4598 StripDestinationDrag
+        // removing the handles); a destset simply carries one already if that refusal is ever lifted.
 
         /// <summary>item -> its NEW amount, for every stock target that differs between the two destinations.
         /// A target removed is amount 0, which is exactly what the pane writes (LogisticsManagerPlanUI
@@ -3454,7 +3571,7 @@ namespace BigAmbitionsMP
 
         private static bool Send(string family, string planId, string hq, string owner, string op, string what,
                                  object? dto, string strValue, int intValue, float number, bool flag,
-                                 string stationId = "")
+                                 string stationId = "", List<PwLogisticsDestination>? destinations = null)
         {
             if (string.IsNullOrEmpty(planId) || string.IsNullOrEmpty(hq))
             { Refused(family, op, planId ?? "?", "no plan id or no headquarters address"); return true; }
@@ -3466,6 +3583,7 @@ namespace BigAmbitionsMP
                 Family = family, PlanId = planId, PlanOp = op, EditSeq = seq,
                 StrValue = strValue ?? "", IntValue = intValue, Estimate = number, BoolValue = flag,
                 StationId = stationId ?? "",
+                Destinations = destinations,   // HQ-PARITY-5 B1/B2: `destset`'s whole list; null on every other op
             };
             switch (family)
             {
@@ -3659,7 +3777,11 @@ namespace BigAmbitionsMP
                 // to redraw the owner's own open pane after a partner pressed a button on it - and for
                 // logistics the pane went on holding the plan object the apply had replaced.  It follows the
                 // edit now, through the one refresh every family uses (B1).
-                RefreshOpenPaneInPlace(fam, id);
+                // HQ-PARITY-5 A1: and so does the owner's own LIST.  The bare RefreshOpenPaneInPlace that
+                // stood here redrew the pane alone, ran under a half-typed edit, and left the row set behind;
+                // A1 does the family's own list refresh first and then that same pane refresh, or defers the
+                // whole thing when a control is open.
+                RefreshOwnTabsAfterRoutedEdit(fam, id, p.PlayerId ?? "", op);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED: {ex.Message}"); }
         }
@@ -3800,13 +3922,18 @@ namespace BigAmbitionsMP
         /// <summary>RUNNER, HQ-PARITY-2 P3.  One logistics op onto MY OWN plan, each with the write the
         /// game's own control makes: `manager` is ChangeLogisticsManager's single assignment
         /// (LogisticsManagersPlanList.cs:195), `warehouse` is OnChangedWarehouse's (LogisticsManagerPlanUI
-        /// .cs:214/:220, and index 0 there is UnAssignAddress), `destadd` is AddDestination's append (:229-232)
-        /// under the plan's own capacity test (:235), `destremove` is the remove button's RemoveAt
-        /// (LogisticsManagerDestinationUI.cs:60), `destchange` is UpdateSelectedBusiness's Reset + assign
-        /// (:568-571) and `target` is the product row's stock-target write (:361-383, where zero REMOVES the
-        /// entry).  ApplyRouted marks the save changed and publishes urgently after this returns, which is the
-        /// LoadPlan-equivalent bookkeeping: nothing here touches this machine's open pane, because the pane
-        /// that made the edit is on the SENDER's machine and redraws off the fan-out.</summary>
+        /// .cs:214/:220, and index 0 there is UnAssignAddress), and - HQ-PARITY-5 B3 - `destset` REPLACES
+        /// THE WHOLE DESTINATION LIST from the leg, under the plan's own capacity test (:235).  The four
+        /// index ops it replaces (destadd/destremove/destchange/target) are gone: each named a row by its
+        /// position in the SENDER's snapshot and was applied here with RemoveAt(i) / [i] against this
+        /// machine's LIVE list, so any gap between the two wrote the edit onto the wrong destination.
+        /// `destset` matches the wanted list against the live one BY ADDRESS KEY, so a destination that is
+        /// still wanted keeps its OWN object - and with it every bit of runtime state the game hangs off it -
+        /// instead of being Reset() or rebuilt; only a key that is new builds a fresh row.  The stock targets
+        /// are then re-seated row by row exactly as the pane's own field write does (:361-383, where zero
+        /// REMOVES the entry).  ApplyRouted marks the save changed and publishes urgently after this returns,
+        /// which is the LoadPlan-equivalent bookkeeping; the owner's own open tabs follow the edit through
+        /// RefreshOwnTabsAfterRoutedEdit (HQ-PARITY-5 A1).</summary>
         private static bool ApplyLogistics(GameInstance gi, Address addr, SharedWorkEditPayload p, string op, string id)
         {
             if (gi.logisticsManagerPlans == null) return Gone("logistics", op, id);
@@ -3837,66 +3964,85 @@ namespace BigAmbitionsMP
                     pl.targetAddress = a;
                     return true;
                 }
-                case "destadd":
+                case "destset":
                 {
-                    if (pl.destinations == null) return Refuse("destadd: the plan holds no destination list");
-                    if (pl.destinations.Count >= pl.MaxDestinations)
-                        return Refuse($"destadd: the plan is already at its capacity of {pl.MaxDestinations} destination(s)");
-                    var dst = new Entities.LogisticsManagerPlanDestination { isUiCollapsed = false };
-                    string key = p.StrValue ?? "";
-                    if (key.Length > 0)
+                    // B3.  The whole desired list arrives at once.  Everything is CHECKED before anything is
+                    // written, so a refusal leaves the plan exactly as it was.
+                    if (p.Destinations == null) return Refuse("destset: the leg carried no destination list");
+                    if (pl.destinations == null) return Refuse("destset: the plan holds no destination list");
+                    // FOLD b G3 (review): CAPACITY IS REFUSED ONLY ON GROWTH.  MaxDestinations is LIVE - it
+                    // is CalculateMaxDestinations(targetAddress, assignedEmployeeId) and answers 0 whenever
+                    // the plan has no manager or no warehouse (decompile LogisticsManagerPlan.cs:43/:145) -
+                    // so the flat test refused a pure AMOUNT change on a manager-less plan, whose list was
+                    // not growing at all.  A list that is not getting longer cannot break a capacity that
+                    // already holds it.
+                    if (p.Destinations.Count > pl.destinations.Count && p.Destinations.Count > pl.MaxDestinations)
+                        return Refuse($"destset: growing to {p.Destinations.Count} destination(s) from {pl.destinations.Count} is over the plan's capacity of {pl.MaxDestinations} here");
+                    var keys = new List<string>();
+                    var addrs = new List<Address?>();
+                    foreach (var d in p.Destinations)
                     {
-                        var a = AddrOf(key);
-                        if (a == null) return Refuse($"destadd: '{key}' is not a building known here");
-                        dst.deliveryTargetAddress = a;
+                        string key = d == null ? "" : (d.DeliveryTargetAddressKey ?? "");
+                        Address? a = null;
+                        if (key.Length > 0)
+                        {
+                            a = AddrOf(key);
+                            if (a == null) return Refuse($"destset: '{key}' is not a building known here");
+                        }
+                        keys.Add(key); addrs.Add(a);
                     }
-                    pl.destinations.Add(dst);
-                    return true;
-                }
-                case "destremove":
-                {
-                    int i = p.IntValue;
-                    if (pl.destinations == null || i < 0 || i >= pl.destinations.Count)
-                        return Refuse($"destremove: destination {i} is not on plan '{id}' here ({pl.destinations?.Count ?? 0} of them)");
-                    pl.destinations.RemoveAt(i);
-                    return true;
-                }
-                case "destchange":
-                {
-                    int i = p.IntValue;
-                    if (pl.destinations == null || i < 0 || i >= pl.destinations.Count)
-                        return Refuse($"destchange: destination {i} is not on plan '{id}' here ({pl.destinations?.Count ?? 0} of them)");
-                    string key = p.StrValue ?? "";
-                    Address? a = null;
-                    if (key.Length > 0) { a = AddrOf(key); if (a == null) return Refuse($"destchange: '{key}' is not a building known here"); }
-                    var dst = pl.destinations[i];
-                    dst.Reset();
-                    dst.deliveryTargetAddress = a;
-                    return true;
-                }
-                case "target":
-                {
-                    int i;
-                    if (!int.TryParse(p.StationId ?? "", System.Globalization.NumberStyles.Integer,
-                                      System.Globalization.CultureInfo.InvariantCulture, out i))
-                        return Refuse("target: the leg named no destination");
-                    if (pl.destinations == null || i < 0 || i >= pl.destinations.Count)
-                        return Refuse($"target: destination {i} is not on plan '{id}' here ({pl.destinations?.Count ?? 0} of them)");
-                    string item = p.StrValue ?? "";
-                    if (item.Length == 0) return Refuse("target: the leg named no item");
-                    var dst = pl.destinations[i];
-                    if (dst.stockTargets == null) return Refuse("target: the destination holds no target list");
-                    int want = p.IntValue < 0 ? 0 : (p.IntValue > MaxTargetAmount ? MaxTargetAmount : p.IntValue);
-                    BigAmbitions.Items.ItemAmountTarget? row = null;
-                    foreach (var t in dst.stockTargets) if (t != null && t.itemName == item) { row = t; break; }
-                    if (want == 0) { if (row != null) dst.stockTargets.Remove(row); return true; }
-                    if (row == null) { row = new BigAmbitions.Items.ItemAmountTarget(item); dst.stockTargets.Add(row); }
-                    row.targetAmount = want;
+                    // MATCH BY ADDRESS KEY, first unused match in order: a row that is still wanted keeps its
+                    // existing object (and its runtime state) wherever it has moved to in the list.
+                    var spare = new List<Entities.LogisticsManagerPlanDestination>(pl.destinations);
+                    var made = new List<Entities.LogisticsManagerPlanDestination>();
+                    for (int i = 0; i < p.Destinations.Count; i++)
+                    {
+                        Entities.LogisticsManagerPlanDestination? dst = null;
+                        for (int k = 0; k < spare.Count; k++)
+                        {
+                            if (spare[k] == null || !Same(KeyOf(spare[k].deliveryTargetAddress), keys[i])) continue;
+                            dst = spare[k]; spare.RemoveAt(k); break;
+                        }
+                        if (dst == null)
+                            dst = new Entities.LogisticsManagerPlanDestination { isUiCollapsed = false, deliveryTargetAddress = addrs[i] };
+                        if (dst.stockTargets == null) dst.stockTargets = new List<BigAmbitions.Items.ItemAmountTarget>();
+                        SetStockTargets(dst, p.Destinations[i]);
+                        made.Add(dst);
+                    }
+                    // The SAME list instance: the pane, the plan's own delivery run and the save all hold it.
+                    pl.destinations.Clear();
+                    pl.destinations.AddRange(made);
                     return true;
                 }
             }
             Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (logistics {op}): no such op.");
             return Refuse($"logistics: no op '{op}'");
+        }
+
+        /// <summary>B3.  Re-seat one destination's stock targets from the leg's copy of that row, with the
+        /// product row's own rules: an empty item name is not a target, the amount is clamped to the pane's
+        /// ceiling, and ZERO IS THE ABSENCE OF A TARGET (the pane removes the entry when the field reaches
+        /// zero, LogisticsManagerPlanUI.cs:376-379).  An ItemAmountTarget already on the row for the same
+        /// item is RE-USED rather than replaced, exactly as the old `target` op did.</summary>
+        private static void SetStockTargets(Entities.LogisticsManagerPlanDestination dst, PwLogisticsDestination? want)
+        {
+            var keep = new List<BigAmbitions.Items.ItemAmountTarget>();
+            foreach (var t in (want == null ? null : want.StockTargets) ?? new List<PwItemOrderLine>())
+            {
+                if (t == null || string.IsNullOrEmpty(t.ItemName)) continue;
+                int amount = t.Amount < 0 ? 0 : (t.Amount > MaxTargetAmount ? MaxTargetAmount : t.Amount);
+                if (amount == 0) continue;
+                bool already = false;
+                foreach (var k in keep) if (k != null && k.itemName == t.ItemName) { already = true; break; }
+                if (already) continue;                       // a duplicated item name is one target, not two
+                BigAmbitions.Items.ItemAmountTarget? row = null;
+                foreach (var e in dst.stockTargets) if (e != null && e.itemName == t.ItemName) { row = e; break; }
+                if (row == null) row = new BigAmbitions.Items.ItemAmountTarget(t.ItemName);
+                row.targetAmount = amount;
+                keep.Add(row);
+            }
+            dst.stockTargets.Clear();
+            dst.stockTargets.AddRange(keep);
         }
 
         /// <summary>The pane's own ceiling on a stock target (LogisticsManagerPlanUI.cs:38/:367-369).</summary>

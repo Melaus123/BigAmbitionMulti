@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using HarmonyLib;
 using Buildings;
 using Helpers;
@@ -12020,6 +12020,57 @@ namespace BigAmbitionsMP
                     return false;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] partnership dialog: {ex.Message}"); return true; }
+            }
+        }
+
+        /// <summary>HQ-PARITY-5 C3, THE PARTNER'S SOURCE PRODUCTS.  For a WAREHOUSE destination the pane's
+        /// product picker lists `warehouse.GetProducts()` of the plan's SOURCE building AS THIS MACHINE HOLDS
+        /// IT (decompile UI.Smartphone.Apps.BizMan.LogisticsManagers/LogisticsManagerPlanUI
+        /// .GetListOfAvailableProducts :471-495, the branch at :479-485), plus the imports and the targets
+        /// already set.  A co-member's replica of a partner's warehouse has no pallets, so that call answers
+        /// nothing and the picker draws empty - HQ-PARITY-2 P1 carried the COUNTS, never the list.  The
+        /// OWNER's list travels on the plan DTO now (PwLogisticsPlan.SourceProducts) and is appended here, on
+        /// a DISPLAY plan only, under the game's OWN two conditions for that branch: the destination is a
+        /// warehouse AND the plan has a source address (:479-489).  FOLD b G7 (review): CanProductBeDelivered
+        /// is NOT applied - the game's warehouse branch does not filter the warehouse's own products with it
+        /// (only the import/export branch does, :491-495), and Warehouse.GetProducts already yields retail
+        /// products and bags only (Entities/Warehouse.cs:35-46), so filtering here dropped names the owner's
+        /// own pane shows.  Nothing is drawn and nothing is removed - the postfix only adds names the result does not already hold, and a throw leaves
+        /// __result exactly as the game built it.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI),
+                      "GetListOfAvailableProducts", new[] { typeof(Entities.LogisticsManagerPlanDestination) })]
+        public static class Patch_LogisticsProducts_OwnerSourceList
+        {
+            /// <summary>One INFO per plan id, so a picker that redraws on every collapse does not repeat.</summary>
+            static readonly System.Collections.Generic.HashSet<string> _logged =
+                new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+
+            static void Postfix(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI __instance,
+                                Entities.LogisticsManagerPlanDestination destination,
+                                ref System.Collections.Generic.List<string> __result)
+            {
+                try
+                {
+                    if (__instance == null || destination == null || __result == null) return;
+                    var plan = __instance._currentPlan;
+                    if (plan == null || !CompanyLists.IsDisplayPlan(plan)) return;
+                    var reg = BuildingHelper.GetBuildingRegistration(destination.deliveryTargetAddress);
+                    if (reg == null || reg.GetBuildingType() != "ba:buildingtype_warehouse") return;   // the game's own :479 branch
+                    if (plan.targetAddress == null) return;                                            // and its :481 guard
+                    string id = plan.id ?? "";
+                    var dto = CompanyPlans.LogisticsDtoOf(id);
+                    if (dto == null || dto.SourceProducts == null) return;
+                    int added = 0;
+                    foreach (var item in dto.SourceProducts)
+                    {
+                        if (string.IsNullOrEmpty(item) || __result.Contains(item)) continue;
+                        __result.Add(item);
+                        added++;
+                    }
+                    if (_logged.Add(id))
+                        Plugin.Logger.LogInfo($"[Plans] logistics products for display plan {id}: {added} added from the owner's source building.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics product list: {ex.Message}"); }
             }
         }
 

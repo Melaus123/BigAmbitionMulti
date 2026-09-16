@@ -727,6 +727,12 @@ namespace BigAmbitionsMP
         public PresetInfo? Preset { get; set; }        // v18 7d uniforms: "uniformimport" — the helper's own preset, copied into the owner's save
         public float   Estimate  { get; set; }         // wave 4 (D21): "mergersellall" — the QUOTE the runner answered with. The runner recomputes at the commitment and sells ONLY if the two still match (0.005); otherwise it refuses and re-quotes, so the figure the player confirmed is the figure charged
         public PwLogisticsPlan? Plan { get; set; }     // wave 4: "mergerplan" — the whole plan, replace-by-id on the target
+        /// <summary>HQ-PARITY-5 B1, ADDITIVE (Version stays 23; an older sender leaves it null, and only the
+        /// logistics "destset" op reads it).  THE WHOLE DESIRED DESTINATION LIST of one logistics plan.  The
+        /// index ops it replaces (destadd/destremove/destchange/target) named a row by its position in the
+        /// SENDER's snapshot, so any gap to the owner's live list landed the edit on the wrong destination;
+        /// the list travels entire instead and the runner matches it by address key.</summary>
+        public List<PwLogisticsDestination>? Destinations { get; set; }
 
         // -- MERGER PHASE 4c PART 2a (D20-6): the PLAN-EDIT leg for the four non-logistics HQ families.
         // One mechanism for all four: the member's pane commit becomes {Family, PlanId, PlanOp, EditSeq}
@@ -3802,6 +3808,14 @@ namespace BigAmbitionsMP
         /// on the ordinary dirty cadence when deliveries or sales move stock; a plan COMMIT publishes
         /// urgently (HQ-PARITY-1 P5), so the figures beside an edit are at most 2 s old.</summary>
         public List<PwStockLine> Stock { get; set; } = new();
+        /// <summary>HQ-PARITY-5 C1, ADDITIVE (an older sender leaves it empty; Version stays 23).  Every
+        /// product the SOURCE building offers, read on the OWNER's machine as
+        /// `Entities.Warehouse.GetProducts()` (Entities/Warehouse.cs:35) - exactly the call the pane's own
+        /// product list makes for a WAREHOUSE destination (LogisticsManagerPlanUI
+        /// .GetListOfAvailableProducts :483-485).  A co-member's replica of a partner warehouse holds no
+        /// pallets, so that call answers an empty list there and the pane says "no products available"; the
+        /// owner's list travels instead.  HQ-PARITY-2 P1 carried the COUNTS (Stock), not the names.</summary>
+        public List<string> SourceProducts { get; set; } = new();
     }
 
     /// <summary>HQ-PARITY-1 P2: one row of PricingManagerPlan.cachedSuggestions (decompile

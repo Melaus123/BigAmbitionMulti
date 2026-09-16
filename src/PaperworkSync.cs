@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 
 namespace BigAmbitionsMP
 {
@@ -1313,7 +1313,8 @@ namespace BigAmbitionsMP
         /// of reading its own replica.  Deliveries and sales move these figures on the ordinary dirty cadence
         /// (30 s); a plan COMMIT publishes urgently (HQ-PARITY-1 P5), so the numbers beside an edit are at
         /// most 2 s old.  NOT part of PlanToDto: that DTO's serialised shape is the edit dedupe, and a stock
-        /// tick must never read as somebody's edit.</summary>
+        /// tick must never read as somebody's edit.  HQ-PARITY-5 C2 adds a THIRD thing a co-member cannot
+        /// compute: the source building's product LIST, filled below from the same call the pane makes.</summary>
         public static void FillLogisticsNumbers(PwLogisticsPlan pp, Buildings.Office.Headquarters.LogisticsManagerPlan pl)
         {
             if (pp == null || pl == null) return;
@@ -1325,7 +1326,30 @@ namespace BigAmbitionsMP
                 string wkey = SafeKey(pl.targetAddress);
                 if (wkey.Length == 0) return;
                 var reg = Helpers.BuildingHelper.GetBuildingRegistration(pl.targetAddress);
-                if (reg == null || reg.itemInstances == null) return;
+                if (reg == null) return;
+                // HQ-PARITY-5 C2: the PRODUCT LIST of the source building, read with the call the pane's own
+                // branch makes on the owner (LogisticsManagerPlanUI.GetListOfAvailableProducts :483-485 -
+                // `GetBuildingRegistration(_currentPlan.targetAddress) is Entities.Warehouse w` then
+                // `w.GetProducts()`).  On a co-member the replica holds no pallets, so that same call answers
+                // an empty list and the destination's product picker says there is nothing to deliver.  A
+                // registration that is NOT an Entities.Warehouse is exactly what the game's own `is` test
+                // rejects, so it publishes nothing here either and the pane keeps the game's own answer
+                // (imports plus the positive targets).  FOLD b G6 (review): that is NOT the factory case -
+                // BuildingHelper.cs:154 builds `new Warehouse()` for EVERY ba:buildingtype_warehouse
+                // registration, factories included, and LogisticsManagerPlan.cs:58 casts a plan's source
+                // straight to Warehouse - so a factory plan's source IS a Warehouse and DOES publish its
+                // product list here.  What falls out of this branch is a source that is not a
+                // warehouse-type building at all.
+                if (reg is Entities.Warehouse srcWarehouse)
+                {
+                    try
+                    {
+                        foreach (var name in srcWarehouse.GetProducts())
+                            if (!string.IsNullOrEmpty(name)) pp.SourceProducts.Add(name);
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics products for plan {pl.id}: {ex.Message}"); }
+                }
+                if (reg.itemInstances == null) return;
                 var totals = new Dictionary<string, int>(StringComparer.Ordinal);
                 foreach (var ii in reg.itemInstances.Values)
                 {
