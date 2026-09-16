@@ -4572,7 +4572,12 @@ namespace BigAmbitionsMP
             /// the copy exactly as it now stands as the baseline every later edit is diffed against.  The
             /// commit points that remain are UpdateSelectedBusiness, OnChangedWarehouse, ChangeLogisticsManager
             /// and SaveGameManager.MarkChange outside a load.</summary>
-            static void Prefix() { CompanyLists.LoadingPlan = true; }
+            /// <summary>HQ-PARITY-7 R2: one number per LoadPlan.  The pallet-count prefix says ONCE per load
+            /// what the stock substitution decided; raised here in the Prefix so it is already this load's
+            /// number by the time the pane draws its product rows.</summary>
+            internal static int LoadPlanSerial;
+
+            static void Prefix() { LoadPlanSerial++; CompanyLists.LoadingPlan = true; }
 
             static void Finalizer() { CompanyLists.LoadingPlan = false; }
 
@@ -4761,7 +4766,7 @@ namespace BigAmbitionsMP
                     if (key.Length == 0) return true;
                     int count;
                     if (CompanyPlans.LogisticsPaneTracked && CompanyPlans.ScopedStock(key, resourceName, out count))
-                    { __result = count; return false; }
+                    { NoteStockDuringLoadPlan(key, resourceName, count); __result = count; return false; }   // R2
                     // HQ-PARITY-3 A7 — THE SECOND GATE, PURCHASING.  PurchasingAgentProductModel.UpdateWarehouse
                     // (decompile :66-70) counts LOCAL pallets in the product's assigned warehouse, so a
                     // partner's purchasing rows drew this machine's stale replica.  The gate is the same shape
@@ -4771,10 +4776,40 @@ namespace BigAmbitionsMP
                     // only for the pane's OWN caller, PurchasingAgentProductModel.UpdateWarehouse.
                     if (CompanyPlans.PurchasingModelScope && CompanyPlans.ScopedPurchasingStock(key, resourceName, out count))
                     { __result = count; return false; }
+                    if (CompanyPlans.LogisticsPaneTracked) NoteStockDuringLoadPlan(key, resourceName, null);   // R2
                     NoteStockNotSubstituted(address, resourceName, key);   // HQ-PARITY-6 P3
                     return true;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock: {ex.Message}"); return true; }
+            }
+
+            /// <summary>HQ-PARITY-7 R2 - ONE LINE PER LOADPLAN SAYS WHAT THE SUBSTITUTION DECIDED.  The pane
+            /// asks this counter once per listed product (LogisticsManagerPlanUI.cs:296), so a line per call
+            /// is a flood, and the once-per-pair miss line below stays silent whenever the figures are wrong
+            /// for a reason its own test does not cover - which is how the R1 failure went unrecorded.  This
+            /// says, once for each LoadPlan, which plan the pane was holding, whether it was still TAGGED,
+            /// whether the owner's DTO was found for its id, how many stock lines that DTO carried and what
+            /// the first product's figure came out as.  The serial compare is the FIRST thing tested after
+            /// the cheap pane flag, so on every other call nothing is asked and no string is built.</summary>
+            private static int _lastStockLogSerial = -1;
+
+            private static void NoteStockDuringLoadPlan(string key, string itemName, int? count)
+            {
+                try
+                {
+                    if (!CompanyPlans.LogisticsPaneTracked) return;
+                    int serial = Patch_LogisticsPlanLoad_MergerRoute.LoadPlanSerial;
+                    if (_lastStockLogSerial == serial) return;
+                    _lastStockLogSerial = serial;           // fold b: claim the serial first, so a pane that is
+                    var pl = CompanyPlans.PaneDisplayPlan(); // not a partner's copy costs ONE read per LoadPlan
+                    if (pl == null) return;                 // not a partner's copy even by id - the miss line speaks
+                    string id = pl.id ?? "";
+                    var dto = string.IsNullOrEmpty(id) ? null : CompanyPlans.LogisticsDtoOf(id);
+                    Plugin.Logger.LogInfo($"[Plans] stock during LoadPlan #{serial} of {id} at {key}: "
+                        + $"display={CompanyLists.IsDisplayPlan(pl)} dto={(dto == null ? "missing" : "found")} "
+                        + $"lines={dto?.Stock?.Count ?? 0} '{itemName}' -> {(count.HasValue ? count.Value.ToString() : "vanilla")}");
+                }
+                catch { }
             }
         }
 
@@ -4785,7 +4820,8 @@ namespace BigAmbitionsMP
         /// after a destination removal, with no evidence either way. This says why, ONCE per plan-and-address
         /// pair. Cost: nothing while no partner plan is on screen (PaneDisplayPlan answers null on a
         /// registered-pane miss or a hidden pane before anything is allocated), and the message strings are
-        /// built only on a genuine miss.
+        /// built only on a genuine miss.  HQ-PARITY-7 R2: a null answer from a pane that IS up is no longer
+        /// silence either - it is the R1 failure itself, and it gets its own once-per-address line.
         /// FOLD b H3: the pair is the KEY, not a concatenated string - the dedupe test now runs before any
         /// allocation at all, and before ScopedStockReason is asked (that call does real work to word the
         /// reason, and on a pane the player leaves open it was being paid on every product of every frame
@@ -4804,9 +4840,21 @@ namespace BigAmbitionsMP
             {
                 if (MergerFlip.FlippedCount == 0) return;
                 var pl = CompanyPlans.PaneDisplayPlan();
-                if (pl == null || pl.targetAddress == null) return;
                 if (key == null) { try { key = GameStateReader.AddressKey(address); } catch { return; } }
                 if (string.IsNullOrEmpty(key)) return;
+                if (pl == null)
+                {
+                    // HQ-PARITY-7 R2: THE MISS THAT SAID NOTHING.  A logistics pane that is up while the
+                    // merger is flipped, holding a plan this mod does not recognise as a partner's copy, took
+                    // the early return here - which is exactly the R1 failure, drawn from the empty local
+                    // replica in silence.  Same once-per-pair budget, with an empty id as the pair's id half.
+                    if (!CompanyPlans.LogisticsPaneTracked) return;
+                    if (_stockMissLogged.Contains(("?", key))) return;   // fold b: its own slot, not an empty-id plan's
+                    _stockMissLogged.Add(("?", key));
+                    Plugin.Logger.LogInfo($"[Plans] logistics stock NOT substituted at {key}: pane plan not recognised as a partner copy");
+                    return;
+                }
+                if (pl.targetAddress == null) return;
                 string tkey = ""; try { tkey = GameStateReader.AddressKey(pl.targetAddress); } catch { }
                 if (!string.Equals(tkey, key, StringComparison.OrdinalIgnoreCase)) return;   // some other building's count
                 string id = pl.id ?? "";
@@ -4874,7 +4922,8 @@ namespace BigAmbitionsMP
         /// (a) a merger is up and this machine is a member - one int compare, which is the whole cost off a
         /// session; (b) the logistics pane object this mod registered in the LoadPlan postfix above is alive
         /// and active in the hierarchy; (c) its `_currentPlan` (read live, LogisticsManagerPlanUI.cs:71) is a
-        /// tagged display copy.  Only then does it cost a dictionary lookup and one JSON signature, and only
+        /// partner's copy - tagged, or (HQ-PARITY-7 R1) its id has a DTO from an owner whose overlay is not
+        /// suspended here.  Only then does it cost a dictionary lookup and one JSON signature, and only
         /// while a PARTNER's logistics pane is open - and RouteDisplayPlanIfChanged is a no-op when the shape
         /// is unchanged (the `_lastSentPlan` early return), so a plain redraw sends nothing.</summary>
         [HarmonyPatch(typeof(SaveGameManager), nameof(SaveGameManager.MarkChange))]

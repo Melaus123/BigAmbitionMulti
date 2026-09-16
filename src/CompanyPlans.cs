@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using Buildings.Office.Headquarters;
 using Entities;          // ImportPartnership lives here, not with the four HQ plan types
 using Helpers;
@@ -2954,11 +2954,21 @@ namespace BigAmbitionsMP
         /// false off a merger and false until a logistics pane has drawn at least once on this machine.</summary>
         public static bool LogisticsPaneTracked => MergerFlip.FlippedCount != 0 && _paneUI != null;
 
-        /// <summary>The plan the logistics pane is showing RIGHT NOW, if it is a PARTNER's display copy.  A
+        /// <summary>The plan the logistics pane is showing RIGHT NOW, if it is a PARTNER's copy.  A
         /// LIVE read of the pane's own `_currentPlan` (LogisticsManagerPlanUI.cs:71) - not a copy taken at
         /// draw time - so the answer is the plan as it stands at the moment of the question, which is what
         /// the MarkChange commit seam needs.  Null = no pane, a hidden pane, or one of this machine's own
-        /// plans.</summary>
+        /// plans.
+        /// HQ-PARITY-7 R1 - RECOGNISED BY ITS ID, NOT ONLY BY OBJECT IDENTITY.  The identity tag that
+        /// CompanyLists.IsDisplayPlan tests is carried by the plan OBJECT, so a copy LIFTED by a re-install
+        /// keeps its id but loses the tag, and the hands-on run had every stock figure drop to 0 until the
+        /// plan was re-selected - silently, because the miss diagnostic is gated on the very test that
+        /// failed.  THE WINDOW: the game's destination remove handler calls `LoadPlan(_currentPlan)` at once
+        /// (decompile LogisticsManagerDestinationUI.cs:57-62) while the owner's urgent bundle re-installs the
+        /// copies about two seconds later, so for those seconds the pane holds an object the installer has
+        /// already replaced.  A published DTO for the same id is therefore the second way in, and it can
+        /// never admit one of this machine's OWN plans: Receive drops its own pid before anything reaches
+        /// `_byOwner` (:85), so an own plan has no DTO here at all.</summary>
         public static Buildings.Office.Headquarters.LogisticsManagerPlan? PaneDisplayPlan()
         {
             try
@@ -2969,7 +2979,21 @@ namespace BigAmbitionsMP
                     _paneCurrentPlanField = ui.GetType().GetField("_currentPlan", BindingFlags.Instance | BindingFlags.NonPublic);
                 var pl = _paneCurrentPlanField == null
                        ? null : _paneCurrentPlanField.GetValue(ui) as Buildings.Office.Headquarters.LogisticsManagerPlan;
-                if (pl == null || !CompanyLists.IsDisplayPlan(pl)) return null;
+                if (pl == null) return null;
+                // R1 (fold b/c, review HIGH + re-check): the id fallback must never admit a plan this
+                // machine RUNS.  While it stands in for an absent partner (MergerAbsence), that partner's
+                // REAL plans are installed here under the same ids - their live pallets are the truth, not
+                // the absent owner's frozen published figures, which _byOwner still holds.  The authoritative
+                // state is MergerAbsence's own stand-in registry, keyed by the headquarters address: the
+                // _suspended set is filled only when the owner's bundle arrived BEFORE the absence mark
+                // (SuspendOwner returns early otherwise), so it alone cannot be the gate.
+                if (!CompanyLists.IsDisplayPlan(pl))
+                {
+                    if (string.IsNullOrEmpty(pl.id)) return null;
+                    string hq = ""; try { hq = KeyOf(pl.headquartersAddress); } catch { }
+                    if (hq.Length > 0 && MergerAbsence.SimulatesHere(hq)) return null;   // run here on the absent owner's behalf
+                    if (LogisticsDtoOfActive(pl.id) == null) return null;
+                }
                 return pl;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics pane read: {ex.Message}"); return null; }
@@ -2982,6 +3006,20 @@ namespace BigAmbitionsMP
             foreach (var kv in _byOwner)
                 foreach (var g in kv.Value?.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
                     if (g != null && string.Equals(g.Id, planId, StringComparison.Ordinal)) return g;
+            return null;
+        }
+
+        /// <summary>HQ-PARITY-7 fold b: the same lookup, but an owner whose overlay is SUSPENDED (this
+        /// machine stands in for them and runs their real plans) is skipped - the pane's plan is then this
+        /// machine's own to run, never a partner's copy.</summary>
+        internal static PwLogisticsPlan? LogisticsDtoOfActive(string planId)
+        {
+            foreach (var kv in _byOwner)
+            {
+                if (_suspended.Contains(kv.Key)) continue;
+                foreach (var g in kv.Value?.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
+                    if (g != null && string.Equals(g.Id, planId, StringComparison.Ordinal)) return g;
+            }
             return null;
         }
 
@@ -3674,6 +3712,34 @@ namespace BigAmbitionsMP
         public static void ReceiveRefusal(string family, string planId, string reason)
         {
             Plugin.Logger.LogWarning($"[Merger] plan-edit-refused ({family} {planId}): {reason}.");
+            // HQ-PARITY-7 R3 - A REFUSED ORDER IS SHOWN WITH THE GAME'S OWN NOTICE.  The two refusals the
+            // owner's purchasing-start check can return (:4199 / :4204) are the same two cases the game
+            // itself puts on screen when Order is pressed locally (decompile PurchasingAgentPlanUI.cs:238
+            // and :243), so the sender sees the game's own localized notice instead of a WARNING line nobody
+            // reads.  ONLY these two: every other reason stays log-only, its wording not yet settled.
+            //
+            // WHY THE MOD'S PREFIX CANNOT RUN THE GAME'S TWO CHECKS LOCALLY: the display copy's order lines
+            // DO carry the owner's warehouse key (Protocol.cs:3721 PwItemOrderLine.AssignedWarehouseKey),
+            // but it is resolved against THIS machine's registrations on install (:1844 AddrOf) and a key
+            // that does not resolve leaves exactly the null a genuinely unassigned product leaves.  A local
+            // check could not tell those apart and would refuse orders that are perfectly good at the owner,
+            // so the owner's check is the only one that can answer.
+            if (reason != null && reason.StartsWith("start: an ordered item has no warehouse assigned", StringComparison.Ordinal))
+            {
+                try { UI.Notification.Notifications.ShowError("bizman_purchasingagents_contact_notification_no_warehouse_assigned"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] refusal notice: {ex.Message}"); }
+            }
+            else if (reason != null && reason.StartsWith("start: there are no items to deliver", StringComparison.Ordinal))
+            {
+                try { UI.Notification.Notifications.ShowError("bizman_delivery_notification_no_items_to_deliver"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] refusal notice: {ex.Message}"); }
+            }
+            else if (reason != null && reason.Contains("too close to its delivery day"))
+            {
+                // The game's own notice for this rule (PurchasingAgentPlanUI.CancelOrder -> DeliveryHelper).
+                try { DeliveryHelper.ShowCantModifyContractNotification(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] refusal notice: {ex.Message}"); }
+            }
             // FOLD b2: the routed logistics op advanced the OPTIMISTIC baseline on the way out.  A refusal
             // means the runner never applied it, so that baseline is now a shape the owner never held and the
             // next diff would be taken against a lie.  Re-seed it from the last RECEIVED DTO, so the next
