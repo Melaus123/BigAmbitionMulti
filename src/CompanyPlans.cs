@@ -2073,6 +2073,24 @@ namespace BigAmbitionsMP
                     case "purchasing":  return PurchasingAgentHelper.GetAssignedPlansForHeadquarters(a).Count;
                     case "hr":          return HrManagerHelper.GetAssignedPlansForHeadquarters(a).Count;
                     case "headhunter":  return HeadhunterHelper.GetAssignedPlansForHeadquarters(a).Count;
+                    case "logistics":
+                    {
+                        // G2 (HQ-PARITY-8): the logistics drop handler indexes GetFilteredPlans()
+                        // (LogisticsManagersPlanList.cs:77-79 / :107-120) - the headquarters' plans of the
+                        // OPEN TAB only - so the warehouse/factory filter is part of the count.  The tab is
+                        // the list component's own public `currentTab`, read the way the create gate reads it.
+                        bool factory = false;
+                        try
+                        {
+                            var lst = ListOf("logistics") as UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList;
+                            factory = lst != null && (lst.currentTab ?? "").Equals("factory", StringComparison.OrdinalIgnoreCase);
+                        }
+                        catch { }
+                        int n = 0;
+                        foreach (var pl in LogisticsManagerHelper.GetAssignedPlansForHeadquarters(a))
+                            if (pl != null && pl.isFactory == factory) n++;
+                        return n;
+                    }
                 }
             }
             catch { }
@@ -3525,6 +3543,22 @@ namespace BigAmbitionsMP
         {
             try
             {
+                // G1 (HQ-PARITY-8).  A LOGISTICS row is NOT a detached overlay row: it is a tagged display
+                // INSTALL sitting in this machine's own gi.logisticsManagerPlans (CompanyLists.IsDisplayPlan),
+                // so it is never in _rowOwner/_rowInfo and the overlay test below would call a partner's plan
+                // "my own" and let the native body run on it.  The owner is read off the plan's own
+                // headquarters exactly as the hqlog lever does (:2444-2450), and no plan DTO rides along - a
+                // logistics leg carries its fields in StrValue / Destinations.
+                if (string.Equals(family, "logistics", StringComparison.Ordinal))
+                {
+                    var lg = plan as Buildings.Office.Headquarters.LogisticsManagerPlan;
+                    if (lg == null || !CompanyLists.IsDisplayPlan(lg)) { OwnEditCommitted("pane edit"); return false; }
+                    string lhq = KeyOf(lg.headquartersAddress);
+                    if (lhq.Length == 0) { Refused(family, op, lg.id ?? "?", "the plan names no headquarters here"); return true; }
+                    CompanyLists.TryOwnerOfAddress(lhq, out var lowner);
+                    if (mutate != null) { try { mutate(plan); } catch (Exception mx) { Plugin.Logger.LogWarning($"[Plans] {family} {op} display: {mx.Message}"); } }
+                    return Send(family, lg.id ?? "", lhq, lowner ?? "", op, what, null, strValue, intValue, number, flag, station);
+                }
                 if (!IsOverlayPlan(plan)) { OwnEditCommitted("pane edit"); return false; }   // my own plan: nothing changes here, but the company is watching
                 if (!_rowInfo.TryGetValue(plan, out var ri) || ri == null)
                 { Refused(family, op, "?", "the row is no longer in the registry"); return true; }
@@ -3566,10 +3600,20 @@ namespace BigAmbitionsMP
         // The arming lives exactly as long as the pane method call, confirmed or cancelled either way.
 
         private static object _confirmRow;
-        private static string _confirmFamily = "", _confirmOp = "", _confirmWhat = "";
+        private static string _confirmFamily = "", _confirmOp = "", _confirmWhat = "", _confirmValue = "";
+        // FOLD b M3: the DISPLAY write that goes with the armed edit.  A no-op by default, so the purchasing
+        // pane's own commits (which have no display leg) need no delegate and nothing here can be null.
+        private static Action<object> _confirmMutate = _ => { };
 
-        /// <summary>True = armed, the native body must run.  False = not a partner's row (nothing changes).</summary>
-        public static bool ArmConfirmRoute(string family, object plan, string op, string what)
+        /// <summary>True = armed, the native body must run.  False = not a partner's row (nothing changes).
+        /// G3 (HQ-PARITY-8): `value` is what the routed leg has to carry in StrValue - the chosen employee id
+        /// for a manager/agent dropdown whose change the GAME itself puts behind a confirmation.  It stays
+        /// empty for the purchasing pane commits, whose ops carry nothing.
+        /// FOLD b M3: `mutate` is the same DISPLAY write the direct route passes to RoutePaneEdit.  Without it
+        /// the confirmed leg dropped the optimistic copy write and the dropdown reverted at the next rebuild
+        /// until the owner published.</summary>
+        public static bool ArmConfirmRoute(string family, object plan, string op, string what, string value = "",
+                                           Action<object>? mutate = null)
         {
             try
             {
@@ -3577,14 +3621,15 @@ namespace BigAmbitionsMP
                 // that reach the routing layer HERE and not through RoutePaneEdit, so an OWN plan's confirm
                 // would otherwise publish at the 30 s cadence.  Same one hook.
                 if (!IsOverlayPlan(plan) || !_rowInfo.ContainsKey(plan)) { OwnEditCommitted("confirmed pane edit"); return false; }
-                _confirmRow = plan; _confirmFamily = family ?? ""; _confirmOp = op ?? ""; _confirmWhat = what ?? "";
+                _confirmRow = plan; _confirmFamily = family ?? ""; _confirmOp = op ?? ""; _confirmWhat = what ?? ""; _confirmValue = value ?? "";
+                _confirmMutate = mutate ?? (_ => { });
                 return true;
             }
             catch { DisarmConfirmRoute(); return false; }
         }
 
         public static void DisarmConfirmRoute()
-        { _confirmRow = null; _confirmFamily = ""; _confirmOp = ""; _confirmWhat = ""; }
+        { _confirmRow = null; _confirmFamily = ""; _confirmOp = ""; _confirmWhat = ""; _confirmValue = ""; _confirmMutate = _ => { }; }
 
         /// <summary>THE WRAPPER'S SIDE.  Null = nothing armed, leave the dialog's own callback alone.  A
         /// delegate = use this INSTEAD: the routed send, taken once so a nested dialog cannot take it twice.</summary>
@@ -3592,9 +3637,21 @@ namespace BigAmbitionsMP
         {
             object row = _confirmRow;
             if (row == null) return null;
-            string fam = _confirmFamily, op = _confirmOp, what = _confirmWhat;
+            string fam = _confirmFamily, op = _confirmOp, what = _confirmWhat, val = _confirmValue;
+            var mut = _confirmMutate;                                   // FOLD b M3: taken with the rest
             DisarmConfirmRoute();
-            return () => { try { RoutePaneEdit(fam, what, row, op); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {fam} {op} confirmed route: {ex.Message}"); } };
+            return () =>
+            {
+                try
+                {
+                    // G3: one line per family the first time a confirmed edit really leaves - the player has
+                    // just answered the GAME's own dialog on a partner's row, and the log says where it went.
+                    if (_refusalLogged.Add("confirmroute|" + fam))
+                        Plugin.Logger.LogInfo($"[Merger] {fam}: the game's own confirmation was answered on a partner's row - the edit routes to that plan's owner (once per family).");
+                    RoutePaneEdit(fam, what, row, op, val, 0, 0f, false, mut);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] {fam} {op} confirmed route: {ex.Message}"); }
+            };
         }
 
         /// <summary>CREATION (E1).  'Add plan' on a PARTNER's headquarters: nothing is added here, the runner
@@ -4049,6 +4106,11 @@ namespace BigAmbitionsMP
                 return Refuse($"{op}: plan '{id}' is a display copy here - this machine does not run it");
             switch (op)
             {
+                // G1 (HQ-PARITY-8): the pane's delete button (LogisticsManagerPlanUI.cs:239-247) deletes
+                // through the helper and mutates no plan, so the change seam never saw it - the co-member's
+                // delete of a partner's plan is this leg instead.  Mirrors purchasing's `delete` (:4326).
+                // FOLD b M4 (record only): DeletePlan FORCE-COMPLETES every in-flight delivery on this machine (LogisticsManagerHelper.cs:69-71) - the game's own behaviour when the OWNER deletes, and a routed delete is the owner deleting.
+                case "delete": LogisticsManagerHelper.DeletePlan(id); return true;
                 case "manager":
                 {
                     string eid = p.StrValue ?? "";
@@ -4200,7 +4262,15 @@ namespace BigAmbitionsMP
                 }
                 case "manager":
                     if (InjectedHere(p.StrValue)) return RefuseInjected("pricing", op, id, p.StrValue);   // r2 MAJOR-3
-                    pl.assignedEmployeeId = string.IsNullOrEmpty(p.StrValue) ? null : p.StrValue; return true;
+                    // FOLD b H2: the game changes a pricing manager through the PLAN's own calls
+                    // (PricingManagersPlanList.ChangePricingManager :237-246).  UnAssignEmployee
+                    // (PricingManagerPlan.cs:65-70) RESTORES THE SHOPS' ORIGINAL PRICES - the very thing the
+                    // unassign dialog warns about - and clears the suggestions; AssignEmployee (:57-63)
+                    // snapshots the current prices, reapplies and recomputes.  The raw field write did none
+                    // of that, so the owner did not do what the confirmed dialog promised.
+                    if (string.IsNullOrEmpty(p.StrValue)) pl.UnAssignEmployee();
+                    else pl.AssignEmployee(p.StrValue);
+                    return true;
                 case "delete":         PricingManagerHelper.DeletePlan(id); return true;
             }
             Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (pricing): unknown op '{op}'."); return Refuse($"unknown op '{op}'");
@@ -4274,7 +4344,12 @@ namespace BigAmbitionsMP
             {
                 case "agent":
                     if (InjectedHere(p.StrValue)) return RefuseInjected("purchasing", op, id, p.StrValue);   // r2 MAJOR-3
-                    ip.employeeInstanceId = p.StrValue ?? ""; return true;
+                    // FOLD b H2: ChangePurchasingAgent (PurchasingAgentsPlanList.cs:150-158) does more on the
+                    // UNASSIGN leg - ImportPartnership.UnAssignEmployee (:415-421) also stops the contract and
+                    // drops the urgent flag.  Assigning is the raw write the game itself makes.
+                    if (string.IsNullOrEmpty(p.StrValue)) ip.UnAssignEmployee();
+                    else ip.employeeInstanceId = p.StrValue;
+                    return true;
                 case "warehouse":
                 case "warehouseall":
                 {
@@ -4353,8 +4428,36 @@ namespace BigAmbitionsMP
             switch (op)
             {
                 case "manager":
+                {
                     if (InjectedHere(p.StrValue)) return RefuseInjected("hr", op, id, p.StrValue);   // r2 MAJOR-3
-                    pl.assignedEmployeeId = string.IsNullOrEmpty(p.StrValue) ? null : p.StrValue; return true;
+                    // FOLD b H2: the game's own change path (HrManagersPlanList.cs:186-256 plus
+                    // ChangeHrManager :260-267).  Every confirmed branch TRIMS BEFORE ASSIGNING: employees
+                    // past the new manager's capacity lose the plan (and their own assignedHrManagerPlanId),
+                    // and the health insurance is cancelled when the new manager's skill cannot carry it.
+                    // The member has already answered that dialog; when neither condition held both steps are
+                    // no-ops, so they run unconditionally here rather than being guessed from the wire.
+                    string? eid = string.IsNullOrEmpty(p.StrValue) ? null : p.StrValue;
+                    if (eid == null) { pl.UnAssignEmployee(); return true; }
+                    EmployeeInstance? e = null; try { e = EmployeeHelper.GetEmployeeById(eid); } catch { }
+                    if (e == null) return Refuse($"manager: no employee '{eid}' on this machine");
+                    float sk = e.GetSkillValue("ba:skill_hrmanager");
+                    int max = HrManagerHelper.CalculateMaxAssignableEmployees(sk);
+                    while (pl.assignedEmployees != null && pl.assignedEmployees.Count > 0 && pl.assignedEmployees.Count > max)
+                    {
+                        string last = pl.assignedEmployees[pl.assignedEmployees.Count - 1];
+                        try { var lost = EmployeeHelper.GetEmployeeById(last); if (lost != null) lost.assignedHrManagerPlanId = null; } catch { }
+                        pl.assignedEmployees.RemoveAt(pl.assignedEmployees.Count - 1);
+                    }
+                    if (pl.healthInsurancePlan != null
+                        && sk < HealthInsuranceHelper.GetMinSkillForPlan(pl.healthInsurancePlan.planType))
+                        pl.CancelHealthInsurancePlan();
+                    pl.AssignEmployee(eid);
+                    // ChangeHrManager :262-266: somebody who was one of the plan's OWN employees stops being
+                    // one the moment they take the plan over.
+                    if (e.assignedHrManagerPlanId == pl.id)
+                    { if (pl.assignedEmployees != null) pl.assignedEmployees.Remove(eid); e.assignedHrManagerPlanId = null; }
+                    return true;
+                }
                 case "delete":
                     // CROSS-HR-3 A3: the tags first, while the list still says who carries them; native then
                     // clears the LOCAL records as it always has.  The prefix on HrManagerPlan.Delete sees this
@@ -4530,8 +4633,42 @@ namespace BigAmbitionsMP
             switch (op)
             {
                 case "manager":
+                {
                     if (InjectedHere(p.StrValue)) return RefuseInjected("headhunter", op, id, p.StrValue);   // r2 MAJOR-3
-                    pl.assignedEmployeeId = string.IsNullOrEmpty(p.StrValue) ? null : p.StrValue; return true;
+                    // FOLD b H2: HeadhuntersPlanList.cs:131-195 plus ChangeHeadhunter :203.  Every confirmed
+                    // branch STRIPS BEFORE ASSIGNING: deal-breakers the new headhunter's recruitment points
+                    // cannot pay for are cleared, and the HR plans past its capacity are nulled out.  Both are
+                    // no-ops when the new headhunter covers them, so they run unconditionally.  Unassigning
+                    // never prompts and is the plain write the game itself makes.
+                    string? eid = string.IsNullOrEmpty(p.StrValue) ? null : p.StrValue;
+                    if (eid != null)
+                    {
+                        EmployeeInstance? e = null; try { e = EmployeeHelper.GetEmployeeById(eid); } catch { }
+                        if (e == null) return Refuse($"manager: no employee '{eid}' on this machine");
+                        float sk = e.GetSkillValue("ba:skill_headhunter");
+                        int cost = 0;
+                        if (pl.dealBreakerTypes != null)
+                            foreach (var t in pl.dealBreakerTypes)
+                            { try { var d = HeadhunterHelper.GetData(t); if (d != null) cost += d.recruitmentPointCost; } catch { } }
+                        if (pl.dealBreakerTypes != null && HeadhunterHelper.CalculateMaxDealBreakersPoints(sk) < cost)
+                            pl.dealBreakerTypes.Clear();
+                        int max = HeadhunterHelper.CalculateMaxHrPlans(sk);
+                        if (max < 0) max = 0;
+                        if (pl.assignedHrPlans != null)
+                        {
+                            // Fold c (re-check): the game trims the HR-plan slots ONLY when the new headhunter cannot
+                            // handle the plans currently held (HeadhuntersPlanList.cs:136 counts the non-empty slots;
+                            // the trims sit inside the two failed-capacity branches :143-146 / :181-184). The array is
+                            // index-addressed and may be sparse, so an unconditional trim could null a plan parked in a
+                            // high slot that the game would keep.
+                            int held = 0; foreach (var h in pl.assignedHrPlans) if (!string.IsNullOrEmpty(h)) held++;
+                            if (max < held)
+                                for (int i = max; i < pl.assignedHrPlans.Length; i++) pl.assignedHrPlans[i] = null;
+                        }
+                    }
+                    pl.assignedEmployeeId = eid;
+                    return true;
+                }
                 case "delete":  HeadhunterHelper.DeletePlan(id); return true;
                 // r2 MAJOR-5 (D3).  The recruiting tab's writes are LIVE native writes on
                 // planUI.currentPlan (HeadhuntersRecruitingTab.cs:168 skillValueTarget, :312 skillRecruiting,

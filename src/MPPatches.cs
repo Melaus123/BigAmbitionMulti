@@ -4478,6 +4478,30 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>HQ-PARITY-8 G1 — THE PANE'S DELETE BUTTON.  `LogisticsManagerPlanUI.DeletePlan`
+        /// (decompile :239-247) deletes through `LogisticsManagerHelper.DeletePlan(_currentPlan.id)` and
+        /// mutates no plan, so the MarkChange seam above has nothing to diff: a member's delete of a
+        /// partner's plan vanished locally and came back at the owner's next publish.  Gated like the HR /
+        /// pricing / headhunter delete buttons (:11408 / :11454 / :11817), and applied at the owner by
+        /// ApplyLogistics' `delete`.
+        /// ____currentPlan = '___' + '_currentPlan' (LogisticsManagerPlanUI.cs:71).</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI), "DeletePlan")]
+        public static class Patch_LogisticsPaneDelete_MergerGate
+        {
+            static bool Prefix(Buildings.Office.Headquarters.LogisticsManagerPlan ____currentPlan)
+            { try { return !CompanyPlans.RoutePaneEdit("logistics", "DeletePlan", ____currentPlan, "delete"); } catch { return true; } }
+        }
+
+        /// <summary>HQ-PARITY-8 G2 — THE PLAN-ROW DRAG.  `LogisticsManagersPlanList.OnPlanReordered` (:75-85)
+        /// is the fifth family's drop handler and was the only one unhooked; same refusal as the other four
+        /// (:10904-10931).  Row order is a display preference, so there is nothing for a route to carry.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList), "OnPlanReordered")]
+        public static class Patch_LogisticsPlanReorder_MergerGate
+        {
+            static bool Prefix(int fromIndex, int toIndex)
+            { try { return !CompanyPlans.RefuseReorder("logistics", fromIndex, toIndex); } catch { return true; } }
+        }
+
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI), "UpdateSelectedBusiness")]
         public static class Patch_LogisticsPlanDestination_MergerGate
         {
@@ -10512,6 +10536,12 @@ namespace BigAmbitionsMP
             catch { return ""; }
         }
 
+        /// <summary>HQ-PARITY-8 G3: the chosen employee, or null.  `showError: false` because a candidate the
+        /// dropdown offered is always resolvable here (the roster is built out of this machine's own
+        /// EmployeeInstances), and a miss must not raise the game's error toast.</summary>
+        private static Entities.EmployeeInstance? EmployeeOrNull(string id)
+        { try { return string.IsNullOrEmpty(id) ? null : EmployeeHelper.GetEmployeeById(id, showError: false); } catch { return null; } }
+
         /// <summary>The same, for a list of plan ids (HeadhuntersAutomaticReplacementTab._hrManagerPlansIds).</summary>
         private static string PlanEditStringAt(object instance, string field, int index)
         {
@@ -10569,12 +10599,40 @@ namespace BigAmbitionsMP
                 try
                 {
                     string who = PlanEditEmployeeId(__instance, "_pricingManagers", pricingManagerIndex);
+                    // G3 (HQ-PARITY-8): the GAME's own two conditions (PricingManagersPlanList.cs:205-230) -
+                    // unassigning a manager that has prices set, or picking one whose skill is lower than the
+                    // plan's current manager.  Both are answerable from the copy: originalStorePrices is
+                    // carried as a COUNT (CompanyPlans.BuildPricing) and PricingManagerSkillValue reads the
+                    // plan's own manager, who is replicated here.  When a confirm is due the prefix ARMS and
+                    // lets the native body run, so the player sees the game's dialog: OK routes (the shared
+                    // HudConfirm wrapper swaps the callback) and cancel re-selects the old option natively.
+                    if (plan == null) return true;   // no row to decide about: the native body owns the call
+                    // FOLD b H1: THE GAME'S OWN EQUALITY TEST COMES FIRST (PricingManagersPlanList.cs:208
+                    // - the chosen manager's id against plan.assignedEmployeeId, then an early return).
+                    // Re-picking the person already on the row opens NO dialog, so arming here would leave a
+                    // stale route sitting in wait to hijack the next confirmation anywhere in the game.
+                    if (who == (plan.assignedEmployeeId ?? "")) return true;   // who is never null - PlanEditEmployeeId returns "" for the unassigned option
+                    var emp = EmployeeOrNull(who);
+                    bool confirm = string.IsNullOrEmpty(who)
+                        ? (plan.originalStorePrices != null && plan.originalStorePrices.Count > 0)
+                        : (emp != null && emp.GetSkillValue("ba:skill_pricingmanager") < plan.PricingManagerSkillValue);
+                    // FOLD b M3: ONE delegate for both legs - the confirmed route now carries the same
+                    // display write the direct route does, so after OK the dropdown does not revert at the
+                    // next rebuild while the owner's publish is still on its way.
+                    System.Action<object> mut = row =>
+                    { var pl = row as Buildings.Office.Headquarters.PricingManagerPlan; if (pl != null) pl.assignedEmployeeId = string.IsNullOrEmpty(who) ? null : who; };
+                    if (confirm && CompanyPlans.ArmConfirmRoute("pricing", plan, "manager", "manager assignment", who, mut)) return true;
                     // H4: the runner's own write, mirrored on the DISPLAY copy so the dropdown settles at once.
-                    return !CompanyPlans.RoutePaneEdit("pricing", "manager assignment", plan, "manager", who, 0, 0f, false, row =>
-                    { var pl = row as Buildings.Office.Headquarters.PricingManagerPlan; if (pl != null) pl.assignedEmployeeId = string.IsNullOrEmpty(who) ? null : who; });
+                    return !CompanyPlans.RoutePaneEdit("pricing", "manager assignment", plan, "manager", who, 0, 0f, false, mut);
                 }
                 catch { return true; }
             }
+
+            // FOLD b H1: the dialog captures its callback synchronously inside the original (the shared
+            // HudConfirm wrapper takes the route at Show() time), so clearing the arm as this pane method
+            // returns cannot cancel a live route - it only stops a stale one outliving the call.  Same
+            // pattern as the purchasing pane's Finalizer.
+            static void Finalizer() { try { CompanyPlans.DisarmConfirmRoute(); } catch { } }
         }
 
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.HRManagers.HrManagersPlanList), "OnChangedHrManager")]
@@ -10588,12 +10646,43 @@ namespace BigAmbitionsMP
                 try
                 {
                     string who = PlanEditEmployeeId(__instance, "_hrManagers", hrManagerIndex);
+                    // G3 (HQ-PARITY-8): the GAME's three confirmations (HrManagersPlanList.cs:178-235) all
+                    // stand on the same two tests, and only when a manager is being ASSIGNED: can the new
+                    // manager hold every assigned employee, and is their skill enough for the plan's health
+                    // insurance.  DEVIATION worth knowing: the copy's assignedEmployees list drops anybody
+                    // this machine cannot resolve (CompanyPlans.BuildHr), so the head-count test can read
+                    // LOW and skip a prompt the owner would have seen; the insurance test is exact (the
+                    // agreement travels whole).  Unassigning never prompts natively, so it routes at once.
+                    if (plan == null) return true;   // no row to decide about: the native body owns the call
+                    // FOLD b H1: the game's own equality test first (HrManagersPlanList.cs:180 - the chosen
+                    // id against plan.assignedEmployeeId, then an early return).  See the pricing prefix.
+                    if (who == (plan.assignedEmployeeId ?? "")) return true;   // who is never null - PlanEditEmployeeId returns "" for the unassigned option
+                    var emp = EmployeeOrNull(who);
+                    bool confirm = false;
+                    if (emp != null)
+                    {
+                        float sk = emp.GetSkillValue("ba:skill_hrmanager");
+                        bool fits = Buildings.Office.Headquarters.HrManagerHelper.CalculateMaxAssignableEmployees(sk)
+                                    >= (plan.assignedEmployees != null ? plan.assignedEmployees.Count : 0);
+                        bool insuranceOk = plan.healthInsurancePlan == null
+                                        || sk >= Helpers.HealthInsuranceHelper.GetMinSkillForPlan(plan.healthInsurancePlan.planType);
+                        confirm = !fits || !insuranceOk;
+                    }
+                    // FOLD b M3: one delegate for both legs (see the pricing prefix).
+                    System.Action<object> mut = row =>
+                    { var pl = row as Buildings.Office.Headquarters.HrManagerPlan; if (pl != null) pl.assignedEmployeeId = string.IsNullOrEmpty(who) ? null : who; };
+                    if (confirm && CompanyPlans.ArmConfirmRoute("hr", plan, "manager", "manager assignment", who, mut)) return true;
                     // H4: the runner's own write, mirrored on the DISPLAY copy so the dropdown settles at once.
-                    return !CompanyPlans.RoutePaneEdit("hr", "manager assignment", plan, "manager", who, 0, 0f, false, row =>
-                    { var pl = row as Buildings.Office.Headquarters.HrManagerPlan; if (pl != null) pl.assignedEmployeeId = string.IsNullOrEmpty(who) ? null : who; });
+                    return !CompanyPlans.RoutePaneEdit("hr", "manager assignment", plan, "manager", who, 0, 0f, false, mut);
                 }
                 catch { return true; }
             }
+
+            // FOLD b H1: the dialog captures its callback synchronously inside the original (the shared
+            // HudConfirm wrapper takes the route at Show() time), so clearing the arm as this pane method
+            // returns cannot cancel a live route - it only stops a stale one outliving the call.  Same
+            // pattern as the purchasing pane's Finalizer.
+            static void Finalizer() { try { CompanyPlans.DisarmConfirmRoute(); } catch { } }
         }
 
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Headhunters.HeadhuntersPlanList), "OnChangedHeadhunter")]
@@ -10606,12 +10695,46 @@ namespace BigAmbitionsMP
                 try
                 {
                     string who = PlanEditEmployeeId(__instance, "_headhunters", headhunterIndex);
+                    // G3 (HQ-PARITY-8): the GAME's three confirmations (HeadhuntersPlanList.cs:124-179) stand
+                    // on two tests, and only when a headhunter is being ASSIGNED: can the new one hold every
+                    // assigned HR plan, and do its deal-breaker points cover the ones already chosen.  Both
+                    // read fields the copy carries whole (assignedHrPlans, dealBreakerTypes - BuildHeadhunter)
+                    // against static data, so the answer matches the owner's exactly.
+                    if (plan == null) return true;   // no row to decide about: the native body owns the call
+                    // FOLD b H1: the game's own equality test first (HeadhuntersPlanList.cs:127 - the chosen
+                    // id against plan.assignedEmployeeId, then an early return).  See the pricing prefix.
+                    if (who == (plan.assignedEmployeeId ?? "")) return true;   // who is never null - PlanEditEmployeeId returns "" for the unassigned option
+                    var emp = EmployeeOrNull(who);
+                    bool confirm = false;
+                    if (emp != null)
+                    {
+                        float sk = emp.GetSkillValue("ba:skill_headhunter");
+                        int held = 0;
+                        if (plan.assignedHrPlans != null)
+                            foreach (var s in plan.assignedHrPlans) if (!string.IsNullOrEmpty(s)) held++;
+                        bool fits = Buildings.Office.Headquarters.HeadhunterHelper.CalculateMaxHrPlans(sk) >= held;
+                        int cost = 0;
+                        if (plan.dealBreakerTypes != null)
+                            foreach (var t in plan.dealBreakerTypes)
+                            { try { var d = Buildings.Office.Headquarters.HeadhunterHelper.GetData(t); if (d != null) cost += d.recruitmentPointCost; } catch { } }
+                        bool pointsOk = Buildings.Office.Headquarters.HeadhunterHelper.CalculateMaxDealBreakersPoints(sk) >= cost;
+                        confirm = !fits || !pointsOk;
+                    }
+                    // FOLD b M3: one delegate for both legs (see the pricing prefix).
+                    System.Action<object> mut = row =>
+                    { var pl = row as Buildings.Office.Headquarters.HeadhunterPlan; if (pl != null) pl.assignedEmployeeId = string.IsNullOrEmpty(who) ? null : who; };
+                    if (confirm && CompanyPlans.ArmConfirmRoute("headhunter", plan, "manager", "manager assignment", who, mut)) return true;
                     // H4: the runner's own write, mirrored on the DISPLAY copy so the dropdown settles at once.
-                    return !CompanyPlans.RoutePaneEdit("headhunter", "manager assignment", plan, "manager", who, 0, 0f, false, row =>
-                    { var pl = row as Buildings.Office.Headquarters.HeadhunterPlan; if (pl != null) pl.assignedEmployeeId = string.IsNullOrEmpty(who) ? null : who; });
+                    return !CompanyPlans.RoutePaneEdit("headhunter", "manager assignment", plan, "manager", who, 0, 0f, false, mut);
                 }
                 catch { return true; }
             }
+
+            // FOLD b H1: the dialog captures its callback synchronously inside the original (the shared
+            // HudConfirm wrapper takes the route at Show() time), so clearing the arm as this pane method
+            // returns cannot cancel a live route - it only stops a stale one outliving the call.  Same
+            // pattern as the purchasing pane's Finalizer.
+            static void Finalizer() { try { CompanyPlans.DisarmConfirmRoute(); } catch { } }
         }
 
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PurchasingAgentsPlanList), "OnChangedPurchasingAgent")]
@@ -10624,12 +10747,31 @@ namespace BigAmbitionsMP
                 try
                 {
                     string who = PlanEditEmployeeId(__instance, "_purchasingAgents", purchasingAgentIndex);
+                    // G3 (HQ-PARITY-8): the GAME asks EVERY TIME an agent is assigned and never when one is
+                    // unassigned (PurchasingAgentsPlanList.cs:122-148 `bizman_purchasingagent_change_confirm`),
+                    // so the condition needs nothing off the plan at all.
+                    // FOLD b H1: the game's own equality test first (PurchasingAgentsPlanList.cs:124-128 -
+                    // the chosen id against plan.employeeInstanceId, then an early return).  Re-picking the
+                    // agent already on the row opens no dialog, so arming would leave a stale route waiting
+                    // to hijack the next confirmation.
+                    if (plan == null) return true;   // no row to decide about: the native body owns the call
+                    if (who == (plan.employeeInstanceId ?? "")) return true;   // who is never null - PlanEditEmployeeId returns "" for the unassigned option
+                    // FOLD b M3: one delegate for both legs (see the pricing prefix).
+                    System.Action<object> mut = row =>
+                    { var pl = row as Entities.ImportPartnership; if (pl != null) pl.employeeInstanceId = string.IsNullOrEmpty(who) ? null : who; };   // fold c: null on unassign, as the owner's UnAssignEmployee writes
+                    if (!string.IsNullOrEmpty(who)
+                        && CompanyPlans.ArmConfirmRoute("purchasing", plan, "agent", "agent assignment", who, mut)) return true;
                     // H4: the runner's own write, mirrored on the DISPLAY copy so the dropdown settles at once.
-                    return !CompanyPlans.RoutePaneEdit("purchasing", "agent assignment", plan, "agent", who, 0, 0f, false, row =>
-                    { var pl = row as Entities.ImportPartnership; if (pl != null) pl.employeeInstanceId = who ?? ""; });
+                    return !CompanyPlans.RoutePaneEdit("purchasing", "agent assignment", plan, "agent", who, 0, 0f, false, mut);
                 }
                 catch { return true; }
             }
+
+            // FOLD b H1: the dialog captures its callback synchronously inside the original (the shared
+            // HudConfirm wrapper takes the route at Show() time), so clearing the arm as this pane method
+            // returns cannot cancel a live route - it only stops a stale one outliving the call.  Same
+            // pattern as the purchasing pane's Finalizer.
+            static void Finalizer() { try { CompanyPlans.DisarmConfirmRoute(); } catch { } }
         }
 
         // ══ U2 (user ruling 2026-09-12, plan D37) — THE MANAGER DROPDOWN FOLLOWS THE ROW'S HEADQUARTERS ══
