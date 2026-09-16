@@ -141,8 +141,10 @@ namespace BigAmbitionsMP
                 if (b.GetComponentInParent<LoadGameCharacterEntryView>() != null) continue;   // card internals — handled per card
                 if (n.Contains("close") || n.Contains("back") || n.Contains("exit"))
                 { Rewire(b, () => { Close(); MPCanvasUI.Instance?.OnLoadWindowClosed(); }); }
+                // Shared with the bug-report folder opener: on Windows the same explorer.exe
+                // call, now with the path quoted; elsewhere (macOS) a file:/// Application.OpenURL.
                 else if (n.Contains("browse") || n.Contains("folder"))
-                { Rewire(b, () => { try { System.Diagnostics.Process.Start("explorer.exe", Path.GetFullPath(MPSaveManager.MpVersionFolder())); } catch (Exception ex) { Plugin.Logger.LogWarning($"[LoadWin] browse: {ex.Message}"); } }); }
+                { Rewire(b, () => { try { if (!MPBugReport.TryOpenFolder(Path.GetFullPath(MPSaveManager.MpVersionFolder()))) Plugin.Logger.LogWarning("[LoadWin] browse: the folder could not be opened"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[LoadWin] browse: {ex.Message}"); } }); }
                 else if (n.Contains("upgrade"))
                 { UnityEngine.Object.Destroy(b.gameObject); }
             }

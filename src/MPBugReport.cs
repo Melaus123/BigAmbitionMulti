@@ -1157,7 +1157,9 @@ namespace BigAmbitionsMP
                 "If Discord upload is configured, this report was also queued for webhook upload.\r\n");
         }
 
-        private static void TryOpenFolder(string dir)
+        /// <summary>Opens a folder in the platform's file browser. Returns false when the launch threw
+        /// (swallowed here so a missing explorer never breaks the caller; the caller may log it).</summary>
+        internal static bool TryOpenFolder(string dir)
         {
             try
             {
@@ -1165,8 +1167,9 @@ namespace BigAmbitionsMP
                     Process.Start("explorer.exe", "\"" + dir + "\"");
                 else
                     Application.OpenURL("file:///" + dir.Replace("\\", "/"));
+                return true;
             }
-            catch { }
+            catch { return false; }
         }
 
         private static bool UploadReport(string url, bool direct, string dir, string reason, string[] discordTagIds)
@@ -1432,8 +1435,11 @@ namespace BigAmbitionsMP
         // players are identified by in-game name + stable id, never by the account segment.
         // [\\/]+ (not [\\/]) so JSON-escaped paths (C:\\Users\\name) redact too; the segment
         // itself (8.3 short forms included) is replaced, everything after it is preserved.
+        // macOS home folders live under /Users/NAME - matched case-sensitively so URL paths
+        // such as /users/<id> stay; the same [\\/]+ separators as the Windows form so a
+        // JSON-escaped \/Users\/name redacts too.
         private static readonly System.Text.RegularExpressions.Regex _userPath =
-            new System.Text.RegularExpressions.Regex(@"(?i)([A-Z]:[\\/]+Users[\\/]+)([^\\/\r\n""']+)", System.Text.RegularExpressions.RegexOptions.Compiled);
+            new System.Text.RegularExpressions.Regex(@"(?i)([A-Z]:[\\/]+Users[\\/]+|(?-i:[\\/]+Users[\\/]+))([^\\/\r\n""']+)", System.Text.RegularExpressions.RegexOptions.Compiled);
         // A player's SteamID64 identifies their Steam account and can be looked up, and it reached
         // uploads three ways: MPConfig logs "Stable id: steam-<id>" into Player.log at every startup,
         // peer-log requests ship each connected player's whole Player.log, and the save-store folders

@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using BAModAPI;
 using HarmonyLib;
@@ -28,6 +29,89 @@ namespace BigAmbitionsMP
     public class ModEntry : ModBigAmbitionsBase
     {
         public static ModEntry Instance { get; private set; } = null!;
+
+        /// <summary>The three interchangeable Facepunch.Steamworks builds the game can ship
+        /// (Windows x64 / macOS+Linux / Windows x86). Same namespaces, same types.</summary>
+        private static readonly string[] SteamworksNames =
+            { "Facepunch.Steamworks.Win64", "Facepunch.Steamworks.Posix", "Facepunch.Steamworks.Win32" };
+
+        /// <summary>Re-entrancy guard: Assembly.Load of a name that is not installed raises
+        /// AssemblyResolve again, so without this the handler would call itself forever.
+        /// ThreadStatic because resolve events can arrive on more than one thread.</summary>
+        [ThreadStatic] private static bool _resolving;
+
+        /// <summary>
+        /// Runs when the loader instantiates this entry, before OnLoadAsync. This assembly is
+        /// compiled against ONE Steamworks build by name, but the Mac game ships a different
+        /// one, so a run-time resolver makes the three names interchangeable and a single DLL
+        /// loads on both platforms. On Windows the referenced Win64 assembly is always there
+        /// and resolves normally — the handler is never asked for it, so nothing changes there.
+        /// The body is wrapped: a static constructor that throws kills the whole mod.
+        /// </summary>
+        static ModEntry()
+        {
+            try { AppDomain.CurrentDomain.AssemblyResolve += ResolveSteamworks; } catch { }
+        }
+
+        /// <summary>Answers a request for any Steamworks build with whichever build is already
+        /// loaded, else tries to load one of the others. Deliberately names no Steamworks TYPE:
+        /// touching one here would need the very assembly this is trying to resolve.</summary>
+        private static Assembly? ResolveSteamworks(object sender, ResolveEventArgs args)
+        {
+            try
+            {
+                if (_resolving) return null;
+
+                string requested;
+                try { requested = new AssemblyName(args.Name).Name; } catch { return null; }
+                if (Array.IndexOf(SteamworksNames, requested) < 0) return null;   // not ours — answer at once
+
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    string loaded;
+                    try { loaded = asm.GetName().Name; } catch { continue; }
+                    if (Array.IndexOf(SteamworksNames, loaded) >= 0) return ServedBy(requested, loaded, asm);
+                }
+
+                _resolving = true;
+                try
+                {
+                    foreach (var other in SteamworksNames)
+                    {
+                        if (other == requested) continue;
+                        try
+                        {
+                            var asm = Assembly.Load(other);
+                            if (asm != null) return ServedBy(requested, other, asm);
+                        }
+                        catch { }
+                    }
+                }
+                finally { _resolving = false; }
+
+                LogBinding($"[Plugin] Steamworks binding: requested {requested}, no Facepunch.Steamworks assembly available");
+                return null;
+            }
+            catch { return null; }
+        }
+
+        private static Assembly ServedBy(string requested, string served, Assembly asm)
+        {
+            LogBinding($"[Plugin] Steamworks binding: requested {requested}, served {served}");
+            return asm;
+        }
+
+        /// <summary>The resolver can fire before Plugin's logger is up; fall back to Unity's.</summary>
+        private static void LogBinding(string line)
+        {
+            try
+            {
+                var log = Plugin.Logger;
+                if (log != null) log.LogInfo(line);
+                else UnityEngine.Debug.Log(line);
+            }
+            catch { }
+        }
 
         /// <summary>Patch classes that failed or bound nothing at load — a dead patch class is
         /// SILENT FEATURE LOSS (2026-07-09 audit: the slice-4 wallet guard shipped unapplied for two

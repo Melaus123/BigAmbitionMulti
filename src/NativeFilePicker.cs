@@ -7,7 +7,8 @@ namespace BigAmbitionsMP
 {
     /// <summary>
     /// File picker for bug-report attachments. Shows the OS "Open file" dialog OUT OF PROCESS
-    /// (via Windows PowerShell's WinForms OpenFileDialog), so it can NEVER crash the game: the
+    /// (Windows: PowerShell's WinForms OpenFileDialog; macOS: osascript's "choose file"), so it
+    /// can NEVER crash the game: the
     /// dialog lives in a separate process and never touches the game's render device or threads.
     /// The previous in-process Win32 COM dialog hard-crashed the game when shown over it (the
     /// game's main thread was blocked while a native modal dialog ran over the fullscreen surface
@@ -20,6 +21,11 @@ namespace BigAmbitionsMP
     {
         public static string[] PickBugReportAttachments()
         {
+            // macOS has no PowerShell/WinForms; same out-of-process idea, through osascript.
+            if (UnityEngine.Application.platform == UnityEngine.RuntimePlatform.OSXPlayer ||
+                UnityEngine.Application.platform == UnityEngine.RuntimePlatform.OSXEditor)
+                return PickMac();
+
             string tmp     = Path.GetTempPath();
             string stamp   = "bamp-pick-" + Guid.NewGuid().ToString("N");
             string outFile = Path.Combine(tmp, stamp + ".txt");
@@ -84,6 +90,68 @@ namespace BigAmbitionsMP
             {
                 try { if (File.Exists(ps1))     File.Delete(ps1); }     catch { }
                 try { if (File.Exists(outFile)) File.Delete(outFile); } catch { }
+            }
+        }
+
+        /// <summary>macOS half: Finder's own multi-select "choose file" sheet, run out of process
+        /// by osascript, which prints one POSIX path per line. Same contract as the Windows path —
+        /// blocks, returns only files that exist, empty array on cancel or failure.</summary>
+        private static string[] PickMac()
+        {
+            string tmp    = Path.GetTempPath();
+            string stamp  = "bamp-pick-" + Guid.NewGuid().ToString("N");
+            string script = Path.Combine(tmp, stamp + ".applescript");
+
+            try
+            {
+                File.WriteAllText(script,
+                    "set fs to choose file with prompt \"Attach files to your BigAmbitionsMP bug report\" with multiple selections allowed\n" +
+                    "set out to \"\"\n" +
+                    "repeat with f in fs\n" +
+                    "set out to out & POSIX path of f & linefeed\n" +
+                    "end repeat\n" +
+                    "return out\n");
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName               = "/usr/bin/osascript",
+                    Arguments              = "\"" + script + "\"",
+                    UseShellExecute        = false,
+                    CreateNoWindow         = true,
+                    RedirectStandardOutput = true,
+                };
+
+                string stdout;
+                using (var proc = Process.Start(psi))
+                {
+                    if (proc == null) return Array.Empty<string>();
+                    // Drain the pipe WHILE waiting: a full pipe would deadlock the wait, and a
+                    // blocking ReadToEnd before the wait would make the 180 s guard unreachable
+                    // (review 2026-09-16) - the async read completes when the process exits or is killed.
+                    var read = proc.StandardOutput.ReadToEndAsync();
+                    if (!proc.WaitForExit(180000)) { try { proc.Kill(); } catch { } return Array.Empty<string>(); }
+                    stdout = read.GetAwaiter().GetResult();
+                    if (proc.ExitCode != 0) return Array.Empty<string>();   // user cancelled
+                }
+
+                if (string.IsNullOrWhiteSpace(stdout)) return Array.Empty<string>();
+
+                var files = new List<string>();
+                foreach (var raw in stdout.Split('\n'))
+                {
+                    string p = raw.Trim();
+                    if (!string.IsNullOrWhiteSpace(p) && File.Exists(p)) files.Add(p);
+                }
+                return files.ToArray();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[BugReport] file picker failed: {ex.Message}");
+                return Array.Empty<string>();
+            }
+            finally
+            {
+                try { if (File.Exists(script)) File.Delete(script); } catch { }
             }
         }
     }
