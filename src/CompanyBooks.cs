@@ -55,8 +55,11 @@ namespace BigAmbitionsMP
         public static Taxes? LastFiledReturn;
 
         /// <summary>TAXBILL-ONE T2: true while the bill's row labels may carry a rich-text colour tag -
-        /// set from the renderer's own line template by the bill patch.  False everywhere else, and the
-        /// labels are then plain display names.</summary>
+        /// set by the bill patch from what the renderer will actually do with a label.  False everywhere
+        /// else, and the labels are then plain display names.
+        /// GAME-PATCH-0916: false on THIS game build in every case - TaxesMessage.AddPlainLine wraps a
+        /// non-key label in &lt;noparse&gt;...&lt;/noparse&gt; (decompile TaxesMessage.cs:366-375), so a tag would
+        /// print literally.  See Patch_TaxesMessage_CompanyBill.LabelsAcceptMarkup.</summary>
         public static bool TaxRowTint;
 
         /// <summary>TAXBILL-ONE T4: the anniversary day whose COMPANY assessment was declined because a
@@ -1146,8 +1149,10 @@ namespace BigAmbitionsMP
 
         /// <summary>T2: a member's DISPLAY NAME as a bill row label — the only label this build adds,
         /// and no new wording (the repossession variant already draws a plain name row with an empty
-        /// value, TaxesMessage.cs:140).  Colour-tinted only when the renderer's line template has rich
-        /// text on, which the bill patch checks off the live template before it calls CompanyReturn.</summary>
+        /// value, decompile TaxesMessage.cs:221).  Colour-tinted only when the renderer would let a
+        /// label's markup render, which the bill patch decides before it calls CompanyReturn.
+        /// GAME-PATCH-0916: it never would — AddPlainLine escapes the label (TaxesMessage.cs:366-375) —
+        /// so TaxRowTint is false and this returns the plain display name.</summary>
         public static string MemberRowLabel(string pid)
         {
             string name = "";

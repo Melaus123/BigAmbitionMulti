@@ -5528,9 +5528,12 @@ namespace BigAmbitionsMP
                     // for this building cached a null/default when no files
                     // existed yet, so subsequent UpdateSign calls would just
                     // return the cached generic and ignore our newly-written
-                    // files.  Sledgehammer Clear() forces all subsequent loads
-                    // to re-read from disk; AI logos will simply re-load via
-                    // Addressables (small async cost).
+                    // files.  Dropping just this business's PLAYER cache entries
+                    // forces its next load to re-read from disk; the game's own
+                    // AI-business entries (same name, IsPlayerBusiness false) are
+                    // left untouched.  Nothing is destroyed here and nothing that
+                    // exists today is released, so the sign keeps drawing its
+                    // current texture until the refresh queued below repaints it.
                     if (wroteLogo)
                     {
                         InvalidateLogoTextureCacheForBusiness(info.BusinessName);
@@ -5590,53 +5593,197 @@ namespace BigAmbitionsMP
         }
         private static readonly System.Collections.Generic.List<PendingLogoRefresh> _pendingLogoRefreshes = new();
 
-        // Clear LogoHelper.BusinessLogoTextures so subsequent UpdateSign calls
-        // re-load logos from disk.  Necessary after writing new logo files for
-        // a player business — without this the dictionary keeps the null/default
-        // it cached when the directory was empty (or the previous version of
-        // the texture from before the host re-customized).
+        // Prune LogoHelper's business-logo cache, BY NAME, so subsequent UpdateSign
+        // calls re-load that business's logo from disk.  Necessary after writing new
+        // logo files for a player business — without this the dictionary keeps the
+        // null/default it cached when the directory was empty (or the previous version
+        // of the texture from before the host re-customized).
         //
-        // We also Destroy() the cached Texture2D objects so Unity can't keep
-        // showing them through the sign's MaterialPropertyBlock reference.
-        // Without this, even though the dict no longer holds the texture, the
-        // sign's mesh still has it assigned and Unity will keep rendering it
-        // until the controller explicitly SetSignTextures a new one.  Destroy
-        // forces the new SetSignTexture to actually take effect.
+        // Only the PLAYER-business keys of the ONE named business are removed (never a
+        // whole-cache Clear(), never the game's AI entries), and of those only the
+        // Addressables-backed entries are Release()d — an entry holding a generated/from-disk
+        // Texture2D is dropped WITHOUT Release(), because that Release() would Destroy() the
+        // texture while signs and cards are still drawing it.  Player logos are never
+        // addressable, so nothing is actually released today.
+        // ReleaseAndRemoveLogoEntries has the full reasoning.
         private static int _logoCacheInvalidationCount = 0;
+        private static System.Reflection.FieldInfo? _businessLogosField;
+        private static bool _businessLogosFieldWarned;
+        private static System.Reflection.PropertyInfo? _businessLogoKeyNameProp;
+        private static System.Reflection.PropertyInfo? _businessLogoKeyIsPlayerProp;
+        private static System.Reflection.MethodInfo? _businessLogoEntryRelease;
+        private static System.Reflection.FieldInfo? _businessLogoEntryIsAddressable;
+        private static bool _businessLogoIsAddressableWarned;
+        private static bool _logoReleaseWarned;
+
         /// <summary>
-        /// Invalidates LogoHelper.BusinessLogoTextures.
+        /// Releases and drops the game's cached logo textures for ONE business, by name.  SHARED: this is also
+        /// what SharedShopWorkTabs.InvalidateLogoCaches calls (once per name on a rename), so the by-name walk
+        /// and the release rule live in a single place.
         ///
-        /// We can't iterate the Il2CppSystem dictionary safely through
-        /// IL2CPP-Interop (the previous round crashed the client mid-foreach,
-        /// likely a marshalling/iterator issue with the ValueTuple key type).
-        /// And we can't Destroy() the cached Texture2Ds (that caused cross-
-        /// business contamination — other signs' MaterialPropertyBlocks still
-        /// referenced those destroyed textures and rendered garbage).
+        /// GAME-PATCH-0916: the cache used to be the public LogoHelper.BusinessLogoTextures.  It is now the
+        /// PRIVATE static LogoHelper.BusinessLogos, a Dictionary(BusinessLogoKey, BusinessLogoCacheEntry) (new
+        /// decompile LogoHelper.cs:66, read back by GetBusinessLogoTexture :217-222), so it is reached by
+        /// reflection and handled as a plain IDictionary — the key struct is private, is never named here, and
+        /// is only ever asked for its BusinessName (:19) and IsPlayerBusiness (:23) properties.
         ///
-        /// Safe middle ground: call dict.Clear() — removes all entries but
-        /// doesn't destroy the texture objects.  Other signs' refs stay
-        /// alive and unchanged.  Next UpdateSign for any business: cache
-        /// miss → fresh load → SetSignTexture with the new texture → that
-        /// sign repaints.  Old textures GC naturally once nothing refers
-        /// to them.  Brief one-time perf hit (all signs re-load on next
-        /// render), nothing functionally wrong.
+        /// ONLY ADDRESSABLE ENTRIES ARE RELEASED.  BusinessLogoCacheEntry (decompile BusinessLogoCacheEntry.cs:5-33)
+        /// holds either a live Addressables handle or a plain Texture2D, and its private readonly `_isAddressable`
+        /// (:9, set from handle.IsValid() in the ctor :17) decides which.  Its parameterless Release() (:20-33)
+        /// does Addressables.Release for the handle — but for a NON-addressable entry it does
+        /// Object.Destroy(Texture) (:29-32), and the entries built by LoadLogoFile (LogoHelper.cs:267) and
+        /// StoreGeneratedTexture (:325) are exactly those.  So:
+        ///   * `_isAddressable` true  -> Release() (a handle that is dropped unreleased leaks its refcount).
+        ///   * `_isAddressable` false -> remove the dictionary entry only, NO Release().
+        /// Destroying the texture here would make that building's sign and cards draw a destroyed texture
+        /// (garbage) until the queued refresh repaints them ~0.5 s later; the game itself only ever releases a
+        /// non-addressable entry when it already has the replacement in hand (StoreGeneratedTexture
+        /// LogoHelper.cs:317-325 — release, then immediately store the new entry).  The texture simply stays
+        /// alive for whatever is still drawing it and is collected with its last reference once the reload has
+        /// replaced it, which is what the mod did before GAME-PATCH-0916 (an earlier attempt to Destroy() these
+        /// made signs render garbage).  `_isAddressable` is read by cached FieldInfo; if it cannot be read the
+        /// entry is dropped WITHOUT Release() (one warning per session) — leaking a refcount is recoverable,
+        /// destroying a live texture is not.  A failing Release() does not stop the removal (one warning per
+        /// session).
+        ///
+        /// Only the MATCHING keys are touched.  A whole-cache Clear() (what this did before) also destroyed an
+        /// unrelated sign texture that BusinessLogoGenerator happened to be generating: StoreGeneratedTexture is
+        /// replace-only (:314-320 — no entry for the key, no store, the fresh texture is Destroyed) and the
+        /// generator stores only at the very end of a multi-frame run (BusinessLogoGenerator.cs:170-172), so a
+        /// Clear() in that window left that building on its fallback logo until the game was restarted.  The same
+        /// narrow window still exists for the ONE business invalidated here — a generation in flight for this
+        /// name loses its result — which is acceptable: that business is being renamed or re-synced and is about
+        /// to re-render anyway.
+        ///
+        /// ONLY PLAYER-BUSINESS KEYS ARE TOUCHED.  The key struct also carries IsPlayerBusiness (LogoHelper.cs:23)
+        /// and the walk now requires it to be true, so an AI business of the same name keeps its entry: the mod
+        /// only ever invalidates PLAYER logos (renames, custom logos synced between machines), and those are
+        /// always non-addressable (LoadLogoFile LogoHelper.cs:267 / StoreGeneratedTexture :325).  The addressable
+        /// branch below is therefore unreachable in practice today and is kept only as a guard, in case a player
+        /// logo ever arrives through Addressables.  If the flag cannot be read the key is left alone.
+        ///
+        /// What is dropped re-loads on the next UpdateSign (a small async cost); nothing that exists today is
+        /// released, and a plain texture is left to the collector.  Textures still referenced by another
+        /// sign's MaterialPropertyBlock are NOT touched, because only this business's player keys are removed.
+        /// LogoHelper.PendingBusinessLogoLoads (:68) is deliberately LEFT ALONE: an entry there is an in-flight
+        /// load still owned by its handle, and pulling it out from under that handle would leak or
+        /// double-release the texture.
         /// </summary>
+        /// <returns>how many of this business's PLAYER cache entries were removed in total (released + dropped);
+        /// AI-business entries of the same name are not counted because they are not touched.</returns>
+        internal static int ReleaseAndRemoveLogoEntries(string businessName)
+            => ReleaseAndRemoveLogoEntries(businessName, out _, out _);
+
+        /// <summary>As <see cref="ReleaseAndRemoveLogoEntries(string)"/>, but also reports the split:
+        /// <paramref name="released"/> = Addressables-backed entries whose handle was given back (none exist
+        /// today — player logos are never addressable),
+        /// <paramref name="dropped"/> = every entry removed WITHOUT a release: non-addressable (its texture
+        /// survives until the reload replaces it), `_isAddressable` unreadable, a Release() that threw, or a
+        /// null value in the dictionary.</summary>
+        /// <returns>released + dropped.</returns>
+        internal static int ReleaseAndRemoveLogoEntries(string businessName, out int released, out int dropped)
+        {
+            released = 0;
+            dropped = 0;
+            if (string.IsNullOrEmpty(businessName)) return 0;
+            try
+            {
+                if (_businessLogosField == null)
+                    _businessLogosField = typeof(LogoHelper).GetField(
+                        "BusinessLogos", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                var dict = _businessLogosField?.GetValue(null) as System.Collections.IDictionary;
+                if (dict == null)
+                {
+                    if (!_businessLogosFieldWarned)
+                    {
+                        _businessLogosFieldWarned = true;
+                        Plugin.Logger.LogWarning("[Patcher] LogoHelper.BusinessLogos (private static) was not found — the logo texture cache cannot be invalidated, so a renamed business may keep drawing its old sign until the game is restarted.");
+                    }
+                    return 0;
+                }
+                var kill = new System.Collections.Generic.List<object>();
+                foreach (var k in dict.Keys)
+                {
+                    if (k == null) continue;
+                    if (_businessLogoKeyNameProp == null) _businessLogoKeyNameProp = k.GetType().GetProperty("BusinessName");
+                    if ((_businessLogoKeyNameProp?.GetValue(k) as string) != businessName) continue;
+                    // PLAYER entries only.  The key also carries IsPlayerBusiness (LogoHelper.cs:23); an
+                    // AI business can share the name, and its entry is the game's — releasing it would
+                    // unload a texture the mod never changed (the mod only ever invalidates player logos:
+                    // renames and custom logos synced between machines).  Read the flag the same way as
+                    // the name, through a cached PropertyInfo on the private key struct; if it cannot be
+                    // read the key is LEFT ALONE (not touching an entry is always the safe side).
+                    if (_businessLogoKeyIsPlayerProp == null) _businessLogoKeyIsPlayerProp = k.GetType().GetProperty("IsPlayerBusiness");
+                    if (_businessLogoKeyIsPlayerProp?.GetValue(k) is bool isPlayer && isPlayer) kill.Add(k);
+                }
+                foreach (var k in kill)
+                {
+                    try
+                    {
+                        var entry = dict[k];
+                        if (entry == null) dropped++;   // nothing to release, but the entry is still removed below — counted as dropped
+                        else
+                        {
+                            if (_businessLogoEntryIsAddressable == null)
+                                _businessLogoEntryIsAddressable = entry.GetType().GetField(
+                                    "_isAddressable", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                            if (_businessLogoEntryIsAddressable == null)
+                            {
+                                if (!_businessLogoIsAddressableWarned)
+                                {
+                                    _businessLogoIsAddressableWarned = true;
+                                    Plugin.Logger.LogWarning("[Patcher] BusinessLogoCacheEntry._isAddressable (private) was not found — logo cache entries are dropped without Release(), which may leak an Addressables refcount per invalidation but never destroys a texture a sign is still drawing.");
+                                }
+                                dropped++;
+                            }
+                            else if (_businessLogoEntryIsAddressable.GetValue(entry) is bool addressable && addressable)
+                            {
+                                // Unreachable today: only player-business keys get here and a player logo is
+                                // never addressable.  Kept as a guard in case one ever arrives that way.
+                                if (_businessLogoEntryRelease == null)
+                                    _businessLogoEntryRelease = entry.GetType().GetMethod("Release", System.Type.EmptyTypes);
+                                _businessLogoEntryRelease?.Invoke(entry, null);
+                                released++;
+                            }
+                            else
+                            {
+                                // Non-addressable: Release() would Object.Destroy(Texture) and the sign would
+                                // draw garbage until the queued refresh repaints it.  Drop the entry only.
+                                dropped++;
+                            }
+                        }
+                    }
+                    catch (Exception rex)
+                    {
+                        if (!_logoReleaseWarned)
+                        {
+                            _logoReleaseWarned = true;
+                            Plugin.Logger.LogWarning($"[Patcher] BusinessLogoCacheEntry.Release() failed for '{businessName}' — the entry is still dropped, but its Addressables handle is not given back: {rex.GetType().Name}: {rex.Message}");
+                        }
+                        dropped++;  // removed, but nothing was given back
+                    }
+                    dict.Remove(k);
+                }
+                return released + dropped;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ReleaseAndRemoveLogoEntries({businessName}): {ex.GetType().Name}: {ex.Message}"); return 0; }
+        }
+
+        /// <summary>Invalidates the game's business-logo texture cache for ONE business after its logo or name
+        /// changed.  All of the work — the by-name walk over PLAYER keys only, why only Addressables-backed
+        /// entries are Release()d, and why the cache is no longer Clear()ed wholesale — is in
+        /// ReleaseAndRemoveLogoEntries; this wrapper
+        /// only counts the invalidations and logs the first three plus every fiftieth, with the
+        /// released/dropped split.</summary>
         public static void InvalidateLogoTextureCacheForBusiness(string businessName)
         {
             if (string.IsNullOrEmpty(businessName)) return;
-            try
+            ReleaseAndRemoveLogoEntries(businessName, out int released, out int dropped);
+            _logoCacheInvalidationCount++;
+            if (_logoCacheInvalidationCount <= 3 || _logoCacheInvalidationCount % 50 == 0)
             {
-                var dict = LogoHelper.BusinessLogoTextures;
-                if (dict == null) { Plugin.Logger.LogWarning("[Patcher] BusinessLogoTextures is null."); return; }
-                int sizeBefore = dict.Count;
-                dict.Clear();
-                _logoCacheInvalidationCount++;
-                if (_logoCacheInvalidationCount <= 3 || _logoCacheInvalidationCount % 50 == 0)
-                {
-                    Plugin.Logger.LogInfo($"[Patcher] LogoHelper cache cleared for '{businessName}' update (was {sizeBefore} entry(s); op #{_logoCacheInvalidationCount}).");
-                }
+                Plugin.Logger.LogInfo($"[Patcher] LogoHelper cache invalidated for '{businessName}' update (released={released} dropped={dropped}; op #{_logoCacheInvalidationCount}).");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] InvalidateLogoTextureCacheForBusiness({businessName}): {ex.GetType().Name}: {ex.Message}"); }
         }
 
         public static void DrainPendingLogoRefreshes()

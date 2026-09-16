@@ -5265,9 +5265,15 @@ namespace BigAmbitionsMP
             {
                 var t = VehicleManager.FindGameType("CityMapFilters");
                 if (t == null) return null;
+                // GAME-PATCH-0916: ApplyFilters has TWO overloads now — the public no-arg pass starter
+                // (decompile CityMapFilters.cs:499) and a private per-building ApplyFilters(CityBuildingController)
+                // (:567) the deferred work queue pumps. A name-only lookup threw AmbiguousMatchException and this
+                // whole patch class failed at startup (host log 2026-09-16 12:49). The dump wants the pass
+                // starter, so the empty argument list pins it.
                 return t.GetMethod("ApplyFilters",
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                  | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly);
+                  | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly,
+                    null, Type.EmptyTypes, null);
             }
 
             // Round-98 gates (user-approved; the dump measured ~53ms/call): only when a human
@@ -9479,7 +9485,14 @@ namespace BigAmbitionsMP
                     try { own = Helpers.TaxHelper.GetCurrentTaxesToPay(); } catch { }
                     float partners = CompanyBooks.PartnerTaxCurrentDue();
                     if (partners <= 0f) return;                          // nothing to add: leave the page alone
-                    ___taxesOwedAmountLabel.text = (own + partners).ToShortCurrencyFormat();
+                    // GAME-PATCH-0916 F5: the EconoView taxes page writes every figure with its own
+                    // TaxCalculationHelper.ToCurrencyFormat (decompile EconoViewTaxes.cs:157/165/174 - full
+                    // "$1,234.56"), so a short-form company total sat next to full-form native figures. Use the
+                    // page's own formatter. It takes a decimal (TaxCalculationHelper.cs:133) and our running
+                    // totals are floats, so the game's own float->decimal rounding does the conversion
+                    // (RoundCurrency, :118 - exactly what ToRoundedCurrencyFormat :128 does).
+                    ___taxesOwedAmountLabel.text = Helpers.TaxCalculationHelper.ToCurrencyFormat(
+                        Helpers.TaxCalculationHelper.RoundCurrency(own + partners));
                     // m-e (review r3): with no own bill the page had just written its own "no taxes
                     // due" / "taxes paid" wording in darkGreen (EconoViewTaxes.cs:112/113 and
                     // 122/123).  Overwriting the wording with a figure while leaving the green read as
@@ -9530,7 +9543,10 @@ namespace BigAmbitionsMP
                     {
                         { "day",     Helpers.TaxHelper.GetCurrentTaxesDueDay().ToString() },
                         { "address", Streets.AddressHelper.ToFormattedString(irs) },
-                        { "amount",  (own + partners).ToCurrencyFormat() },
+                        // GAME-PATCH-0916 F5: the native body formats this entry with
+                        // TaxCalculationHelper.ToRoundedCurrencyFormat (decompile Helpers/TaxHelper.cs:203), not
+                        // the float extension - match it so the company figure reads like the native warning.
+                        { "amount",  Helpers.TaxCalculationHelper.ToRoundedCurrencyFormat(own + partners) },
                     };
                     GameManager.SendTextMessage(contact, "ba:messagetype_contacts_taxes_message_warning", data);
                     sent = true;   // POPUPS-1 review MINOR-4: from here on native must NOT send a second warning
@@ -9646,12 +9662,12 @@ namespace BigAmbitionsMP
         /// <summary>TAXBILL-ONE T2 (user ruling 2026-09-12): under a merger the bill the IRS sends IS the
         /// company's return - every member's businesses, deductions and properties on one sheet, one
         /// total, equal to what the shared wallet will pay.  Nothing new is drawn: the renderer is the
-        /// game's own (UI.Smartphone.Apps.Contacts/TaxesMessage.SetData, decompile :71-80) and it is
+        /// game's own (UI.Smartphone.Apps.Contacts/TaxesMessage.SetData, decompile :107-118) and it is
         /// simply handed a DIFFERENT Taxes object.  ContactsApp.cs:495-499 re-runs SetData from the
         /// STORED message on every open of the conversation, so the swap is never persisted - and a
         /// member who files later completes the bill by itself at the next open.
         /// The only label this build adds is a member's DISPLAY NAME, which the repossession variant
-        /// already draws as a plain row with an empty value (TaxesMessage.cs:140).</summary>
+        /// already draws as a plain row with an empty value (TaxesMessage.cs:221).</summary>
         [HarmonyPatch(typeof(UI.Smartphone.Apps.Contacts.TaxesMessage),
                       nameof(UI.Smartphone.Apps.Contacts.TaxesMessage.SetData), new Type[] { typeof(Entities.Taxes) })]
         public static class Patch_TaxesMessage_CompanyBill
@@ -9660,25 +9676,17 @@ namespace BigAmbitionsMP
             private static System.Collections.Generic.List<string>? _pendingRows;
             private static System.Reflection.MethodInfo? _addPlain, _addSplitter;
 
-            /// <summary>A row label may carry a colour tag only where the renderer's own line template has
-            /// rich text ON.  Read off the LIVE template: TaxesMessage.taxLineTemplate (private
-            /// SerializeField, TaxesMessage.cs:57-58) -> TaxesMessageLine.leftLabel (private
-            /// SerializeField, TaxesMessageLine.cs:14-15) -> the TMP text component on it.</summary>
-            private static bool RichTextOn(UI.Smartphone.Apps.Contacts.TaxesMessage msg)
+            /// <summary>Can a row LABEL we hand the renderer carry markup (a colour tag) and have it render?
+            /// No - and asking the TMP component was the wrong question.  The table TMP does have richText on
+            /// (the game writes its own bold/position/line-height tags into it), but every label reaching
+            /// AddPlainLine is now ESCAPED by the renderer itself: `AppendRow("&lt;noparse&gt;" + FitLabel(label, w) +
+            /// "&lt;/noparse&gt;", value)` (decompile UI.Smartphone.Apps.Contacts/TaxesMessage.cs:366-375).  A
+            /// member display name is not a localization key, so it takes that branch and a colour tag would
+            /// print LITERALLY in the IRS bill.  Answer false; the helper stays (and is named for the real
+            /// question) so a later game build that drops the escape needs one line changed here.</summary>
+            private static bool LabelsAcceptMarkup(UI.Smartphone.Apps.Contacts.TaxesMessage msg)
             {
-                try
-                {
-                    var tmpl = AccessTools.Field(typeof(UI.Smartphone.Apps.Contacts.TaxesMessage), "taxLineTemplate")?.GetValue(msg)
-                               as UI.Smartphone.Apps.Contacts.TaxesMessageLine;
-                    if (tmpl == null) return false;
-                    var left = AccessTools.Field(typeof(UI.Smartphone.Apps.Contacts.TaxesMessageLine), "leftLabel")?.GetValue(tmpl)
-                               as UnityEngine.Component;
-                    if (left == null) return false;
-                    var tmp = left.GetComponent<TMPro.TMP_Text>();
-                    if (tmp == null) tmp = left.GetComponentInChildren<TMPro.TMP_Text>(true);
-                    return tmp != null && tmp.richText;
-                }
-                catch { return false; }
+                return false;
             }
 
             static void Prefix(UI.Smartphone.Apps.Contacts.TaxesMessage __instance, ref Entities.Taxes taxes)
@@ -9687,7 +9695,7 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!MergerSync.IAmMember || taxes == null) return;
-                    CompanyBooks.TaxRowTint = RichTextOn(__instance);
+                    CompanyBooks.TaxRowTint = LabelsAcceptMarkup(__instance);   // false on this build: the renderer escapes labels
                     float own = taxes.totalToPay;
                     var company = CompanyBooks.CompanyReturn(taxes, out var pending, out int lossRows);
                     int folded = 0;
@@ -9719,8 +9727,64 @@ namespace BigAmbitionsMP
                     _addSplitter!.Invoke(__instance, null);
                     foreach (var pid in pending)
                         _addPlain!.Invoke(__instance, new object[] { CompanyBooks.MemberRowLabel(pid), string.Empty });
+                    CommitTable(t, __instance);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Tax] pending-member rows: {ex.Message}"); }
+            }
+
+            private static System.Reflection.MethodInfo? _endTable;
+            private static System.Reflection.FieldInfo? _tableText;
+            private static bool _tableTextWarned;
+            private static bool _endTableWarned;
+
+            /// <summary>GAME-PATCH-0916: rows are no longer live objects.  SetData builds the whole message
+            /// into one shared StringBuilder (TaxesMessage.TableText, private static, :72) and commits it in
+            /// EndTable (:134-142) - which has already run by the time this POSTFIX appends its rows, so the
+            /// postfix has to commit again or the rows are never shown.  EndTable INSERTS the line-height tag
+            /// at position 0 of that StringBuilder (:136), so simply calling it twice would leave two tags.
+            /// The code allows the clean fix: strip the tag EndTable put there last time, then let EndTable
+            /// itself re-insert it and redo its own sizing (:137-141) off the live row metrics, which the
+            /// rows just appended have already updated through MeasureCharacter (:353-364).
+            /// Review r1 F6: if TableText cannot be read the tag cannot be stripped, so EndTable would quietly
+            /// leave TWO `&lt;line-height=&gt;` tags in the message. In that case we do NOT commit at all (one
+            /// warning per session): the appended rows are not shown, which is the same outcome as a missing
+            /// EndTable above and strictly better than a visibly broken bill.</summary>
+            private static void CommitTable(Type t, UI.Smartphone.Apps.Contacts.TaxesMessage msg)
+            {
+                if (_endTable == null)  _endTable  = AccessTools.Method(t, "EndTable");
+                if (_tableText == null) _tableText = AccessTools.Field(t, "TableText");
+                if (_endTable == null)
+                {
+                    if (!_endTableWarned)
+                    {
+                        _endTableWarned = true;
+                        Plugin.Logger.LogWarning("[Tax] pending-member rows appended but not committed: TaxesMessage.EndTable was not found.");
+                    }
+                    return;
+                }
+                const string tagPrefix = "<line-height=";
+                var sb = _tableText?.GetValue(null) as System.Text.StringBuilder;
+                if (sb == null)
+                {
+                    if (!_tableTextWarned)
+                    {
+                        _tableTextWarned = true;
+                        Plugin.Logger.LogWarning("[Tax] pending-member rows appended but not committed: TaxesMessage.TableText was not readable, so the line-height tag EndTable already inserted cannot be stripped and calling EndTable again would double it.");
+                    }
+                    return;
+                }
+                if (sb.Length > tagPrefix.Length)
+                {
+                    bool leading = true;
+                    for (int i = 0; i < tagPrefix.Length; i++) if (sb[i] != tagPrefix[i]) { leading = false; break; }
+                    if (leading)
+                    {
+                        int end = -1;
+                        for (int i = tagPrefix.Length; i < sb.Length; i++) if (sb[i] == '>') { end = i; break; }
+                        if (end > 0) sb.Remove(0, end + 1);
+                    }
+                }
+                _endTable!.Invoke(msg, null);
             }
         }
 

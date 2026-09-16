@@ -9,8 +9,12 @@ namespace BigAmbitionsMP
     /// Permanent field guard (round-84, user-approved): dead map-pin trap + self-heal.
     ///
     /// Mechanism (read from native): UI.PermanentPointsOfInterest.HandlePermanentPOIs iterates a
-    /// CACHED array of Permanent pins, rebuilt only when UpdatePermanentPointsOfInterest() sets the
-    /// flag. A pin destroyed without that refresh NREs the loop EVERY FRAME forever — and a rebuild
+    /// CACHED collection of Permanent pins, rebuilt only when UpdatePermanentPointsOfInterest() sets
+    /// the flag. GAME-PATCH-0916: that cache is no longer the private static array
+    /// _permanentPointsOfInterest — it is the private static readonly
+    /// List&lt;PointOfInterest&gt; PermanentPois (new decompile UI/PermanentPointsOfInterest.cs:14),
+    /// refilled by RebuildPermanentPois() (:36-44); the walk below is otherwise unchanged (one Unity
+    /// fake-null test per entry). A pin destroyed without that refresh NREs the loop EVERY FRAME — and a rebuild
     /// alone can't purge it, because the corpse also still sits in cityMap.pois (its managed
     /// .Permanent stays readable). KILOKEN 20260724-170745: the report's entire 4MB Player.log
     /// window was this one NRE — the field evidence for the actual bug was erased. Never reproduced
@@ -46,8 +50,8 @@ namespace BigAmbitionsMP
                 //    fake-null: the managed shell is alive, so its plain managed fields
                 //    (targetAddress, isGuider, hidden) are still readable — the corpse names itself.
                 int dead = 0;
-                _cacheField ??= AccessTools.Field(typeof(UI.PermanentPointsOfInterest), "_permanentPointsOfInterest");
-                if (_cacheField?.GetValue(null) is PointOfInterest[] cache)
+                _cacheField ??= AccessTools.Field(typeof(UI.PermanentPointsOfInterest), "PermanentPois");
+                if (_cacheField?.GetValue(null) is System.Collections.Generic.List<PointOfInterest> cache)
                 {
                     foreach (var pin in cache)
                     {

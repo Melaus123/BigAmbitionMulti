@@ -304,7 +304,11 @@ namespace BigAmbitionsMP
     /// applies → re-syncs) and skip the native local apply. The OWNER, single-player, and businesses keep the
     /// native behavior (CanEnterGranted is false for them). NOTE: a guest "eats" by taking the item to hand
     /// (then eats from hand) — reusing the take path avoids a dup. The native walk-to-fridge is skipped for a
-    /// guest (the action routes immediately); minor, polish later if it matters.</summary>
+    /// guest (the action routes immediately); minor, polish later if it matters.
+    /// GAME-PATCH-0916: the fridge now also implements ICargoStorageController, so the INTERIOR-DESIGNER
+    /// PACKAGE TOOL fills it through FridgeController.TryMoveCargoToStorage (decompile FridgeController.cs:110)
+    /// — a second write path that never reaches the private AddToStorage the guard below intercepts. That
+    /// path is covered by Patch_Fridge_TryMoveCargoToStorage_Guest, so every guest fill route is owner-routed.</summary>
     internal static class HousingFridge
     {
         internal static bool GuestRoute(ItemController fridge, out string addr, out string fid)
@@ -368,6 +372,59 @@ namespace BigAmbitionsMP
                 return false;   // routed each item to the owner; skip the native local add
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] fridge add route: {ex.Message}"); return true; }
+        }
+    }
+
+    /// <summary>GAME-PATCH-0916 F1 + review r1 F1/F2 — the SECOND guest fill route, and why the mod REFUSES it
+    /// instead of routing it. FridgeController implements ICargoStorageController (decompile
+    /// FridgeController.cs:8) and the interior-designer package tool moves a dragged stack through it:
+    /// PackageToolSetup.MoveCargoToStorage (Buildings.Indoors.InteriorDesign/PackageToolSetup.cs:392-413) calls
+    /// TryMoveCargoToStorage (FridgeController.cs:110-124), which writes the fridge via TryToMoveCargoToFridge →
+    /// ItemInstance.MergeIntoCargo / TryToAddToCargo and NEVER enters the private AddToStorage the guard above
+    /// intercepts — so a guest was filling a host's fridge locally and the owner's next snapshot wiped it.
+    /// Routing the move to the owner is NOT safe here, for two reasons the mod cannot work around:
+    ///   (a) the native move has a storability/capacity gate this machine cannot evaluate for the OWNER's fridge:
+    ///       TryToMoveCargoToFridge refuses a non-food stack (`ItemCached.saturation &lt;= 0`, :186-189) and
+    ///       TryToMoveCargoStackToFridge refuses a stack that does not fit (:219-230). Answering TRUE with
+    ///       shouldRemoveSourceCargo = true makes the caller delete the guest's stack (:409-411) while the
+    ///       matching RequestPut is fire-and-forget (BuildingStorageSync.cs:42-43) and may be refused on the
+    ///       owner's machine — the stack would simply vanish;
+    ///   (b) the package-tool move is a REVERTIBLE action (PackageToolSetup.cs:53-54, moveCargoToStorage /
+    ///       undoMoveCargoToStorage; the undo's snapshots are taken at :403-404). An UNDO restores the source
+    ///       cargo locally after the owner has already applied the put — the item then exists on both machines.
+    /// So for a partner's fridge this prefix answers the game's OWN refusal (shouldRemoveSourceCargo = false,
+    /// result false), which MoveCargoToStorage turns into CargoStorageMoveResult.Failed (:405-408): the stack
+    /// stays in the box, nothing is routed, and there is nothing to undo. The guest fills a partner's fridge the
+    /// ordinary way instead — through the fridge itself, i.e. the AddToStorage guard above, which has no undo.
+    /// The refusal covers NESTED cargo too (a packed container): the native body would have added it to the
+    /// host's fridge locally, which is the desync this class exists to stop.</summary>
+    // The second argument is `out bool`, i.e. bool& — an attribute argument must be a constant/typeof, so
+    // `typeof(bool).MakeByRefType()` cannot be written here. Harmony's own spelling for a by-ref argument is
+    // the (Type[], ArgumentType[]) ctor overload, which is what pins this overload unambiguously.
+    [HarmonyPatch(typeof(FridgeController), "TryMoveCargoToStorage",
+                  new Type[] { typeof(CargoInstance), typeof(bool) },
+                  new ArgumentType[] { ArgumentType.Normal, ArgumentType.Out })]
+    public static class Patch_Fridge_TryMoveCargoToStorage_Guest
+    {
+        private static bool _refusalLogged;
+
+        static bool Prefix(FridgeController __instance, CargoInstance cargoInstance,
+                           ref bool shouldRemoveSourceCargo, ref bool __result)
+        {
+            try
+            {
+                if (cargoInstance == null || cargoInstance.IsSealed) return true;                      // native refuses these itself
+                if (!HousingFridge.GuestRoute(__instance, out _, out _)) return true;                   // owner / non-guest → native
+                shouldRemoveSourceCargo = false;  // the stack stays in the box — nothing was moved, nothing to undo
+                __result = false;                 // == the native refusal; the caller answers CargoStorageMoveResult.Failed
+                if (!_refusalLogged)
+                {
+                    _refusalLogged = true;
+                    Plugin.Logger.LogInfo("[Housing] the package tool does not move cargo into a partner's fridge here - use the fridge itself (routed to the owner).");
+                }
+                return false;                     // refused for a partner's fridge; skip the native local move
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] fridge package-tool route: {ex.Message}"); return true; }
         }
     }
 

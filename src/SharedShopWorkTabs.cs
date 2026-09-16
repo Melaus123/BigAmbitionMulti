@@ -3550,20 +3550,28 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>The mod's own logo plumbing is keyed by business NAME (a file cache and the game's
-        /// texture cache), so a rename has to drop both or the sign and cards keep drawing the old logo.</summary>
+        /// texture cache), so a rename has to drop both or the sign and cards keep drawing the old logo.
+        /// GAME-PATCH-0916: the game's cache is no longer the public LogoHelper.BusinessLogoTextures keyed
+        /// by a ValueTuple - it is the PRIVATE static LogoHelper.BusinessLogos (new decompile
+        /// LogoHelper.cs:66) keyed by the PRIVATE readonly struct BusinessLogoKey (:17-30), and every value is
+        /// a BusinessLogoCacheEntry that OWNS an Addressables handle or a generated texture
+        /// (BusinessLogoCacheEntry.cs:5-33).  Review r1 F3 / fold c: an ADDRESSABLES-backed entry dropped without
+        /// its Release() leaks the handle's refcount, which the game never does (LogoHelper.cs:323, :454-457) -
+        /// but Release() on a generated or file-loaded entry DESTROYS its texture outright, and a sign can
+        /// draw that destroyed texture until the next repaint.  Both the by-name walk and the rule (release an
+        /// Addressables entry, merely drop the others - the pre-patch behaviour) live in ONE shared place,
+        /// GameStatePatcher.ReleaseAndRemoveLogoEntries, called once per name here.  Only the matching entries
+        /// go, so every other business keeps its loaded texture; the dropped ones re-load on the next draw.
+        /// LogoHelper.PendingBusinessLogoLoads (:68) is deliberately left alone - those entries are in-flight
+        /// Addressables loads still owned by their handle, and removing one would pull the load out from under
+        /// it.</summary>
         private static void InvalidateLogoCaches(string oldName, string newName)
         {
             try { BusinessSync.ForgetLogoCache(oldName); BusinessSync.ForgetLogoCache(newName); } catch { }
             try
             {
-                var dict = LogoHelper.BusinessLogoTextures;
-                if (dict != null)
-                {
-                    var kill = new List<(string businessName, LogoSize logoSize, bool isPlayerBusiness)>();
-                    foreach (var k in dict.Keys)
-                        if (k.businessName == oldName || k.businessName == newName) kill.Add(k);
-                    foreach (var k in kill) dict.Remove(k);
-                }
+                GameStatePatcher.ReleaseAndRemoveLogoEntries(oldName);
+                if (newName != oldName) GameStatePatcher.ReleaseAndRemoveLogoEntries(newName);
             }
             catch { }
         }
