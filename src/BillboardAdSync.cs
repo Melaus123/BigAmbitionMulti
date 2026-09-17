@@ -58,15 +58,21 @@ namespace BigAmbitionsMP
                 var mine = SnapshotOwnCampaigns();
                 string key = string.Join(";", mine);
                 if (!kicked && key == _lastSent) return;   // daily check, nothing changed — nothing to ship
-                _lastSent = key;
                 var p = new BillboardAdsPayload { PlayerId = MPConfig.PlayerId };
                 p.Entries.AddRange(mine);
+                bool sent = true;
                 if (MPServer.IsRunning)
                 {
                     HostHandle(p, MPConfig.PlayerId, null);
                     if (kicked) ReshipStored();   // a joiner needs the OTHER members' sets too
                 }
-                else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BillboardAds, MPConfig.PlayerId, p));
+                else sent = MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BillboardAds, MPConfig.PlayerId, p));
+                // CROSSHR-ROSTER-1 fold b: the mark is set only when the set actually left. Marked before the send,
+                // a set handed in while the link was down (the entry/join tick) counted as sent for the whole session
+                // and only a campaign change could clear it - the staff-roster latch again. Unmarked, the next daily
+                // check (or the next kick) ships it.
+                if (!sent) { _kick = true; return; }
+                _lastSent = key;
                 Plugin.Logger.LogInfo($"[AdSync] own billboard campaigns sent: {mine.Count} entr{(mine.Count == 1 ? "y" : "ies")} ({(kicked ? "entry/join" : "daily change")}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[AdSync] tick: {ex.Message}"); }
