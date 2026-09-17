@@ -67,7 +67,7 @@ namespace BigAmbitionsMP
             // WS3: injected roster records die with the scene too (runtime-only, like the synthetics).
             foreach (var id in new List<string>(_injectedStaff.Keys)) RemoveInjectedStaff(id);
             lock (_rosterByAddr) { _rosterByAddr.Clear(); }
-            _rosterApplied.Clear(); _rosterSigSent.Clear(); _rosterLogSig.Clear();
+            _rosterApplied.Clear(); _rosterSigSent.Clear(); _rosterLogSig.Clear(); _rosterNotSentLogged.Clear();
             _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _crossOwnerLogged.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = "";
         }
 
@@ -1901,6 +1901,7 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, float> _benchGrace = new();                // employeeId → when the bench stopped listing it (the roster may be about to claim it)
         private static readonly HashSet<string> _localCollisionLogged = new();                 // CROSS-HR-2b: local-id collisions already said (once per id per process)
         private const float BenchGraceSeconds = 12f;
+        private static readonly HashSet<string> _rosterNotSentLogged = new();   // CROSSHR-ROSTER-1: one line per address per session
         private static readonly Dictionary<string, string> _rosterSigSent = new();            // owner side: addr → last published sig
         private static readonly Dictionary<string, string> _rosterLogSig  = new();            // round-189: addr → last LOGGED membership (log speaks on hire/fire/rename only)
         private static float _nextRosterPublishAt, _nextRosterApplyAt;
@@ -2037,10 +2038,20 @@ namespace BigAmbitionsMP
                     string sig = RosterSig(staff);
                     if (_rosterSigSent.TryGetValue(addr, out var prev) && prev == sig) continue;
                     if (staff.Count == 0 && !_rosterSigSent.ContainsKey(addr)) continue;   // never had staff — nothing to say
-                    _rosterSigSent[addr] = sig;
                     var p = new PlayerStaffRosterPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Staff = staff };
                     var env = MessageEnvelope.Create(MessageType.PlayerStaffRoster, MPConfig.PlayerId, p);
-                    if (MPServer.IsRunning) MPServer.BroadcastAny(env); else MPClient.SendEnvelope(env);
+                    bool sent = true;
+                    if (MPServer.IsRunning) MPServer.BroadcastAny(env); else sent = MPClient.SendEnvelope(env);
+                    if (!sent)
+                    {
+                        // CROSSHR-ROSTER-1 (2026-09-16): the mark used to be set BEFORE the send, so a roster the
+                        // client could not send yet (link not up) counted as sent for ever - a latch only a staff
+                        // change could clear. Unmarked, the next TickRosterPublish pass carries it.
+                        if (_rosterNotSentLogged.Add(addr))
+                            Plugin.Logger.LogInfo($"[StaffRoster] '{addr}' not sent yet - the link is not up; the next publish pass carries it.");
+                        continue;
+                    }
+                    _rosterSigSent[addr] = sig;
                     // Round-189 (user call): the publish sig deliberately includes DRIFTING fields
                     // (satisfaction, availability) so remote staff panels stay current — but that
                     // made this line fire on every morale tick (1,407 'published' lines in one

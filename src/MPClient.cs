@@ -216,6 +216,7 @@ namespace BigAmbitionsMP
             _transport?.Disconnect();
             _transport = null;
             _connected = false;
+            ClearNotSentLog();   // CROSSHR-ROSTER-1 fold b: the once-per-type set is per connection, not per process
             IsInLobby = true;
             _lobbyPlayers = new List<string>();
         }
@@ -2501,10 +2502,30 @@ namespace BigAmbitionsMP
             catch { }
         }
 
-        /// <summary>Reliable send for modules that build their own envelope.</summary>
-        public static void SendEnvelope(MessageEnvelope env)
+        // CROSSHR-ROSTER-1: one WARNING per message type per connection; written from the Unity tick AND the
+        // transport's poll thread (handlers call SendEnvelope inline), so every access is under the lock.
+        private static readonly System.Collections.Generic.HashSet<MessageType> _notSentLogged = new();
+        private static readonly object _notSentLock = new();
+        private static void ClearNotSentLog() { lock (_notSentLock) _notSentLogged.Clear(); }
+
+        /// <summary>Reliable send for modules that build their own envelope. Sends when the link is up and
+        /// says so; returns FALSE when it could not, so a caller that keeps a "sent" mark (the staff-roster and
+        /// billboard publishers) can leave it unset and try again on its next pass. CROSSHR-ROSTER-1
+        /// (2026-09-16): on the 0916 game patch the client's eleven staff rosters were handed in here while
+        /// IsConnected was false and vanished without a line; the publisher had already marked them sent, so the
+        /// host never got a partner's people.</summary>
+        public static bool SendEnvelope(MessageEnvelope env)
         {
-            if (IsConnected) Send(env);
+            if (env == null) return false;
+            if (IsConnected) { Send(env); return true; }
+            try
+            {
+                bool first; lock (_notSentLock) first = _notSentLogged.Add(env.Type);
+                if (first)
+                    Plugin.Logger.LogWarning($"[Client] {env.Type} NOT sent - the link is not up yet (connected={_connected}, transport running={_transport is { IsRunning: true }}); the sender must retry.");
+            }
+            catch { }
+            return false;
         }
 
         // Poll loop lives in LnlClientTransport now (transport seam) — same
