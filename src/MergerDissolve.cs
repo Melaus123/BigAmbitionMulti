@@ -125,6 +125,7 @@ namespace BigAmbitionsMP
                                 // A foreign SOURCE makes GetPlannedDeliveries null the address silently; drop it
                                 // here so the plan says what it is instead of failing every hour in silence.
                                 sources++;
+                                if (!apply) Plugin.Logger.LogInfo($"[Dissolve] check names: source '{sk}' on plan {pl.id} (an ex-partner's building).");   // DIAG-1
                                 if (apply) try { pl.UnAssignAddress(); } catch { }
                             }
                         }
@@ -140,6 +141,7 @@ namespace BigAmbitionsMP
                             // ex-partner's shop for ever. The native cancel resets every destination row in
                             // every plan that names the address, which is exactly the whole of the leak.
                             dests++;
+                            if (!apply) Plugin.Logger.LogInfo($"[Dissolve] check names: destination '{dk}' on plan {pl.id} (an ex-partner's building).");   // DIAG-1
                             if (apply)
                                 try { Buildings.Office.Headquarters.LogisticsManagerHelper.CancelAllDeliveriesForAddress(d.deliveryTargetAddress); }
                                 catch { }
@@ -160,6 +162,7 @@ namespace BigAmbitionsMP
                     {
                         if (!pending.TryGetValue(tid, out var row) || row == null) continue;
                         if (!ExPartnerKey(row.DestKey ?? "", ex)) continue;   // r1 MINOR-5: the row names its own destination
+                        if (!apply) Plugin.Logger.LogInfo($"[Dissolve] check names: cargo row {tid} -> '{row.DestKey}' withdrawn={row.Withdrawn}.");   // DIAG-1
                         if (row.Withdrawn) { flight++; continue; }
                         cargo++;
                         if (!apply) continue;

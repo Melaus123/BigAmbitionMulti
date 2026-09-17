@@ -2854,7 +2854,16 @@ namespace BigAmbitionsMP
                 case MessageType.PlayerStaffRoster:
                 {
                     var sr = env.GetPayload<PlayerStaffRosterPayload>();
-                    if (sr == null || !SenderIs(sr.PlayerId, senderPid, env.Type)) break;
+                    if (sr == null)
+                    {
+                        // CROSSHR-ROSTER-1 (2026-09-16): on the 0916 game patch the host stopped injecting a
+                        // partner's staff - its NetStats IN carried no PlayerStaffRoster at all - and this was the
+                        // one exit that said nothing. A payload that fails to deserialise is a bug to diagnose from
+                        // the log (user ruling 2026-09-16), so it is named here; the sender's copies stay absent.
+                        Plugin.Logger.LogWarning($"[Server] PlayerStaffRoster from '{senderPid}': payload did not deserialise - dropped ({env.Data?.Length ?? 0} chars).");
+                        break;
+                    }
+                    if (!SenderIs(sr.PlayerId, senderPid, env.Type)) break;
                     if (!SenderOwns(sr.AddressKey, senderPid))
                     {
                         Plugin.Logger.LogWarning($"[Server] PlayerStaffRoster for '{sr.AddressKey}' from '{senderPid}' — sender doesn't own/rent it — dropped.");
