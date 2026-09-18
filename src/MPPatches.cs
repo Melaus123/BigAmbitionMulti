@@ -7152,8 +7152,16 @@ namespace BigAmbitionsMP
             private static bool _boatLogged;
             private static int  _boatWarned;
 
+            /// <summary>TICK-ISO-1 fold (review H1): the clock BEFORE this tick. RunMainGameTick adds the delta to
+            /// SaveGameManager.Current.Minute at GameManager.cs:568 and the hourly loop subtracts 60 per hour after
+            /// RunHourly; a throw inside RunHourly left Minute ACCUMULATING every swallowed frame, and the first clean
+            /// tick would have run the whole backlog of hours in one burst. On a swallow the Finalizer puts the clock
+            /// back where this tick found it: the clock holds while the fault persists, and never bursts.</summary>
+            [ThreadStatic] private static float _minuteBefore;
+
             static void Prefix(ref float deltaTimeWithMultiplier)
             {
+                try { _minuteBefore = SaveGameManager.Current != null ? SaveGameManager.Current.Minute : -1f; } catch { _minuteBefore = -1f; }
                 // Gate on an active MP game: a stale AheadHeld must never freeze the clock/economy
                 // in single-player after a disconnect.
                 bool inSession = MPServer.IsRunning || MPClient.InMpGame;
@@ -7190,6 +7198,194 @@ namespace BigAmbitionsMP
 
                 if (inSession && TimeSync.AheadHeld && !MPRestSync.SkipActive)
                     deltaTimeWithMultiplier = 0f;
+            }
+
+            // TICK-ISO-1 (2026-09-17).  GameStatePatcher.DrainQueue rides Patch_GameManager_Update.Postfix (:344-352)
+            // and a Postfix does NOT run when the original throws.  A native throw inside RunMainGameTick therefore
+            // escaped both and stalled replication on BOTH machines for every frame it kept throwing.  In an MP world
+            // the tick's exception is swallowed here so the rest of the frame - and the queue drain - still runs;
+            // outside one the exception is handed back and vanilla behaves exactly as before.
+            private static readonly System.Collections.Generic.HashSet<string> _isoShapes =
+                new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+            private static readonly System.Collections.Generic.Dictionary<string, int> _isoCounts =
+                new System.Collections.Generic.Dictionary<string, int>(StringComparer.Ordinal);
+
+            static Exception? Finalizer(Exception? __exception)
+            {
+                if (__exception == null) return null;
+                bool inMpWorld;
+                try { inMpWorld = MPServer.IsRunning || MPClient.IsClientInWorld || MPClient.OfflineFork; }
+                catch { inMpWorld = false; }
+                if (!inMpWorld) return __exception;                       // vanilla: hand the game's own throw back
+                bool clockHeld = false;
+                try
+                {
+                    // Review H1: never bank time a swallowed tick did not spend (see _minuteBefore).
+                    var gi = SaveGameManager.Current;
+                    if (gi != null && _minuteBefore >= 0f && gi.Minute > _minuteBefore) { gi.Minute = _minuteBefore; clockHeld = true; }
+                }
+                catch { }
+                try
+                {
+                    string shape = IsoShapeOf(__exception);
+                    if (_isoCounts.Count >= 64 && !_isoCounts.ContainsKey(shape)) shape = "(other shapes)";   // review L4: bounded
+                    _isoCounts.TryGetValue(shape, out int seen);
+                    seen++;
+                    _isoCounts[shape] = seen;
+                    string held = clockHeld ? " - the clock is HELD until the fault clears" : "";
+                    if (_isoShapes.Add(shape))
+                        Plugin.Logger.LogWarning($"[TickIso] the game's main tick threw {shape} - swallowed so replication keeps running{held} (TICK-ISO-1).\n{__exception}");
+                    else if (seen % 600 == 0)
+                        Plugin.Logger.LogWarning($"[TickIso] the game's main tick threw {shape} - swallowed so replication keeps running{held} (TICK-ISO-1); {seen} times so far.");
+                }
+                catch { }
+                return null;
+            }
+
+            /// <summary>Exception type plus its first two stack frames: one key per distinct failure site, so a storm
+            /// of the same throw costs one line and a NEW site is never hidden behind it.</summary>
+            private static string IsoShapeOf(Exception ex)
+            {
+                try
+                {
+                    string frames = "";
+                    string st = ex.StackTrace ?? "";
+                    int taken = 0;
+                    foreach (var rawLine in st.Split('\n'))
+                    {
+                        string line = rawLine.Trim();
+                        if (line.Length == 0) continue;
+                        frames += (taken == 0 ? " at " : " <- ") + line;
+                        if (++taken == 2) break;
+                    }
+                    return ex.GetType().Name + frames;
+                }
+                catch { return ex.GetType().Name; }
+            }
+        }
+
+        // SCHEDULE-2 guard (2026-09-17).  ScheduleHelper.RegenerateSimulatedScheduleDays (decompile :166-182) takes
+        // CurrentSimulatedDayIndex = ScheduleDays.FindIndex(x => x == CurrentScheduleDay) - a REFERENCE match - and
+        // GetSimulatedScheduleDays then indexes SimulatedScheduleDays with that value (:186), so a selected day object
+        // that is no longer in the list gives -1 and throws ArgumentOutOfRangeException.  Replica refreshes now
+        // reconcile the day objects IN PLACE (GameStatePatcher, SharedShopSchedule), but any other path that rebuilds
+        // them reopens the same hole: re-point the selection at the list entry for the SAME weekday first.
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper),
+                      nameof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.RegenerateSimulatedScheduleDays))]
+        public static class Patch_ScheduleHelper_Regenerate_ReAnchor
+        {
+            private static readonly System.Collections.Generic.HashSet<string> _reAnchorLogged =
+                new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+
+            static void Prefix()
+            {
+                try
+                {
+                    var cur = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.CurrentScheduleDay;
+                    var days = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.ScheduleDays;
+                    if (days == null || days.Count == 0) return;
+                    if (cur != null) foreach (var d in days) if (ReferenceEquals(d, cur)) return;   // the page is still anchored
+                    var replacement = days[0];   // review L6: a NULL selection indexes [-1] just the same
+                    if (cur != null) foreach (var d in days) if (d != null && d.day == cur.day) { replacement = d; break; }
+                    UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.CurrentScheduleDay = replacement;
+                    string addr = "";
+                    try
+                    {
+                        var biz = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.Business;
+                        if (biz != null && biz.buildingRegistration != null) addr = GameStateReader.AddressKey(biz.buildingRegistration);
+                    }
+                    catch { }
+                    if (_reAnchorLogged.Add(addr))
+                        Plugin.Logger.LogInfo($"[Schedule] selected day re-anchored after a replica refresh (SCHEDULE-2){(addr.Length > 0 ? $" at {addr}" : "")}.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Schedule] re-anchor guard (SCHEDULE-2): {ex.Message}"); }
+            }
+        }
+
+        // TICK-ISO-1 diagnostic (2026-09-17).  WorkstationController.FindChair (decompile :31-54) walks to the stack
+        // root and recurses through childItemControllers testing ItemController.Occupied, whose seat branch (:262)
+        // runs sittingPositions.All(x => x.childCount > 0) and throws NullReferenceException when a seat's
+        // sittingPositions array holds a null slot.  That is the throw that escaped RunMainGameTick and stalled
+        // replication (the "can't enter a friend's shop" family).  In an MP world answer "no chair found" instead of
+        // throwing, and name the seat with the null slot - the permanent diagnostic for that family.
+        [HarmonyPatch(typeof(Controllers.WorkstationController), nameof(Controllers.WorkstationController.FindChair))]
+        public static class Patch_WorkstationController_FindChair_Iso
+        {
+            private static readonly System.Collections.Generic.HashSet<string> _chairLogged =
+                new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+            // sittingPositions is declared `internal` on ItemController: read it by reflection so a visibility or
+            // rename change in a game update costs a missing detail, never a compile break or a throw in the guard.
+            private static readonly System.Reflection.FieldInfo _fSittingPositions =
+                AccessTools.Field(typeof(ItemController), "sittingPositions");
+
+            static Exception? Finalizer(Exception? __exception, Controllers.WorkstationController __instance, ref ItemController? __result)
+            {
+                if (__exception == null) return null;
+                bool inMpWorld;
+                try { inMpWorld = MPServer.IsRunning || MPClient.IsClientInWorld || MPClient.OfflineFork; }
+                catch { inMpWorld = false; }
+                if (!inMpWorld) return __exception;
+                __result = null;                                          // the caller's own "no chair" answer
+                try
+                {
+                    string item = "?", id = "";
+                    try { if (__instance != null) item = __instance.itemName; } catch { }
+                    try
+                    {
+                        var ii = __instance != null ? __instance.ItemInstance : null;
+                        if (ii != null && ii.id != null) id = ii.id.ToString();
+                    }
+                    catch { }
+                    if (_chairLogged.Add(item + "|" + id))
+                        Plugin.Logger.LogWarning($"[TickIso] FindChair threw at '{item}'{(id.Length > 0 ? $" ({id})" : "")} - {DescribeSeats(__instance)} (TICK-ISO-1 diagnostic): {__exception.GetType().Name}: {__exception.Message}");
+                }
+                catch { }
+                return null;
+            }
+
+            /// <summary>Every seat under the workstation's stack root (the same walk FindChair does: up through
+            /// parentItemController, then down through childItemControllers), with its sitting-slot count and the
+            /// indices that are null - the slot the game's Occupied lambda dereferences.</summary>
+            private static string DescribeSeats(Controllers.WorkstationController? ws)
+            {
+                try
+                {
+                    ItemController? root = ws;
+                    int hops = 0;
+                    while (root != null && root.parentItemController != null && hops++ < 32) root = root.parentItemController;
+                    if (root == null) return "no stack root to inspect";
+                    var found = new System.Collections.Generic.List<string>();
+                    DescribeSeat(root, found, 0);
+                    if (found.Count == 0) return "no seat found under the stack";
+                    return string.Join("; ", found.ToArray());
+                }
+                catch { return "seat inspection failed"; }
+            }
+
+            private static void DescribeSeat(ItemController? ic, System.Collections.Generic.List<string> found, int depth)
+            {
+                if (ic == null || depth > 16 || found.Count >= 12) return;
+                try
+                {
+                    var slots = _fSittingPositions != null ? _fSittingPositions.GetValue(ic) as UnityEngine.Transform[] : null;
+                    if (slots != null && slots.Length > 0)
+                    {
+                        string nulls = "";
+                        for (int i = 0; i < slots.Length; i++)
+                            if (slots[i] == null) nulls += (nulls.Length > 0 ? "," : "") + i;
+                        string sid = "";
+                        try { var ii = ic.ItemInstance; if (ii != null && ii.id != null) sid = ii.id.ToString(); } catch { }
+                        found.Add($"seat '{ic.itemName}'{(sid.Length > 0 ? $" ({sid})" : "")} has {slots.Length} sitting slot(s), "
+                                  + (nulls.Length > 0 ? $"null sitting slot(s) [{nulls}]" : "none null"));
+                    }
+                }
+                catch { }
+                try
+                {
+                    if (ic.childItemControllers != null)
+                        foreach (var child in ic.childItemControllers) DescribeSeat(child, found, depth + 1);
+                }
+                catch { }
             }
         }
 

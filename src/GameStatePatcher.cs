@@ -5216,7 +5216,7 @@ namespace BigAmbitionsMP
 
                 // Operating hours (Phase 1c) — without these, suppression on
                 // client leaves scheduleDays empty and every business looks
-                // closed.  Replace verbatim from host.
+                // closed.  Take the host's version, reconciled onto the replica's own day objects.
                 try
                 {
                     // The owner's OWN shop hours live in their save — never overwrite them from the host's
@@ -5224,42 +5224,46 @@ namespace BigAmbitionsMP
                     // Shared-shop management (Business PERMISSION feature, 2026-08-21) and MERGED shops (phase 0,
                     // 2026-09-10): a shop this player may manage through a grant — or helps run through a merger —
                     // is reconciled PER DAY by SharedShopSchedule (true = handled); every other shop — own, AI —
-                    // takes the unchanged path below.
+                    // takes the in-place reconcile below.
                     if (reg.scheduleDays != null && info.Schedule != null && info.Schedule.Count > 0 && !receiverOwnsThis
                         && SharedShopSchedule.TryApplyOwnerTruth(reg, info.Schedule, info.AddressKey, "heartbeat"))
                     { }
                     else if (reg.scheduleDays != null && info.Schedule != null && info.Schedule.Count > 0
                         && !receiverOwnsThis)
                     {
-                        reg.scheduleDays.Clear();
+                        // SCHEDULE-2 (2026-09-17): reconcile the replica's days IN PLACE - never Clear() the
+                        // outer list.  An open BizMan Schedule tab holds REFERENCES to these ScheduleDay objects:
+                        // ScheduleHelper.RegenerateSimulatedScheduleDays (:169) re-finds the page's day with
+                        // FindIndex(x => x == CurrentScheduleDay) and then indexes SimulatedScheduleDays with the
+                        // result (:186), so swapping the day objects under an open tab left that index at -1 and
+                        // threw on both machines.  Update each existing day's contents and keep the object.
+                        // Review M3: never under the player's hand or a running auto-fill (the same guard
+                        // TryApplyOwnerTruth has at SharedShopSchedule.cs:589) - the next heartbeat carries it.
+                        if (SharedShopSchedule.ScheduleBusy(reg)) { }
+                        else
+                        {
                         foreach (var d in info.Schedule)
                         {
-                            var sd = new ScheduleDay
+                            if (d == null) continue;
+                            int day = d.Day;
+                            if (day < 1 || day > 7) continue;
+                            var sd = SharedShopSchedule.FindDay(reg, day);
+                            if (sd == null)
                             {
-                                day    = (BigAmbitions.DayNightCycle.DayOfWeekOrdered)d.Day,
-                                isOpen = d.IsOpen,
-                            };
-                            if (sd.openingHourSlots != null && d.OpeningHourSlots != null)
-                            {
-                                foreach (var slot in d.OpeningHourSlots)
-                                    sd.openingHourSlots.Add(new OpeningHourSlot(slot.StartingHour, slot.EndingHour));
+                                if (reg.scheduleDays.Count >= 7) continue;   // never grow past the game's seven
+                                // A replica still filling in: insert at the Monday..Sunday position - the game
+                                // addresses days by list index (ScheduleHelper.GetScheduleDay(i) => ScheduleDays[i-1]).
+                                sd = new ScheduleDay { day = (BigAmbitions.DayNightCycle.DayOfWeekOrdered)day };
+                                int at = 0;
+                                while (at < reg.scheduleDays.Count && reg.scheduleDays[at] != null
+                                       && (int)reg.scheduleDays[at].day < day) at++;
+                                reg.scheduleDays.Insert(at, sd);
                             }
-                            if (sd.workShifts != null && d.WorkShifts != null)
-                            {
-                                foreach (var shift in d.WorkShifts)
-                                {
-                                    if (shift == null) continue;
-                                    sd.AddWorkShift(new WorkShift
-                                    {
-                                        employeeId     = shift.EmployeeId ?? "",
-                                        itemInstanceId = shift.ItemInstanceId ?? "",
-                                        startingHour   = shift.StartingHour,
-                                        endingHour     = shift.EndingHour,
-                                        type           = (WorkShiftType)shift.Type,
-                                    });
-                                }
-                            }
-                            reg.scheduleDays.Add(sd);
+                            SharedShopSchedule.ReplaceDay(sd, d, keepSynthetic: false);   // this shop is not shop-shared: no local duty stand-ins to keep
+                        }
+                        // The page anchors on a day OBJECT and on the day buttons; after a content refresh run the
+                        // tab's own redraw so both match what is now in the list (SCHEDULE-2).
+                        if (SharedShopSchedule.IsScheduleTabOpenFor(reg)) SharedShopSchedule.RedrawScheduleTab(reg);
                         }
                     }
                 }

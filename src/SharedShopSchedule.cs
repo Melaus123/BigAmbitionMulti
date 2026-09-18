@@ -645,7 +645,7 @@ namespace BigAmbitionsMP
         public static bool IsSynthetic(string employeeId)
             => !string.IsNullOrEmpty(employeeId) && employeeId.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal);
 
-        private static ScheduleDay FindDay(BuildingRegistration reg, int day)
+        internal static ScheduleDay FindDay(BuildingRegistration reg, int day)
         {
             foreach (var sd in reg.scheduleDays) if (sd != null && (int)sd.day == day) return sd;
             return null;
@@ -653,7 +653,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Rewrite one ScheduleDay IN PLACE from its DTO (the UI holds references to the day objects).
         /// keepSynthetic: this machine's own duty stand-ins survive (the other side never sees or sends them).</summary>
-        private static void ReplaceDay(ScheduleDay sd, ScheduleDayInfo d, bool keepSynthetic)
+        internal static void ReplaceDay(ScheduleDay sd, ScheduleDayInfo d, bool keepSynthetic)
         {
             sd.isOpen = d.IsOpen;
             sd.openingHourSlots ??= new List<OpeningHourSlot>();
@@ -799,6 +799,13 @@ namespace BigAmbitionsMP
 
         // ── Schedule UI helpers (either machine) ───────────────────────────────
 
+        /// <summary>SCHEDULE-2 fold (review M3): the same "not under the player's hand" test TryApplyOwnerTruth uses
+        /// (:589), for the heartbeat's in-place branch in GameStatePatcher.</summary>
+        internal static bool ScheduleBusy(BuildingRegistration reg)
+        {
+            try { return (IsDragging() && IsScheduleTabOpenFor(reg)) || IsAutoFilling(reg); } catch { return false; }
+        }
+
         private static bool IsDragging()
         {
             try { return WorkShiftDrag.CurrentDraggedWorkShift != null; } catch { return false; }
@@ -839,7 +846,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Is THIS machine's BizMan Schedule tab currently showing this registration?</summary>
-        private static bool IsScheduleTabOpenFor(BuildingRegistration reg)
+        internal static bool IsScheduleTabOpenFor(BuildingRegistration reg)
         {
             try
             {
@@ -860,7 +867,7 @@ namespace BigAmbitionsMP
         /// selected day: what LoadScheduler does (re-fetch staff + workstations, day buttons) then re-select the day
         /// they are looking at.</summary>
         private static bool _reflectionMissLogged;
-        private static void RedrawScheduleTab(BuildingRegistration reg)
+        internal static void RedrawScheduleTab(BuildingRegistration reg)
         {
             try
             {
