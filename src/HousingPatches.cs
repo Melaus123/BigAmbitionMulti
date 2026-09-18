@@ -129,17 +129,21 @@ namespace BigAmbitionsMP
         }
     }
 
+    /// <summary>GUEST-PARITY-1 (2026-09-17, bundle 20260914-232310): includeHelper - a permitted guest or a merger
+    /// member in a friend's BUSINESS uses the bed like the owner (user ruling: owner parity, never charged). The offer
+    /// half (the CTA wraps above) already passed; the act half refused at BedController.cs:21 because the default
+    /// flip covers residence guests only (:110).</summary>
     [HarmonyPatch(typeof(BedController), "PerformActivity")]
     public static class Patch_BedController_PerformActivity_Guest
     {
-        static void Prefix()    { HousingFurniture.Enter(); }
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }
         static void Finalizer() { HousingFurniture.Exit(); }
     }
 
     [HarmonyPatch(typeof(TVController), "PerformActivity")]
     public static class Patch_TVController_PerformActivity_Guest
     {
-        static void Prefix()    { HousingFurniture.Enter(); }
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }   // GUEST-PARITY-1: TVController.cs:13
         static void Finalizer() { HousingFurniture.Exit(); }
     }
 
@@ -160,7 +164,7 @@ namespace BigAmbitionsMP
     [HarmonyPatch(typeof(WorkoutMachineController), "PerformActivity")]
     public static class Patch_WorkoutMachineController_PerformActivity_Guest
     {
-        static void Prefix()    { HousingFurniture.Enter(); }
+        static void Prefix()    { HousingFurniture.Enter(includeHelper: true); }   // GUEST-PARITY-1: a gym helper works out like the owner
         static void Finalizer() { HousingFurniture.Exit(); }
     }
 
