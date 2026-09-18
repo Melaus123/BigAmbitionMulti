@@ -2977,6 +2977,15 @@ namespace BigAmbitionsMP
         /// draw time - so the answer is the plan as it stands at the moment of the question, which is what
         /// the MarkChange commit seam needs.  Null = no pane, a hidden pane, or one of this machine's own
         /// plans.
+        /// HQ-PARITY-9 (2026-09-17) - "SHOWING" INCLUDES "BEING DRAWN".  The game hides the pane on a tab
+        /// switch (LogisticsManagersPlanList.cs:94) and LoadPlan draws every product row and its stock figure
+        /// (LogisticsManagerPlanUI.cs:139-142) before it re-activates the pane (:154), so Unity's active flag
+        /// was false for exactly the draw the substitution exists for: the first selection after a tab switch
+        /// (and the first of a session) drew the local replica's zeros, the second selection was right (user
+        /// hands-on 2026-09-17).  The exact state is "the game is inside LoadPlan on this pane" - the flag the
+        /// LoadPlan Prefix raises and its Finalizer drops - and the Prefix now notes the pane first.  The
+        /// MarkChange seam stays shut during a load (CompanyLists.RouteDisplayPlanIfChanged tests LoadingPlan),
+        /// so a load still commits nothing.
         /// HQ-PARITY-7 R1 - RECOGNISED BY ITS ID, NOT ONLY BY OBJECT IDENTITY.  The identity tag that
         /// CompanyLists.IsDisplayPlan tests is carried by the plan OBJECT, so a copy LIFTED by a re-install
         /// keeps its id but loses the tag, and the hands-on run had every stock figure drop to 0 until the
@@ -2992,7 +3001,7 @@ namespace BigAmbitionsMP
             try
             {
                 var ui = _paneUI;
-                if (ui == null || !ui.gameObject.activeInHierarchy) return null;
+                if (ui == null || !(ui.gameObject.activeInHierarchy || CompanyLists.LoadingPlan)) return null;   // HQ-PARITY-9
                 if (_paneCurrentPlanField == null)
                     _paneCurrentPlanField = ui.GetType().GetField("_currentPlan", BindingFlags.Instance | BindingFlags.NonPublic);
                 var pl = _paneCurrentPlanField == null

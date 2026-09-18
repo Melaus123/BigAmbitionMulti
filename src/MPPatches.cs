@@ -4601,7 +4601,19 @@ namespace BigAmbitionsMP
             /// number by the time the pane draws its product rows.</summary>
             internal static int LoadPlanSerial;
 
-            static void Prefix() { LoadPlanSerial++; CompanyLists.LoadingPlan = true; }
+            /// <summary>HQ-PARITY-9 (2026-09-17): THE PANE IS NOTED BEFORE THE DRAW, NOT AFTER.  The list hides
+            /// the pane on every tab switch (LogisticsManagersPlanList.cs:94, RefreshManagersList) and LoadPlan
+            /// draws the product rows (:139-142, AddDestinationEntry -> LoadProducts -> CountResourcesInPallets)
+            /// BEFORE it re-activates the pane (:154).  With the pane noted only in the Postfix, the first
+            /// LoadPlan of a session asked the stock prefix with no pane at all; and CompanyPlans.PaneDisplayPlan
+            /// now treats "inside LoadPlan" as showing (CompanyLists.LoadingPlan), which needs the pane that is
+            /// loading to be the one on record.  `_currentPlan` is the first line of LoadPlan (:129), so a
+            /// live read during the draw already sees the new plan.</summary>
+            static void Prefix(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagerPlanUI __instance)
+            {
+                LoadPlanSerial++; CompanyLists.LoadingPlan = true;
+                try { CompanyPlans.NoteLogisticsPane(__instance); CompanyPlans.RegisterPane("logistics", __instance); } catch { }
+            }
 
             static void Finalizer() { CompanyLists.LoadingPlan = false; }
 
