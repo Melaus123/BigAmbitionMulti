@@ -98,6 +98,13 @@
       "expect_result": "settled=True"
     },
     {
+      "seq": 12,
+      "role": "both",
+      "cmd": "licensefees",
+      "expect_result": "^OK licensefees marked=[0-9]+ ",
+      "note": "DETERMINISM (2026-09-18): each member marks its OWN cinema/theater licensing fees paid-today through the game's noCharge path, BEFORE B is captured. Run T-WALLETDUPE-20260918-130339 failed step 32 by exactly $20,000 because the rejoining owner's clock ran through the opening hour in-world and the game billed its daily fee - a legitimate charge, and a timing accident. The paid-today mark rides the autosave, so the reload cannot bill it again; the conservation assertion below stays EXACT"
+    },
+    {
       "seq": 13,
       "role": "both",
       "cmd": "mark TEST WALLETDUPE BALANCE-BEFORE-SAVE",

@@ -61,9 +61,37 @@ def changed_src_files():
     return files
 
 
+# GAME UPDATE CHECK (user decision 2026-09-18): the decompile the mod is read and reviewed against was made from
+# ONE Steam build. When Steam has moved on, every hook and every line number in the notes may be stale - say so loudly.
+# Update BOTH values after re-decompiling (see .modding/01-environment.md "AFTER A GAME UPDATE").
+DECOMPILE_BUILDID = "25343755"          # C:\code\cpp2il\mono-1.0-update0916 (Steam update of 2026-09-16, game Build 3680)
+STEAM_MANIFEST = r"C:\Program Files (x86)\Steam\steamapps\appmanifest_1331550.acf"
+
+
+def game_update_warning():
+    try:
+        txt = open(STEAM_MANIFEST, encoding="utf-8", errors="replace").read()
+        m = re.search(r'"buildid"\s+"(\d+)"', txt)
+        t = re.search(r'"TargetBuildID"\s+"(\d+)"', txt)
+        installed = m.group(1) if m else "?"
+        target = t.group(1) if t else installed
+        if installed != DECOMPILE_BUILDID or target not in ("0", installed):
+            bar = "!" * 100
+            print(bar)
+            print(f"!! GAME UPDATE: Steam build installed={installed} pending={target}, decompile made from {DECOMPILE_BUILDID}.")
+            print("!! Re-decompile, run tools/patch_compat_check.py, diff old vs new, THEN trust reads and reviews again.")
+            print(bar)
+            return True
+        print(f"== game build {installed} matches the decompile")
+    except Exception as ex:
+        print(f"== game update check skipped: {ex}")
+    return False
+
+
 def main():
     skip_game = "--skip-game-check" in sys.argv
     problems = []
+    game_update_warning()
     if not skip_game and process_running("Big Ambitions.exe"):
         print("REFUSED: the game is running - never build under a live game.")
         return 1

@@ -1383,6 +1383,33 @@ namespace BigAmbitionsMP
                     return $"OK assigned '{nempId}' -> '{naddr}'";
                 }
 
+                case "licensefees":
+                {
+                    // 2026-09-18 (rig determinism, user-approved): mark the LOCAL player's own cinema/theater
+                    // licensing fees PAID TODAY through the game's own noCharge path (LicensingFeesHelper.cs:16-38:
+                    // `noCharge || IsBusinessOpen`, SetLicensingFeePaidToday, no ChangeMoney). T-WALLETDUPE asserts
+                    // the company balance EXACTLY across a save/reload; a legitimate $20k daily fee landed mid-run
+                    // whenever the rejoining owner's clock ran through the opening hour in-world (run
+                    // T-WALLETDUPE-20260918-130339) and broke the assertion by timing alone.
+                    var lgi = SaveGameManager.Current;
+                    if (lgi?.BuildingRegistrations == null) return "ERR no game instance";
+                    int lMarked = 0; var lNames = new StringBuilder();
+                    foreach (var lr in lgi.BuildingRegistrations)
+                    {
+                        if (lr == null) continue;
+                        string lt = lr.businessTypeName ?? "";
+                        if (lt != "ba:businesstype_cinema" && lt != "ba:businesstype_theater") continue;
+                        if (!MergerFlip.TrulyMine(lr)) continue;   // own shops only - never a flipped partner's
+                        try
+                        {
+                            Buildings.Retail.Businesses.CinemaTheater.LicensingFeesHelper.PayLicensingFees(lr, noCharge: true);
+                            lMarked++; lNames.Append(lNames.Length > 0 ? "," : "").Append(lr.BusinessName);
+                        }
+                        catch (Exception lex) { return $"ERR licensefees '{lr.BusinessName}': {lex.Message}"; }
+                    }
+                    return $"OK licensefees marked={lMarked} [{lNames}] (paid today, no charge)";
+                }
+
                 case "money":
                 {
                     var mgi = SaveGameManager.Current;
