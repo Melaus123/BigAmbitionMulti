@@ -1437,6 +1437,12 @@ namespace BigAmbitionsMP
                                                  PointOfInterest? keptPoi = null, Color32 keptColour = default)
         {
             try { if (go.GetComponent<ModGhostMarker>() == null) go.AddComponent<ModGhostMarker>(); } catch { }   // review MAJOR-1(b)
+            // TRAFFIC-CONSIST T2 (2026-09-18, design Q3 / I2): every player-vehicle ghost - on EVERY machine and in
+            // either traffic mode - gets the CHILD proxy the thinking traffic senses, so a parked or driven ghost is
+            // braked for instead of driven through. This is the common tail of every ghost spawn, so a ghost that is
+            // REBUILT (a grant change respawns them) gets its proxy back with it. Teardown is already covered: both
+            // destroy paths below call TrafficSync.NotifyCollidersRemoved, which walks triggers carrying the tag.
+            TrafficSync.AttachTrafficSenseProxy(go);
 #if BAMP_DEV
             VehicleHierarchyProbe.DumpOnce(go, e.TypeName);   // DIAG:DEVTOOL — passenger door/seat discovery (once per type)
 #endif
@@ -1742,6 +1748,17 @@ namespace BigAmbitionsMP
 
         /// <summary>Count of player-vehicle ghosts on this client (census/diagnostics).</summary>
         public static int RemoteVehicleCount => _remoteVehicles.Count;
+
+        /// <summary>TRAFFIC-CONSIST T4 census (once per 30 s, never per frame): how many player-vehicle ghosts carry
+        /// a LIVE sense proxy on the sensed layer. 0 before T2, equal to RemoteVehicleCount after it - which is the
+        /// whole answer to I2.</summary>
+        public static int SensedGhostCount()
+        {
+            int n = 0;
+            try { foreach (var rv in _remoteVehicles.Values) if (rv != null && rv.Go != null && TrafficSync.HasTrafficSenseProxy(rv.Go)) n++; }
+            catch { }
+            return n;
+        }
 
         /// <summary>Every collider on every vehicle on THIS machine — ghosts + the local player's
         /// real cars. Used to keep remote-avatar colliders from shoving them (IgnoreCollision).</summary>

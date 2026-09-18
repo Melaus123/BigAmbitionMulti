@@ -2380,6 +2380,17 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.ClientTrafficSnapshot:
+                {
+                    // TRAFFIC-CONSIST T1: the sender is the connection's VERIFIED identity (bound at Hello) - the
+                    // payload names no player, so there is nothing here to spoof, exactly as for TrafficModeAck.
+                    // Main thread: the handler spawns and moves the stand-in objects.
+                    var cts = env.GetPayload<ClientTrafficSnapshotPayload>();
+                    if (cts != null)
+                        GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.HostOnClientTrafficSnapshot(senderPid, cts));
+                    break;
+                }
+
                 case MessageType.PlayerAppearance:
                     HandleClientAppearance(senderPid, env);
                     break;

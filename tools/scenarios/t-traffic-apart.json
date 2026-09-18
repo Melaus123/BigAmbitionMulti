@@ -111,43 +111,70 @@
     {
       "seq": 12,
       "role": "h",
-      "sleep_s": 45,
-      "note": "longer on purpose: the host's refill is at most ONE car per frame and only at an off-screen waypoint (Gley DensityManager), and the client's own cars only go as they leave the screen"
+      "sleep_s": 6,
+      "note": "TRAFFIC-CONSIST T1: a few publish beats (0.2 s each) while the client still holds the cars it was driving in local mode"
     },
     {
       "seq": 13,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=ghost .* published=[1-9]\\d* ",
+      "note": "T1: in ghost mode with leftovers alive the client PUBLISHES them (a 0 here means the scenario no longer exercises publishing - fix the scenario, not the oracle)"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* pvsensed=[1-9]\\d* standins=[1-9]\\d*$",
+      "note": "T1: the host keeps a visible, sensed stand-in per published car; T2: its player-vehicle ghosts carry the sense proxy"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "sleep_s": 100,
+      "note": "100 s since TRAFFIC-CONSIST (was 45): leftovers now SENSE and brake for ghosts, so one can sit in full view until the 90 s in-view ceiling retires it (run 20260918-165824: 1 of 13 still alive at 51 s). Longer on purpose: the host's refill is at most ONE car per frame and only at an off-screen waypoint (Gley DensityManager), and the client's own cars only go as they leave the screen"
+    },
+    {
+      "seq": 16,
       "role": "c",
       "cmd": "traffic",
       "expect_result": "^OK traffic role=c ghosts=[1-9]\\d* hostcars=\\d+ seq=[1-9]\\d* dropped=\\d+ lane=\\S+ mode=ghost local=0 handover=none",
       "note": "ghost mode really back: the host's cars are here, this machine's own ambient cars are gone, handover finished"
     },
     {
-      "seq": 14,
+      "seq": 17,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* standins=0$",
+      "note": "T1: the client's leftovers are gone (old step 13 proved local=0), so every stand-in must have been retired by the absent sweep / 2 s silence rule"
+    },
+    {
+      "seq": 18,
       "role": "h",
       "cmd": "trafficmode force ${clientPid} auto",
       "expect_result": "^OK trafficmode ${clientPid} auto"
     },
     {
-      "seq": 15,
+      "seq": 19,
       "role": "c",
       "cmd": "tp ${hostPid}",
       "expect_result": "^OK tp -?\\d+ -?\\d+ -?\\d+",
       "note": "standing on the host: the distance rule must hold the client in ghost mode"
     },
     {
-      "seq": 16,
+      "seq": 20,
       "role": "h",
       "sleep_s": 45
     },
     {
-      "seq": 17,
+      "seq": 21,
       "role": "c",
       "cmd": "traffic",
       "expect_result": "^OK traffic role=c .* mode=ghost local=0 handover=none",
       "note": "standing on the host, the nearest other player is metres away - far inside the 250 m ring - so the distance rule holds the client in ghost mode, agreeing with the forced verdict it replaced"
     },
     {
-      "seq": 18,
+      "seq": 22,
       "role": "both",
       "cmd": "mark TEST TRAFFIC APART END",
       "expect_result": "OK MARK"

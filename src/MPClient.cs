@@ -2376,6 +2376,17 @@ namespace BigAmbitionsMP
                 new TrafficModeAckPayload { Mode = mode, Seq = seq }));
         }
 
+        /// <summary>TRAFFIC-CONSIST T1: this client's own leftover ambient cars -> the host, on the UNRELIABLE lane
+        /// (a lost publish costs one 0.2 s beat and the next one carries the same cars) and seq-guarded on the host
+        /// exactly like the host's own snapshot stream. Sent only while this client is in ghost mode and still holds
+        /// local ambient cars of its own.</summary>
+        public static void SendClientTrafficSnapshot(ClientTrafficSnapshotPayload p)
+        {
+            if (!IsConnected || p == null) return;
+            var env = MessageEnvelope.Create(MessageType.ClientTrafficSnapshot, MPConfig.PlayerId, p);
+            _transport?.Send(env.Serialize(), reliable: false);
+        }
+
         /// <summary>Sends the local player's vehicle fleet to the host for relay.</summary>
         public static void SendVehicleSync(VehicleFleetPayload payload)
         {

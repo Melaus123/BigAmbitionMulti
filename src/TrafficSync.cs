@@ -69,6 +69,9 @@ namespace BigAmbitionsMP
             public bool          HasPrev;
             public bool          HasVel;
             public bool          HasPrevVel;
+            /// <summary>T3 P3: the newest packet said "stopped or braking" (TrafficCarDto.St). Such a car is
+            /// never extrapolated, never given a Hermite tangent, and its rewind rate limit is lifted.</summary>
+            public bool          Stopped;
             public Collider[]?   Solids;              // MINOR-7 (2026-09-02): non-trigger colliders cached at spawn (shove belt)
             public Rigidbody?    Body;                // cached ROOT rigidbody — driven via MovePosition so the
                                                       //   kinematic ghost acts as a solid obstacle (2026-06-16)
@@ -100,9 +103,29 @@ namespace BigAmbitionsMP
         private const float PlaybackDelay   = 0.20f;
         /// <summary>Chase rate for the host→client clock offset estimate (per applied snapshot).</summary>
         private const float ClockOffsetLerp = 0.05f;
-        /// <summary>How much BACKWARD motion a single frame may apply to a ghost. A late packet that would
-        /// pull it back is spread over the following frames instead of snapping it.</summary>
-        private const float RewindEpsilon   = 0.05f;
+        // ── TRAFFIC-CONSIST T3 (2026-09-18, design Q4 P1-P5): prediction that can never CLOSE a gap ──────────
+        // I3 was dead reckoning up to 0.3 s plus an absolute ban on rewinding: a follower kept every overlap it
+        // ever gained. Four numbers replace that, and this is why they are these numbers.
+        //   PredictSpeedFloor 1.5 m/s - below a walking pace a car's own velocity vector is mostly noise, so
+        //     extrapolating it invents motion the car never made, and that invented metre is exactly the one that
+        //     lands inside the car in front. Below the floor nothing is predicted at all (P1).
+        //   RewindRate 3 m/s - a correction backwards is the ghost GIVING BACK ground it should not have taken,
+        //     so it has to read as motion, not as a snap. 0.2.3 jerked because it applied the whole correction in
+        //     one frame; the rate limit is the entire difference (P4).
+        //   RewindFastRate 8 m/s past RewindBacklogMetres 1.5 m - once the ghost is more than about a car's nose
+        //     ahead of the truth, correct spacing matters more than smoothness: a 2 m backlog then closes in
+        //     ~0.25 s instead of ~0.7 s (P4).
+        // StoppedSpeed 0.5 m/s is the design's own "this car is not moving" test for the St flag (P3, F15).
+        private const float PredictSpeedFloor   = 1.5f;
+        private const float RewindRate          = 3f;
+        private const float RewindFastRate      = 8f;
+        private const float RewindBacklogMetres = 1.5f;
+        private const float StoppedSpeed        = 0.5f;
+
+        // T4 census counters for P1-P5's own evidence. Incremented in TickGhosts (no logging there), printed and
+        // reset by the 30 s census line, so they always describe ONE window.
+        private static int   _deadReckonFrames, _rewindFrames;
+        private static float _maxDeadReckonMetres, _maxRewindMetres;
         private static float _clockOffset;          // clientUnscaledTime - hostT, smoothed
         private static bool  _haveClockOffset;
 
@@ -306,6 +329,18 @@ namespace BigAmbitionsMP
             // reset that runs on EVERY disconnect (game load / scene change); HandBackToVanilla only runs on the
             // offline fork, so the counters would otherwise carry a previous world's numbers into the next log.
             _badDensityCameraLogged.Clear(); _offGridDensitySkips = 0;
+            // TRAFFIC-CONSIST T1/T3: the published-leftover state, the stand-ins (their objects die with the scene)
+            // and the clock estimate are all per world. _haveClockOffset matters here: the HOST stamps its stand-ins
+            // with its own clock (offset 0), and that must never be carried into a session where this machine is a
+            // client reading a real host's stamps.
+            foreach (var f in _foreign.Values) { f.Rows.Clear(); f.StandIns.Clear(); }
+            _foreign.Clear(); _foreignNextOrdinal = 0; _foreignDropLogs = 0;
+            _publishTimer = 0f; _publishSeq = 0; _publishedLast = 0; _publishLogged = false;
+            _publishedIds.Clear(); _sensorSkips = 0;
+            _haveClockOffset = false; _clockOffset = 0f;
+            _senseProxyPending.Clear(); _senseProxyDeferLogged = false;
+            _nextCensusAt = 0f; _gleyTriggerHits = 0;
+            _deadReckonFrames = 0; _rewindFrames = 0; _maxDeadReckonMetres = 0f; _maxRewindMetres = 0f;
         }
 
         /// <summary>Role-based step — called each frame in-game.</summary>
@@ -357,6 +392,13 @@ namespace BigAmbitionsMP
                         }
                         MPPerf.End("Tr.Light", tb);
                     }
+
+                    // TRAFFIC-CONSIST T1 step 2: the host's stand-ins for other players' leftovers are ordinary
+                    // entries in the SAME ghost dictionary, so the existing interpolation moves them - there is no
+                    // second mover. A no-op (one count test) while nobody is publishing.
+                    TickGhosts();
+                    TickSenseProxyRetry();
+                    TickTrafficCensus();
                 }
                 else if (MPClient.IsConnected)
                 {
@@ -370,10 +412,23 @@ namespace BigAmbitionsMP
                     if (Time.timeSinceLevelLoad > 5f)
                         SuppressLocalTraffic();
                     TickGhosts();
+                    // TRAFFIC-CONSIST T1 step 1: the publish rides the HOST'S OWN beat - 0.2 s (open question 1,
+                    // decided 2026-09-18) - and PublishLeftovers itself holds the rule about when to send at all.
+                    _publishTimer -= Time.unscaledDeltaTime;
+                    if (_publishTimer <= 0f) { _publishTimer = PublishInterval; PublishLeftovers(); }
+                    TickSenseProxyRetry();
+                    TickTrafficCensus();
 #if BAMP_DEV
                     TickCensus();
                     TickPushProbe();
 #endif
+                }
+                else if (_foreign.Count > 0)
+                {
+                    // Review 2026-09-18: the host stopped its server but stayed in the world - nobody publishes to
+                    // it any more and the host branch above (the only sweeper) no longer runs. Retire every
+                    // stand-in through the ordinary path now; without this they stay as solid props for good.
+                    SweepForeignTraffic(Time.unscaledTime, _noPeers);
                 }
             }
             catch (Exception ex)
@@ -468,6 +523,8 @@ namespace BigAmbitionsMP
             /// <summary>S3 (2026-09-12): the car's TRUE velocity, straight off the same VehicleComponent
             /// this row was built from (GetVelocity() = its rigidbody velocity, m/s).</summary>
             public Vector3 Vel;
+            /// <summary>T3 P3: 1 = stopped or braking, read live from Gley at the moment this row was built.</summary>
+            public byte    St;
         }
 
         private static readonly List<MasterCar> _masterScratch = new();
@@ -518,7 +575,9 @@ namespace BigAmbitionsMP
                     // instead of being back-derived by the client from two quantized positions.
                     Vector3 vel = default;
                     try { vel = vc.GetVelocity(); } catch { }
-                    _masterScratch.Add(new MasterCar { Index = index, Model = model, Colors = colors, Pos = pos, Rot = rot, Vel = vel });
+                    // T3 P3: "stopped or braking" travels WITH the row, so the client never has to infer it from a
+                    // velocity that is already a beat old. Live read at the moment of commitment.
+                    _masterScratch.Add(new MasterCar { Index = index, Model = model, Colors = colors, Pos = pos, Rot = rot, Vel = vel, St = StoppedFlag(index, vel) });
                 }
             }
             catch (Exception ex)
@@ -526,6 +585,34 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[TrafficSync] BuildMaster: {ex.Message}");
             }
             return _masterScratch;
+        }
+
+        /// <summary>T3 P3 (design Q4, F15): 1 when Gley's own driving action for this car is one of the stop-ish
+        /// ones - GiveWay 15, StopInPoint 20, TempStop 60, StopInDistance 70, StopNow 90
+        /// (GleyTrafficSystem/SpecialDriveActionTypes.cs) - or the car is simply slower than StoppedSpeed. Read
+        /// live, per row. TrafficManager.Instance lazily CREATES a manager, so the state is tested first (review
+        /// #2 MINOR-2); any read failure yields 0 = "moving or unknown", which is exactly today's behaviour.</summary>
+        private static byte StoppedFlag(int index, Vector3 vel)
+        {
+            try
+            {
+                if (vel.sqrMagnitude < StoppedSpeed * StoppedSpeed) return 1;
+                if (!TrafficManager.HasInstance || !TrafficManager.IsInitialized) return 0;
+                var tm = TrafficManager.Instance;
+                if (tm == null) return 0;
+                var state = tm.GetCurrentDrivingState(index);
+                switch (state.Item2)
+                {
+                    case SpecialDriveActionTypes.GiveWay:
+                    case SpecialDriveActionTypes.StopInPoint:
+                    case SpecialDriveActionTypes.TempStop:
+                    case SpecialDriveActionTypes.StopInDistance:
+                    case SpecialDriveActionTypes.StopNow:
+                        return 1;
+                }
+            }
+            catch { }
+            return 0;
         }
 
         // T2 per-peer state: PLAYER id → (pool slot → identity token = the Colors list ref last sent).
@@ -555,6 +642,15 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(playerId)) return;
             _peerSentIdentity.Remove(playerId);
             _peerTraffic.Remove(playerId); _peerTrafficPin.Remove(playerId);   // TRAFFIC-APART P7: its mode state goes with it
+            // TRAFFIC-CONSIST T1 step 4: a departing owner's published leftovers and their stand-ins go AT ONCE -
+            // nobody is left to update them, and a rejoin takes a new ordinal (design failure case 1).
+            if (_foreign.TryGetValue(playerId, out var goneF))
+            {
+                int n = goneF.StandIns.Count, rows = goneF.Rows.Count;
+                DropStandIns(goneF, null);
+                _foreign.Remove(playerId);
+                if (rows > 0 || n > 0) Plugin.Logger.LogInfo($"[TrafficSync] '{playerId}' left: {rows} relayed leftover row(s) and {n} stand-in(s) dropped.");
+            }
             _lightsFullSentAt = -999f;
         }
 
@@ -752,9 +848,31 @@ namespace BigAmbitionsMP
                         // S3: velocity in cm/s (0 = standing still / unknown — the client derives then).
                         Vx = Mathf.RoundToInt(mc.Vel.x * 100f), Vy = Mathf.RoundToInt(mc.Vel.y * 100f),
                         Vz = Mathf.RoundToInt(mc.Vel.z * 100f),
+                        // T3 P3: additive - a 0.3.0 client ignores an unknown JSON member and behaves as today.
+                        St = mc.St,
                     };
                     if (needIdentity) { dto.Model = mc.Model; dto.Colors = mc.Colors; sent[mc.Index] = mc.Colors; }
                     snap.Cars.Add(dto);
+                }
+                // TRAFFIC-CONSIST T1 step 3: FOLD every OTHER client's published leftovers into this peer's
+                // ordinary snapshot, under their reserved ids. The OWNER is skipped - it still holds those cars
+                // itself, and a second copy of its own car would be the "two truths for one car" the design rules
+                // out structurally. Same send radius as the host's own rows, and identity always rides (the rows
+                // are few and only exist during a fade), so a receiving client can spawn them on first sight.
+                // Nothing on the receiving side is new: they are ordinary TrafficSnapshot rows, so a 0.3.0 client
+                // renders them exactly like the host's own cars.
+                foreach (var kvF in _foreign)
+                {
+                    if (kvF.Key == pid) continue;
+                    foreach (var row in kvF.Value.Rows)
+                    {
+                        if (havePos)
+                        {
+                            var rp = new Vector3(row.X * 0.01f, row.Y * 0.01f, row.Z * 0.01f);
+                            if ((rp - anchor).sqrMagnitude > r2) continue;
+                        }
+                        snap.Cars.Add(row);
+                    }
                 }
                 bool laneOk = MPServer.SendTrafficSnapshotTo(link, snap);
                 _laneUnreliable = laneOk;
@@ -789,6 +907,9 @@ namespace BigAmbitionsMP
                 foreach (var k in _peerTraffic.Keys) if (!livePids.Contains(k)) (staleMode ??= new List<string>()).Add(k);
                 if (staleMode != null) foreach (var k in staleMode) { _peerTraffic.Remove(k); _peerTrafficPin.Remove(k); }
             }
+            // TRAFFIC-CONSIST T1 step 4: published rows are perishable - they die after 2 s of silence and with
+            // the peer. Rides this same 0.2 s beat (an event, not a timer of its own).
+            SweepForeignTraffic(now, livePids);
         }
 
 
@@ -1143,6 +1264,7 @@ namespace BigAmbitionsMP
                         // wait for a second packet before it can move between snapshots.
                         if (car.Vx != 0 || car.Vy != 0 || car.Vz != 0)
                         { g.Velocity = new Vector3(car.Vx * 0.01f, car.Vy * 0.01f, car.Vz * 0.01f); g.HasVel = true; }
+                        g.Stopped = car.St != 0;   // T3 P3
                         _ghosts[car.Index] = g;
                     }
                     else
@@ -1168,6 +1290,7 @@ namespace BigAmbitionsMP
                         g.TargetRot = rot;
                         g.TargetAt  = Time.unscaledTime;
                         g.HostT     = snap.T;
+                        g.Stopped   = car.St != 0;   // T3 P3: the newest word on whether this car moves at all
 #if BAMP_DEV
                         // S4 jitter, REDEFINED (fold c): the visible CORRECTION this arrival implies. The
                         // ghost is drawn PlaybackDelay behind the host clock, so nothing is ever rendered as
@@ -1337,9 +1460,12 @@ namespace BigAmbitionsMP
             // Client sim at zero density (2026-09-02): a ghost's colliders move to the layer Gley brakes for
             // (ServiceColliderLayer — resolved from the traffic system's own LayerSetup; NOT PlayerVehicles, which
             // measured as neither sensed nor collidable, H-SVC-113). On the traffic layer a stripped ghost reaches the
-            // unguarded VehicleComponent.cs:366 deref (the June NRE class); on playerLayers the car takes the safe
-            // branch, brakes and waits, exactly as for a player's car. Same relayer the A2 look-alike uses.
-            if (ClientServiceSimEnabled) RelayerCollidersToServiceLayer(body);
+            // unguarded VehicleComponent.OnTriggerEnter deref (decompile :428, other.attachedRigidbody - the June NRE
+            // class); on playerLayers the car takes the safe branch, brakes and waits, exactly as for a player's car.
+            // Same relayer the A2 look-alike uses. UNCONDITIONAL since TRAFFIC-CONSIST T5 (review HIGH-1): a client's
+            // local-mode cars and fade leftovers run the real sensor handler whatever ClientServiceSimEnabled says,
+            // so no ghost may stay on AiVehicles once a sensed layer exists (the routine is a no-op without one).
+            RelayerCollidersToServiceLayer(body);
             return body;
         }
 
@@ -1368,6 +1494,7 @@ namespace BigAmbitionsMP
                 // without sensing (logged as a warning; the look-alike then falls back to the player body).
                 var excluded = new System.Collections.Generic.HashSet<int> { LayerHelper.PlayerLayerIndex, LayerHelper.HumanLayerIndex,
                     LayerHelper.PlayerVehiclesLayerIndex, LayerHelper.UiLayerIndex, LayerHelper.IgnoreRaycastLayerIndex, LayerHelper.DefaultLayerIndex };
+                if (ai >= 0) excluded.Add(ai);   // review 2026-09-18: never the traffic layer itself - a proxy there takes the same-layer branch and its null-rigidbody deref
                 var names = new System.Collections.Generic.List<string>();
                 for (int i = 0; i < 32; i++) if ((mask & (1 << i)) != 0) names.Add($"{LayerMask.LayerToName(i)}({i}){(Collides(i) ? "" : "×noAi")}{(excluded.Contains(i) ? "×excluded" : "")}");
                 if (veh >= 0 && (mask & (1 << veh)) != 0 && Collides(veh)) chosen = veh;
@@ -1538,11 +1665,19 @@ namespace BigAmbitionsMP
                 // exactly the same schedule, instead of chasing an extrapolated point.
                 float ahead = 0f;
                 Vector3 desiredPos; Quaternion desiredRot;
+                // T3 P1/P3: "this car is not really moving" - either the newest speed is below the floor or the
+                // packet says so outright. Everything predictive is off for such a car.
+                float speed = g.Velocity.magnitude;
+                bool  still = g.Stopped || speed < PredictSpeedFloor;
                 if (_haveClockOffset && g.HasPrev && renderT < g.HostT && g.HostT - g.PrevHostT > 0.001f)
                 {
                     float span = g.HostT - g.PrevHostT;
                     float u    = Mathf.Clamp01((renderT - g.PrevHostT) / span);
-                    desiredPos = (g.HasVel && g.HasPrevVel)
+                    // T3 P5: the Hermite needs BOTH tangents to be real. A long tangent at one end against a
+                    // near-zero one at the other overshoots past its own endpoint - a car easing to a stop is
+                    // exactly that case - so a slow or stopped endpoint takes the plain lerp instead.
+                    bool hermite = g.HasVel && g.HasPrevVel && !still && g.PrevVel.magnitude >= PredictSpeedFloor;
+                    desiredPos = hermite
                         ? Hermite(g.PrevPos, g.PrevVel * span, g.TargetPos, g.Velocity * span, u)
                         : Vector3.Lerp(g.PrevPos, g.TargetPos, u);
                     desiredRot = Quaternion.Slerp(g.PrevRot, g.TargetRot, u);
@@ -1555,19 +1690,65 @@ namespace BigAmbitionsMP
                     ahead = _haveClockOffset
                         ? Mathf.Clamp(renderT - g.HostT, 0f, MaxExtrapolateSeconds)
                         : Mathf.Min(now - g.TargetAt, MaxExtrapolateSeconds);
-                    desiredPos = g.TargetPos + g.Velocity * ahead;
+                    if (still)
+                    {
+                        // T3 P1/P3: no extrapolation AT ALL below the floor or under St. The gap a stopped car
+                        // leaves is real; inventing motion into it is what pushes a ghost into the car ahead.
+                        ahead = 0f;
+                        desiredPos = g.TargetPos;
+                    }
+                    else
+                    {
+                        // T3 P2 - BRAKING DAMP. When the newest speed is below the previous one the car is
+                        // slowing, so predict with the deceleration actually measured between the two stamps and
+                        // never travel further than its own stopping distance v^2/2a: a constant-velocity guess
+                        // would sail it into the back of the queue it is joining.
+                        float dist = speed * ahead;
+                        if (g.HasPrev && g.HasPrevVel && g.HostT - g.PrevHostT > 0.001f)
+                        {
+                            float prevSpeed = g.PrevVel.magnitude;
+                            if (prevSpeed > speed)
+                            {
+                                float decel = (prevSpeed - speed) / (g.HostT - g.PrevHostT);
+                                if (decel > 0.01f)
+                                    dist = Mathf.Min(dist - 0.5f * decel * ahead * ahead, speed * speed / (2f * decel));
+                            }
+                        }
+                        if (dist < 0f) dist = 0f;
+                        desiredPos = g.TargetPos + g.Velocity.normalized * dist;
+                    }
                     desiredRot = g.TargetRot;
+                    if (ahead > 0f)
+                    {
+                        _deadReckonFrames++;
+                        float dr = (desiredPos - g.TargetPos).magnitude;
+                        if (dr > _maxDeadReckonMetres) _maxDeadReckonMetres = dr;
+                    }
                 }
                 Vector3    smoothedPos = Vector3.Lerp(t.position, desiredPos, k);
                 Quaternion smoothedRot = Quaternion.Slerp(t.rotation, desiredRot, k);
-                // S4: never REWIND a ghost. A late packet that would pull it backwards along its own heading
-                // keeps at most RewindEpsilon of that this frame; the rest is carried by the following frames
-                // (the target stands still, so the chase closes it smoothly) rather than snapping back.
+                // T3 P4 - THE RATE-LIMITED REWIND, in place of the old absolute no-rewind clamp (I3: a follower
+                // that may never move backwards can never give an overlap back, so a wrong gap became permanent).
+                // Backward motion along the heading is now limited, not forbidden: RewindRate normally, and
+                // RewindFastRate once the backlog passes RewindBacklogMetres, so the correction reads as the car
+                // easing back rather than as the 0.2.3 snap. A car the packet calls stopped (P3) has the limit
+                // lifted altogether - it is not driving away from the correction, and the chase rate k still
+                // spreads it over a few frames.
                 {
                     Vector3 mv  = smoothedPos - t.position;
                     Vector3 dir = g.Velocity.sqrMagnitude > 0.01f ? g.Velocity.normalized : t.forward;
                     float along = Vector3.Dot(mv, dir);
-                    if (along < -RewindEpsilon) smoothedPos -= dir * (along + RewindEpsilon);
+                    if (along < 0f)
+                    {
+                        float backlog = Mathf.Max(0f, Vector3.Dot(t.position - desiredPos, dir));
+                        if (backlog > _maxRewindMetres) _maxRewindMetres = backlog;
+                        _rewindFrames++;
+                        if (!g.Stopped)
+                        {
+                            float cap = (backlog > RewindBacklogMetres ? RewindFastRate : RewindRate) * Time.deltaTime;
+                            if (along < -cap) smoothedPos -= dir * (along + cap);
+                        }
+                    }
                 }
 #if BAMP_DEV
                 Vector3 _pre = t.position;
@@ -2525,7 +2706,7 @@ namespace BigAmbitionsMP
         private static void EnterLocalMode()
         {
             _localDensityIssued = false; _localDensityWaitLogged = false; _localDensityUninitLogged = false;
-            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: local (seq {_modeSeq}) - this client is far from every other player and takes over its own traffic; {_ghosts.Count} host ghost(s) fade out first.");
+            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: local (seq {_modeSeq}) - this client is far from every other player and takes over its own traffic; {_ghosts.Count} host ghost(s) fade out first. Measured here: nearest other player {MeasuredNearestOtherPlayer()}.");
         }
 
         /// <summary>P6: someone is near again — the host's cars rule here. Acked IMMEDIATELY: in this direction there
@@ -2536,7 +2717,7 @@ namespace BigAmbitionsMP
             var tm = TrafficManager.Instance;
             if (tm != null) { SelfDensityCall = true; try { tm.SetTrafficDensity(0); } catch { } finally { SelfDensityCall = false; } }
             _localDensityIssued = false; _localDensityWaitLogged = false; _localDensityUninitLogged = false;
-            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: ghost (seq {_modeSeq}) - another player is near; the host's traffic takes over and the local cars fade out as its ghosts arrive.");
+            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: ghost (seq {_modeSeq}) - another player is near; the host's traffic takes over and the local cars fade out as its ghosts arrive. Measured here: nearest other player {MeasuredNearestOtherPlayer()}.");
             MPClient.SendTrafficModeAck(ModeGhost, _modeSeq);
         }
 
@@ -2867,6 +3048,515 @@ namespace BigAmbitionsMP
         /// records that 0 as the game's request.</summary>
         internal static bool SelfDensityCall;
         private static float _nextClientSimBeat;
+
+        // ══ TRAFFIC-CONSIST T1 (2026-09-18, design Q1 option A) - a client PUBLISHES its leftover cars ══════
+        //
+        // WHY AT ALL (user ruling): everyone has to exist in the same world, consistent with itself. During the
+        // switch-over to ghost mode a client still holds ambient cars of its OWN - cars another player standing
+        // next to him cannot see and, worse, that the other machine's thinking traffic drives straight through.
+        // Option B ("place the boundary so no leftover is ever visible") is arithmetically impossible (leftovers
+        // stay private only past 230 m while the flip fires at 250 m, and a fade may run to 90 s), and option C
+        // ("the host adopts the cars") needs a respawn that can fail and a pose jump. So: publish them.
+        //
+        // THE RULE (open question 2, decided 2026-09-18): ONLY while this client's mode is ghost AND it still
+        // holds ambient local cars. A client running local traffic alone is beyond 350 m from everyone - there is
+        // nobody to be inconsistent with, and nothing to pay for.
+        private const float PublishInterval = BroadcastInterval;   // 0.2 s - the host's own beat (open question 1)
+        private static float _publishTimer;
+        private static long  _publishSeq;
+        private static int   _publishedLast;
+        private static bool  _publishLogged;
+        /// <summary>T5: the pool indices of the cars the LAST publish beat carried - i.e. this client's current fade
+        /// leftovers. Kept as a set so the Gley sensor shield (MPPatches.Patch_GleyVehicle_NREShield, a PHYSICS-path
+        /// prefix) can answer "is this one of my own real cars?" with one hash lookup and no allocation, from the
+        /// very same list T1 publishes from.</summary>
+        private static readonly HashSet<int> _publishedIds = new();
+        private static int   _sensorSkips;
+
+        /// <summary>T5: is this Gley car one of this client's fade leftovers (the newest publish beat)? False on the
+        /// host, false when nothing is being published.</summary>
+        internal static bool IsPublishedLeftover(VehicleComponent? v)
+        {
+            try { return v != null && _publishedIds.Count > 0 && _publishedIds.Contains(v.GetIndex()); }
+            catch { return false; }
+        }
+
+        /// <summary>T5: the sensor shield skipped one real handler call. Counter only - it runs on the physics path
+        /// and must never log; the 30 s census prints and resets it.</summary>
+        internal static void CountSensorSkip() { _sensorSkips++; }
+        /// <summary>T4 lever: how many leftover cars this client put on the wire on its last publish beat.</summary>
+        public static int PublishedLeftoverCount => _publishedLast;
+
+        /// <summary>T1 step 1: the client's publish beat. The filter is the FADE'S OWN leftover filter (active, no
+        /// preset path, not one of the mod's service cars - the same three tests TickGhostHandover and
+        /// ClearClientTrafficExceptServiceCars use), so the rows are exactly the cars that are fading out. Identity
+        /// (model + colours) rides on every row: there are at most a couple of dozen and only for the length of a
+        /// fade, and it lets the host - and every peer the host relays to - spawn one on first sight.</summary>
+        private static void PublishLeftovers()
+        {
+            try
+            {
+                if (MPServer.IsRunning || !MPClient.IsConnected) { _publishedLast = 0; _publishedIds.Clear(); return; }
+                if (ClientTrafficMode != ModeGhost) { _publishedLast = 0; _publishedIds.Clear(); return; }
+                var list = TrafficManager.Instance?.trafficVehicles?.GetVehicleList();
+                if (list == null) { _publishedLast = 0; _publishedIds.Clear(); return; }
+                _publishedIds.Clear();   // T5: rebuilt every beat, so the shield's exemption can never outlive a car
+                var payload = new ClientTrafficSnapshotPayload { T = Time.unscaledTime, Seq = ++_publishSeq };
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var v = list[i];
+                    if (v == null) continue;
+                    var go = v.gameObject;
+                    if (go == null || !go.activeInHierarchy) continue;
+                    if (v.presetPath != null) continue;
+                    if (ServiceCars.IsClientKept(go)) continue;
+                    int index = v.GetIndex();
+                    _publishedIds.Add(index);
+                    var t = v.transform;
+                    var pos = t.position; var rot = t.rotation;
+                    Vector3 vel = default;
+                    try { vel = v.GetVelocity(); } catch { }
+                    // Same identity cache the host's BuildMaster uses: a recycle always teleports, so a small move
+                    // means the same live car and the model/paint read (an IL2CPP string + a material scan) is skipped.
+                    string model; List<float> colors;
+                    if (_carColors.TryGetValue(index, out var cc) && (pos - cc.Pos).sqrMagnitude < SnapDistance * SnapDistance)
+                    { model = cc.Model; colors = cc.Colors; cc.Pos = pos; }
+                    else
+                    {
+                        model = StripCloneSuffix(go.name);
+                        colors = ReadBodyColors(index, go);
+                        _carColors[index] = new CarColorEntry { Model = model, Pos = pos, Colors = colors };
+                    }
+                    payload.Cars.Add(new TrafficCarDto
+                    {
+                        Index = index, Model = model, Colors = colors,
+                        X = Mathf.RoundToInt(pos.x * 100f), Y = Mathf.RoundToInt(pos.y * 100f), Z = Mathf.RoundToInt(pos.z * 100f),
+                        Qx = Mathf.RoundToInt(rot.x * 10000f), Qy = Mathf.RoundToInt(rot.y * 10000f),
+                        Qz = Mathf.RoundToInt(rot.z * 10000f), Qw = Mathf.RoundToInt(rot.w * 10000f),
+                        Vx = Mathf.RoundToInt(vel.x * 100f), Vy = Mathf.RoundToInt(vel.y * 100f), Vz = Mathf.RoundToInt(vel.z * 100f),
+                        // T3 P3: the machine that RUNS the car is the one that can read its driving action, and for
+                        // a published leftover that machine is this one - so the flag is set here, by the same test
+                        // the host applies to its own rows.
+                        St = StoppedFlag(index, vel),
+                    });
+                }
+                _publishedLast = payload.Cars.Count;
+                if (_publishedLast == 0) return;
+                MPClient.SendClientTrafficSnapshot(payload);
+                if (!_publishLogged)
+                {
+                    _publishLogged = true;
+                    Plugin.Logger.LogInfo($"[TrafficSync] publishing {_publishedLast} leftover local car(s) to the host at {1f / PublishInterval:0} Hz while this client is in ghost mode - the host stands them in for its own traffic to brake for and relays them to every other player. Counted from here on by the 30 s [TrafficCensus] line ('published').");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] PublishLeftovers: {ex.Message}"); }
+        }
+
+        // ── T1 steps 2-4: the HOST's side of the published leftovers ──────────────────────────────────────
+        /// <summary>Reserved relay id base (design Q1 step 3). The host's own ids are Gley POOL INDICES, bounded by
+        /// the pool size (a few hundred), so ids from 1,000,000 up can never collide with one; each owner gets a
+        /// 10,000-wide block, wider than any pool.</summary>
+        private const int   ForeignIdBase   = 1000000;
+        private const int   ForeignIdStride = 10000;
+        /// <summary>Design failure case 1: all of an owner's rows drop after this long without a publish (and at
+        /// once on ForgetPeer), so a client wedged mid-fade - or simply gone - cannot leave cars standing.</summary>
+        private const float ForeignSilenceSeconds = 2f;
+
+        private sealed class ForeignTraffic
+        {
+            public int   Ordinal;
+            public long  Seq;
+            public float LastAt;
+            public float SinceAt;                                  // first publish of the current episode (census age)
+            public readonly List<TrafficCarDto> Rows = new();      // the NEWEST publish, already carrying relay ids
+            public readonly HashSet<int> StandIns = new();         // relay ids that have a stand-in in _ghosts
+        }
+        private static readonly Dictionary<string, ForeignTraffic> _foreign = new();
+        private static readonly HashSet<string> _noPeers = new();   // the empty live-set for the server-stopped sweep
+        private static int _foreignNextOrdinal;
+        private static int _foreignDropLogs;
+
+        /// <summary>T4 lever: stand-ins this host keeps for other players' published cars.</summary>
+        public static int HostStandInCount { get { int n = 0; foreach (var f in _foreign.Values) n += f.StandIns.Count; return n; } }
+        /// <summary>T4 lever: rows of other players' leftovers this host is relaying right now.</summary>
+        public static int HostReceivedLeftoverCount { get { int n = 0; foreach (var f in _foreign.Values) n += f.Rows.Count; return n; } }
+        /// <summary>T4 lever: cars in this machine's ghost table that are somebody ELSE'S leftovers (reserved ids) -
+        /// the host's stand-ins, or, on a client, the rows the host relayed here.</summary>
+        public static int ForeignGhostCount { get { int n = 0; foreach (var k in _ghosts.Keys) if (k >= ForeignIdBase) n++; return n; } }
+
+        /// <summary>T1 steps 2-4 (host): take one client's published leftovers, keep a SENSED stand-in per car so
+        /// this machine's own thinking traffic brakes for them, and hold the rows for the relay in BroadcastPerPeer.
+        /// Seq-guarded exactly like the host's own stream (the publish rides the unreliable lane, so a late packet
+        /// must never win newest-wins; a far-lower Seq is a new stream after a rejoin, not a stale packet). Main
+        /// thread only - it spawns and moves objects.</summary>
+        public static void HostOnClientTrafficSnapshot(string pid, ClientTrafficSnapshotPayload p)
+        {
+            if (!MPServer.IsRunning || p == null || string.IsNullOrEmpty(pid)) return;
+            try
+            {
+                if (!_foreign.TryGetValue(pid, out var ft))
+                {
+                    _foreign[pid] = ft = new ForeignTraffic { Ordinal = ++_foreignNextOrdinal, SinceAt = Time.unscaledTime };
+                    Plugin.Logger.LogInfo($"[TrafficSync] '{pid}' is publishing its leftover local cars (ordinal {ft.Ordinal}): they get stand-ins here and ride this host's snapshots to every OTHER player under ids from {ForeignIdBase + ForeignIdStride * ft.Ordinal}.");
+                }
+                if (p.Seq > 0 && p.Seq <= ft.Seq && ft.Seq - p.Seq <= 100) return;
+                if (ft.Rows.Count == 0 && ft.StandIns.Count == 0) ft.SinceAt = Time.unscaledTime;
+                ft.Seq = p.Seq; ft.LastAt = Time.unscaledTime;
+                ft.Rows.Clear();
+                var live = new HashSet<int>();
+                if (p.Cars != null)
+                    foreach (var c in p.Cars)
+                    {
+                        if (c == null) continue;
+                        int id = ForeignIdBase + ForeignIdStride * ft.Ordinal + c.Index;
+                        var row = new TrafficCarDto
+                        {
+                            Index = id, Model = c.Model, Colors = c.Colors,
+                            X = c.X, Y = c.Y, Z = c.Z, Qx = c.Qx, Qy = c.Qy, Qz = c.Qz, Qw = c.Qw,
+                            Vx = c.Vx, Vy = c.Vy, Vz = c.Vz, St = c.St,
+                        };
+                        ft.Rows.Add(row);
+                        live.Add(id);
+                        ApplyStandIn(ft, row);
+                    }
+                // A car ABSENT from the newest publish is gone on its owner's machine - the same rule ApplySnapshot's
+                // absent sweep applies to the host's own cars, so a leftover dies here the moment it dies there.
+                DropStandIns(ft, live);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] client traffic from '{pid}': {ex.Message}"); }
+        }
+
+        /// <summary>T1 step 2: one stand-in per published car - the SAME stripped clone the traffic ghosts and the
+        /// service look-alikes use (CloneStrippedPrefab + RelayerCollidersToServiceLayer), stored as an ordinary
+        /// entry in the ghost table so the SAME interpolation drives it. It is a visible PROP, never a Gley car:
+        /// the host's density budget and its pool are untouched (design failure case 3), and because it is visible
+        /// the host's own player - who is just "another player" to the client in fade - sees those cars at all.
+        /// An unknown model gets NO stand-in, and its row is still relayed (design failure case 2).
+        /// The stamps are the host's OWN arrival times, not the publisher's clock: the two machines share no clock,
+        /// and the arrival beat IS the sample cadence, so the buffered interpolation works with offset 0.</summary>
+        private static void ApplyStandIn(ForeignTraffic ft, TrafficCarDto row)
+        {
+            try
+            {
+                string model = row.Model ?? "";
+                var pos = new Vector3(row.X * 0.01f, row.Y * 0.01f, row.Z * 0.01f);
+                var rot = new Quaternion(row.Qx * 0.0001f, row.Qy * 0.0001f, row.Qz * 0.0001f, row.Qw * 0.0001f);
+                if (rot.x == 0f && rot.y == 0f && rot.z == 0f && rot.w == 0f)
+                    rot = _ghosts.TryGetValue(row.Index, out var lastRot) ? lastRot.TargetRot : Quaternion.identity;
+                float now = Time.unscaledTime;
+                _ghosts.TryGetValue(row.Index, out var g);
+                // A pool slot reused for a different car on the owner's machine: same two tells as ApplySnapshot.
+                if (g != null && g.Go != null && (g.Model != model || Vector3.Distance(g.Go.transform.position, pos) > SnapDistance))
+                {
+                    try { NotifyCollidersRemoved(g.Go, g.Solids); UnityEngine.Object.Destroy(g.Go); } catch { }
+                    _ghosts.Remove(row.Index); ft.StandIns.Remove(row.Index); g = null;
+                }
+                if (g == null || g.Go == null)
+                {
+                    if (model.Length == 0) return;
+                    BuildPrefabMap();
+                    GameObject? prefab = null;
+                    _trafficPrefabs?.TryGetValue(model, out prefab);
+                    if (prefab == null) return;                       // failure case 2: no stand-in, row still relayed
+                    var body = CloneStrippedPrefab(prefab, model, pos, rot);
+                    if (body == null) return;
+                    RelayerCollidersToServiceLayer(body);             // unconditional here: this host really runs Gley
+                    g = new TrafficGhost { Go = body, Model = model, TargetPos = pos, TargetRot = rot, TargetAt = now, HostT = now };
+                    g.Body = body.GetComponent<Rigidbody>();
+                    try { var all = body.GetComponentsInChildren<Collider>(true); var sol = new List<Collider>(all.Length); foreach (var c in all) if (c != null && !c.isTrigger) sol.Add(c); g.Solids = sol.ToArray(); } catch { }
+                    _ghosts[row.Index] = g;
+                    ft.StandIns.Add(row.Index);
+                    // The host's own clock IS the stamp clock for stand-ins, so the buffered interpolation needs no
+                    // estimate (offset 0). The host never runs ApplySnapshot, which is the only other writer.
+                    _clockOffset = 0f; _haveClockOffset = true;
+                }
+                else
+                {
+                    g.PrevPos = g.TargetPos; g.PrevRot = g.TargetRot; g.PrevVel = g.Velocity;
+                    g.PrevHostT = g.HostT; g.HasPrevVel = g.HasVel; g.HasPrev = true;
+                    float hdt = now - g.HostT;
+                    if (row.Vx != 0 || row.Vy != 0 || row.Vz != 0)
+                    { g.Velocity = new Vector3(row.Vx * 0.01f, row.Vy * 0.01f, row.Vz * 0.01f); g.HasVel = true; }
+                    else if (hdt > 0.005f) { g.Velocity = (pos - g.TargetPos) / hdt; g.HasVel = true; }
+                    g.TargetPos = pos; g.TargetRot = rot; g.TargetAt = now; g.HostT = now;
+                }
+                g.Stopped = row.St != 0;
+                if (g.Go != null && row.Colors != null && row.Colors.Count >= 6 && !SameColors(g.LastColors, row.Colors))
+                {
+                    ApplyVehicleBodyColors(g.Go, model, row.Colors);
+                    g.LastColors = row.Colors;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] stand-in for a published car: {ex.Message}"); }
+        }
+
+        /// <summary>Retires an owner's stand-ins: all of them (live == null) or every one the newest publish no
+        /// longer names. Goes through the same release path every other ghost teardown uses, so a host car braking
+        /// for one never keeps a dead collider (review BLOCKER-2 / design failure case 4).</summary>
+        private static void DropStandIns(ForeignTraffic ft, HashSet<int>? live)
+        {
+            List<int>? gone = null;
+            foreach (var id in ft.StandIns) if (live == null || !live.Contains(id)) (gone ??= new List<int>()).Add(id);
+            if (live == null) ft.Rows.Clear();
+            if (gone == null) return;
+            foreach (var id in gone) { RetireGhost(id); ft.StandIns.Remove(id); }
+        }
+
+        /// <summary>T1 step 4: an owner that has gone quiet for ForeignSilenceSeconds - or that is no longer a
+        /// connected peer - loses every row and every stand-in at once. Runs on the host's own 0.2 s beat.</summary>
+        private static void SweepForeignTraffic(float now, HashSet<string> livePids)
+        {
+            if (_foreign.Count == 0) return;
+            List<string>? drop = null;
+            foreach (var kv in _foreign)
+                if (!livePids.Contains(kv.Key) || now - kv.Value.LastAt > ForeignSilenceSeconds)
+                    (drop ??= new List<string>()).Add(kv.Key);
+            if (drop == null) return;
+            foreach (var pid in drop)
+            {
+                if (!_foreign.TryGetValue(pid, out var ft)) continue;
+                bool live = livePids.Contains(pid);
+                int rows = ft.Rows.Count, n = ft.StandIns.Count;
+                DropStandIns(ft, null);
+                _foreign.Remove(pid);
+                if ((rows > 0 || n > 0) && _foreignDropLogs++ < 10)
+                    Plugin.Logger.LogInfo($"[TrafficSync] '{pid}' stopped publishing leftovers ({(live ? $"{ForeignSilenceSeconds:0} s of silence" : "peer gone")}): {rows} relayed row(s) and {n} stand-in(s) dropped.");
+            }
+        }
+
+        // ══ TRAFFIC-CONSIST T2 (design Q3) - player-vehicle ghosts are SENSED ══════════════════════════════
+        internal const string SenseProxyName = "BAMP_TrafficSense";
+        private  const string SenseProxyTag  = "AiVehicleHalt";
+        private static readonly List<GameObject> _senseProxyPending = new();
+        private static float _senseProxyRetryAt;
+        private static int   _senseProxyLogs;
+        private static bool  _senseProxyDeferLogged;
+
+        /// <summary>The ghost's sense proxy, wherever it hangs (it is parented to the body collider when there is
+        /// one, so a root-level Find would miss it).</summary>
+        private static Transform? FindSenseProxy(GameObject go)
+        {
+            try
+            {
+                foreach (var t in go.GetComponentsInChildren<Transform>(true))
+                    if (t != null && t.gameObject.name == SenseProxyName) return t;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>T2 (design Q3, I2): gives one player-vehicle ghost the child that Gley's sensors see. ONE
+        /// mechanism on EVERY machine, unconditionally - the host always runs thinking traffic and a client runs
+        /// one in either mode (its own service cars drive natively at zero ambient density) - and doing it once at
+        /// spawn avoids re-layering churn at every mode flip.
+        /// WHY A CHILD, never the root: EntityController re-asserts the ROOT layer in Awake and Show()
+        /// (EntityController.cs:83-85, :162) and VehicleController rewrites renderer layers on enter/exit (:338,
+        /// :345, :389), so a relayered root is undone on any ghost that KEEPS its controller (a granted, drivable
+        /// one). Nothing native touches a child's layer.
+        /// WHY A TRIGGER: Gley ignores a trigger collider UNLESS it carries the tag AiVehicleHalt
+        /// (VehicleComponent.cs:419, :471) - the game's own tag (DriveInEntranceEnterTrigger.cs:16) - and the
+        /// playerLayers branch it then takes never dereferences attachedRigidbody (:451-457), so the proxy needs no
+        /// rigidbody and adds no solid physics against the local player's own car.
+        /// TEARDOWN: every ghost destroy path goes through NotifyCollidersRemoved, which already walks triggers
+        /// carrying this tag - without that a braking car would hold a dead collider forever (failure case 4).</summary>
+        internal static void AttachTrafficSenseProxy(GameObject? go)
+        {
+            if (go == null) return;
+            try
+            {
+                if (FindSenseProxy(go) != null) return;              // a rebuilt ghost keeps the one it has
+                int layer = ServiceColliderLayer();
+                if (layer < 0)
+                {
+                    // A gated action that defers RETRIES on the next beat, and says so.
+                    if (!_senseProxyPending.Contains(go)) _senseProxyPending.Add(go);
+                    if (!_senseProxyDeferLogged)
+                    {
+                        _senseProxyDeferLogged = true;
+                        Plugin.Logger.LogInfo("[TrafficSync] traffic-sense proxy deferred: the sensed layer is not resolvable yet (LayerSetupData not loaded). Retried on every traffic beat.");
+                    }
+                    return;
+                }
+
+                Transform parent = go.transform;
+                Vector3 center, size;
+                if (VehicleHelper.TryGetBodyColliderBounds(go.transform, out var lb, out var bodyCol) && bodyCol != null)
+                {
+                    parent = bodyCol.transform;     // the bounds the game hands back are in THAT transform's space
+                    center = lb.center; size = lb.size;
+                }
+                else
+                {
+                    // Fallback for a body this ghost does not have in the native shape: the union of its own solid
+                    // colliders, brought into the root's space. Axis-aligned, so approximate - but a sense volume
+                    // only has to be about the size of the car.
+                    Bounds? wb = null;
+                    foreach (var c in go.GetComponentsInChildren<Collider>(true))
+                    {
+                        if (c == null || c.isTrigger) continue;
+                        if (wb == null) wb = c.bounds;
+                        else { var b = wb.Value; b.Encapsulate(c.bounds); wb = b; }
+                    }
+                    if (wb == null) return;         // nothing to size a proxy from
+                    var w = wb.Value;
+                    var ls = go.transform.lossyScale;
+                    center = go.transform.InverseTransformPoint(w.center);
+                    size = new Vector3(w.size.x / Mathf.Max(0.0001f, Mathf.Abs(ls.x)),
+                                       w.size.y / Mathf.Max(0.0001f, Mathf.Abs(ls.y)),
+                                       w.size.z / Mathf.Max(0.0001f, Mathf.Abs(ls.z)));
+                }
+
+                var child = new GameObject(SenseProxyName);
+                child.transform.SetParent(parent, false);
+                child.transform.localPosition = center;
+                child.transform.localRotation = Quaternion.identity;
+                child.transform.localScale    = Vector3.one;
+                child.layer = layer;
+                try { child.tag = SenseProxyTag; }
+                catch (Exception ex)
+                {
+                    try { UnityEngine.Object.Destroy(child); } catch { }
+                    Plugin.Logger.LogWarning($"[TrafficSync] traffic-sense proxy: the tag '{SenseProxyTag}' is not defined in this project, so player-vehicle ghosts stay invisible to traffic ({ex.Message}).");
+                    return;
+                }
+                var box = child.AddComponent<BoxCollider>();
+                box.size = size;
+                box.isTrigger = true;
+                if (_senseProxyLogs++ < 2)
+                    Plugin.Logger.LogInfo($"[TrafficSync] player-vehicle ghost '{go.name}': sense proxy '{SenseProxyName}' added ({size.x:F1}x{size.z:F1} m, trigger tagged '{SenseProxyTag}', layer '{LayerMask.LayerToName(layer)}') - thinking traffic brakes for this ghost now.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficSync] traffic-sense proxy: {ex.Message}"); }
+        }
+
+        /// <summary>T4 census: does this ghost carry a live proxy on the sensed layer?</summary>
+        internal static bool HasTrafficSenseProxy(GameObject? go)
+        {
+            try
+            {
+                if (go == null) return false;
+                var t = FindSenseProxy(go);
+                if (t == null) return false;
+                int layer = ServiceColliderLayer();
+                return layer >= 0 && t.gameObject.layer == layer;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>T2: ghosts whose proxy could not be built yet (the sensed layer was unreadable) retry on the
+        /// traffic beat and say when they land. Dead entries fall out; a still-unready one re-queues itself.</summary>
+        private static void TickSenseProxyRetry()
+        {
+            if (_senseProxyPending.Count == 0) return;
+            float now = Time.unscaledTime;
+            if (now < _senseProxyRetryAt) return;
+            _senseProxyRetryAt = now + 1f;
+            var pending = _senseProxyPending.ToArray();
+            _senseProxyPending.Clear();
+            int done = 0;
+            foreach (var go in pending)
+            {
+                if (go == null) continue;
+                AttachTrafficSenseProxy(go);
+                if (FindSenseProxy(go) != null) done++;
+            }
+            if (done > 0) Plugin.Logger.LogInfo($"[TrafficSync] traffic-sense proxy: {done} deferred player-vehicle ghost(s) are sensed now.");
+        }
+
+        // ══ TRAFFIC-CONSIST T4 - the census (design section 6; LOG ONLY) ══════════════════════════════════
+        private const float CensusInterval = 30f;
+        private static float _nextCensusAt;
+        private static int   _gleyTriggerHits;
+        private static bool  _triggerHitWarned;
+        private static readonly List<Vector3> _censusScratch = new();
+
+        /// <summary>T4: counter only, called from the VehicleComponent.OnTriggerEnter postfix. Counts a sensor hit
+        /// whose other collider sits under a ModGhostMarker parent - i.e. one of the mod's ghost bodies. Runs per
+        /// trigger event, so it never logs; the 30 s census prints and resets it.</summary>
+        internal static void CountGhostTriggerHit(Component? other)
+        {
+            try { if (other != null && other.GetComponentInParent<ModGhostMarker>() != null) _gleyTriggerHits++; }
+            catch { }
+        }
+
+        /// <summary>A once-only warning for a per-event patch body, so a broken hook is still named without
+        /// spamming a line per frame.</summary>
+        internal static void WarnOnce(string patch, Exception ex)
+        {
+            if (_triggerHitWarned) return;
+            _triggerHitWarned = true;
+            Plugin.Logger.LogWarning($"[TrafficSync] {patch}: {ex.Message} (further occurrences are silent).");
+        }
+
+        /// <summary>T4 (design section 6): ONE line every 30 s on BOTH sides, log-only. It answers I1/I2/I3 in
+        /// order: how many leftovers are published/relayed and stood in for, whether every player-vehicle ghost is
+        /// really sensed (pvGhostsSensed == pvGhosts), and what the prediction did (dead-reckon and rewind extremes
+        /// over the window, and how many ghost pairs are overlapping). The pair count is computed ONCE here, never
+        /// per frame. The counters describe one window and are reset as it is printed.</summary>
+        private static void TickTrafficCensus()
+        {
+            float now = Time.unscaledTime;
+            if (_nextCensusAt <= 0f) { _nextCensusAt = now + CensusInterval; return; }
+            if (now < _nextCensusAt) return;
+            _nextCensusAt = now + CensusInterval;
+            try
+            {
+                bool host = MPServer.IsRunning;
+                int sensedLayer = ServiceColliderLayer();
+                int onLayer = 0;
+                _censusScratch.Clear();
+                foreach (var g in _ghosts.Values)
+                {
+                    if (g?.Go == null) continue;
+                    if (sensedLayer >= 0 && g.Go.layer == sensedLayer) onLayer++;
+                    _censusScratch.Add(g.Go.transform.position);
+                }
+                // Ghost pairs closer than 2.5 m - the shape I3 leaves behind. <= ~40 ghosts, so <= ~800 pairs, once
+                // every 30 s.
+                int pairs = 0;
+                for (int i = 0; i < _censusScratch.Count; i++)
+                    for (int j = i + 1; j < _censusScratch.Count; j++)
+                        if ((_censusScratch[i] - _censusScratch[j]).sqrMagnitude < 6.25f) pairs++;
+                _censusScratch.Clear();
+
+                int localAmbient = LocalAmbientCount();
+                float leftoverAge = 0f;
+                if (host) { foreach (var f in _foreign.Values) if (f.Rows.Count > 0) leftoverAge = Mathf.Max(leftoverAge, now - f.SinceAt); }
+                else if (_handover == HandoverToGhost && localAmbient > 0) leftoverAge = now - _handoverAt;
+
+                string side = host
+                    ? $"receivedLeftovers={HostReceivedLeftoverCount} standIns={HostStandInCount}"
+                    : $"published={_publishedLast} sensorSkipped={_sensorSkips}";
+                Plugin.Logger.LogInfo(
+                    $"[TrafficCensus] role={(host ? "host" : "client")} mode={(host ? "host" : ClientTrafficMode)} handover={(host ? HandoverNone : _handover)} " +
+                    $"ghosts={_ghosts.Count} ghostsOnSensedLayer={onLayer} pvGhosts={VehicleManager.RemoteVehicleCount} " +
+                    $"pvGhostsSensed={VehicleManager.SensedGhostCount()} localAmbient={localAmbient} oldestLeftoverAge={leftoverAge:F1} " +
+                    $"{side} gleyTriggerHitsFromPlayerVehicleGhosts={_gleyTriggerHits} overlappingReplicaPairs={pairs} " +
+                    $"deadReckonFrames={_deadReckonFrames} maxDeadReckonMetres={_maxDeadReckonMetres:F2} " +
+                    $"rewindFrames={_rewindFrames} maxRewindMetres={_maxRewindMetres:F2}");
+                _gleyTriggerHits = 0; _sensorSkips = 0; _deadReckonFrames = 0; _rewindFrames = 0;
+                _maxDeadReckonMetres = 0f; _maxRewindMetres = 0f;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficCensus] {ex.Message}"); }
+        }
+
+        /// <summary>T4: what THIS machine measures to the nearest other player, printed on the flip lines beside the
+        /// host's own number - a divergence between the two is what a wrong flip would look like. Every other player
+        /// is remote from a client, so the same anchor rules apply (a rider is judged by the car it rides).</summary>
+        private static string MeasuredNearestOtherPlayer()
+        {
+            try
+            {
+                if (!LocalAnchorPosition(out var me)) return "unknown";
+                float best = float.PositiveInfinity;
+                foreach (var pid in RemotePlayerManager.GetRemotePlayerIds())
+                {
+                    if (string.IsNullOrEmpty(pid)) continue;
+                    if (TryGetPlayerAnchorPosition(pid, out var op)) best = Mathf.Min(best, Vector3.Distance(me, op));
+                }
+                return float.IsPositiveInfinity(best) ? "unknown" : $"{best:F0} m";
+            }
+            catch { return "unknown"; }
+        }
 
         public static void ToggleClientTrafficSuppression()
         {

@@ -145,15 +145,25 @@ namespace BigAmbitionsMP
                     // TRAFFIC-SMOOTH S5 (2026-09-12): one line for the traffic stream's health.
                     // TRAFFIC-APART P9 (2026-09-12): plus WHICH traffic this machine runs (mode; "host" on the host),
                     // how many ambient cars of its own are alive, and whether a handover is still fading.
+                    // TRAFFIC-CONSIST T4 (2026-09-18): plus the four numbers of the consistency work - how many
+                    // leftover cars THIS client published on its last beat, how many FOREIGN cars (another
+                    // player's leftovers, relayed under reserved ids) this machine holds, how many player-vehicle
+                    // ghosts carry the sense proxy, and how many stand-ins a host keeps for published cars.
                     int ghosts = 0, hostcars = 0, localcars = 0;
+                    int published = 0, foreign = 0, pvsensed = 0, standins = 0;
                     try { ghosts = TrafficSync.ClientTrafficGhostCount; } catch { }
                     try { if (MPServer.IsRunning) hostcars = TrafficSync.HostTrafficCount(); } catch { }
                     try { localcars = TrafficSync.LocalAmbientCount(); } catch { }
+                    try { published = TrafficSync.PublishedLeftoverCount; } catch { }
+                    try { foreign = TrafficSync.ForeignGhostCount; } catch { }
+                    try { pvsensed = VehicleManager.SensedGhostCount(); } catch { }
+                    try { standins = TrafficSync.HostStandInCount; } catch { }
                     string tmode = MPServer.IsRunning ? "host" : TrafficSync.ClientTrafficMode;
                     return $"OK traffic role={Role} ghosts={ghosts} hostcars={hostcars} " +
                            $"seq={TrafficSync.LastTrafficSeq} dropped={TrafficSync.StaleSnapshotsDropped} " +
                            $"lane={TrafficSync.TrafficLane} mode={tmode} local={localcars} " +
-                           $"handover={TrafficSync.ClientHandover}";
+                           $"handover={TrafficSync.ClientHandover} " +
+                           $"published={published} foreign={foreign} pvsensed={pvsensed} standins={standins}";
                 }
 
                 case "ghostjitter":

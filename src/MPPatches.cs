@@ -1116,6 +1116,21 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(Controllers.TurnstileBarrier), "OnTriggerExit")]
         public static class Patch_Turnstile_Exit_IgnoreGhosts { static bool Prefix(UnityEngine.Collider other) => !IsModGhostContact(other); }
 
+        /// <summary>TRAFFIC-CONSIST T4 (2026-09-18, design section 6): the trigger-hit counter. Gley's own sensor
+        /// entry point, counted ONLY when the other collider sits under a ModGhostMarker parent - i.e. it is one of
+        /// the mod's ghost bodies. Expected 0 before T2's sense proxy exists and non-zero after, which is the
+        /// measurement I2 needs and, like the symptom itself, it needs no proximity to anything. Counter only: this
+        /// runs per trigger event and must never log per frame (the census prints it every 30 s).</summary>
+        [HarmonyPatch(typeof(VehicleComponent), nameof(VehicleComponent.OnTriggerEnter))]
+        public static class Patch_VC_OnTriggerEnter_CountGhostHits
+        {
+            static void Postfix(UnityEngine.Collider other)
+            {
+                try { TrafficSync.CountGhostTriggerHit(other); }
+                catch (Exception ex) { TrafficSync.WarnOnce("Patch_VC_OnTriggerEnter_CountGhostHits", ex); }
+            }
+        }
+
         /// <summary>Client sim at zero ambient density (2026-09-02): while the client paints the HOST's light states
         /// (TrafficSync.ApplyTrafficLights → Waypoint.stop), Gley's local phase timer must never advance there.
         /// TRAFFIC-APART P5(iv): in LOCAL mode nothing paints them - this client runs its own traffic, so it runs
@@ -6170,6 +6185,14 @@ namespace BigAmbitionsMP
         // player RIDES dies mid-coroutine on it (the 2026-06-10 "taxi crash":
         // ride hangs, game must be killed).  In MP, swallow those exceptions:
         // the traffic car simply ignores the ghost, which is correct.
+        //
+        // T5 (2026-09-18, H-LOCALSTOP-1): the old rule "on a pure CLIENT all local Gley traffic is suppressed, so
+        // every sensor call here belongs to a pre-clear transient" has been FALSE since TRAFFIC-APART. A client now
+        // runs REAL Gley cars in two ordinary situations — its own ambient traffic in LOCAL mode, and the fade
+        // leftovers it still holds while already in ghost mode — and a brain whose OnTriggerEnter / OnTriggerExit /
+        // NewColliderHit never runs brakes for nothing at all. Those two cases are exempt now, next to the client's
+        // own service cars, in the same shape the sibling client patches use (Patch_TM_UpdateSkip, the density
+        // clamp, Patch_IM_UpdateIntersections_ClientSkip all carry the ClientRunsLocalTraffic exemption).
         [HarmonyPatch]
         public static class Patch_GleyVehicle_NREShield
         {
@@ -6186,20 +6209,33 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Gley] NRE shield: type={(t != null ? "ok" : "NOT FOUND")} targets={n}");
             }
 
-            // On a pure CLIENT all local Gley traffic is suppressed, so any sensor callback that lands here
-            // is a transient car (about to be cleared) touching one of our ghosts — there is no legitimate
-            // traffic AI to run. Skip the handler so the NRE is never THROWN: the Finalizer below only
-            // catches it after the full stack unwind (~7,500×/session in the physics path). The HOST keeps
-            // the real handler (its live traffic needs the sensors) and relies on the Finalizer for the
-            // low-volume real-traffic-vs-remote-vehicle-ghost contacts.
+            // THE RULE. A car whose brain this machine really runs keeps its sensors; anything else on a pure
+            // client is a pre-clear transient touching one of our ghosts, and the handler is skipped so the NRE is
+            // never THROWN (the Finalizer below only catches it after the full stack unwind — ~7,500×/session on
+            // the physics path). The HOST always keeps the real handler: its live traffic needs the sensors, and
+            // the Finalizer covers the low-volume real-traffic-vs-ghost contacts.
+            //   (a) LOCAL mode — this client runs its OWN ambient traffic (TRAFFIC-APART P5);
+            //   (b) fade LEFTOVERS — real Gley cars it still holds while already in ghost mode, taken from the very
+            //       registry T1 publishes from (one hash lookup, rebuilt every 0.2 s beat, no scene sweep);
+            //   (c) its own SERVICE cars (2026-09-02) — they brake for traffic ghosts through the playerLayers
+            //       branch, and that arm alone stays gated by ClientServiceSimEnabled, because that flag is what
+            //       turns the service-car sim on; (a) and (b) are ordinary Gley ambient traffic whose existence
+            //       does not depend on it, exactly as Patch_TM_UpdateSkip lets Gley tick in local mode "whatever
+            //       the service-sim flag says".
+            // The sensed-layer guard covers all three: with no sensed layer nothing here is sensed anyway
+            // (ghosts stay on AiVehicles), so the shield stays closed. With one, EVERY traffic ghost and stand-in is
+            // relayered onto it unconditionally (TrafficSync.SpawnTrafficGhost / ApplyStandIn - review HIGH-1), so an
+            // open arm meets ghosts only on the playerLayers branch, which never dereferences attachedRigidbody;
+            // the Finalizer stays as the net for anything that slips through.
             static bool Prefix(VehicleComponent __instance)
             {
                 if (!(MPClient.IsClientInWorld && !MPServer.IsRunning)) return true;   // host / single player: real handler
-                // Client sim at zero ambient density (2026-09-02): the client's OWN service cars need their sensors —
-                // they brake for traffic ghosts through the playerLayers branch (ghosts are relayered at spawn).
-                // Every other client car is a pre-clear transient and stays skipped: the June class stays closed.
-                if (TrafficSync.ClientServiceSimEnabled && TrafficSync.ServiceColliderLayer() >= 0
-                    && __instance != null && ServiceCars.IsClientKept(__instance.gameObject)) return true;   // no sensed layer → keep the shield (ghosts stay on AiVehicles)
+                if (TrafficSync.ServiceColliderLayer() < 0) { TrafficSync.CountSensorSkip(); return false; }
+                if (TrafficSync.ClientRunsLocalTraffic) return true;                                        // (a)
+                if (TrafficSync.IsPublishedLeftover(__instance)) return true;                               // (b)
+                if (TrafficSync.ClientServiceSimEnabled && __instance != null
+                    && ServiceCars.IsClientKept(__instance.gameObject)) return true;                        // (c)
+                TrafficSync.CountSensorSkip();
                 return false;
             }
 
