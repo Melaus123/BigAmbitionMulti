@@ -230,6 +230,8 @@ namespace BigAmbitionsMP
                 // this, acceptance was only inferable from the money-movement toast.
                 string verdict = p.State == "accepted" ? "accepted" : "declined";
                 string what = p.Kind == "gift" ? "gift" : p.Kind == "business" ? $"offer for '{p.BusinessName}'" : "loan offer";
+                // HUBSALE-1: the verdict is logged on the PROPOSER's machine too - a buyer's bundle used to show nothing.
+                Plugin.Logger.LogInfo($"[Hub] offer '{p.Id}' kind={p.Kind} addr='{p.AddressKey}' -> {p.State} from '{p.To}' (${p.Principal:N0}).");
                 GameStatePatcher.EnqueueOnMainThread(() => PassengerHud.Toast($"{p.To} {verdict} your ${p.Principal:N0} {what}.", 4f));
                 return;
             }
@@ -301,8 +303,30 @@ namespace BigAmbitionsMP
             {
                 string ownerNow = "";
                 try { MPServer.BuildingOwners.TryGetValue(offer.AddressKey ?? "", out ownerNow); } catch { }
-                string sellerKey = offer.To == MPConfig.PlayerId ? "host" : offer.To;
-                if ((ownerNow ?? "") != sellerKey)
+                bool sellerIsHost = offer.To == MPConfig.PlayerId;
+                string sellerKey = sellerIsHost ? "host" : offer.To;
+                bool sellerHolds;
+                if (sellerIsHost)
+                {
+                    // HUBSALE-1 (bundle 20260908-191001, 2026-09-17): the host's own PRE-SESSION rentals are never
+                    // ledgered (GameStatePatcher.cs:2537 - "already native via RentedByPlayer"), and a ledgered host
+                    // entry may carry either id form (IsHostLedgerId, round-172); the literal compare above lapsed
+                    // EVERY sale where the host was the seller, and the buyer was told the owner "declined". The live
+                    // native tenancy (TrulyMine, the bootstrap's own test at :6313) decides, and a confirmed host tenancy
+                    // back-fills the ledger so the re-key at MPOffers.cs:60 finds an entry. An empty ledger entry alone
+                    // never authorises a sale.
+                    bool ledgerOk = string.IsNullOrEmpty(ownerNow) || GameStatePatcher.IsHostLedgerId(ownerNow ?? "");
+                    bool native = false;
+                    try { var reg = GameStatePatcher.FindRegistration(offer.AddressKey ?? ""); native = reg != null && MergerFlip.TrulyMine(reg); } catch { }
+                    sellerHolds = ledgerOk && native;
+                    if (sellerHolds && string.IsNullOrEmpty(ownerNow))
+                    {
+                        try { MPServer.BuildingOwners[offer.AddressKey ?? ""] = MPConfig.PlayerId; } catch { }
+                        Plugin.Logger.LogInfo($"[Hub] business offer '{a.Id}' for '{offer.AddressKey}': the host holds it natively - ledger back-filled (HUBSALE-1).");
+                    }
+                }
+                else sellerHolds = (ownerNow ?? "") == offer.To;
+                if (!sellerHolds)
                 {
                     Plugin.Logger.LogWarning($"[Hub] business offer '{a.Id}' for '{offer.AddressKey}' lapsed — ledger owner is '{ownerNow}', not the seller '{sellerKey}'.");
                     NotifyParty(offer.To, $"the sale of '{offer.BusinessName}' can't complete — the session ledger no longer lists you as its owner.");
