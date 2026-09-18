@@ -313,6 +313,47 @@ namespace BigAmbitionsMP
         /// moves by the exact jump in minutes. Taxes move by the midnight crossings (`Day - day` counts them). Injected/synthetic staff
         /// records are display copies — never touched. Then, forward only, if a tax anniversary fell inside the gap the game's own annual
         /// assessment runs once (user ruling 2026-09-04). Main thread; once per load, right after the clock write.</summary>
+        /// <summary>SNAP-WEEK-1: replay the WEEKLY staff-counter reset of any Monday daily pass the JOIN SNAP jumped over.
+        /// Only the LOCAL player's own employees are touched — injected partner copies (MPRegisterSync.IsInjectedStaff)
+        /// and synthetic duty stand-ins are someone else's records or not records at all. Forward jumps only.
+        /// workedHoursToday is deliberately NOT touched (review M1): PayWage reads it at the next midnight
+        /// (EmployeeInstance.cs:826-828) and the daily pass zeroes it only after paying (EmployeeHelper.cs:186) —
+        /// zeroing it here would throw away the pay for hours already worked today.</summary>
+        private static void ResetSkippedStaffCounters(int fromDay, int toDay)
+        {
+            try
+            {
+                // A Monday reset belongs to the midnight INTO that day, so the crossed days are (fromDay, toDay].
+                var mondays = new System.Collections.Generic.List<int>();
+                for (int d = fromDay + 1; d <= toDay; d++)
+                {
+                    try { if (d >= 1 && TimeHelper.GetDayOfWeek(d) == BigAmbitions.DayNightCycle.DayOfWeekOrdered.Monday) mondays.Add(d); } catch { }
+                }
+                bool weekly = mondays.Count > 0;
+                var dict = Helpers.EmployeeHelper.EmployeeInstancesDictionary;
+                if (dict == null) return;
+                int staff = 0, before = 0, after = 0;
+                var sample = new System.Collections.Generic.List<string>();
+                foreach (var e in dict.Values)
+                {
+                    if (e == null) continue;
+                    string id = e.id ?? "";
+                    if (id.Length == 0) continue;
+                    bool notOurs = false;
+                    try { notOurs = id.StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix, System.StringComparison.Ordinal) || MPRegisterSync.IsInjectedStaff(id); } catch { }
+                    if (notOurs) continue;
+                    staff++;
+                    int had = e.workedHoursThisWeek;
+                    before += had;
+                    if (weekly) { e.workedDays = 0; e.workedHoursThisWeek = 0; }
+                    after += e.workedHoursThisWeek;
+                    if (sample.Count < 3) sample.Add($"{id}:{had}→{e.workedHoursThisWeek}");
+                }
+                Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: weekly hours: staff={staff} hoursThisWeek before={before} after={after} mondays crossed={mondays.Count} (days {(mondays.Count > 0 ? string.Join(",", mondays) : "-")}) sample: {(sample.Count > 0 ? string.Join(" ", sample) : "-")} (SNAP-WEEK-1).");
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] JOIN SNAP: weekly staff counters (SNAP-WEEK-1): {ex.Message}"); }
+        }
+
         private static void ShiftLocalTimeline(int fromDay, float fromHourF, int toDay, float toHourF)
         {
             try
@@ -506,6 +547,14 @@ namespace BigAmbitionsMP
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[TimeSync] timeline shift (installation contracts): {ex.Message}"); }
 
                 Plugin.Logger.LogInfo($"[TimeSync] JOIN SNAP: timeline shifted — jump {(toMoment - fromMoment):+0;-0} h = {deltaMinutes:+0.#;-0.#} min ({crossings:+0;-0} midnight pass(es)): staff={staff} campaigns={campaigns} offers={offers} headhunters={headhunters} taxBill={taxes} vehicles={vehicles} furniture={furniture} food={food} wholesale={wholesale} imports={imports} moves={moves} installs={installs} — no time passed for you (H-EMP-1/H-SNAP-1).");
+
+                // SNAP-WEEK-1: workedDays / workedHoursThisWeek are reset only by a MONDAY daily pass
+                // (Helpers/EmployeeHelper.cs:118-123), which the snap skips. A client whose jump crossed a
+                // Monday midnight therefore carries last week's hours for good (bundle 20260910-151530:
+                // +210 h, days 49→57, two Mondays). Run the reset those passes would have run. workedHoursToday
+                // stays: the next midnight pays it and then zeroes it (review M1). Backward snaps do nothing:
+                // the game's own daily pass will re-run the reset on the way back.
+                if (!backward && toDay > fromDay) ResetSkippedStaffCounters(fromDay, toDay);
 
                 if (!backward) RunSkippedAnnualAssessment(gi, fromDay, toDay);   // forward only: a rewind across an anniversary is the game's own re-bill (left, ruling 2026-09-04)
             }
