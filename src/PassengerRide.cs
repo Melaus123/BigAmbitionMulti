@@ -621,6 +621,7 @@ namespace BigAmbitionsMP
         {
             _localVeh = vehicleId; _localSeat = seat; _pinned = false; _following = false;
             _exitRequested = false; _ghostGoneSince = -1f; _camSaved = false; _goal = FollowGoal.None;
+            _camNotLiveSince = -1f; _camReassertLogged = false; _noGhostLogged = false; _noCamLogged = false;   // RIDECAM-1: per-ride once-flags
             _pinFallback = Time.unscaledTime + 10f;   // backstop only: warp into the seat if the walk fails
 
             var pc = PlayerHelper.PlayerController;
@@ -639,6 +640,10 @@ namespace BigAmbitionsMP
         private static Transform? _savedIvcFollow, _savedIvcLook;   // [PassFollow] indoorVehicleCamera originals (restored on exit)
         private static bool       _camSaved;         // [PassFollow] captured both vehicle cams' pre-ride Follow yet?
         private static bool       _camIndoor;        // [PassFollow] last asserted vehicle cam (true=indoorVehicleCamera)
+        private static float      _camNotLiveSince = -1f;   // RIDECAM-1: when the brain first reported us not live (-1 = live)
+        private static bool       _camReassertLogged;       // RIDECAM-1 (F1): one "ride cam not live" WARNING per ride
+        private static bool       _noGhostLogged, _noCamLogged;   // RIDECAM-1 (B2): one line per ride each
+        private static int        _followDiag;              // RIDECAM-1 (B3): capped at 40 lines per session
 
         private static void StartPin()
         {
@@ -712,14 +717,24 @@ namespace BigAmbitionsMP
         // re-asserted every frame by TickLocalRide: the building-entry transition switches the live cam to
         // the on-foot IndoorCam (BuildingManager.cs:517), so we just re-claim Priority the next frame. The
         // GetCurrentCamera()!=cam guard means we only call SetCamera when not already live → no flicker.
+        // RIDECAM-1 (F1, 2026-09-17): the brain "am I live?" read below is a DIAGNOSTIC ONLY — we never cut
+        // or re-assert on it. A vcam we cannot see in AllCameras is not ours to take back, and the instant
+        // re-assert this used to fire broke every later blend in the session (see the note at the read).
         private static void EnsureRideCamera(Transform? ghost)
         {
-            if (ghost == null) return;
+            // RIDECAM-1 (B2): this was a silent return, so "the camera never moved" read identically to
+            // "there was nothing to follow". One line per ride tells the two apart.
+            if (ghost == null)
+            {
+                if (!_noGhostLogged)
+                { _noGhostLogged = true; Plugin.Logger.LogInfo($"[RideCam] no ghost (indoor={_camIndoor}) — nothing to follow"); }
+                return;
+            }
             // Bug (2026-06-30): while the city map is open, YIELD the camera to the game's map view. We re-claim
             // Priority every frame, which was stealing the camera straight back from the map (the owner-passenger's
             // map opened but the view stayed on the car). CityMap.IsOpen is the game's own map-state flag; we
             // re-assert the ride cam the frame the map closes.
-            if (CityMap.IsOpen) return;
+            if (CityMap.IsOpen) { _camNotLiveSince = -1f; return; }
             try
             {
                 var gm = InstanceBehavior<GameManager>.Instance;
@@ -727,11 +742,54 @@ namespace BigAmbitionsMP
                 SaveCamsOnce(gm);
                 _camIndoor = BuildingManager.IsInsideBuilding;
                 var cam = _camIndoor ? gm.indoorVehicleCamera : gm.vehicleCamera;
-                if (cam == null) return;
-                if (cam.Follow != ghost) { cam.Follow = ghost; cam.LookAt = ghost; }
+                // RIDECAM-1 (B2): an indoor layout with no indoorVehicleCamera left cam null and the ride
+                // camera silently stopped being asserted — fall back to the outdoor vehicle cam.
+                if (cam == null && _camIndoor) { cam = gm.vehicleCamera; _camIndoor = false; }
+                if (cam == null)
+                {
+                    if (!_noCamLogged)
+                    { _noCamLogged = true; Plugin.Logger.LogInfo($"[RideCam] no camera (indoor={BuildingManager.IsInsideBuilding}) — nothing to follow"); }
+                    return;
+                }
+                if (cam.Follow != ghost)
+                {
+                    string oldName = cam.Follow != null ? cam.Follow.name : "-";
+                    cam.Follow = ghost; cam.LookAt = ghost;
+                    if (_followDiag < 40)   // RIDECAM-1 (B3), capped per session
+                    {
+                        _followDiag++;
+                        string brainLive = "-", prio1 = "-";
+                        try { brainLive = CameraHelper.GetCinemachineBrain()?.ActiveVirtualCamera?.Name ?? "-"; } catch { }
+                        try { prio1 = CameraHelper.GetCurrentCamera()?.name ?? "-"; } catch { }
+                        Plugin.Logger.LogInfo($"[RideCam] follow '{oldName}' -> '{ghost.name}' cam={cam.name} indoor={_camIndoor} brainLive={brainLive} prio1={prio1} seated={IsSeated}");
+                    }
+                }
                 if (CameraHelper.GetCurrentCamera() != cam) CameraHelper.SetCamera(cam);
+
+                // RIDECAM-1 (B1 read, F1 fix): GetCurrentCamera() is a PRIORITY read (CameraHelper.cs:23-25,
+                // FirstOrDefault(Priority==1)) and SetCamera only writes priorities and waits on the brain.
+                // A third-party camera vcam outside AllCameras is invisible to both, so the guard above
+                // believed it held the camera while another vcam actually rendered (bundle 20260917-220453).
+                // Ask the BRAIN who is live — and then do NOTHING but say so. The instant re-assert this used
+                // to fire was hosted on the target cam, and SetCameraInstant (Helpers/CameraHelper.cs:87-90)
+                // calls StopAllCoroutines() on the Priority-1 camera — itself — so its restore block never ran
+                // and every camera blend for the rest of the session became a hard cut; and against a foreign
+                // vcam it can never win the view anyway, so it looped every 0.5 s forever.
+                if (!_pinned) { _camNotLiveSince = -1f; return; }
+                bool live = true;
+                try { live = CameraHelper.GetCinemachineBrain()?.IsLive(cam) ?? true; } catch { }
+                if (live) { _camNotLiveSince = -1f; return; }
+                if (_camNotLiveSince < 0f) { _camNotLiveSince = Time.unscaledTime; return; }
+                if (Time.unscaledTime - _camNotLiveSince < 2f) return;
+                if (!_camReassertLogged)
+                {
+                    _camReassertLogged = true;
+                    string liveName = "-";
+                    try { liveName = CameraHelper.GetCinemachineBrain()?.ActiveVirtualCamera?.Name ?? "-"; } catch { }
+                    Plugin.Logger.LogWarning($"[RideCam] ride cam not live for 2 s — another camera holds the view (brainLive='{liveName}') — a camera mod? (RIDECAM-1)");
+                }
             }
-            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] camera assert: {ex.Message}"); }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] camera assert (RIDECAM-1): {ex.Message}"); }
         }
 
         private static void RestoreCamera()
