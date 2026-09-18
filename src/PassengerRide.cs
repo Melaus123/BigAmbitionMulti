@@ -159,6 +159,10 @@ namespace BigAmbitionsMP
         private static float  _depDeadline;
         private static bool   _exitRequested;     // already asked the host to release us (car vanished)
         private static float  _ghostGoneSince = -1f;   // when our ridden ghost first went missing (-1 = present)
+        private static Vector3 _parkedPos;             // RIDE-EXIT-1: where the real body was parked when this ride pinned
+        private static bool   _parkedValid;            // RIDE-EXIT-1: is _parkedPos meaningful for the current ride?
+        private static float  _offMeshSince = -1f;     // RIDE-EXIT-1: when the local agent first read off-mesh (-1 = on mesh)
+        private static float  _lastUnstuck  = -999f;   // RIDE-EXIT-1: unscaled time of the last Unstuck() (one per 30 s)
 
         /// <summary>True once we're actually pinned in the seat — drives the passenger HUD so the
         /// "Exit Vehicle" button only appears after we're really aboard, not on board-approval.</summary>
@@ -195,6 +199,7 @@ namespace BigAmbitionsMP
                 RiderSleepEnergy.Tick();   // review #4 MAJOR: energy regen for a rider's car sleep
                 TickDeposit();          // walk-to-deposit: deposit on arrival (proximity/timeout poll)
                 TickRemoteRiders();
+                TickOffMeshWatchdog();  // RIDE-EXIT-1: recover a player stranded off the NavMesh on foot
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] Update: {ex.Message}"); }
         }
@@ -654,6 +659,11 @@ namespace BigAmbitionsMP
                 var pc = PlayerHelper.PlayerController;
                 var ghost = VehicleManager.GhostTransform(_localVeh);
                 if (pc == null) return;
+                // RIDE-EXIT-1: remember where the real body is parked for this ride. It is a place the
+                // player legally walked to, so it is the last-resort exit spot when neither the ghost's
+                // pose nor a 25 m sample around it lands on the NavMesh.
+                try { var pch = pc.Character; _parkedValid = pch != null; if (pch != null) _parkedPos = pch.transform.position; }
+                catch { _parkedValid = false; }
                 // Same thing entering a car does (VehicleController/CarController.EnterVehicle): hide
                 // the avatar, lock independent movement, switch to the vehicle camera — minus the two
                 // driver-only lines (ActiveVehicleId + controlledByPlayer), which we must NOT set on
@@ -813,6 +823,40 @@ namespace BigAmbitionsMP
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] camera exit: {ex.Message}"); }
         }
 
+        /// <summary>RIDE-EXIT-1 (second lever): a player stranded off the NavMesh on foot (river, roof,
+        /// void) can neither walk nor click-to-move, and the game ships no recovery for it. When that
+        /// state lasts 2 s outside a seat, outside a vehicle and outside a building, call the game's own
+        /// PlayerController.Unstuck() — at most once per 30 s so a genuinely off-mesh scene can't loop.</summary>
+        private static void TickOffMeshWatchdog()
+        {
+            try
+            {
+                // Review H1: only in a running world (the same gate the ride ticks use at :90/:123). IsConnected
+                // is true from transport-connect on, and a freshly spawned character reads isOnNavMesh=false
+                // during the fenced load / join snap while unscaled time keeps counting - Unstuck() there would
+                // warp the player under the mod's own WorldReady placement.
+                if (!MPServer.IsRunning && !MPClient.InMpGame) { _offMeshSince = -1f; return; }
+                // Re-check R1: InMpGame latches as soon as the player object exists during the LOAD
+                // (MPCanvasUI.cs:1047), before the startup hold, the join snap and the WorldReady placement.
+                // The readiness authority (overlay down, registrations, role ready, 3 s settled) and, on a
+                // client, "world sync applied and the fresh spawn placed" are the states this protects.
+                if (!MPWorldReady.IsSettled) { _offMeshSince = -1f; return; }
+                if (MPClient.IsConnected && (!MPClient.WorldSyncApplied || MPClient.PendingFreshSpawn)) { _offMeshSince = -1f; return; }
+                if (_localVeh != "" || IsSeated) { _offMeshSince = -1f; return; }
+                if (BuildingManager.IsInsideBuilding) { _offMeshSince = -1f; return; }
+                if (VehicleHelper.GetCurrentVehicle() != null) { _offMeshSince = -1f; return; }
+                var agent = PlayerHelper.PlayerController?.Character?.navmeshAgent;
+                if (agent == null || !agent.enabled || agent.isOnNavMesh) { _offMeshSince = -1f; return; }
+                if (_offMeshSince < 0f) { _offMeshSince = Time.unscaledTime; return; }
+                if (Time.unscaledTime - _offMeshSince < 2f) return;
+                if (Time.unscaledTime - _lastUnstuck < 30f) return;
+                _lastUnstuck = Time.unscaledTime; _offMeshSince = -1f;
+                Plugin.Logger.LogWarning("[Ride] player off the navmesh for 2 s — Unstuck() called (RIDE-EXIT-1)");
+                PlayerController.Unstuck();
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] off-mesh watchdog (RIDE-EXIT-1): {ex.Message}"); }
+        }
+
         private static void EndLocalRide(bool beside)
         {
             if (_localVeh == "") return;
@@ -823,7 +867,8 @@ namespace BigAmbitionsMP
                 var ghost = RideCar(_localVeh);   // ghost, or our own real car by id once the borrower released it
 
                 // Reverse the native enter (only if we actually got in): avatar back, movement
-                // unlocked, camera restored — then teleport to the exit door (current car position).
+                // unlocked, camera restored — then teleport to the exit door (a NavMesh-sampled
+                // spot beside the car's current pose; see RIDE-EXIT-1 below).
                 if (_pinned)
                 {
                     try { ch?.ToggleVisibility(true); } catch { }   // re-activates the character
@@ -843,13 +888,33 @@ namespace BigAmbitionsMP
 
                 if (ch != null)
                 {
-                    Vector3 outPos = (beside && ghost != null) ? ghost.TransformPoint(DoorLocal(_localSeat)) : ch.transform.position;
+                    // RIDE-EXIT-1: the ghost is DEAD-RECKONED, so its current pose is an extrapolation and
+                    // can sit anywhere — including over water (bundle 20260915-225458: the rider was put in
+                    // the river, agent off-mesh, hasPath=False; the game has no water recovery). Never warp
+                    // to a raw pose: sample the NavMesh around it (5 m, then 25 m), and if both miss put the
+                    // body back where it was parked when the ride pinned.
+                    Vector3 raw = (beside && ghost != null) ? ghost.TransformPoint(DoorLocal(_localSeat)) : ch.transform.position;
+                    Vector3 outPos = raw;
+                    string sampled = "none";
+                    try
+                    {
+                        if (UnityEngine.AI.NavMesh.SamplePosition(raw, out var hit5, 5f, UnityEngine.AI.NavMesh.AllAreas))
+                        { outPos = hit5.position; sampled = "5m"; }
+                        else if (UnityEngine.AI.NavMesh.SamplePosition(raw, out var hit25, 25f, UnityEngine.AI.NavMesh.AllAreas))
+                        { outPos = hit25.position; sampled = "25m"; }
+                        else if (_parkedValid)
+                        { outPos = _parkedPos; sampled = "parked"; }
+                    }
+                    catch { }
                     try { ch.navmeshAgent?.Warp(outPos); } catch { try { ch.transform.position = outPos; } catch { } }
+                    bool onMesh = false;
+                    try { onMesh = ch.navmeshAgent != null && ch.navmeshAgent.enabled && ch.navmeshAgent.isOnNavMesh; } catch { }
+                    Plugin.Logger.LogInfo($"[Ride] exit warp → ({outPos.x:F1},{outPos.y:F1},{outPos.z:F1}) onNavMesh={onMesh} sampled={sampled} src={(beside ? "beside" : "inplace")} ghost={_localVeh} (RIDE-EXIT-1)");
                 }
                 try { pc?.ResetNavigation(); } catch { }
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Ride] EndLocalRide: {ex.Message}"); }
-            _localVeh = ""; _localSeat = -1; _pinned = false; _following = false;
+            _localVeh = ""; _localSeat = -1; _pinned = false; _following = false; _parkedValid = false;
             _exitRequested = false; _ghostGoneSince = -1f; _goal = FollowGoal.None;
         }
 
