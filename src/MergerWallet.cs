@@ -64,6 +64,10 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    // DESIGNER-MONEY-1 (C2): FIRST, and for every player — not just merger members. An open
+                    // Interior Designer session books every outside money change against its own snapshot and
+                    // claws it back at close (see DesignerBalanceKeeper).
+                    try { DesignerBalanceKeeper.OnExternalMoneyChange(amount, transactionInfo?.Type ?? ""); } catch { }
                     if (amount == 0f || _applyingReconcile) return;
                     if (!MergerSync.IAmMember) return;
                     // PHASE 4b (T1): the record the native path has just enqueued rides this same
@@ -207,6 +211,9 @@ namespace BigAmbitionsMP
             try
             {
                 gi.Money = balance;
+                // DESIGNER-MONEY-1 (C2): a DIRECT field write never reaches the ChangeMoney postfix, so tell
+                // an open designer session about it by delta or it claws the mirror back at close.
+                try { DesignerBalanceKeeper.OnExternalMoneyChange(diff, "mp:wallet_mirror"); } catch { }
                 Plugin.Logger.LogInfo($"[EconProbe] wallet SET ${balance:N0} ({why}; local drift {(diff >= 0 ? "+" : "")}{diff:N0}).");
             }
             finally { _applyingReconcile = false; }

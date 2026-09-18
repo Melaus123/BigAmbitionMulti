@@ -61,6 +61,9 @@ namespace BigAmbitionsMP
                 if (gi == null) return;
                 gi.Money += delta;
                 MergerWallet.ForwardExternal(delta, $"hub: {reason}");   // slice 4: direct writes must reach the shared ledger
+                // DESIGNER-MONEY-1 (M2): a DIRECT wallet write never passes native ChangeMoney, so an open
+                // Interior Designer session would claw it back at close — tell the designer about it.
+                DesignerBalanceKeeper.OnExternalMoneyChange(delta, "hub");
                 if (notice) MPChat.AddNotice($"{(delta >= 0 ? "+" : "−")}${Mathf.Abs(delta):N0} — {reason}");
                 Plugin.Logger.LogInfo($"[Hub] money {(delta >= 0 ? "+" : "")}{delta:N0} ({reason}); balance {gi.Money:N0}.");
                 Version++;

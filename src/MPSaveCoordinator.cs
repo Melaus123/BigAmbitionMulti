@@ -1786,7 +1786,11 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo("[MPSave] restored cash skipped — the company wallet is already mirrored.");
                 else
                 {
+                    // DESIGNER-MONEY-1 (C2): the delta this direct write represents, for an open designer
+                    // session (a direct field set never reaches the ChangeMoney postfix).
+                    float cashDelta = _pendingCashApply - gi.Money;
                     gi.Money = _pendingCashApply;   // apply verbatim — $0 and overdraft are legitimate authoritative balances
+                    try { DesignerBalanceKeeper.OnExternalMoneyChange(cashDelta, "mp:restored_cash"); } catch { }
                     Plugin.Logger.LogInfo($"[MPSave] Applied restored cash ${_pendingCashApply:F0}.");
                 }
             }

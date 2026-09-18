@@ -72,6 +72,8 @@ namespace BigAmbitionsMP
                 }
                 if (Math.Abs(share - balance) < 0.005f) return;   // a one-member company: the share IS the balance
                 _mirror = balance; _stashed = true;
+                // DESIGNER-MONEY-1 (M2): an `x = value` wallet write — forward the DELTA actually applied.
+                DesignerBalanceKeeper.OnExternalMoneyChange(share - balance, "merger share-save stash");
                 gi.Money = share;
                 Plugin.Logger.LogInfo($"[MergerWallet] save wrote this member's share ${share:F0} of ${balance:F0} into the save file (mirror restored).");
             }
@@ -87,7 +89,13 @@ namespace BigAmbitionsMP
                 if (depth > 1) return;   // X6: a nested call stashed nothing, so it restores nothing
                 if (!_stashed) return;
                 var gi = SaveGameManager.Current;
-                if (gi != null) gi.Money = _mirror;   // unconditional on BOTH paths — the mirror is the live truth
+                if (gi != null)
+                {
+                    // DESIGNER-MONEY-1 (M2): an `x = value` wallet write — forward the DELTA actually applied.
+                    float back = _mirror - gi.Money;
+                    gi.Money = _mirror;   // unconditional on BOTH paths — the mirror is the live truth
+                    DesignerBalanceKeeper.OnExternalMoneyChange(back, "merger share-save restore");
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerWallet] share-save finalizer: {ex.Message}"); }
             finally { if (depth <= 1) { _stashed = false; _mirror = 0f; } }
