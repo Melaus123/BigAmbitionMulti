@@ -135,6 +135,49 @@ namespace BigAmbitionsMP
         /// stray background Show must never see another thread flag.</summary>
         [ThreadStatic] private static bool _applying;
 
+        /// <summary>NOTIFY-2 (design 2026-09-17, F1/F2): set while THIS machine is inside one of the two
+        /// EmployeeHelper batch routines whose notice data names a PERSON (the training pair) or
+        /// 'common_unassigned' (a resigning employee with no building) instead of a business - so the
+        /// ordinary owner gate has nothing to resolve and the notice never travelled. Ownership is not in
+        /// the data; it is in WHO RUNS THE BATCH. Both routines run from the game's daily tick on the
+        /// machine that SIMULATES those employees (EmployeeHelper.cs:274-276), and a member's injected
+        /// copies of a partner's staff never resign or train here: the hourly life of an injected record
+        /// is refused outright (MPPatches Patch_EmployeeInstance_RunHourly_SkipInjected, the complaints
+        /// prefix, and the training purge). ThreadStatic for the same reason _applying is.</summary>
+        [ThreadStatic] internal static bool InOwnStaffBatch;
+
+        /// <summary>One INFO line per header key relayed on batch evidence alone.</summary>
+        private static readonly HashSet<string> _loggedStaffBatch = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>NOTIFY-2: the scope around the two batch routines. Both are PRIVATE statics, so they
+        /// are patched by NAME. The finalizer clears the flag even when the native routine throws - a
+        /// stuck flag would make every later unresolved notice claim staff-batch evidence.</summary>
+        [HarmonyPatch]
+        internal static class Patch_EmployeeHelper_OwnStaffBatch
+        {
+            static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                foreach (var name in new[] { "ShowFinishedTrainingEmployeeNotifications", "ShowResignedEmployeeNotifications" })
+                {
+                    var m = AccessTools.Method(typeof(Helpers.EmployeeHelper), name);
+                    if (m != null) yield return m;
+                }
+            }
+
+            static void Prefix(out bool __state)
+            {
+                __state = false;
+                try { __state = InOwnStaffBatch; InOwnStaffBatch = true; }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[NotifyRelay] staff-batch scope enter: {ex.Message}"); }
+            }
+
+            static void Finalizer(bool __state)
+            {
+                try { InOwnStaffBatch = __state; }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[NotifyRelay] staff-batch scope exit: {ex.Message}"); }
+            }
+        }
+
         /// <summary>One INFO line per header key that could not be tied to a business of mine - a
         /// roll-up pop-up ("4 employees called in sick") names no business by design, and would
         /// otherwise log every game day.</summary>
@@ -266,7 +309,20 @@ namespace BigAmbitionsMP
                     }
             }
 
-            if (string.IsNullOrEmpty(addressKey)) { LogUnresolved(headerKey, string.IsNullOrEmpty(name) ? "(no business named)" : name); return; }
+            // NOTIFY-2 (design 2026-09-17): the training and resign notices name a PERSON or
+            // 'common_unassigned', never a business, so all three resolves above come back empty for them.
+            // The evidence that they are MINE is that MY machine ran the batch (see InOwnStaffBatch) -
+            // these routines run on the machine that simulates those employees, and a partner's injected
+            // copies never reach them here. The notice travels with an EMPTY addressKey: the receiver
+            // needs none (PayloadSane does not require one, and ApplyRelayed only folds it into the
+            // de-dupe id), so the partner sees the game's own words about a person they co-employ.
+            if (string.IsNullOrEmpty(addressKey) && InOwnStaffBatch && MergerSync.IAmMember
+                && headerKey.StartsWith("employeehelper_notification_", StringComparison.Ordinal))   // review LOW: staff keys only
+            {
+                if (_loggedStaffBatch.Add(headerKey))
+                    Plugin.Logger.LogInfo($"[NotifyRelay] relayed '{headerKey}' on staff-batch evidence (no business named)");
+            }
+            else if (string.IsNullOrEmpty(addressKey)) { LogUnresolved(headerKey, string.IsNullOrEmpty(name) ? "(no business named)" : name); return; }
 
             var (day, hourOfDay) = GameStateReader.GetGameTime();
             var p = new NotificationRelayPayload
@@ -322,7 +378,9 @@ namespace BigAmbitionsMP
             try
             {
                 if (!PayloadSane(p, "receiver")) return;
-                string dup = "bamp-relay-" + Fnv(p.HeaderKey + "|" + p.AddressKey + "|" + p.StampMinute);
+                // NOTIFY-2 fold (review MEDIUM-1): the person's name joins the id - a staff-batch notice has no
+                // address and the whole batch shares one game minute, so three resignations hashed to ONE toast.
+                string dup = "bamp-relay-" + Fnv(p.HeaderKey + "|" + p.AddressKey + "|" + p.StampMinute + "|" + FirstName(p.Data));
                 RememberSender(dup, p.PlayerId);   // 4d R5: the renderer tints this toast in the sender's colour
                 float seconds = p.Seconds > 0f ? p.Seconds : 4f;
                 _applying = true;

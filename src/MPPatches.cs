@@ -7065,6 +7065,12 @@ namespace BigAmbitionsMP
                     // were prime complainers (no native task assigned) and, when the roster
                     // carried no name, messaged from a contact literally called "Staff".
                     try { if (MPRegisterSync.IsInjectedStaff(__instance.id)) return false; } catch { }
+                    // NOTIFY-2 fold G (2026-09-17): a SYNTHETIC DUTY stand-in has no life of its own
+                    // either. Without this it could complain - and, with a deadline expiring, RESIGN -
+                    // into the very batch NotificationRelay.InOwnStaffBatch treats as proof that the
+                    // person is one of MY staff. The training purge (:3371-3387) already tests this
+                    // prefix; the two hourly prefixes now agree with it.
+                    try { if ((__instance.id ?? "").StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal)) return false; } catch { }
 
                     // Round-62: a NULL/undefined address is the NATIVE state of a hired-but-
                     // unassigned employee — vanilla lets them complain ("the company" message;
@@ -7832,7 +7838,12 @@ namespace BigAmbitionsMP
                 try
                 {
                     if ((MPServer.IsRunning || MPClient.IsClientInWorld || MPClient.OfflineFork)   // H-FORK-1: holds in the offline fork
-                        && __instance != null && MPRegisterSync.IsInjectedStaff(__instance.id))
+                        && __instance != null
+                        // NOTIFY-2 fold G (2026-09-17): a synthetic duty stand-in is a staffing puppet with
+                        // no life either - and a resignation from one would land in the batch
+                        // NotificationRelay.InOwnStaffBatch reads as "this person is mine".
+                        && (MPRegisterSync.IsInjectedStaff(__instance.id)
+                            || (__instance.id ?? "").StartsWith(MPRegisterSync.SyntheticDutyEmployeeIdPrefix, StringComparison.Ordinal)))
                         return false;
                 }
                 catch { }
