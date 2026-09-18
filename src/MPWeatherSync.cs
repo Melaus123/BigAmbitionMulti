@@ -50,6 +50,27 @@ namespace BigAmbitionsMP
         /// change anyway.</summary>
         public static int HostRainState = -1;
 
+        /// <summary>WEATHER-LATCH-1: Time.unscaledTime when the last host verdict was applied (-1 = never).
+        /// The client's scheduler suppression is only safe while the host is still TALKING: a stalled host
+        /// (paused, hung, or a heartbeat that stopped carrying weather) used to leave a converged client
+        /// raining forever, because the suppression skips the only code that could ever end it.</summary>
+        private static float _hostVerdictAt = -1f;
+        private static bool  _stallLogged;      // one line per stall (reset when we start following the host again)
+        // WEATHER-LATCH-1 (M4): after a stall fallback the host's verdicts are ON HOLD until two consecutive
+        // FRESH ones, at least 3 s apart, carry the same value. A host coming back (unpausing, or a burst of
+        // queued heartbeats) would otherwise whipsaw the sky with the first stale value to arrive.
+        private static bool  _stalled;
+        private static int   _freshState = -1;   // the first of the two matching post-stall verdicts
+        private static float _freshAt = -1f;     // Time.unscaledTime when that first one arrived
+        private static float _rainOnSinceMin = -1f;   // TimeHelper.NowInMinutes() when isRaining went on
+        private static int   _lastDiagMin = int.MinValue;   // L4: last GAME minute the diag gate let through
+        private static System.Reflection.MemberInfo? _rainEndMember;
+        // L3: either resolve can fail simply because the type has not loaded yet, so RETRY every 60 s
+        // instead of latching off the first miss. These hold the last ATTEMPT time, not "resolved".
+        private static float _rainEndTriedAt = -999f;
+        private static object? _todc; private static System.Reflection.MethodBase? _todcShould;
+        private static float _todcTriedAt = -999f;
+
         private static void Resolve()
         {
             if (_resolved) return;
@@ -156,6 +177,20 @@ namespace BigAmbitionsMP
         {
             if (hostState < 0) return;
             HostRainState = hostState;   // recorded before any early return — the scheduler patch keys off it
+
+            // WEATHER-LATCH-1 (M4): while stalled, HOLD. Two verdicts at least 3 s apart carrying the same
+            // value are the proof the host is really talking again; until then _hostVerdictAt stays old, so
+            // the scheduler patch keeps handing the weather back to the local scheduler.
+            float now = UnityEngine.Time.unscaledTime;
+            if (_stalled)
+            {
+                if (_freshAt < 0f || _freshState != hostState) { _freshState = hostState; _freshAt = now; return; }
+                if (now - _freshAt < 3f) return;
+                _stalled = false; _freshState = -1; _freshAt = -1f;
+                Plugin.Logger.LogInfo("[Weather] host verdicts fresh again — following the host (WEATHER-LATCH-1)");
+            }
+            _hostVerdictAt = now;   // WEATHER-LATCH-1 staleness clock
+            _stallLogged = false;
             int local = CurrentRainState();
             if (local < 0 || local == hostState) return;
             Plugin.Logger.LogInfo($"[Weather] host={(hostState == 1 ? "raining" : "dry")} local={(local == 1 ? "raining" : "dry")} — forcing local to match.");
@@ -230,6 +265,73 @@ namespace BigAmbitionsMP
         /// If a game update renames the method the loader's BOUND-NOTHING warn plus
         /// the warn below fire, and behavior degrades to the pre-round
         /// correction-only sync (cosmetic).</summary>
+        /// <summary>WEATHER-LATCH-1 (F2): rain that has been on for more than three GAME hours is already
+        /// abnormal, so from there print one line per game-minute naming everything that decides when it ends.
+        /// Read-only; anything unreadable prints '-'.</summary>
+        private static void RainStuckDiag()
+        {
+            try
+            {
+                // L4: this is a prefix on UpdateIsRaining — it runs EVERY FRAME, in every role. Gate on the
+                // cheap clock properties FIRST, so the reflection read (CurrentRainState) and NowInMinutes
+                // cost once per GAME minute instead of once per frame.
+                int minuteKey;
+                try { minuteKey = (int)TimeHelper.CurrentDay * 1440 + (int)TimeHelper.CurrentHour * 60 + (int)TimeHelper.CurrentMinute; }
+                catch { return; }
+                if (minuteKey == _lastDiagMin) return;          // once per game-minute
+                _lastDiagMin = minuteKey;
+
+                int state = CurrentRainState();
+                float nowMin;
+                try { nowMin = TimeHelper.NowInMinutes(); } catch { return; }
+                if (state != 1) { _rainOnSinceMin = -1f; return; }
+                if (_rainOnSinceMin < 0f) { _rainOnSinceMin = nowMin; return; }
+                float onFor = nowMin - _rainOnSinceMin;
+                if (onFor < 180f) return;                       // under three game-hours: normal weather
+
+                string end = "-";
+                try
+                {
+                    if (_rainEndMember == null && UnityEngine.Time.unscaledTime - _rainEndTriedAt >= 60f)
+                    {
+                        _rainEndTriedAt = UnityEngine.Time.unscaledTime;   // L3: retry every 60 s, never latch
+                        if (_rainHelper != null)
+                            _rainEndMember = (System.Reflection.MemberInfo?)AccessTools.Property(_rainHelper, "NextRainEndTime")
+                                          ?? (System.Reflection.MemberInfo?)AccessTools.Field(_rainHelper, "NextRainEndTime");
+                    }
+                    if (_rainEndMember is System.Reflection.PropertyInfo pi) end = pi.GetValue(null)?.ToString() ?? "-";
+                    else if (_rainEndMember is System.Reflection.FieldInfo fi) end = fi.GetValue(null)?.ToString() ?? "-";
+                }
+                catch { end = "-"; }
+
+                string env = "-";
+                try
+                {
+                    if ((_todcShould == null || _todc == null) && UnityEngine.Time.unscaledTime - _todcTriedAt >= 60f)
+                    {
+                        _todcTriedAt = UnityEngine.Time.unscaledTime;   // L3: retry every 60 s, never latch
+                        var t = VehicleManager.FindGameType("TimeOfDayController");
+                        if (t != null)
+                        {
+                            _todcShould = AccessTools.Method(t, "ShouldUpdateEnvironmentValues");
+                            _todc = UnityEngine.Object.FindObjectOfType(t);
+                        }
+                    }
+                    if (_todcShould != null && _todc != null) env = _todcShould.Invoke(_todc, null)?.ToString() ?? "-";
+                }
+                catch { env = "-"; }
+
+                string speed = "-";
+                try { speed = OptionsGuard.EffectiveSessionValue().ToString("0.##"); } catch { }
+
+                Plugin.Logger.LogInfo(
+                    $"[Weather] raining {(onFor / 60f):F1}h now=D{TimeHelper.CurrentDay} "
+                    + $"{TimeHelper.CurrentHour:00}:{(int)TimeHelper.CurrentMinute:00} end={end} "
+                    + $"speed={speed}x envUpdates={env}");
+            }
+            catch (Exception ex) { try { Plugin.Logger.LogWarning($"[Weather] rain-stuck diag: {ex.Message}"); } catch { } }
+        }
+
         [HarmonyPatch]
         public static class Patch_RainScheduler_HostOnly
         {
@@ -248,9 +350,25 @@ namespace BigAmbitionsMP
             private static bool _suppressLogged;   // once per launch: the line is the field evidence the round is active
             static bool Prefix()
             {
+                RainStuckDiag();   // WEATHER-LATCH-1 (F2) — runs in every role
                 if (MPServer.IsRunning || !MPClient.InMpGame) return true;   // host/solo/promoted: native scheduler
                 int host = HostRainState;
                 if (host < 0) return true;              // no host verdict yet (or old-version host): native = pre-round behavior
+
+                // WEATHER-LATCH-1 (F1): a host verdict older than 15 s is not authority any more, it is
+                // silence. Hand the local scheduler back so rain can end on its own; the next heartbeat
+                // re-converges us in one step.
+                float age = _hostVerdictAt < 0f ? 999f : UnityEngine.Time.unscaledTime - _hostVerdictAt;
+                if (age > 15f)
+                {
+                    if (!_stallLogged)
+                    {
+                        _stallLogged = true;
+                        _stalled = true; _freshState = -1; _freshAt = -1f;   // M4: hold verdicts until two agree
+                        Plugin.Logger.LogInfo($"[Weather] host rain verdict stale ({age:F0}s) — native scheduler resumed (WEATHER-LATCH-1)");
+                    }
+                    return true;
+                }
                 if (CurrentRainState() != host) return true;   // CONVERGING: native — this is the commit path (rig run 1)
                 if (!_suppressLogged)
                 {
