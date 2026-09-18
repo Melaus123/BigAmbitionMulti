@@ -284,6 +284,12 @@ namespace BigAmbitionsMP
         private static volatile bool _wroteClock;
         public static bool ConsumeClockWrite() { var v = _wroteClock; _wroteClock = false; return v; }
 
+        /// <summary>Mark a clock advance made DELIBERATELY somewhere else (the BAMP_DEV 'clock' rig lever drives
+        /// GameManager.RunMainGameTick directly) as authorized, exactly like this class marks its own writes: the
+        /// world-clock guardian then re-bases its sampling window at the new time on its next pass instead of
+        /// treating the jump as an unaccounted skip and pinning it back.</summary>
+        public static void NoteAuthorizedClockWrite() { _wroteClock = true; }
+
         // One-time JOIN snap (user 2026-07-19, "on connect you match"): connecting
         // days behind the host used to schedule a run-forward catch-up that
         // SIMULATED every skipped day (wages, rent, RunDaily…) at fast-forward.

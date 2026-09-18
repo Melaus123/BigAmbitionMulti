@@ -379,6 +379,42 @@ namespace BigAmbitionsMP
                     _customizerFirstSeen = -1f;
                     return "OK armed — confirms the character screen when it appears (2s settle)";
 
+                case "clock":
+                {
+                    // L1 (user-approved rig tooling, 2026-09-18): move the game clock forward to HH:MM TODAY
+                    // through the game's own time path. GameManager.RunMainGameTick is that path: it adds the
+                    // minutes to the clock and, in its own `while (Minute >= 60)` loop, runs every hour it
+                    // crosses (BusinessSimulatorHelper/Job/Parking/Recruitment/Happiness/Employee/Pricing
+                    // RunHourly, the wholesale + factory delivery hours) and NewDay() at the 24:00 rollover,
+                    // which is what produces the 23:00/midnight day-end and the DailySummary. Writing the hour
+                    // field instead would skip all of it.
+                    //
+                    // The native TimeMachine is NOT the route in MP: Patch_TimeMachine_Start_Consensus stops
+                    // every locally started machine through its own off switch and Patch_TimeMachine_Update_Freeze
+                    // stops it advancing time itself, so a machine started here would move nothing.
+                    // HOST ONLY: the host's clock is the world's; clients follow through the ordinary time sync.
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    int colon = arg.IndexOf(':');
+                    if (colon <= 0 || !int.TryParse(arg.Substring(0, colon).Trim(), out var wantH)
+                                   || !int.TryParse(arg.Substring(colon + 1).Trim(), out var wantM))
+                        return "ERR usage: clock HH:MM";
+                    if (wantH < 0 || wantH > 23 || wantM < 0 || wantM > 59) return "ERR usage: clock HH:MM (00:00-23:59)";
+                    var (curDay, curHour) = GameStateReader.GetGameTime();
+                    double nowMin  = curHour * 60.0;
+                    double wantMin = wantH * 60.0 + wantM;
+                    double delta   = wantMin - nowMin;
+                    if (delta <= 0.001)
+                        return $"ERR the clock only moves forward — it is already day {curDay} {(int)curHour:00}:{(int)((curHour % 1f) * 60f):00}, and {wantH:00}:{wantM:00} is not later today";
+                    var gm = InstanceBehavior<GameManager>.Instance;
+                    if (gm == null) return "ERR no GameManager yet";
+                    string was = $"{(int)curHour:00}:{(int)((curHour % 1f) * 60f):00}";
+                    gm.RunMainGameTick((float)delta);                 // the game's own tick: clock + every hourly/daily pass it crosses
+                    try { TimeSync.NoteAuthorizedClockWrite(); } catch { }   // sanctioned jump — the world-clock guardian re-bases instead of pinning it back
+                    var (newDay, newHour) = GameStateReader.GetGameTime();
+                    string now = $"{(int)newHour:00}:{(int)((newHour % 1f) * 60f):00}";
+                    return $"OK clock {was} -> {now} on day {newDay} (advanced {delta:0.#} game-minutes through RunMainGameTick; day was {curDay})";
+                }
+
                 case "pause":
                 {
                     // T284-C (user-approved 2026-08-21): a scriptable press of the REAL pause

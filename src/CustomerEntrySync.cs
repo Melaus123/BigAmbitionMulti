@@ -38,6 +38,7 @@ namespace BigAmbitionsMP
         // shopping trip, surviving table re-seeds).
         private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<CustomerEntry, string> _ownerIds = new();
         private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Order, string> _seededOrderIds = new();
+        private static readonly Dictionary<string, int> _capCapped = new();        // C1 (2026-09-18): addr → the game day the MaxEntries cap was last reported for
         private static readonly Dictionary<string, int> _lastSeedLogged = new();   // DIAG(econ-verify)
         private static readonly Dictionary<string, int> _lastCapacitySig = new();  // round-213: capacity recompute only on real seed changes
         private static int _idCounter;
@@ -119,6 +120,19 @@ namespace BigAmbitionsMP
                 var table = Table();
                 if (table == null || reg == null || !table.TryGetValue(reg.Address, out var entries) || entries == null)
                     return list;
+                if (entries.Count > MaxEntries)
+                {   // C1 (log-only, 2026-09-18): the snapshot stops at the cap without a word, so a receiver simply
+                    // never hears about the shoppers past it. Once per address per game day.
+                    string capAddr = ""; try { capAddr = GameStateReader.AddressKey(reg); } catch { }
+                    int capDay = -1;    try { capDay = GameStateReader.GetGameTime().day; } catch { }
+                    if (!_capCapped.TryGetValue(capAddr, out var lastDay) || lastDay != capDay)
+                    {
+                        _capCapped[capAddr] = capDay;
+                        int done = 0;     try { foreach (var e in entries) if (e != null && e.completed) done++; } catch { }
+                        string capType = ""; try { capType = reg.businessTypeName ?? ""; } catch { }
+                        Plugin.Logger.LogWarning($"[Customers] CAPPED '{capAddr}' pending={entries.Count} cap={MaxEntries} type={capType} completed={done} day={capDay}");
+                    }
+                }
                 for (int i = 0; i < entries.Count && list.Count < MaxEntries; i++)
                 {
                     var e = entries[i];

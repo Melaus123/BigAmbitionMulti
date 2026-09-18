@@ -341,6 +341,9 @@ namespace BigAmbitionsMP
             _senseProxyPending.Clear(); _senseProxyDeferLogged = false;
             _nextCensusAt = 0f; _gleyTriggerHits = 0;
             _deadReckonFrames = 0; _rewindFrames = 0; _maxDeadReckonMetres = 0f; _maxRewindMetres = 0f;
+            // H-TAXISTRAND-1: a scene reset during a ride would otherwise leave the world-clock pinner suppressed
+            // for good (the ride's end event never arrives for the world that went away).
+            LocalInTaxi = false; _taxiTarget = null; _taxiInstantArmed = false;
         }
 
         /// <summary>Role-based step — called each frame in-game.</summary>
@@ -349,6 +352,8 @@ namespace BigAmbitionsMP
             try
             {
                 if (SaveGameManager.Current == null) return;
+
+                TickTaxiLiveCheck();   // F5: the ride's completion event can be missed — a live read closes the ride
 
                 if (MPServer.IsRunning)
                 {
@@ -2332,35 +2337,135 @@ namespace BigAmbitionsMP
         }
 
         // ── Taxi travel fast-forward exemption (backlog #5) ───────────────────
-        // The game's taxi travel uses TaxiController.TaxiTravel which calls
-        // GameSpeedController.Set with isFastForwarding=true and advances the
-        // world clock by the trip duration.  Our world-clock pinner (MPCanvasUI.
-        // TickWorldClock) would normally revert each advance every frame —
-        // result: the taxi ride coroutine waits forever for time to move
-        // forward and the player is "locked up" in the cab.
+        // The game's taxi ride is TaxiSystem.TravelCoroutine: it runs the time
+        // machine forward by the trip duration (isFastForwarding), then warps
+        // the player.  Our world-clock pinner (MPCanvasUI.TickWorldClock) would
+        // normally revert each advance every frame — result: the ride coroutine
+        // waits forever for time to move forward and the player is "locked up"
+        // in the cab.
         //
         // While LocalInTaxi is set the world-clock pinner gets out of the way.
-        // Once the ride completes (`CompletedTaxiRide`) we reset the pinner's
-        // window to the new clock so it doesn't see the advance retroactively
-        // as a skip and roll it back.
+        // Once the ride completes (the game's own "ba:gameevent_completedtaxiride"
+        // announcement) we reset the pinner's window to the new clock so it
+        // doesn't see the advance retroactively as a skip and roll it back.
+        //
+        // 2026-09-18 (H-TAXISTRAND-1): both ends are bound to the ride itself now
+        // — MPPatches.Patch_TaxiSystem_TravelCoroutine_RideStart and
+        // Patch_GameEvent_CompletedTaxiRide_RideEnd.  The previous binding sat on
+        // the BuildingResume.TaxiTravel wrapper, which ends ~1.3 s BEFORE the ride
+        // and runs even when TravelTo refuses the trip.
         public static bool LocalInTaxi { get; private set; }
 
-        public static void OnTaxiTravelStart()
+        // X2 arrival trace (H-TAXISTRAND-1, log-only): the destination captured at the start of the ride.
+        private static EntityController? _taxiTarget;
+        private static bool _taxiInstantArmed;
+        private static int  _taxiTraceLines;
+        private const int   TaxiTraceBudget = 60;   // arrival lines per session
+
+        public static void OnTaxiTravelStart(EntityController? target = null)
         {
+            _taxiTarget = target;
+            try { _taxiInstantArmed = MPRestSync.TaxiRidePending; } catch { _taxiInstantArmed = false; }
             if (LocalInTaxi) return;
             LocalInTaxi = true;
-            Plugin.Logger.LogInfo("[Taxi] TaxiTravel start — world-clock suppression OFF until ride ends.");
+            Plugin.Logger.LogInfo("[Taxi] ride start (TaxiSystem.TravelCoroutine) — world-clock suppression OFF until the ride ends.");
         }
 
         public static void OnTaxiTravelEnd()
         {
             if (!LocalInTaxi) return;
             LocalInTaxi = false;
-            Plugin.Logger.LogInfo("[Taxi] CompletedTaxiRide — world-clock suppression re-armed at post-ride time.");
+            Plugin.Logger.LogInfo("[Taxi] ride end (ba:gameevent_completedtaxiride) — world-clock suppression re-armed at post-ride time.");
             // World-clock detector resets itself on the next TickWorldClock pass
             // because `LocalInTaxi` was true the previous frame; the detector
             // already short-circuits in that case.  No explicit reset needed —
             // see MPCanvasUI.TickWorldClock.
+            TraceTaxiArrival();
+            _taxiTarget = null;
+        }
+
+        private static System.Reflection.PropertyInfo? _pTaxiIsTraveling;
+        private static bool _taxiProbeResolved;
+        private static bool _taxiProbeMissLogged;
+
+        /// <summary>F5 (2026-09-18): the ride's completion event can simply never arrive — the coroutine is cancelled,
+        /// the warp throws on a destroyed destination (TaxiSystem.cs:92), or the session drops. LocalInTaxi would then
+        /// stay true for the rest of the world: MPCanvasUI's LateUpdate steps out of the way entirely while it is set,
+        /// so Time.timeScale is owned by nobody, and the world clock stays on the taxi clamp. So the ride's own live
+        /// state decides instead of a timer. TaxiSystem.IsTraveling is `_travelCoroutine != null` (TaxiSystem.cs:20);
+        /// TravelTo assigns that field on the same frame our START prefix fires (TaxiSystem.cs:65 — the prefix runs
+        /// while the StartCoroutine argument is being evaluated, and the assignment completes before the frame ends),
+        /// and TravelCoroutine clears it only on its very last line, after the completion event. So it is already true
+        /// by the first tick after the start, and false means the ride is over however it ended.</summary>
+        private static void TickTaxiLiveCheck()
+        {
+            if (!LocalInTaxi) return;
+            try
+            {
+                if (!_taxiProbeResolved)
+                {
+                    _taxiProbeResolved = true;
+                    _pTaxiIsTraveling = VehicleManager.FindGameType("TaxiSystem")?
+                        .GetProperty("IsTraveling", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                }
+                if (_pTaxiIsTraveling == null)
+                {
+                    if (!_taxiProbeMissLogged)
+                    {
+                        _taxiProbeMissLogged = true;
+                        Plugin.Logger.LogWarning("[Taxi] TaxiSystem.IsTraveling not found — a ride that loses its completion event can no longer be closed by the live check.");
+                    }
+                    return;
+                }
+                if (_pTaxiIsTraveling.GetValue(null) is not bool traveling) return;   // no TaxiSystem instance yet: decide nothing
+                if (traveling) return;
+            }
+            catch { return; }   // the property throws while the instance is gone — that is not a verdict
+            Plugin.Logger.LogWarning("[Taxi] ride ended without its completion event — cleared by the live check.");
+            OnTaxiTravelEnd();
+        }
+
+        /// <summary>X2 (log-only, H-TAXISTRAND-1): once per ride, everything that decides whether the player can
+        /// walk after the warp — where the game aimed them, whether that point is ON the navmesh, where they
+        /// actually ended up, and the state of their agent. Budget TaxiTraceBudget lines per session.</summary>
+        private static void TraceTaxiArrival()
+        {
+            try
+            {
+                if (_taxiTraceLines >= TaxiTraceBudget) return;
+                _taxiTraceLines++;
+                string name = "?", type = "?";
+                var tgt = _taxiTarget;
+                try { if (tgt != null) { name = tgt.name; type = tgt.GetType().Name; } } catch { }
+                bool haveNav = false; Vector3 nav = Vector3.zero;
+                try { if (tgt != null) { nav = tgt.GetNavMeshTargetPosition(); haveNav = true; } } catch { }
+                string sample = "no target";
+                if (haveNav)
+                {
+                    try
+                    {
+                        sample = UnityEngine.AI.NavMesh.SamplePosition(nav, out var hit, 3f, -1)
+                            ? $"{hit.position} mask={hit.mask}"
+                            : "NO HIT within 3m";
+                    }
+                    catch (Exception ex) { sample = "threw " + ex.GetType().Name; }
+                }
+                Vector3 ppos = Vector3.zero; bool agentEnabled = false, onNav = false;
+                try
+                {
+                    var ch = PlayerHelper.PlayerController?.Character;
+                    if (ch != null)
+                    {
+                        ppos = ch.transform.position;
+                        var agent = ch.GetComponentInChildren<UnityEngine.AI.NavMeshAgent>(true);
+                        if (agent != null) { agentEnabled = agent.enabled; onNav = agent.isOnNavMesh; }
+                    }
+                }
+                catch { }
+                Plugin.Logger.LogWarning($"[Taxi] arrival target='{name}'/{type} navTarget={(haveNav ? nav.ToString() : "n/a")} sample={sample}"
+                    + $" player={ppos} agentEnabled={agentEnabled} onNavMesh={onNav} instant={_taxiInstantArmed} ({_taxiTraceLines}/{TaxiTraceBudget})");
+            }
+            catch { }
         }
 
         // ── Building entry / exit (backlog #6 + #7) ───────────────────────────

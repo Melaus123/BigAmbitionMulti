@@ -26,8 +26,11 @@ namespace BigAmbitionsMP
     /// counts) that belongs to another player (GameStatePatcher.IsForeignPlayerBusiness) and is not merger-flipped.
     ///
     /// EDITOR (the permitted player's machine): the game's own schedule screen edits the local REPLICA of the shared
-    /// shop. A 2 s scan compares each day's signature with the owner-truth baseline and sends the changed days only,
-    /// each stamped with the baseline signature it was edited against (SharedScheduleEdit → host → owner). In-flight
+    /// shop. A 2 s scan compares each day's signature with the owner-truth baseline and sends the changed days only
+    /// WHEN THIS MACHINE CAN NAME THE PLAYER ACTION BEHIND THE DIFFERENCE (H-SCHEDWIPE-1: the Schedule tab is open on
+    /// that shop, its auto-fill is running, or one of the three off-tab player mutators just ran here). A difference
+    /// with no such intent is the replica changing itself and is never routed; the owner's copy is asked for instead.
+    /// Each sent day is stamped with the baseline signature it was edited against (SharedScheduleEdit → host → owner). In-flight
     /// days are held 15 s for the owner's echo; a lost message simply re-sends. Signatures are PER DAY, sorted, and
     /// exclude duty stand-ins (BAMP_DUTY_*) on both sides.
     /// OWNER: per day — base signature == my current day → apply (the only checks: every shift's employee still
@@ -64,6 +67,37 @@ namespace BigAmbitionsMP
         private static readonly int _seqEpoch = new System.Random().Next(1, int.MaxValue);   // per process: a restarted editor's counter starts over and must not be silenced
         private static string _openSessionAddr = "";   // the ONE shared shop whose Schedule tab is open on this machine
         private static float  _lastKeepalive;
+
+        // ── H-SCHEDWIPE-1 (2026-09-18): a day leaves this machine only when a PLAYER changed it here ──────────
+        // The scan used to route ANY per-day difference of a replica to the owner. A replica that emptied itself
+        // with the tab shut therefore routed EMPTY days; the owner applied them (ValidateRefs only walks the shifts
+        // that are PRESENT, so an empty day validates) and the heartbeat carried the loss back — both saves lost
+        // the workers. The gate below is the fix; the SELF-CHANGE probe next to it is how we find the writer.
+        private static readonly HashSet<string> _touched = new();                        // addr → an off-tab PLAYER mutator ran here; a one-shot latch consumed by the next scan
+        private static readonly Dictionary<string, HashSet<int>> _selfChanged = new();   // addr → days that changed with no intent — never sent, waiting for the owner's truth
+        private static readonly HashSet<string> _truthAskLogged = new();                 // addr → the "awaiting the owner's truth" line is printed once, and marks an ask we must close
+        private static readonly Dictionary<string, Dictionary<int, (List<string> ids, List<WorkShift> list)>> _baseIds = new();   // addr → day → the employee ids the baseline day held + the list object they lived in (probe)
+        private static readonly Dictionary<string, Dictionary<int, string>> _ownBase = new();                                     // OWNER probe: addr → day → sig, re-baselined every beat so it reports deltas
+        private static readonly Dictionary<string, Dictionary<int, (List<string> ids, List<WorkShift> list)>> _ownIds = new();
+
+        /// <summary>A native full-roster employee pass (RunDaily / RunHourly / complaints) brackets itself here, so a
+        /// shift the SIMULATION removes inside one is never mistaken for the player's hand. Set by MPPatches'
+        /// StripModEmployeeRecords / RestoreModEmployeeRecords, which already wrap exactly those passes.</summary>
+        internal static int    InEmployeePass;
+        internal static int    LastStripFrame   = -1;
+        internal static int    LastRestoreFrame = -1;
+        internal static string LastStripContext = "";
+
+        private const int ProbeBudget = 40;                        // SELF-CHANGE lines per session; both roles share the budget
+        private static int _probeLines;
+        private static readonly HashSet<string> _probed = new();   // "addr|day|sig" already reported
+        // F8: the owner-side probe is EVENT-DRIVEN. The suspected writer only lives inside a native full-roster
+        // employee pass, so after the one baseline pass the probe looks again only on the first beat after a
+        // strip/restore moved these frame stamps. Nothing walks the registrations on the beats in between.
+        private static bool _ownBaseTaken;
+        private static int  _probeSeenStrip   = -1;
+        private static int  _probeSeenRestore = -1;
+        private static bool OwnProbeDue => !_ownBaseTaken || LastStripFrame != _probeSeenStrip || LastRestoreFrame != _probeSeenRestore;
 
         // owner side
         private static readonly Dictionary<string, Dictionary<string, float>> _sessions      = new();   // addr → editor pid → last heard
@@ -116,13 +150,18 @@ namespace BigAmbitionsMP
         public static bool IsScheduleManaged(BuildingRegistration reg, string addr) => IsSharedShop(reg, addr) || IsMergedShop(reg, addr);
 
         /// <summary>MAIN THREAD (MPCanvasUI.Update, 2 s). Inert unless this player helps somewhere, hosts an editing
-        /// session, is in a merger, or has deferred work.</summary>
+        /// session, is in a merger, has deferred work, or a native employee pass has run since the owner-side probe
+        /// last looked (F8).</summary>
         public static void Tick()
         {
             if (Time.unscaledTime < _nextScan) return;
             _nextScan = Time.unscaledTime + ScanSeconds;
             bool helper = GrantSync.SharedManageCount > 0 || MergerFlip.FlippedCount > 0;   // merged shops are schedule-managed too (phase 0, 2026-09-10)
-            if (!helper && _sessions.Count == 0 && _pendingTruth.Count == 0 && _pendingRedraw.Count == 0
+            // S2: the OWNER watches its own shops too (it holds injected partner records named in its own schedule).
+            // F8: that costs a beat only for the one baseline pass and then only after a native employee pass has
+            // run; once the probe budget is spent this term goes false for good.
+            bool probing = _probeLines < ProbeBudget && (MPServer.IsRunning || MPClient.IsClientInWorld) && OwnProbeDue;
+            if (!helper && !probing && _sessions.Count == 0 && _pendingTruth.Count == 0 && _pendingRedraw.Count == 0
                 && _openSessionAddr.Length == 0 && _baseline.Count == 0) return;
             try
             {
@@ -161,11 +200,23 @@ namespace BigAmbitionsMP
                     string addr; try { addr = GameStateReader.AddressKey(reg); } catch { continue; }
                     if (!IsScheduleManaged(reg, addr)) continue;   // membership decided by IsScheduleManaged alone — the prune below must agree with TryApplyOwnerTruth's gate
                     (seen ??= new()).Add(addr);
-                    if (IsAutoFilling(reg)) continue;         // the fill is still writing — send its days as one change-set when it is done
+                    if (IsAutoFilling(reg))
+                    {   // The fill is still writing — its days go as one change-set when it is done. F1: a native fill
+                        // OUTLIVES the tab (BizManSchedule.cs:146-149, ScheduleAutoFillerHelper.cs:82-97), so the
+                        // intent is latched HERE, while the fill is visibly running; the first scan that meets the
+                        // finished fill then finds it and routes the result instead of force-reverting it.
+                        _touched.Add(addr);
+                        continue;
+                    }
                     var sigs = DaySigs(reg);
-                    if (!_baseline.TryGetValue(addr, out var baseline)) { _baseline[addr] = sigs; continue; }   // first sight = baseline
+                    if (!_baseline.TryGetValue(addr, out var baseline)) { _baseline[addr] = sigs; _baseIds[addr] = DayIdsOf(reg); continue; }   // first sight = baseline
                     _inflight.TryGetValue(addr, out var inflight);
                     List<ScheduleDay> changed = null; List<string> bases = null;
+                    // H-SCHEDWIPE-1: what makes a difference an EDIT rather than the replica changing itself. A
+                    // running fill cannot reach this line (it is skipped above), so the fill's intent arrives the
+                    // only way it can — as the latch F1 set while it was running.
+                    bool tabOpen = IsScheduleTabOpenFor(reg);
+                    bool intent  = tabOpen || _touched.Contains(addr);
                     foreach (var sd in reg.scheduleDays)
                     {
                         if (sd == null) continue;
@@ -175,8 +226,24 @@ namespace BigAmbitionsMP
                         if (sig == b) continue;                                                           // matches the owner's truth
                         if (inflight != null && inflight.TryGetValue(day, out var f) && f.sig == sig
                             && Time.unscaledTime - f.at < PendingHoldSeconds) continue;                  // already in flight
+                        if (!intent)
+                        {   // Nothing the player did here explains this day. Do not send it, and do NOT re-baseline —
+                            // the baseline stays the owner's truth, which is what makes the forced take-back below work.
+                            ProbeSelfChange(reg, addr, day, sd, tabOpen, filling: false, isOwner: false);   // a fill never reaches this line
+                            if (!_selfChanged.TryGetValue(addr, out var self)) _selfChanged[addr] = self = new HashSet<int>();
+                            self.Add(day);
+                            continue;
+                        }
+                        // F4: a real edit on a day we were waiting for the owner's copy of cancels that wait — an
+                        // owner snapshot in flight must never force-revert the edit the player has just made.
+                        ForgetSelfChanged(addr, day);
                         (changed ??= new()).Add(sd); (bases ??= new()).Add(b);
                     }
+                    // F2: the latch is consumed HERE — by the one scan that actually evaluated the gate for this
+                    // address. The earlier blanket clear also ate latches for shops this scan skipped (auto-filling,
+                    // no baseline yet, not managed this beat), which is how an intent could be lost entirely.
+                    _touched.Remove(addr);
+                    if (_selfChanged.ContainsKey(addr)) AskOwnerForTruth(addr);
                     if (changed == null) continue;
                     _seq.TryGetValue(addr, out var seq); seq++; _seq[addr] = seq;
                     var p = new SharedScheduleEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Seq = seq, SeqEpoch = _seqEpoch };
@@ -202,9 +269,160 @@ namespace BigAmbitionsMP
                     foreach (var k in gone)
                     {
                         _baseline.Remove(k); _inflight.Remove(k); _pendingTruth.Remove(k); _pendingRedraw.Remove(k);
+                        _baseIds.Remove(k); _selfChanged.Remove(k); _truthAskLogged.Remove(k);
                         Plugin.Logger.LogInfo($"{Tag} '{k}' is no longer shared with this player — schedule editing state dropped, native sync resumes.");
                     }
             }
+            ProbeOwnShops(gi);   // reads _touched for MY OWN shops, so it runs before the drop below
+            // F2: a latch for an address this scan did not find schedule-managed can never be read by the gate, so it
+            // goes with the rest of that shop's state. (My own shops are dropped here too, after the probe has read
+            // them — the probe is log-only, so at worst a beat on which it did not look prints one extra line.)
+            if (_touched.Count > 0)
+            {
+                List<string>? staleLatch = null;
+                foreach (var k in _touched) if (seen == null || !seen.Contains(k)) (staleLatch ??= new()).Add(k);
+                if (staleLatch != null) foreach (var k in staleLatch) _touched.Remove(k);
+            }
+        }
+
+        /// <summary>F4: this day is no longer waiting for the owner's copy. When the last day of an address clears,
+        /// the session the ask opened is closed again, exactly as the arrival path does.</summary>
+        private static void ForgetSelfChanged(string addr, int day)
+        {
+            if (!_selfChanged.TryGetValue(addr, out var self) || !self.Remove(day)) return;
+            if (self.Count > 0) return;
+            _selfChanged.Remove(addr);
+            if (_truthAskLogged.Remove(addr) && _openSessionAddr != addr)
+                SendSession(new ScheduleSessionPayload { PlayerId = MPConfig.PlayerId, Action = "close", AddressKey = addr });
+        }
+
+        /// <summary>S2 probe, OWNER side: my OWN shops are watched by the same beat, because the owner holds injected
+        /// partner records named in its own schedule and strips them for the same native passes. The owner has no
+        /// owner-truth baseline of its own, so the FIRST sight of a shop simply becomes the baseline (the same
+        /// first-sight rule the editor side uses) and only later deltas can print; every pass re-baselines, so the log
+        /// reports deltas instead of one stuck difference. Log-only, and the whole pass stops for good once the
+        /// budget is spent. F8: after the baseline pass this runs ONLY on the first beat following a native employee
+        /// strip/restore — the one window the suspected writer lives in — so nothing walks the registrations on the
+        /// beats in between.</summary>
+        private static void ProbeOwnShops(GameInstance gi)
+        {
+            try
+            {
+                if (_probeLines >= ProbeBudget) { if (_ownBase.Count > 0) { _ownBase.Clear(); _ownIds.Clear(); } return; }
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                if (!OwnProbeDue) return;
+                _probeSeenStrip = LastStripFrame; _probeSeenRestore = LastRestoreFrame; _ownBaseTaken = true;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null || reg.scheduleDays == null) continue;
+                    if (!MergerFlip.TrulyMine(reg)) continue;
+                    string addr; try { addr = GameStateReader.AddressKey(reg); } catch { continue; }
+                    if (string.IsNullOrEmpty(addr)) continue;
+                    var sigs = DaySigs(reg);
+                    if (!_ownBase.TryGetValue(addr, out var prev)) { _ownBase[addr] = sigs; _ownIds[addr] = DayIdsOf(reg); continue; }
+                    bool tabOpen = IsScheduleTabOpenFor(reg);
+                    bool filling = IsAutoFilling(reg);
+                    if (!(tabOpen || filling || _touched.Contains(addr)))
+                        foreach (var sd in reg.scheduleDays)
+                        {
+                            if (sd == null) continue;
+                            int day = (int)sd.day;
+                            sigs.TryGetValue(day, out var sig); sig ??= "";
+                            prev.TryGetValue(day, out var b); b ??= "";
+                            if (sig == b) continue;
+                            ProbeSelfChange(reg, addr, day, sd, tabOpen, filling, isOwner: true);
+                            if (_probeLines >= ProbeBudget) break;
+                        }
+                    _ownBase[addr] = sigs; _ownIds[addr] = DayIdsOf(reg);
+                    if (_probeLines >= ProbeBudget) return;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} WARNING ProbeOwnShops (S2 probe): {ex.Message}"); }
+        }
+
+        /// <summary>S2 mutator probe (H-SCHEDWIPE-1, log-only, both machines): one line naming everything that could
+        /// explain a schedule day changing here with nobody editing it. ProbeBudget lines per session, and each
+        /// address+day+signature prints once — the editor side deliberately never re-baselines such a day, so
+        /// without that key the same difference would print on every beat.</summary>
+        private static void ProbeSelfChange(BuildingRegistration reg, string addr, int day, ScheduleDay sd, bool tabOpen, bool filling, bool isOwner)
+        {
+            try
+            {
+                if (_probeLines >= ProbeBudget) return;
+                if (!_probed.Add($"{addr}|{day}|{DaySig(sd)}")) return;
+                _probeLines++;
+                var store = isOwner ? _ownIds : _baseIds;
+                List<string>? before = null; List<WorkShift>? wasList = null;   // net48 nullable: both stay null when this day has no baseline record yet
+                if (store.TryGetValue(addr, out var perDay) && perDay.TryGetValue(day, out var rec)) { before = rec.ids; wasList = rec.list; }
+                var now = IdsOf(sd);
+                var dropped = new List<string>();
+                if (before != null)
+                    foreach (var id in before)
+                    {
+                        if (now.Contains(id)) continue;
+                        bool inj = false, co = false;
+                        try { inj = MPRegisterSync.IsInjectedStaff(id); } catch { }
+                        try { co  = CompanyPlans.CoMemberCopyHere(id); } catch { }
+                        dropped.Add($"{id}[{(inj ? "injected" : "-")}/{(co ? "mergedPartner" : "-")}/{(IsSynthetic(id) ? "synthetic" : "-")}]");
+                    }
+                int frame = Time.frameCount;
+                string rented = "?", stamp = "?", type = "?";
+                try { rented = reg.RentedByPlayer.ToString(); } catch { }
+                try { stamp  = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                try { type   = reg.businessTypeName ?? ""; } catch { }
+                int gday = -1; float ghour = -1f;
+                try { var gt = GameStateReader.GetGameTime(); gday = gt.day; ghour = gt.hourOfDay; } catch { }
+                Plugin.Logger.LogWarning($"{Tag} SELF-CHANGE {(isOwner ? "owner" : "replica")} '{addr}' {DayName(day)}: shifts {(before != null ? before.Count : -1)}->{now.Count}"
+                    + $", dropped [{string.Join(", ", dropped)}]"
+                    + $", tabOpen={tabOpen} drag={IsDragging()} autofill={filling}"
+                    + $", frame={frame} sinceStrip={(LastStripFrame < 0 ? -1 : frame - LastStripFrame)} sinceRestore={(LastRestoreFrame < 0 ? -1 : frame - LastRestoreFrame)}"
+                    + $" stripCtx='{LastStripContext}' inPass={InEmployeePass}, listReplaced={(wasList != null && !ReferenceEquals(wasList, sd.workShifts))}"
+                    + $", RentedByPlayer={rented}, ownerStamp='{stamp}', type='{type}', gameDay={gday} hour={ghour:0.0} ({_probeLines}/{ProbeBudget})");
+            }
+            catch { }
+        }
+
+        /// <summary>H-SCHEDWIPE-1 (iii)+(v): a day that changed here with no player behind it is never sent; we ask the
+        /// owner for their whole schedule instead — the way a session "open" carrying a signature that is not the
+        /// owner's own already makes OwnerOpen reply with a full copy. The sentinel signature can never equal a real
+        /// one, so the reply is always the full copy. Retried on every scan beat until the truth lands (an owner that
+        /// cannot be reached simply never answers), and said once per address. The session the ask opens is closed
+        /// again the moment the truth arrives, unless a real Schedule tab is open on that shop here.</summary>
+        private static void AskOwnerForTruth(string addr)
+        {
+            try
+            {
+                SendSession(new ScheduleSessionPayload { PlayerId = MPConfig.PlayerId, Action = "open", AddressKey = addr, Sig = "\u0001self-change-ask" });
+                if (_truthAskLogged.Add(addr))
+                    Plugin.Logger.LogWarning($"{Tag} '{addr}': a schedule day changed here with no player edit behind it — nothing was routed to the owner; awaiting the owner's truth (asked again on every 2 s scan until it lands).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} WARNING truth request '{addr}': {ex.Message}"); }
+        }
+
+        private static List<string> IdsOf(ScheduleDay sd)
+        {
+            var ids = new List<string>();
+            try { if (sd != null && sd.workShifts != null) foreach (var w in sd.workShifts) if (w != null && !string.IsNullOrEmpty(w.employeeId)) ids.Add(w.employeeId); }
+            catch { }
+            return ids;
+        }
+
+        private static Dictionary<int, (List<string> ids, List<WorkShift> list)> DayIdsOf(BuildingRegistration reg)
+        {
+            var d = new Dictionary<int, (List<string> ids, List<WorkShift> list)>();
+            try { if (reg != null && reg.scheduleDays != null) foreach (var sd in reg.scheduleDays) if (sd != null) d[(int)sd.day] = (IdsOf(sd), sd.workShifts); }
+            catch { }
+            return d;
+        }
+
+        private static void BaseIdsDay(string addr, int day, ScheduleDay sd)
+        {
+            try
+            {
+                if (!_baseIds.TryGetValue(addr, out var per)) _baseIds[addr] = per = new Dictionary<int, (List<string> ids, List<WorkShift> list)>();
+                per[day] = (IdsOf(sd), sd.workShifts);
+            }
+            catch { }
         }
 
         private static BuildingRegistration FindReg(string addressKey, GameInstance gi = null)
@@ -265,6 +483,14 @@ namespace BigAmbitionsMP
         private static void CloseEditorSession(string why)
         {
             string addr = _openSessionAddr;
+            if (addr.Length > 0)
+            {   // F3: a resize / move / paste in the last <2 s before the tab goes away raises no OnWorkShiftChanged
+                // and nothing scans on close, so those edits would be met by the next scan with the tab already shut
+                // and read as the replica changing itself. Latch the intent and pull the next scan into this frame,
+                // before the address is forgotten. Event-driven: the close IS the event, there is no delay.
+                _touched.Add(addr);
+                _nextScan = 0f;
+            }
             _openSessionAddr = "";
             if (addr.Length == 0) return;
             SendSession(new ScheduleSessionPayload { PlayerId = MPConfig.PlayerId, Action = "close", AddressKey = addr });
@@ -567,7 +793,7 @@ namespace BigAmbitionsMP
             if (MergerFlip.TrulyMine(reg)) { Plugin.Logger.LogWarning($"{Tag} snapshot for '{p.AddressKey}' but that shop is mine — ignored."); return; }
             if (p.Schedule.Count == 0)
             {
-                if (!_baseline.ContainsKey(p.AddressKey)) _baseline[p.AddressKey] = DaySigs(reg);   // "unchanged": our held copy IS the owner's truth
+                if (!_baseline.ContainsKey(p.AddressKey)) { _baseline[p.AddressKey] = DaySigs(reg); _baseIds[p.AddressKey] = DayIdsOf(reg); }   // "unchanged": our held copy IS the owner's truth
                 return;
             }
             if (p.RejectedDays.Count > 0)
@@ -589,8 +815,23 @@ namespace BigAmbitionsMP
                 if ((IsDragging() && IsScheduleTabOpenFor(reg)) || IsAutoFilling(reg)) { _pendingTruth[addr] = (days, forceDays, why); return true; }   // never swap the schedule under the player's hand or a running auto-fill
                 _pendingTruth.Remove(addr);
 
+                // H-SCHEDWIPE-1 (iv): days this machine changed with nobody editing them are FORCED from the owner's
+                // copy. It has to be the force branch: the ordinary branch below skips a day whose incoming signature
+                // still equals our baseline, and that is exactly this case — we deliberately never re-baselined.
+                List<int>? selfOnly = null;   // days forced ONLY because this machine changed them on its own (never the owner's RejectedDays)
+                if (_selfChanged.TryGetValue(addr, out var self) && self.Count > 0)
+                {
+                    var forced = forceDays != null ? new List<int>(forceDays) : new List<int>();
+                    foreach (var sd0 in self) if (!forced.Contains(sd0)) { forced.Add(sd0); (selfOnly ??= new()).Add(sd0); }
+                    forceDays = forced;
+                    _selfChanged.Remove(addr);
+                    if (_truthAskLogged.Remove(addr) && _openSessionAddr != addr)
+                        SendSession(new ScheduleSessionPayload { PlayerId = MPConfig.PlayerId, Action = "close", AddressKey = addr });   // the ask's session ends with the ask
+                    Plugin.Logger.LogWarning($"{Tag} '{addr}': the owner's truth arrived for {self.Count} day(s) this machine had changed on its own ({why}) — taking their copy verbatim.");
+                }
+
                 var local = DaySigs(reg);
-                if (!_baseline.TryGetValue(addr, out var baseline)) _baseline[addr] = baseline = new Dictionary<int, string>(local);
+                if (!_baseline.TryGetValue(addr, out var baseline)) { _baseline[addr] = baseline = new Dictionary<int, string>(local); _baseIds[addr] = DayIdsOf(reg); }
                 _inflight.TryGetValue(addr, out var inflight);
                 List<int> lost = null; int taken = 0, echoed = 0;
                 foreach (var d in days)
@@ -601,9 +842,14 @@ namespace BigAmbitionsMP
                     local.TryGetValue(day, out var l); l ??= "";
                     baseline.TryGetValue(day, out var b); b ??= "";
                     bool dirty = l != b;                                   // a local edit not yet confirmed by the owner
-                    bool force = forceDays != null && forceDays.Contains(day);
                     (string sig, float at) f = default;
                     bool hasFlight = inflight != null && inflight.TryGetValue(day, out f);
+                    // F4 (narrowed by the re-check, 2026-09-18): a day forced ONLY because this machine changed it on
+                    // its own is not forced while an edit of ours is in flight for it - the ordinary branch below
+                    // reconciles that (our own echo, or the owner wins). The owner's REJECTED days are always forced:
+                    // a rejected day is by definition in flight, and the take-back is what rejection exists for.
+                    bool force = forceDays != null && forceDays.Contains(day)
+                                 && !(hasFlight && selfOnly != null && selfOnly.Contains(day));
                     var sd = FindDay(reg, day);
                     if (sd == null)
                     {
@@ -618,20 +864,20 @@ namespace BigAmbitionsMP
                     {
                         bool differs = incoming != l;
                         ReplaceDay(sd, d, keepSynthetic: true);
-                        baseline[day] = incoming; inflight?.Remove(day);
+                        baseline[day] = incoming; BaseIdsDay(addr, day, sd); inflight?.Remove(day);
                         if (differs) (lost ??= new()).Add(day);
                         continue;
                     }
                     if (incoming == b) continue;                           // the owner's day is unchanged since our baseline — keep any local edit
                     bool echo = hasFlight && f.sig == incoming;            // the owner applied OUR edit
                     ReplaceDay(sd, d, keepSynthetic: true);                // any local duty stand-in shifts stay (the owner's never arrive)
-                    baseline[day] = incoming; inflight?.Remove(day);
+                    baseline[day] = incoming; BaseIdsDay(addr, day, sd); inflight?.Remove(day);
                     if (echo) echoed++;
                     else { taken++; if (dirty) (lost ??= new()).Add(day); }
                 }
                 // Log only — this feature puts nothing on screen (user ruling 2026-08-21).
                 if (lost != null)
-                    Plugin.Logger.LogInfo($"{Tag} '{addr}': the owner's version replaced a local edit on {DayNames(lost)} ({why}).");
+                    Plugin.Logger.LogInfo($"{Tag} '{addr}': the owner's version replaced what this machine held on {DayNames(lost)} ({why}) — a local edit, or a day this replica had changed on its own.");
                 if (echoed > 0 || taken > 0)
                     Plugin.Logger.LogInfo($"{Tag} '{addr}' updated from the owner ({why}): {echoed} day(s) confirmed ours, {taken} day(s) changed by them.");
                 if (IsScheduleTabOpenFor(reg)) RedrawScheduleTab(reg);
@@ -895,11 +1141,69 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} redraw: {ex.InnerException?.Message ?? ex.Message}"); }   // reflection wraps the real exception
         }
 
+        // ── H-SCHEDWIPE-1: the three OFF-TAB player mutators ──────────────────
+        // The design read of 2026-09-18 found exactly three native routes that rewrite a day's shifts with no
+        // Schedule tab open and without raising OnWorkShiftChanged. Each prefix resolves the affected address LIVE
+        // (UnassignEmployeeFromAllWorkshifts clears assignedAddress itself, so a postfix would have nothing left to
+        // read) and latches it for the next scan. The first of the three is ALSO a simulation route — retirement
+        // inside EmployeeHelper.RunDaily calls it — so the latch is refused while a native full-roster pass is
+        // bracketed by InEmployeePass.
+        private static void Touch(string addr)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addr)) return;
+                if (InEmployeePass > 0) return;                                                 // the simulation's hand, not the player's
+                if (GrantSync.SharedManageCount == 0 && MergerFlip.FlippedCount == 0) return;   // nothing here is schedule-managed, so nothing would read the latch
+                _touched.Add(addr);
+            }
+            catch { }
+        }
+
+        /// <summary>A player unassigning an employee (HR screens, firing) clears every shift of theirs.</summary>
+        [HarmonyPatch(typeof(EmployeeHelper), nameof(EmployeeHelper.UnassignEmployeeFromAllWorkshifts))]
+        public static class Patch_Unassign_ScheduleIntent
+        {
+            static void Prefix(EmployeeInstance employeeInstance)
+            {
+                try { if (employeeInstance != null && employeeInstance.assignedAddress != null) Touch(GameStateReader.AddressKey(employeeInstance.assignedAddress)); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} WARNING Patch_Unassign_ScheduleIntent: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>A player removing a workstation drops the shifts bound to it.</summary>
+        [HarmonyPatch(typeof(BuildingRegistration), nameof(BuildingRegistration.RemoveWorkShiftsForItem))]
+        public static class Patch_RemoveWorkShiftsForItem_ScheduleIntent
+        {
+            static void Prefix(BuildingRegistration __instance)
+            {
+                try { if (__instance != null) Touch(GameStateReader.AddressKey(__instance)); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} WARNING Patch_RemoveWorkShiftsForItem_ScheduleIntent: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>A player picking an assignable item up out of the building it was placed in.</summary>
+        [HarmonyPatch(typeof(ItemHelper), nameof(ItemHelper.RemoveFromWorkShifts))]
+        public static class Patch_RemoveFromWorkShifts_ScheduleIntent
+        {
+            static void Prefix(Address initialAddress)
+            {
+                try { Touch(GameStateReader.AddressKey(initialAddress)); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} WARNING Patch_RemoveFromWorkShifts_ScheduleIntent: {ex.Message}"); }
+            }
+        }
+
         /// <summary>Scene teardown. _seq survives on purpose (monotonic per process under one SeqEpoch).</summary>
         public static void Reset()
         {
             _baseline.Clear(); _inflight.Clear(); _pendingTruth.Clear(); _pendingRedraw.Clear();
             _sessions.Clear(); _lastPushedSig.Clear(); _appliedSeq.Clear();
+            _touched.Clear(); _selfChanged.Clear(); _truthAskLogged.Clear(); _baseIds.Clear();
+            _ownBase.Clear(); _ownIds.Clear();   // the probe's own budget and its printed keys are per PROCESS, not per world
+            _ownBaseTaken = false; _probeSeenStrip = -1; _probeSeenRestore = -1;
+            // F7: a world that went away mid-pass would otherwise leave the bracket counter stuck above zero, and
+            // every off-tab player mutator after it would be read as the simulation's hand for good.
+            InEmployeePass = 0;
             _openSessionAddr = "";
         }
     }

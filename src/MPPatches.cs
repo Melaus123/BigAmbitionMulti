@@ -719,41 +719,72 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Patch: *.TaxiTravel (backlog #5) ──────────────────────────────────
-        // Fires when the player picks a destination from the taxi menu and the
-        // ride begins.  The game then sets isFastForwarding=true and advances
-        // the world clock through the trip — which our world-clock pinner
-        // normally reverts every frame, locking the player in the cab.
+        // ── Patches: the taxi ride's real START and END (backlog #5; re-bound 2026-09-18, H-TAXISTRAND-1) ────
+        // What the player lives through as "the ride" is TaxiSystem.TravelCoroutine: it hides the character, runs the
+        // time machine forward by the trip duration, then warps them to the destination.  The game advances the world
+        // clock through the trip — which our world-clock pinner would otherwise revert every frame, locking the
+        // player in the cab — so the ride has to be bracketed exactly.
         //
-        // IMPORTANT: previous version used TargetMethod() returning null when
-        // TaxiTravel wasn't on TaxiController — Harmony treats null as an
-        // error and aborts PatchAll, which then silently drops EVERY other
-        // patch in the assembly (including building entry/exit).  Use
-        // TargetMethods (plural) with FindAllMethodsByName so a missing
-        // method just produces an empty enumerable and the rest of PatchAll
-        // continues unaffected.
+        // The OLD binding (2026-05-19) patched whatever was named "TaxiTravel", believing it WAS the ride coroutine.
+        // It is not: TaxiTravel lives on UI.InGameUI.BuildingResume and is a one-line wrapper around
+        // TaxiSystem.TravelTo, which returns without starting anything when a private fence is locked or the fare
+        // cannot be paid (decompile TaxiSystem.cs:37-66).  So its postfix fired about 1.3 s BEFORE the ride, and
+        // fired even when no ride had begun.  The new binding:
+        //   START = a prefix on TaxiSystem.TravelCoroutine(EntityController, float).  Patching an iterator method's
+        //           stub fires exactly when StartCoroutine(TravelCoroutine(..)) is evaluated — the last line of
+        //           TravelTo, past every early return — and hands us the destination for the arrival trace.
+        //   END   = the game's own completion announcement, GameEvent.Invoke("ba:gameevent_completedtaxiride"),
+        //           raised inside TravelCoroutine right after Character.Reset() (TaxiSystem.cs:96).  GameEvent is a
+        //           plain static holding one Action<string>, and the engine clears that delegate on subsystem
+        //           registration, so a prefix on Invoke is both the smallest hook and the one that cannot be
+        //           unsubscribed out from under us.  TravelCoroutine raises an EMPTY event id five lines earlier,
+        //           hence the exact-id test.
+        // Both use TargetMethods (plural): a TargetMethod returning null aborts PatchAll and would silently drop
+        // EVERY other patch in the assembly.
+        // NOT TOUCHED here (out of scope): the MP instant-arrival timers (MPRestSync.OnTaxiRideStarting's 8 s pending
+        // window and the 0.3 s machine-stop), which are what makes the ride finish at once in multiplayer.
 
         [HarmonyPatch]
-        public static class Patch_TaxiTravel
+        public static class Patch_TaxiSystem_TravelCoroutine_RideStart
         {
             static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
-                => VehicleManager.FindAllMethodsByName("TaxiTravel");
-
-            static void Prefix()
             {
-                try { TrafficSync.OnTaxiTravelStart(); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] TaxiTravel prefix: {ex.Message}"); }
+                var t = VehicleManager.FindGameType("TaxiSystem");
+                // F6: named with its parameter types (decompile TaxiSystem.cs:68) — a name-only lookup would throw
+                // AmbiguousMatchException inside TargetMethods if the game ever adds an overload, and a throw here
+                // aborts PatchAll for the whole assembly.
+                var m = t?.GetMethod("TravelCoroutine",
+                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance,
+                    null, new[] { typeof(EntityController), typeof(float) }, null);
+                Plugin.Logger.LogInfo($"[Taxi] ride-start patch (TaxiSystem.TravelCoroutine): {(m != null ? "patched" : "NOT FOUND")}");
+                if (m != null) yield return m;
             }
 
-            // OBSERVED 2026-05-19: TaxiTravel lives on UI.InGameUI.BuildingResume
-            // and there is no separate CompletedTaxiRide method anywhere in the
-            // loaded assemblies (log: "[FindMethod] 'CompletedTaxiRide' not
-            // found").  TaxiTravel is the ride coroutine itself — postfix fires
-            // when the ride completes, which is our "ride ended" event.
-            static void Postfix()
+            static void Prefix(EntityController target)
             {
-                try { TrafficSync.OnTaxiTravelEnd(); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] TaxiTravel postfix: {ex.Message}"); }
+                try { TrafficSync.OnTaxiTravelStart(target); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] WARNING Patch_TaxiSystem_TravelCoroutine_RideStart: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch]
+        public static class Patch_GameEvent_CompletedTaxiRide_RideEnd
+        {
+            static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                var m = AccessTools.Method(typeof(GameEvent), nameof(GameEvent.Invoke), new[] { typeof(string) });
+                Plugin.Logger.LogInfo($"[Taxi] ride-end patch (GameEvent.Invoke): {(m != null ? "patched" : "NOT FOUND")}");
+                if (m != null) yield return m;
+            }
+
+            static void Prefix(string gameEvent)
+            {
+                try
+                {
+                    if (gameEvent != "ba:gameevent_completedtaxiride") return;   // the ride also raises an empty id a few lines earlier
+                    TrafficSync.OnTaxiTravelEnd();
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] WARNING Patch_GameEvent_CompletedTaxiRide_RideEnd: {ex.Message}"); }
             }
         }
 
@@ -3295,6 +3326,11 @@ namespace BigAmbitionsMP
         {
             var stripped = new System.Collections.Generic.List<Entities.EmployeeInstance>();
             long _pc = MPPerf.Begin();   // round-97: full-roster walk inside native passes — patch-cost bracketed
+            // H-SCHEDWIPE-1: this pair also brackets the pass for the schedule scan, which must never read a shift the
+            // SIMULATION removes in here (retirement calls UnassignEmployeeFromAllWorkshifts) as the player's own edit.
+            SharedShopSchedule.InEmployeePass++;
+            SharedShopSchedule.LastStripFrame   = UnityEngine.Time.frameCount;
+            SharedShopSchedule.LastStripContext = context;
             try
             {
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return stripped;   // records only exist in MP anyway — and they SURVIVE the offline fork (H-FORK-1)
@@ -3319,6 +3355,8 @@ namespace BigAmbitionsMP
         internal static void RestoreModEmployeeRecords(System.Collections.Generic.List<Entities.EmployeeInstance>? stripped, string context)
         {
             long _pc = MPPerf.Begin();   // round-97: both halves of the strip/restore cycle report as one site
+            if (SharedShopSchedule.InEmployeePass > 0) SharedShopSchedule.InEmployeePass--;   // H-SCHEDWIPE-1 (see the strip half)
+            SharedShopSchedule.LastRestoreFrame = UnityEngine.Time.frameCount;
             try
             {
                 var list = SaveGameManager.Current?.EmployeeInstances;
@@ -6223,8 +6261,10 @@ namespace BigAmbitionsMP
             //       does not depend on it, exactly as Patch_TM_UpdateSkip lets Gley tick in local mode "whatever
             //       the service-sim flag says".
             // The sensed-layer guard covers all three: with no sensed layer nothing here is sensed anyway
-            // (ghosts stay on AiVehicles), so the shield stays closed. With one, EVERY traffic ghost and stand-in is
-            // relayered onto it unconditionally (TrafficSync.SpawnTrafficGhost / ApplyStandIn - review HIGH-1), so an
+            // (ghosts stay on AiVehicles), so the shield stays closed. With one, every CLONED traffic ghost,
+            // look-alike and stand-in is relayered onto it unconditionally (TrafficSync.SpawnTrafficGhost /
+            // ApplyStandIn - review HIGH-1); the two SpawnVisualGhost fallbacks in TrafficSync.SpawnTrafficGhost are
+            // native player-vehicle bodies (never on AiVehicles), so they too stay off the same-layer branch. So an
             // open arm meets ghosts only on the playerLayers branch, which never dereferences attachedRigidbody;
             // the Finalizer stays as the net for anything that slips through.
             static bool Prefix(VehicleComponent __instance)
@@ -7097,6 +7137,65 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(BizManPresentation), nameof(BizManPresentation.SendOvertakeOffer))]
         public static class Patch_SendOvertakeOffer_RouteToPlayerOffer
         {
+            // ── B1 (log-only, 2026-09-18): the HOST keeps the native instant buyout for an AI-run business. These
+            // two lines say what that flow did to the business's staff. The Postfix runs when SendOvertakeOffer
+            // RETURNS, which is not necessarily when the transfer completes — the native flow can finish later, so
+            // the line says which of the two it was rather than pretending the numbers are final.
+            private static string _b1Addr = "";
+            private static int    _b1Before;
+
+            private static int OwnEmployeesAt(string addr)
+            {
+                int n = 0;
+                try
+                {
+                    var list = SaveGameManager.Current?.EmployeeInstances;
+                    if (list != null)
+                        foreach (var e in list)
+                        {
+                            if (e == null || e.assignedAddress == null) continue;
+                            if (GameStateReader.AddressKey(e.assignedAddress) == addr) n++;
+                        }
+                }
+                catch { }
+                return n;
+            }
+
+            private static void TraceHostBuyout(BuildingRegistration reg)
+            {
+                try
+                {
+                    _b1Addr   = GameStateReader.AddressKey(reg);
+                    _b1Before = OwnEmployeesAt(_b1Addr);
+                    int ai = 0;   try { ai   = reg.aiEmployees != null ? reg.aiEmployees.Count : 0; } catch { }
+                    string type = ""; try { type = reg.businessTypeName ?? ""; } catch { }
+                    Plugin.Logger.LogWarning($"[Takeover/Host] native buyout '{_b1Addr}' type={type} aiEmployees={ai} ownEmployeesBefore={_b1Before}");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Takeover/Host] WARNING B1 buyout trace: {ex.Message}"); }
+            }
+
+            static void Postfix()
+            {
+                try
+                {
+                    if (_b1Addr.Length == 0) return;
+                    string addr = _b1Addr; _b1Addr = "";
+                    bool rented = false; bool found = false;
+                    try
+                    {
+                        var gi = SaveGameManager.Current;
+                        if (gi?.BuildingRegistrations != null)
+                            foreach (var r in gi.BuildingRegistrations)
+                                if (r != null && GameStateReader.AddressKey(r) == addr) { rented = r.RentedByPlayer; found = true; break; }
+                    }
+                    catch { }
+                    int after = OwnEmployeesAt(addr);
+                    Plugin.Logger.LogWarning($"[Takeover/Host] native buyout '{addr}' returned: ownEmployeesAfter={after} (before {_b1Before}) RentedByPlayer={(found ? rented.ToString() : "reg gone")}"
+                        + (rented ? " — the transfer had completed by the time SendOvertakeOffer returned." : " — NOT transferred yet on return; the native flow completes later, so these numbers are the pre-transfer state."));
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Takeover/Host] WARNING B1 buyout postfix: {ex.Message}"); }
+            }
+
             static bool Prefix(BizManBusiness ___bizManBusiness, TMPro.TMP_InputField ___offerAmountInputField)
             {
                 try
@@ -7113,6 +7212,7 @@ namespace BigAmbitionsMP
                         // reset") plus the $0-valuation exploit.
                         if (MPClient.IsConnected)
                             return MPTakeover.ClientOfferPrefix(reg, ___offerAmountInputField);
+                        TraceHostBuyout(reg);   // B1 (log-only, 2026-09-18): what the native instant flow does to the staff
                         return true;
                     }
 
