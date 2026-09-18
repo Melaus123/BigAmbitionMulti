@@ -32,6 +32,15 @@ namespace BigAmbitionsMP
     [HarmonyPatch(typeof(UI.PermanentPointsOfInterest), nameof(UI.PermanentPointsOfInterest.HandlePermanentPOIs))]
     public static class PoiGuard
     {
+        /// <summary>MAPLOCK-1 (bundle 20260913-130704, 2026-09-17): the three finalizers used to heal ONLY in a
+        /// live session and rethrow otherwise ("SP: vanilla behaviour"). But the OFFLINE FORK - a client that lost
+        /// the host and plays on - is neither host nor client, and it is exactly where the mod's own pins linger
+        /// (PlayerPins tears them down a Tick later): a destroyed pin in CityMap.pois threw inside the map-close
+        /// coroutine (CityMap.cs:307 TogglePois) before :316 UnsetNavigationBlocker(Map), so the map closed, time
+        /// ran and the player could not move; LateUpdate (:93) threw every frame after. The fork heals like a
+        /// session now; a game that has never been in a session keeps vanilla behaviour.</summary>
+        internal static bool Heals => MPServer.IsRunning || MPClient.IsClientInWorld || MPClient.OfflineFork;
+
         private static System.Reflection.FieldInfo? _cacheField;
         private static int _eventCount;
         private static float _nextVerboseLog;
@@ -39,7 +48,7 @@ namespace BigAmbitionsMP
         static Exception? Finalizer(Exception __exception)
         {
             if (__exception == null) return null;
-            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;   // SP: vanilla behavior
+            if (!PoiGuard.Heals) return __exception;   // SP: vanilla behavior (MAPLOCK-1: the offline fork heals too)
             try
             {
                 _eventCount++;
@@ -147,7 +156,7 @@ namespace BigAmbitionsMP
         static Exception? Finalizer(CityMap __instance, Exception __exception)
         {
             if (__exception == null) return null;
-            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;
+            if (!PoiGuard.Heals) return __exception;   // MAPLOCK-1
             try
             {
                 _eventCount++;
@@ -175,7 +184,7 @@ namespace BigAmbitionsMP
         static Exception? Finalizer(Exception __exception)
         {
             if (__exception == null) return null;
-            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;
+            if (!PoiGuard.Heals) return __exception;   // MAPLOCK-1
             try
             {
                 int purged = PoiGuard.PurgeMasterList();
