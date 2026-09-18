@@ -7121,6 +7121,22 @@ namespace BigAmbitionsMP
         /// <summary>HOST (main thread): an owner's bench — cache it, hand it to every connected player who holds a
         /// Business key from that owner — M2 (2026-09-12): a direct grant OR co-membership, the same union the rest of
         /// the bench pipeline now reads — and to the host itself when it holds one. Never broadcast.</summary>
+        // BENCH-MERGE-1: one bench line per SENDER per 30 s — publishes are periodic, so an always-on
+        // line without a budget would be one entry per sender per publish for the whole session.
+        private static readonly Dictionary<string, float> _benchLogAt = new();
+
+        private static bool BenchLogDue(string senderPid)
+        {
+            try
+            {
+                float now = UnityEngine.Time.unscaledTime;
+                if (_benchLogAt.TryGetValue(senderPid, out var next) && now < next) return false;
+                _benchLogAt[senderPid] = now + 30f;
+                return true;
+            }
+            catch { return true; }
+        }
+
         public static void HostRouteSharedStaffPool(SharedStaffPoolPayload p, string senderPid)
         {
             try
@@ -7129,17 +7145,34 @@ namespace BigAmbitionsMP
                 if (!SharedRateOk(senderPid, "bench publish")) return;
                 if ((p.Staff?.Count ?? 0) > 200) { Plugin.Logger.LogWarning($"[SharedShop] bench from '{senderPid}': implausible count — dropped."); return; }
                 _sharedPoolByOwner[senderPid] = p;
-                int sent = 0;
-                if (OwnerRunsManageableShop(senderPid))   // ONE city walk per publish; per player only the grant lookup below
+                // BENCH-MERGE-1 (bundle 20260918-211454): the whole hand-off used to sit inside
+                // OwnerRunsManageableShop(sender). A MERGED member who owns no building of their own —
+                // every one of the company's shops is the partner's — therefore had their unassigned
+                // staff silently dropped, so a new hire never reached the partner who runs the shops.
+                // Co-membership is the second gate: the same source of truth GrantSync.IsGranted unions
+                // in (MergerSync.MergedRuntime), read host-side. The Business-key test is unchanged.
+                int sent = 0, coMember = 0, grantedTo = 0;
+                bool manageable = OwnerRunsManageableShop(senderPid);   // ONE city walk per publish; per player only the lookups below
+                foreach (var pid in new List<string>(_peerNames.Values))
                 {
-                    foreach (var pid in new List<string>(_peerNames.Values))
-                    {
-                        if (pid == senderPid || !GrantSync.IsGranted(GrantKind.Business, senderPid, pid)) continue;   // M2: the union — a co-member holds the key too
-                        SendToPid(pid, MessageEnvelope.Create(MessageType.SharedStaffPool, senderPid, p)); sent++;
-                    }
-                    if (senderPid != MPConfig.PlayerId && GrantSync.IsGranted(GrantKind.Business, senderPid, MPConfig.PlayerId)) { SharedShopStaff.ApplyPool(p); sent++; }   // M2: the union
+                    if (pid == senderPid || !GrantSync.IsGranted(GrantKind.Business, senderPid, pid)) continue;   // M2: the union — a co-member holds the key too
+                    grantedTo++;
+                    bool co = false; try { co = MergerSync.MergedRuntime(senderPid, pid); } catch { }
+                    if (co) coMember++;
+                    if (!manageable && !co) continue;
+                    SendToPid(pid, MessageEnvelope.Create(MessageType.SharedStaffPool, senderPid, p)); sent++;
                 }
-                if (sent > 0) Plugin.Logger.LogInfo($"[SharedShop] bench of '{senderPid}' ({p.Staff?.Count ?? 0}) handed to {sent} permitted player(s).");
+                if (senderPid != MPConfig.PlayerId && GrantSync.IsGranted(GrantKind.Business, senderPid, MPConfig.PlayerId))   // M2: the union
+                {
+                    grantedTo++;
+                    bool coSelf = false; try { coSelf = MergerSync.MergedRuntime(senderPid, MPConfig.PlayerId); } catch { }
+                    if (coSelf) coMember++;
+                    if (manageable || coSelf) { SharedShopStaff.ApplyPool(p); sent++; }
+                }
+                // ALWAYS a line, including sent == 0: a bench that goes nowhere is the failure this
+                // change exists to expose, and it used to be the one case that logged nothing.
+                if (BenchLogDue(senderPid))
+                    Plugin.Logger.LogInfo($"[SharedShop] bench of '{senderPid}' ({p.Staff?.Count ?? 0}): handed to {sent} player(s); gates manageableShop={manageable} coMember={coMember} granted={grantedTo}");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedStaffPool: {ex.Message}"); }
         }

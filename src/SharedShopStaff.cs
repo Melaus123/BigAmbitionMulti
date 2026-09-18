@@ -339,6 +339,21 @@ namespace BigAmbitionsMP
 
         /// <summary>MAIN THREAD. The bench of an owner — accepted from an owner who holds me a Business key:
         /// M2 (2026-09-12) a direct grant OR co-membership in the same company.</summary>
+        // BENCH-MERGE-1: per-owner 30 s budget for the receipt line above.
+        private static readonly Dictionary<string, float> _benchReceiptAt = new();
+
+        private static bool BenchReceiptDue(string ownerPid)
+        {
+            try
+            {
+                float now = UnityEngine.Time.unscaledTime;
+                if (_benchReceiptAt.TryGetValue(ownerPid, out var next) && now < next) return false;
+                _benchReceiptAt[ownerPid] = now + 30f;
+                return true;
+            }
+            catch { return true; }
+        }
+
         public static void ApplyPool(SharedStaffPoolPayload p)
         {
             try
@@ -353,6 +368,11 @@ namespace BigAmbitionsMP
                 var staff = p.Staff ?? new List<StaffInfo>();
                 if (staff.Count > 200) { Plugin.Logger.LogWarning($"{Tag} bench from '{p.PlayerId}': implausible count {staff.Count} — ignored."); return; }
                 if (MPRegisterSync.ApplySharedPool(p.PlayerId, staff)) RefreshMyEmployeesIfOpen();
+                // BENCH-MERGE-1 (2026-09-18): the receiving half had no receipt at all, so a bench that
+                // arrived and one that was never handed over read identically in a client log. One line
+                // per owner per 30 s, the same budget the host's hand-off line uses.
+                if (BenchReceiptDue(p.PlayerId))
+                    Plugin.Logger.LogInfo($"{Tag} bench received from '{p.PlayerId}': {staff.Count} unassigned staff.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} ApplyPool: {ex.Message}"); }
         }
