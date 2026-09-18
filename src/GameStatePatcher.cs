@@ -196,6 +196,78 @@ namespace BigAmbitionsMP
             });
         }
 
+        // SALE-DETACH-1 (2026-09-18): the mod destroys an ItemController while deliberately
+        // KEEPING the same live ItemInstance (the in-place apply policy, this file's
+        // "IN-PLACE APPLY (the flatbed model)" block).  Native controllers subscribe to the
+        // instance's cargo callback in Start (ShelfController.cs:54 →
+        // ItemInstance.AddCallToOnItemsInCargoUpdated) and unsubscribe only in their own
+        // OnDestroy (ShelfController.cs:209) — which is frame-deferred and is skipped entirely
+        // while the city scene unloads or once ItemInstance is null.  The surviving instance
+        // therefore keeps a delegate aimed at a destroyed component: the next sale charges the
+        // customer and runs SubtractFromStock, the callback NREs inside
+        // ShelfController.UpdateFillState, and native TakeItem aborts BEFORE handing over the
+        // bag — stock down, cash down, no item.  So: before destroying such a controller,
+        // detach every cargo-callback delegate that belongs to its own object tree (and any
+        // whose target is an already-destroyed Unity object, which can never unsubscribe
+        // itself).  Returns how many were detached.
+        private static int DetachCargoCallbacks(ItemController ic)
+        {
+            int n = 0;
+            try
+            {
+                if (ic == null) return 0;
+                n += DetachCargoCallbacksOn(ic, ic.transform);
+                // FOLD F2 (M1, 2026-09-18): a CHILD ItemController dies with its parent and carries its OWN
+                // live ItemInstance — same stranded delegate, same NRE on the next sale, one level down.
+                // The interior-apply site rescues the children it keeps by REPARENTING them out of this tree
+                // before the destroy, so this sweep reaches only the ones that are actually dying.
+                foreach (ItemController c in ic.GetComponentsInChildren<ItemController>(true))
+                {
+                    if (c == null || ReferenceEquals(c, ic)) continue;
+                    n += DetachCargoCallbacksOn(c, ic.transform);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!_cargoDetachFailLogged)
+                {
+                    _cargoDetachFailLogged = true;
+                    Plugin.Logger.LogWarning($"[Patcher] SALE-DETACH-1 cargo-callback detach FAILED (first failure only): {ex.Message}");
+                }
+            }
+            return n;
+        }
+
+        // SALE-DETACH-1 / FOLD F2: one controller's own ItemInstance, swept against the DYING tree's root
+        // (a delegate owned by a component under 'root', or by an already-destroyed Unity object, goes).
+        private static int DetachCargoCallbacksOn(ItemController owner, UnityEngine.Transform root)
+        {
+            int n = 0;
+            var inst = owner?.ItemInstance;
+            if (inst == null || root == null) return 0;
+            var combined = inst.OnItemsInCargoUpdated();
+            if (combined == null) return 0;
+            foreach (var d in combined.GetInvocationList())
+            {
+                var act = d as Action;
+                if (act == null) continue;
+                bool ours = false;
+                if (act.Target is UnityEngine.Component c)
+                {
+                    if (c == null) ours = true;                       // destroyed: dead weight either way
+                    else { try { ours = c.transform.IsChildOf(root); } catch { ours = false; } }
+                }
+                else if (act.Target is UnityEngine.Object o && o == null) ours = true;
+                if (!ours) continue;
+                try { inst.RemoveCallFromOnItemsInCargoUpdated(act); n++; } catch { }
+            }
+            return n;
+        }
+
+        // SALE-DETACH-1: session budget for the detach notice (40 lines) + first-failure flag.
+        private static int _cargoDetachLines;
+        private static bool _cargoDetachFailLogged;
+
         /// <summary>Round-269: apply a granted guest's conveyed grab on the OWNER's (or the
         /// host's) world copy. StockOnly mirrors the native shelf-stock semantic — drain the
         /// matching stock entries, keep the shelf. Idempotent: an instance already gone (the
@@ -252,6 +324,12 @@ namespace BigAmbitionsMP
                                     // inside CancelPlacementMode; HamptonsHouse.HideItems). Every native
                                     // removal path removes explicitly before destroying — so do we.
                                     try { bm.allItemControllers.Remove(gone); } catch { }
+                                    // SALE-DETACH-1: the ItemInstance object stays alive (other
+                                    // native structures still reference it) — take this dying
+                                    // controller's cargo subscriptions with it.
+                                    int det2 = DetachCargoCallbacks(gone);
+                                    if (det2 > 0 && _cargoDetachLines++ < 40)
+                                        Plugin.Logger.LogInfo($"[Patcher] controller '{p.ItemInstanceId}' ('{p.ItemName}') destroyed with its instance kept: {det2} cargo callback(s) detached (SALE-DETACH-1).");
                                     try { UnityEngine.Object.Destroy(gone.gameObject); } catch { }
                                 }
                             }
@@ -3593,6 +3671,11 @@ namespace BigAmbitionsMP
                                 // sweeps. (This loop iterates a FindObjectsOfType array, so removing from
                                 // the manager's list here is safe.)
                                 try { InstanceBehavior<BuildingManager>.Instance?.allItemControllers?.Remove(ic); } catch { }
+                                // SALE-DETACH-1: the in-place policy KEEPS this controller's
+                                // ItemInstance alive — detach its subscriptions first.
+                                int det1 = DetachCargoCallbacks(ic);
+                                if (det1 > 0 && _cargoDetachLines++ < 40)
+                                    Plugin.Logger.LogInfo($"[Patcher] controller '{id}' ('{ic.ItemInstance?.itemName}') destroyed with its instance kept: {det1} cargo callback(s) detached (SALE-DETACH-1).");
                                 UnityEngine.Object.Destroy(ic.gameObject);
                                 destroyed++;
                             }
