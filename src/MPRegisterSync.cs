@@ -1463,6 +1463,7 @@ namespace BigAmbitionsMP
                 catch (Exception sx) { Plugin.Logger.LogWarning($"[SynthStaff] shift strip: {sx.Message}"); }
                 if (gi?.EmployeeInstances != null) gi.EmployeeInstances.Remove(s.inst);
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.inst.id); } catch { }
+                try { var ev = MergerEmployeeSync.CountShiftsNaming(gi, s.inst.id); MergerEmployeeSync.LogStaffRemoval("synthetic-retire", s.inst.id, MergerEmployeeSync.StaffNameOf(s.inst), ev.shifts, ev.regs); } catch { }   // STAFF-EVIDENCE-1
                 Plugin.Logger.LogInfo($"[SynthStaff] staff NPC removed at '{addressKey}'.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] remove at station '{stationKey}': {ex.Message}"); }
@@ -1641,9 +1642,53 @@ namespace BigAmbitionsMP
         /// MPSaveIntegrity's sweep summary (detect-only class).</summary>
         public static int LastRealIdOrphans;
 
+        /// <summary>STAFF-EVIDENCE-1 (B3): is this employee id one a PARTNER is known to hold?
+        /// The registries the mod actually keeps, all consulted here:
+        ///   • _injectedStaff — every roster copy AND every shared-bench copy (SharedShopStaff keeps no
+        ///     second cache of its own: its ApplyPool hands the bench straight to ApplySharedPool, which
+        ///     registers the copies HERE with addr "").
+        ///   • MergerAbsence.PromotedStaff — the absent-owner promoted registry.
+        ///   • _rosterByAddr — the latest roster each owner published for each address.
+        /// Detect-only: nothing is removed, moved or rewritten on either verdict.</summary>
+        /// <summary>True once ANY partner roster / bench / promoted record is held - before that PartnerKnownId cannot
+        /// know anybody and its 'unknown' verdict is provisional (world-ready always is).</summary>
+        private static bool RostersLoadedForClassification()
+        {
+            try
+            {
+                if (_injectedStaff.Count > 0) return true;
+                lock (_rosterByAddr) if (_rosterByAddr.Count > 0) return true;
+                try { foreach (var _ in MergerAbsence.PromotedStaff) return true; } catch { }
+            }
+            catch { }
+            return false;
+        }
+
+        private static bool PartnerKnownId(string id)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(id)) return false;
+                if (_injectedStaff.ContainsKey(id)) return true;
+                try { foreach (var k in MergerAbsence.PromotedStaff) if (k == id) return true; } catch { }
+                lock (_rosterByAddr)
+                    foreach (var kv in _rosterByAddr)
+                    {
+                        var st = kv.Value.staff;
+                        if (st == null) continue;
+                        foreach (var s in st) if (s != null && s.Id == id) return true;
+                    }
+            }
+            catch { }
+            return false;
+        }
+
         public static int RepairOrphanDutyShifts(string when)
         {
             int removed = 0, realIdOrphans = 0;
+            var orphanIds = new HashSet<string>();   // B3: distinct shift-employees, classified once each
+            var orphanClass = new Dictionary<string, bool>();   // review M1: PartnerKnownId once per distinct id, not per shift (this sweep runs at every save)
+            int orphanKnown = 0, orphanUnknown = 0;
             try
             {
                 var gi = SaveGameManager.Current;
@@ -1671,17 +1716,36 @@ namespace BigAmbitionsMP
                                 (dead ??= new List<WorkShift>()).Add(w!);
                                 Plugin.Logger.LogWarning($"[ScheduleRepair] orphan duty shift ({when}): '{id}' biz='{r.BusinessName}' station='{w!.itemInstanceId}' day={d} h{w.startingHour}-{w.endingHour} — removing.");
                             }
-                            else if (mine && realIdOrphans < 20)
+                            else if (mine)
                             {
-                                realIdOrphans++;
-                                Plugin.Logger.LogWarning($"[ScheduleDiag] REAL-ID ORPHAN shift ({when}): '{id}' biz='{r.BusinessName}' station='{w!.itemInstanceId}' day={d} h{w.startingHour}-{w.endingHour} — left in place.");
+                                // B3 CLASSIFICATION (detect-only): a shift naming an employee this game does
+                                // not hold is NORMAL when the id is one a partner holds — that is the
+                                // partner's schedule for the partner's staff.  'unknown' is the interesting
+                                // class.  trulyMine/rented are printed so double tenancy shows.
+                                if (!orphanClass.TryGetValue(id, out bool partnerKnown))
+                                {
+                                    partnerKnown = PartnerKnownId(id);
+                                    orphanClass[id] = partnerKnown;
+                                    if (orphanIds.Add(id)) { if (partnerKnown) orphanKnown++; else orphanUnknown++; }
+                                }
+                                if (realIdOrphans < 20)
+                                {
+                                    realIdOrphans++;
+                                    bool tmine = false; try { tmine = MergerFlip.TrulyMine(r); } catch { }
+                                    bool rented = false; try { rented = r.RentedByPlayer; } catch { }
+                                    Plugin.Logger.LogWarning($"[ScheduleDiag] REAL-ID ORPHAN shift ({when}): '{id}' biz='{r.BusinessName}' station='{w!.itemInstanceId}' day={d} h{w.startingHour}-{w.endingHour} — left in place. class={(partnerKnown ? "partner-known" : "unknown")} trulyMine={tmine} rented={rented}");
+                                }
                             }
                         }
                         if (dead != null) { foreach (var w in dead) day.RemoveWorkShift(w); removed += dead.Count; }
                     }
                 }
                 if (removed > 0 || realIdOrphans > 0)
-                    Plugin.Logger.LogWarning($"[ScheduleRepair] {when}: removed {removed} orphan duty shift(s); {realIdOrphans} real-id orphan(s) logged only.");
+                    Plugin.Logger.LogWarning($"[ScheduleRepair] {when}: removed {removed} orphan duty shift(s); {realIdOrphans} real-id orphan(s) logged only."
+                                           + $" shift-employees x{orphanIds.Count} logged (partner-known {orphanKnown}, unknown {orphanUnknown})"
+                                           // Rig 2026-09-18: at world-ready no partner roster has arrived yet, so every id read 'unknown'
+                                           // (172 of 172). Say so - 'unknown' only means something once a roster is loaded.
+                                           + (RostersLoadedForClassification() ? "" : " - NO partner roster loaded yet: 'unknown' is provisional"));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[ScheduleRepair] {when}: {ex.Message}"); }
             LastRealIdOrphans = realIdOrphans;
@@ -1707,6 +1771,7 @@ namespace BigAmbitionsMP
                 var gi   = SaveGameManager.Current;
                 var list = gi?.EmployeeInstances;
                 if (list == null) return () => { };
+                var injectedStripped = new List<string>();   // STAFF-EVIDENCE-1: ids taken out by the WS3 branch below
                 for (int i = list.Count - 1; i >= 0; i--)
                 {
                     var emp = list[i];
@@ -1719,6 +1784,7 @@ namespace BigAmbitionsMP
                         removedEmployees.Add(emp!);
                         list.RemoveAt(i);
                         try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
+                        injectedStripped.Add(id);   // STAFF-EVIDENCE-1
                         continue;
                     }
                     if (!id.StartsWith(SyntheticDutyEmployeeIdPrefix)) continue;
@@ -1745,6 +1811,21 @@ namespace BigAmbitionsMP
                     list.RemoveAt(i);
                     try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
                 }
+                // STAFF-EVIDENCE-1: the WS3 branch RESTORES these records after serialisation, so this is
+                // a once-per-session census with totals, not a per-save line.  Their shifts are the synced
+                // schedule and stay on purpose — the count is evidence, not a fault.
+                try
+                {
+                    if (injectedStripped.Count > 0 && MergerEmployeeSync.StaffEvidenceWanted("save-strip-injected"))   // review H1: once per session, decided BEFORE the walk
+                    {
+                        int evS = 0, evR = 0;
+                        foreach (var iid in injectedStripped)
+                        { var ev = MergerEmployeeSync.CountShiftsNaming(gi, iid); evS += ev.shifts; evR += ev.regs; }
+                        MergerEmployeeSync.LogStaffRemoval("save-strip-injected", $"{injectedStripped.Count} record(s)",
+                                                           "session total", evS, evR, "save-strip-injected");
+                    }
+                }
+                catch { }
                 if (removedEmployees.Count > 0)
                     Plugin.Logger.LogInfo($"[SynthStaff] stripped {removedEmployees.Count} synthetic(s) for save ({when}); restore after serialize.");
             }
@@ -2548,6 +2629,7 @@ namespace BigAmbitionsMP
                 var gi = SaveGameManager.Current;
                 if (gi?.EmployeeInstances != null) gi.EmployeeInstances.Remove(have.inst);
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
+                try { var ev = MergerEmployeeSync.CountShiftsNaming(gi, id); MergerEmployeeSync.LogStaffRemoval("roster-drop", id, MergerEmployeeSync.StaffNameOf(have.inst), ev.shifts, ev.regs); } catch { }   // STAFF-EVIDENCE-1
                 Plugin.Logger.LogInfo($"[StaffRoster] removed injected staff '{id}' ({have.addr}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] remove '{id}': {ex.Message}"); }
@@ -2708,10 +2790,11 @@ namespace BigAmbitionsMP
                     bool here = false;
                     try { here = e.assignedAddress != null && e.assignedAddress.streetName == reg.StreetName && e.assignedAddress.streetNumber == reg.StreetNumber; } catch { }
                     if (!here) continue;
-                    string eid = e.id;
+                    string eid = e.id, enm = MergerEmployeeSync.StaffNameOf(e);
                     gi.EmployeeInstances.RemoveAt(i);
                     try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(eid); } catch { }
                     n++;
+                    try { var ev = MergerEmployeeSync.CountShiftsNaming(gi, eid); MergerEmployeeSync.LogStaffRemoval("business-sale", eid, enm, ev.shifts, ev.regs); } catch { }   // STAFF-EVIDENCE-1
                 }
                 _rosterSigSent.Remove(addr);   // this address is no longer ours to publish
                 if (n > 0) Plugin.Logger.LogInfo($"[StaffRoster] transferred out {n} real staff record(s) at '{addr}' (business sold — round-196).");
@@ -2778,6 +2861,7 @@ namespace BigAmbitionsMP
                     gi.EmployeeInstances.RemoveAt(i);
                     try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(eid); } catch { }
                     n++;
+                    try { var ev = MergerEmployeeSync.CountShiftsNaming(gi, eid); MergerEmployeeSync.LogStaffRemoval("foreign-reconcile", eid, nm, ev.shifts, ev.regs); } catch { }   // STAFF-EVIDENCE-1
                     Plugin.Logger.LogWarning($"[StaffRoster] RECONCILED ({when}): real employee '{nm}' ({eid}) was assigned to '{GameStateReader.AddressKey(reg)}' which this machine does not own — record removed (interrupted-transfer residue, round-196).");
                 }
             }

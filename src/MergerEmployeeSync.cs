@@ -438,6 +438,74 @@ namespace BigAmbitionsMP
         private static bool ForeignPlan(object plan)
         { try { return plan != null && MergerAbsence.IsTaggedInstall(plan); } catch { return false; } }
 
+        // ── STAFF-EVIDENCE-1 (log-only) ──────────────────────────────────
+        /// <summary>B1: READ-ONLY census — how many work shifts still name <paramref name="employeeId"/>
+        /// and across how many registrations.  Mirrors the shift walk ScrubEmployeeReferences does
+        /// (below, :451-464) but REMOVES NOTHING and calls nothing.  A shift naming an employee this
+        /// game does not hold is NORMAL in a merged world (it is the partner's schedule for the
+        /// partner's staff — MPRegisterSync.StripSyntheticsForSave keeps such shifts on purpose,
+        /// see its WS3 comment); this only counts them so two players' logs can say where the truly
+        /// dead ones are born.</summary>
+        internal static (int shifts, int regs) CountShiftsNaming(GameInstance? gi, string? employeeId)
+        {
+            int shifts = 0, regs = 0;
+            try
+            {
+                if (_staffEvidenceLines >= 200) return (0, 0);   // review H1: no walk once the evidence budget is spent
+                if (gi?.BuildingRegistrations == null || string.IsNullOrEmpty(employeeId)) return (0, 0);
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg?.scheduleDays == null) continue;
+                    int here = 0;
+                    foreach (var day in reg.scheduleDays)
+                    {
+                        if (day?.workShifts == null) continue;
+                        for (int i = 0; i < day.workShifts.Count; i++)
+                        { var ws = day.workShifts[i]; if (ws != null && ws.employeeId == employeeId) here++; }
+                    }
+                    if (here > 0) { shifts += here; regs++; }
+                }
+            }
+            catch { }
+            return (shifts, regs);
+        }
+
+        private static int _staffEvidenceLines;
+        private static readonly HashSet<string> _staffEvidenceOnce = new();
+
+        /// <summary>Review H1: ask BEFORE counting. The count is a walk over every registration's whole schedule and
+        /// the save-strip sites run at every autosave - once the shared budget is spent, or a once-per-session site
+        /// has already spoken, the walk must not run at all. Never consumes the once-key (LogStaffRemoval does).</summary>
+        internal static bool StaffEvidenceWanted(string onceKey = "")
+        {
+            try
+            {
+                if (_staffEvidenceLines >= 200) return false;
+                return onceKey.Length == 0 || !_staffEvidenceOnce.Contains(onceKey);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>B2: ONE line AFTER a mod-side employee-record removal.  Budget 200 lines per
+        /// session across EVERY site (shared counter).  A non-empty <paramref name="onceKey"/> makes
+        /// the site log at most once per session — that is for the save-strip sites, which put the
+        /// records straight back after serialisation.</summary>
+        internal static void LogStaffRemoval(string op, string employeeId, string name, int shifts, int regs, string onceKey = "")
+        {
+            try
+            {
+                if (onceKey.Length > 0 && !_staffEvidenceOnce.Add(onceKey)) return;
+                if (_staffEvidenceLines >= 200) return;
+                _staffEvidenceLines++;
+                Plugin.Logger.LogInfo($"[Staff] removed '{employeeId}' ('{name}') via {op}; shifts still naming it: {shifts} across {regs} registration(s)");
+            }
+            catch { }
+        }
+
+        /// <summary>B2 helper: the display name of a record, never throwing.</summary>
+        internal static string StaffNameOf(EmployeeInstance? e)
+        { try { return e?.characterData?.name ?? ""; } catch { return ""; } }
+
         private static void ScrubEmployeeReferences(GameInstance gi, EmployeeInstance rel)
         {
             try
@@ -847,6 +915,7 @@ namespace BigAmbitionsMP
                     ScrubEmployeeReferences(relGi, rel);   // RIG-13 + RIG-2: every structure naming this id, before the record goes
                     try { if (relGi?.EmployeeInstances != null) relGi.EmployeeInstances.Remove(rel); } catch { }
                     try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(rel.id); } catch { }
+                    try { var ev = CountShiftsNaming(relGi, rel.id); LogStaffRemoval("transfer-release", rel.id, StaffNameOf(rel), ev.shifts, ev.regs); } catch { }   // STAFF-EVIDENCE-1
                     try { SaveGameManager.MarkChange(); } catch { }
                     if (!string.IsNullOrEmpty(p.TransferId)) _transfersDone.Add(p.TransferId + "|release");
                     Plugin.Logger.LogInfo($"[Transfer] {p.TransferId}: released to the host - '{handover.Name}' ({rel.id}) left '{p.AddressKey}' for '{p.OtherAddressKey}'.");
@@ -931,6 +1000,7 @@ namespace BigAmbitionsMP
                         ScrubEmployeeReferences(dgi, dr);
                         try { if (dgi?.EmployeeInstances != null) dgi.EmployeeInstances.Remove(dr); } catch { }
                         try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(dr.id); } catch { }
+                        try { var ev = CountShiftsNaming(dgi, dr.id); LogStaffRemoval("custody-return", dr.id, StaffNameOf(dr), ev.shifts, ev.regs); } catch { }   // STAFF-EVIDENCE-1
                         try { SaveGameManager.MarkChange(); } catch { }
                         MPRegisterSync.ForceRosterRepublish(p.AddressKey);
                     }

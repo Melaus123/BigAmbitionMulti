@@ -1049,8 +1049,10 @@ namespace BigAmbitionsMP
                     {
                         var emp = list[i];
                         if (emp == null || !wanted.Contains(emp.id ?? "")) continue;
+                        string dId = emp.id ?? "", dNm = MergerEmployeeSync.StaffNameOf(emp);   // STAFF-EVIDENCE-1: read before the record goes
                         list.RemoveAt(i);
                         n++;
+                        try { var ev = MergerEmployeeSync.CountShiftsNaming(SaveGameManager.Current, dId); MergerEmployeeSync.LogStaffRemoval("demote", dId, dNm, ev.shifts, ev.regs); } catch { }
                     }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] demote: {ex.Message}"); }
@@ -1167,6 +1169,21 @@ namespace BigAmbitionsMP
                     }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] save strip (promoted staff): {ex.Message}"); }
+
+            // STAFF-EVIDENCE-1: these records are RESTORED right after serialisation, so this is a
+            // once-per-session census with totals, not a per-save line.
+            try
+            {
+                if (takenStaff.Count > 0 && MergerEmployeeSync.StaffEvidenceWanted("save-strip-promoted"))   // review H1: once per session, decided BEFORE the walk
+                {
+                    int evS = 0, evR = 0;
+                    foreach (var emp in takenStaff)
+                    { var ev = MergerEmployeeSync.CountShiftsNaming(gi, emp?.id ?? ""); evS += ev.shifts; evR += ev.regs; }
+                    MergerEmployeeSync.LogStaffRemoval("save-strip-promoted", $"{takenStaff.Count} record(s)",
+                                                       "session total", evS, evR, "save-strip-promoted");
+                }
+            }
+            catch { }
 
             if (removed > 0 || takenStaff.Count > 0)
                 Plugin.Logger.LogInfo($"[Absence] {removed} simulated list item(s) + {takenStaff.Count} promoted staff "

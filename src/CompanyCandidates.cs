@@ -855,6 +855,7 @@ namespace BigAmbitionsMP
             {
                 var gi = SaveGameManager.Current;
                 if (gi?.CandidateEmployeeInstances != null) gi.CandidateEmployeeInstances.Remove(have.inst);
+                try { var ev = MergerEmployeeSync.CountShiftsNaming(gi, id); MergerEmployeeSync.LogStaffRemoval("candidate-drop", id, MergerEmployeeSync.StaffNameOf(have.inst), ev.shifts, ev.regs); } catch { }   // STAFF-EVIDENCE-1
             }
             catch { }
             try { EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
