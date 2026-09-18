@@ -649,13 +649,27 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (_openTab != "drivers" || _openAddr.Length == 0) return true;
+                    // SLOT-GUARD-1 (2026-09-18): the not-local test comes FIRST, before the
+                    // shared-tab session test.  A slot can name a non-local vehicle in the
+                    // player's OWN warehouse too (a partner's truck is a ghost here, and until
+                    // the CheckIfWarehouseSlotShouldBeSet guard landed, parking one wrote its id
+                    // into the slot) — with the session test first, native First() was still
+                    // reached there and threw on every driver pick.
                     bool local = false;
-                    try { local = SaveGameManager.Current != null && SaveGameManager.Current.VehicleInstances.Exists(x => x != null && x.id == vehicleInstanceId); } catch { }
+                    try { local = SaveGameManager.Current != null && SaveGameManager.Current.VehicleInstances.Exists(x => x != null && x.id == vehicleInstanceId); } catch { local = true; }   // FOLD F4: can't tell -> fall back to the NATIVE answer (same fail-open as WarehouseSlotGuard)
                     if (local) return true;   // the native check can answer safely
-                    if (!_vehReq.TryGetValue(vehicleInstanceId ?? "", out var req)) { __result = false; return false; }
+                    if (_openTab == "drivers" && _openAddr.Length > 0
+                        && _vehReq.TryGetValue(vehicleInstanceId ?? "", out var req))
+                    {
+                        __result = false;
+                        try { __result = driver != null && driver.HasSkill("ba:skill_deliverydriver") && driver.GetSkillValue("ba:skill_deliverydriver") >= req; } catch { }
+                        return false;
+                    }
+                    // Not local and no carried figure to answer with (the player's OWN warehouse):
+                    // say "no" ourselves — native First() would throw.
+                    if (_logged.Add("skillnonlocal|" + (vehicleInstanceId ?? "")))
+                        Plugin.Logger.LogWarning($"{Tag} driver skill check for '{vehicleInstanceId}' — not a local vehicle and no carried figure; answered false (SLOT-GUARD-1).");
                     __result = false;
-                    try { __result = driver != null && driver.HasSkill("ba:skill_deliverydriver") && driver.GetSkillValue("ba:skill_deliverydriver") >= req; } catch { }
                     return false;
                 }
                 catch { return true; }
