@@ -3128,9 +3128,11 @@ namespace BigAmbitionsMP
             _mergerConfirmMode = mode; _mergerConfirmPid = pid;
             // MERGE-NOTICE-1 (user's exact approved wording, 2026-09-17): shown at the top of both modes until the
             // feature is judged stable; the user will ask for its removal.
+            // MERGE-NOTICE-1 fold (user-approved wording 2026-09-17): the earlier text pointed at an Escape-menu entry that
+            // exists only on the title screen; in-game the route is the top-bar Report button.
             string warn = "<b>Experimental feature.</b> Company mergers are new and may still have bugs. If something " +
-                          "looks wrong, report it from the Escape menu under Multiplayer, Report a Bug, or the Report " +
-                          "button in the top bar, and say what you were doing when it happened.";
+                          "looks wrong, press the purple Report button at the top right of the screen and say what you " +
+                          "were doing when it happened.";
             string terms = "A merger runs your companies as <b>one</b>: every member gets full access to " +
                            "everything the others own — businesses, registers and storage, homes, and " +
                            "vehicles — including selling and spending on the company's behalf. Any member " +
