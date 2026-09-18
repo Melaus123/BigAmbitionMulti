@@ -372,6 +372,10 @@ namespace BigAmbitionsMP
         public static int PurgeForeignTodos(string reason)
         {
             int removed = 0, logged = 0;
+            // MIRROR-1 fold B: a task at a FLIPPED partner address is swept only at LOAD time - a save
+            // written before this mechanism existed can hold one. The live 10-minute tick ("periodic")
+            // must never do it: it would delete the mirror the last bundle just installed.
+            bool loadTime = !string.Equals(reason, "periodic", StringComparison.OrdinalIgnoreCase);
             try
             {
                 var gi = SaveGameManager.Current;
@@ -380,9 +384,16 @@ namespace BigAmbitionsMP
                 {
                     var t = gi.TodoTasks[i];
                     if (t == null) continue;
+                    // MIRROR-1 fold A, BEFORE the predicate: a mirrored EmployeeIdle/Unassigned task names
+                    // an INJECTED staff id, so IsForeignTodoRef is true for it by design. Removing it here
+                    // would fight the shield in TaskMirror - InstantlyCompleteTodoTask would return false,
+                    // removedViaUi would be false, and the fallback below would take the DATA and orphan
+                    // the ROW: exactly the round-246 crash. The mirror leaves only through TaskMirror.Lift.
+                    if (TaskMirror.IsMirrored(t.id)) continue;
                     string eid = "";
                     try { eid = t.employeeId ?? ""; } catch { }
-                    if (!IsForeignTodoRef(eid, t.address)) continue;
+                    bool stale = loadTime && TaskMirror.IsStaleFlippedTodo(t);
+                    if (!stale && !IsForeignTodoRef(eid, t.address)) continue;
                     // ROUND-246 (field 20260806-010308): removal must go through the game's own
                     // routine, which destroys the sidebar ROW together with the DATA.  This loop
                     // used to RemoveAt the data directly — native-legal at LOAD time (the game's
@@ -454,6 +465,16 @@ namespace BigAmbitionsMP
 
         static bool Prefix(ref Entities.TodoTask? __result, Entities.TodoTaskType type, Address address, string employeeId)
         {
+            try
+            {
+                // MIRROR-1 fold A (design step 1): the SECOND refusal. A business-scoped alert about a
+                // PARTNER's shop - flipped onto my screens, simulated on the owner's machine - is not
+                // mine to invent: the owner's own list is mirrored in instead. This is what ends the
+                // false "missing required item / no producers" rows for a shop I have never entered
+                // (design F3). The mirror installer stands outside it (TaskMirror.Installing).
+                if (TaskMirror.RefuseLocalCreation(type, address)) { __result = null; return false; }
+            }
+            catch { }                // our failure must never block a legit todo
             try
             {
                 if (!MPSaveIntegrity.IsForeignTodoRef(employeeId, address)) return true;

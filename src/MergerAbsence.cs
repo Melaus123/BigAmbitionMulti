@@ -655,6 +655,9 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Absence] simulating '{addr}' for '{p.OwnerPid}' "
                                         + $"(staff promoted: {staff}, list items installed: {items}).");
                 }
+                // MIRROR-1 (re-check R4): the marks above are what the creation gate and the regeneration read,
+                // so the game's own per-business alert pass for these addresses is asked only now.
+                try { TaskMirror.RegenerateStandIn(owner, p.Addresses); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] alert regeneration: {ex.Message}"); }
 
                 _resendAsked.Remove(owner);   // r4 F3: served - a later loss may ask (and log) again
 

@@ -3936,6 +3936,12 @@ namespace BigAmbitionsMP
         public List<PwMovingContract>    MovingServiceContracts { get; set; } = new();
         public List<PwLicensingFee>      DisabledLicensingFees  { get; set; } = new();
         public List<PwLicensingFee>      PaidLicensingFeesToday { get; set; } = new();
+
+        // MIRROR-1 (2026-09-17): the owner's objective-panel alerts. They are filled on the OWNER's own
+        // machine (only it can read SaveGameManager.Current.TodoTasks) and ride this bundle to the host,
+        // which copies them onto the CompanyLists payload it fans out. Owner-only: a machine standing in
+        // for an absent owner publishes nothing here, so the per-address bundle surgery never moves them.
+        public List<PwBusinessTask>      BusinessTasks          { get; set; } = new();
     }
 
     /// <summary>One business's own books (the BuildingRegistration half of the paperwork).</summary>
@@ -4181,6 +4187,36 @@ namespace BigAmbitionsMP
         public List<PwImportPartnership> ImportPartnerships  { get; set; } = new();
         public List<PwHrPlan>            HrManagerPlans      { get; set; } = new();
         public List<PwHeadhunterPlan>    HeadhunterPlans     { get; set; } = new();
+
+        // MIRROR-1 (2026-09-17): the owner's OBJECTIVE-PANEL alerts for its own businesses, as display
+        // copies for a co-member. Additive on Version 23, like every family above it. The receiver draws
+        // them through the game's own row builder and never completes one by local state - see TaskMirror.
+        public List<PwBusinessTask>      BusinessTasks       { get; set; } = new();
+    }
+
+    /// <summary>MIRROR-1: ONE of the owner's TodoTasks on the wire (Entities/TodoTask.cs). The id is the
+    /// OWNER's, carried unchanged, because the game finds a drawn row by Transform.Find(task.id) and the
+    /// two machines must agree on it. Type is the enum NAME (a rename in a game update then fails to parse
+    /// rather than mirroring the wrong alert); Priority is Enums.Priority as an int. ProducerItemName is the
+    /// one field with no counterpart on TodoTask: the stock alerts' words name the PRODUCER item, which the
+    /// description resolves out of the LOCAL registration's itemInstances - a lookup a member cannot do for
+    /// a shop it has never entered - so the owner resolves it and it travels. OwnerPid lets an UNADDRESSED
+    /// row (an idle/unassigned employee's alert) be filed even when the local roster cannot name an owner
+    /// for that injected id.</summary>
+    public class PwBusinessTask
+    {
+        public string Id                  { get; set; } = "";
+        public string Type                { get; set; } = "";   // Entities.TodoTaskType name
+        public string AddressKey          { get; set; } = "";   // "" for an employee-only alert
+        public string EmployeeId          { get; set; } = "";
+        public string ItemName            { get; set; } = "";
+        public string ItemInstanceId      { get; set; } = "";
+        public string ProducerItemName    { get; set; } = "";
+        public string BusinessRequirement { get; set; } = "";
+        public int    Priority            { get; set; }         // Enums.Priority
+        public int    PriorityOffset      { get; set; }
+        public int    RemainingDays       { get; set; }
+        public string OwnerPid            { get; set; } = "";
     }
 
     // -- Merger phase 4c part 2 (cross-member deliveries): the routed cargo transfer (MessageType.CargoTransfer) --

@@ -1824,6 +1824,12 @@ namespace BigAmbitionsMP
             // go back in the restore below. A .hsg never carries another member's phone.
             var restoreMessages = CompanyMessages.StripForSave("the save");
 
+            // MIRROR-1 (2026-09-17), the same choke point: a co-member's MIRRORED objective-panel alerts
+            // are display copies of the OWNER's tasks and live in gi.TodoTasks, which nothing above walks.
+            // They come out here and go back in the restore below, exactly as the phone messages do - a
+            // .hsg written from this machine holds none of another member's alerts.
+            var restoreMirrors = TaskMirror.StripForSave(when);
+
             // Restore delegate — re-add the EXACT objects after serialization completes (dup-guarded; the main
             // thread is blocked through the save, so no tick can re-inject during the window, but be defensive).
             return () =>
@@ -1836,6 +1842,7 @@ namespace BigAmbitionsMP
                     // then never go back. The guard stays for the employee/shift loops that do need it.
                     CompanyCandidates.RestoreInjected(removedCandidates, "the save");
                     restoreMessages();
+                    restoreMirrors();   // MIRROR-1: same P8 reason - it does not touch gi.EmployeeInstances
                     // M4: the negotiations and headhunter replacements go back here for the same P8 reason - they
                     // do not touch gi.EmployeeInstances, so the employee null-guard below must not swallow them.
                     try

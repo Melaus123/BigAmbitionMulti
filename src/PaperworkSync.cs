@@ -193,6 +193,14 @@ namespace BigAmbitionsMP
 
             p.Lists     = BuildLists(gi, mine);
             p.Employees = BuildEmployees(gi, mine);
+            // MIRROR-1 (2026-09-17): the OBJECTIVE-PANEL alerts of my own businesses. Filled here and not
+            // in CompanyLists.Extract, because Extract runs on the HOST off a bundle this machine merely
+            // STORED - SaveGameManager.Current.TodoTasks there is the HOST's own list, never the owner's.
+            // TrulyMine only (TaskMirror.MineToPublish): an address this machine SIMULATES for an absent
+            // owner generates that owner's tasks natively on every OTHER member too, so publishing them
+            // would double the rows - the design's Absence paragraph.
+            try { p.Lists.BusinessTasks.AddRange(TaskMirror.BuildRows()); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Tasks] bundle rows: {ex.Message}"); }
             return p;
         }
 
@@ -1000,6 +1008,23 @@ namespace BigAmbitionsMP
                     if (string.Equals(h?.HeadquartersAddressKey ?? "", a, StringComparison.OrdinalIgnoreCase)) nHr++;
             }
 
+            // MIRROR-1 (2026-09-17): the owner's OBJECTIVE PANEL, installed into mine. The address set is
+            // exactly what the loop above accepted - flipped here and NOT simulated here - so a shop this
+            // machine runs for an absent owner keeps its natively generated alerts and gets no second copy.
+            // The unaddressed pass is fold F: an idle/unassigned employee's alert carries no address and is
+            // filed by PERSON instead. Both are re-run in full on every bundle; that is their recurrence.
+            var mirrorAddrs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var a in addrs)
+                if (MergerFlip.IsFlipped(a) && !MergerAbsence.SimulatesHere(a)) mirrorAddrs.Add(a);
+            foreach (var r in p.BusinessTasks ?? new List<PwBusinessTask>())
+                if (r != null && !string.IsNullOrEmpty(r.AddressKey)
+                    && MergerFlip.IsFlipped(r.AddressKey) && !MergerAbsence.SimulatesHere(r.AddressKey))
+                    mirrorAddrs.Add(r.AddressKey);
+            try { TaskMirror.Install(p, mirrorAddrs); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Tasks] install '{p.OwnerPid}': {ex.Message}"); }
+            try { TaskMirror.InstallUnaddressed(p); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Tasks] unaddressed install '{p.OwnerPid}': {ex.Message}"); }
+
             _byOwner[p.OwnerPid] = p;
             // fold b H2: does this owner still have work waiting on a flip?  The answer is exactly the skip
             // counter above, and it is re-decided on every Apply - a later bundle that installs clean takes
@@ -1039,6 +1064,7 @@ namespace BigAmbitionsMP
                 bool had = _byOwner.Remove(ownerPid);
                 _pendingFlip.Remove(ownerPid);   // fold b H2: nothing of theirs is waiting on a flip any more
                 try { CompanyPlans.ClearOwner(ownerPid, why); } catch { }   // 4c part 1: the HQ plan overlay goes with them
+                try { TaskMirror.Lift(ownerPid); } catch { }                 // MIRROR-1: and so does their objective panel
                 RebuildOwnerMap("");   // fold d: a departure is nobody's publish - no pending wait advances
                 if (n > 0 || had)
                 {
@@ -1059,6 +1085,14 @@ namespace BigAmbitionsMP
             {
                 if (string.IsNullOrEmpty(ownerPid) || !_byOwner.ContainsKey(ownerPid)) return;
                 try { CompanyPlans.SuspendOwner(ownerPid, why); } catch { }   // 4c part 1: the REAL plans are about to be installed
+                // MIRROR-1 (review ruling 2026-09-17): the stand-in runs this owner's businesses for real now, so
+                // their mirrored alerts come down and the game regenerates its own for those addresses at once.
+                try
+                {
+                    int lm = TaskMirror.OnStandIn(ownerPid);   // re-check R4: the regeneration runs from ApplyHandover once the marks are set
+                    if (lm > 0) Plugin.Logger.LogInfo($"[Tasks] lifted {lm} mirrored task(s) of '{ownerPid}' - standing in ({why})");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Tasks] stand-in lift for '{ownerPid}': {ex.Message}"); }
                 int n = MergerAbsence.RemoveInstalledForOwner(MergerAbsence.DisplayOwnerTag(ownerPid));
                 if (n > 0)
                 {
@@ -1124,6 +1158,7 @@ namespace BigAmbitionsMP
         public static void ClearAll(string why)
         {
             try { CompanyPlans.ClearAll(why); } catch { }   // 4c part 1
+            try { TaskMirror.Lift(""); } catch { }           // MIRROR-1: every mirrored alert, whoever owned it
             _pendingFlip.Clear();   // fold b H2: both exits below leave no owner behind, so the wait list goes too
             if (_byOwner.Count == 0) { _ownerOfAddr.Clear(); _planById.Clear(); _lastSentPlan.Clear(); _pendingPlan.Clear(); return; }   // fold d: no owners left - nothing pending can echo
             foreach (var pid in new List<string>(_byOwner.Keys)) ClearOwner(pid, why);
@@ -1809,6 +1844,9 @@ namespace BigAmbitionsMP
                 if (l.ImportPartnerships != null) p.ImportPartnerships.AddRange(l.ImportPartnerships);
                 if (l.HrManagerPlans != null) p.HrManagerPlans.AddRange(l.HrManagerPlans);
                 if (l.HeadhunterPlans != null) p.HeadhunterPlans.AddRange(l.HeadhunterPlans);
+                // MIRROR-1: the owner's alerts travel on, untouched. The host neither reads nor judges
+                // them - what is in this owner's stored bundle belongs to this owner.
+                if (l.BusinessTasks != null) p.BusinessTasks.AddRange(l.BusinessTasks);
             }
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var b in bundle?.Businesses ?? new List<BusinessPaperwork>())
