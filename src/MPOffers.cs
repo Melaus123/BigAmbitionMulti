@@ -356,7 +356,50 @@ namespace BigAmbitionsMP
                     reg.AvailableForRent = false;   // not on the market — the buyer runs it
                     try { reg.businessOwnerRivalId = p.BuyerId; } catch { }
                 }
-                Plugin.Logger.LogInfo($"[Offers] RELEASED '{p.BusinessName}' at {p.AddressKey} to {p.BuyerId} (${p.Amount:N0} received; {dropped} staff record(s) transferred out).");
+                // SALE-CLEAR-1: the flags above change WHO OWNS the shop and nothing on screen. The sold
+                // shop's objectives stayed on the objective panel and in the Business Manager until a reopen
+                // or the 10-minute purge (bundle 20260913-173424) — the seller kept being told to restock a
+                // shop that is no longer theirs. The terminate-rental path already has the correct tail
+                // (src/SharedShopWorkTabs.cs, "terminate-rental applied"): complete the address's tasks
+                // OUTRIGHT — never UpdateTasksFromBusiness, which regenerates them — then repaint the map pin,
+                // the map filters, and the Business Manager if it is sitting on this very address.
+                int submitted = 0; bool poi = false, filters = false, guiders = false; string bizman = "closed";
+                if (reg != null)
+                {
+                    // Review M2: the proven tail (SharedShopWorkTabs.cs:4695) and the native sale tail
+                    // (BizManPresentation.cs:689) both drop the on-screen guider to the address first.
+                    try { UI.Guiders.GuidersManager.UpdateGuidersWithAddress(reg.Address); guiders = true; } catch { }
+                    try
+                    {
+                        var tasksUi = InstanceBehavior<UI.UIs>.Instance?.tasksUI;
+                        if (tasksUi != null)
+                        {
+                            var done = new List<Entities.TodoTask>();
+                            foreach (var t in SaveGameManager.Current.TodoTasks)
+                                if (t != null && t.address == reg.Address) done.Add(t);
+                            // Review L2: native TasksUI.InstantlyCompleteListOfTasks (:533-545) silently skips a task
+                            // without a row, so this is the SUBMITTED count, not a confirmed removal count.
+                            if (done.Count > 0) { tasksUi.InstantlyCompleteListOfTasks(done); submitted = done.Count; }
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Offers] SALE-CLEAR-1 tasks '{p.AddressKey}': {ex.Message}"); }
+                    try { InstanceBehavior<CityManager>.Instance.FindCityBuildingController(reg.Address)?.UpdatePoi(); poi = true; } catch { }
+                    try { InstanceBehavior<UI.UIs>.Instance?.mapFilters.ApplyFilters(); filters = true; } catch { }
+                    try
+                    {
+                        var bm = InstanceBehavior<UI.UIs>.Instance?.fullMenu?.bizMan;
+                        if (UI.Smartphone.FullMenu.IsOpen && bm != null && bm.gameObject.activeSelf && bm.business != null && bm.business.address == reg.Address)
+                        { bm.business.ScheduleLoadAlerts(); bizman = "refreshed"; }
+                    }
+                    catch (Exception ex) { bizman = "closed"; Plugin.Logger.LogWarning($"[Offers] SALE-CLEAR-1 bizman '{p.AddressKey}': {ex.Message}"); }
+                    // Review M2: the same two closing calls as the proven tail (SharedShopWorkTabs.cs:4720-4721) and
+                    // the native sale (BizManPresentation.cs:702) - listeners of the rented-building event repaint,
+                    // and the ownership flip above marks the save dirty.
+                    try { GameEvent.Invoke("ba:gameevent_rentedbuilding"); } catch { }
+                    try { SaveGameManager.MarkChange(); } catch { }
+                }
+                Plugin.Logger.LogInfo($"[Offers] RELEASED '{p.BusinessName}' at {p.AddressKey} to {p.BuyerId} (${p.Amount:N0} received; {dropped} staff record(s) transferred out)"
+                                    + $"; tasks submitted={submitted} poi={(poi ? "Y" : "N")} filters={(filters ? "Y" : "N")} guiders={(guiders ? "Y" : "N")} bizman={bizman} (SALE-CLEAR-1).");
                 try { PassengerHud.Toast($"Sold '{p.BusinessName}' to {p.BuyerId} for ${p.Amount:N0}.", 6f); } catch { }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Offers] SellerApplyRelease: {ex.Message}"); }
