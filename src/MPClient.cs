@@ -78,6 +78,16 @@ namespace BigAmbitionsMP
         public static string LastConnectTargetClass = "";
         public static int LastConnectPort;
         private static readonly System.Diagnostics.Stopwatch _connectClock = new();
+        // JOIN-WAIT-1 (C3): when this connection's Hello went out, and the throttle/cap for the waiting line.
+        private static readonly System.Diagnostics.Stopwatch _helloClock = new();
+        private static string _helloSentAtText = "";
+        private static float  _joinWaitNextAt;
+        private static int    _joinWaitLines;
+
+        /// <summary>JOIN-WAIT-1 (C2): status token from the host's LobbyUpdate ("awaiting-approval" while our
+        /// mid-game join request is parked for the host to approve, "" once the real roster arrives). The
+        /// lobby window turns the token into its own wording; nothing from the wire is ever shown verbatim.</summary>
+        public static volatile string JoinStatus = "";
         /// <summary>Set by OnDisconnected for the no-answer case; the lobby shows it in place of the raw reason. Null otherwise.</summary>
         public static string? FriendlyDisconnectReason;
         private static string AddressClass(string host)
@@ -141,6 +151,7 @@ namespace BigAmbitionsMP
 
         public static void Connect(string hostIp, int port)
         {
+            JoinStatus = "";   // JOIN-WAIT-1 (review L3): a fresh connect never inherits a stale parked token
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): a new connection starts with an empty slot map
             MPNeedsTuning.SetPowerNapAllowed(true, "new connection");   // POWERNAP r2 (review r1 MINOR-4): the host's gate is re-learned from the DTO/heartbeat; never carry a previous host's OFF
             ModMismatchVsHost = "";   // fresh connection, fresh verdict (round-253f)
@@ -177,6 +188,7 @@ namespace BigAmbitionsMP
         /// path from the Hello onward; the seam hides the transport.</summary>
         public static bool ConnectSteam(ulong hostSteamId)
         {
+            JoinStatus = "";   // JOIN-WAIT-1 (re-check R5): the Steam entry starts clean too, like Connect()
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): a new connection starts with an empty slot map
             MPNeedsTuning.SetPowerNapAllowed(true, "new connection");   // POWERNAP r2 (review r1 MINOR-4): the host's gate is re-learned from the DTO/heartbeat; never carry a previous host's OFF
             // Round-229: unreliable hooks — refuse to join (see MPServer.Start).
@@ -285,6 +297,9 @@ namespace BigAmbitionsMP
             }
             catch { }
             Send(MessageEnvelope.Create(MessageType.Hello, MPConfig.PlayerId, hello));
+            // JOIN-WAIT-1 (C3): a mid-game join can now sit here for as long as the host takes to click accept.
+            _helloClock.Restart(); _helloSentAtText = System.DateTime.Now.ToString("HH:mm:ss");
+            _joinWaitNextAt = 0f; _joinWaitLines = 0;
         }
 
         private static void OnDisconnected(string reason, byte[] extra)
@@ -313,6 +328,8 @@ namespace BigAmbitionsMP
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyCandidates.ClearAll("the connection dropped")); } catch { }   // phase 4b (people): same rule for the shared candidate copies
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyMessages.ClearAll("the connection dropped")); } catch { }     // phase 4b (people) P4: and for the relayed message copies
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): an involuntary drop ends the session too - Disconnect() only covers the voluntary path
+            JoinStatus = "";   // JOIN-WAIT-1: the wait ends with the connection
+            _helloClock.Reset();
             bool wasConnected = _connected;
             double secs = _connectClock.IsRunning ? _connectClock.Elapsed.TotalSeconds : -1;
             Plugin.Logger.LogWarning($"[Client] Disconnected from host: {reason} after {secs:0.0}s via {LastConnectPath} ({LastConnectTargetClass}); session was {(wasConnected ? "ESTABLISHED" : "never established")}.");
@@ -1266,6 +1283,7 @@ namespace BigAmbitionsMP
             HostLoadMode    = payload.LoadMode;
             HostLoadSession = payload.LoadSessionName ?? "";
             HostExpressLane = payload.HostExpress;   // round-283 capability (see SendPhaseReport)
+            JoinStatus      = payload.JoinStatus ?? "";   // JOIN-WAIT-1 (C2): set while parked, cleared by the real roster
             Plugin.Logger.LogInfo($"[Client] Lobby: {string.Join(", ", LobbyPlayers)} " +
                                   $"(starting cash {(EnforceStartingCash ? "enforced by host" : "per-player")})");
         }
@@ -2484,6 +2502,29 @@ namespace BigAmbitionsMP
         /// of ≥2% and ≥0.7s. Direct-UDP joins never report (fragmentation is internal to
         /// that transport — accepted limitation); silence is what the overlay renders as
         /// "loading world…", so no report is never wrong, only less informative.</summary>
+        /// <summary>JOIN-WAIT-1 (C3): a mid-game join parked for the host's approval has no timeout and, until now,
+        /// left no trace in the client's log — the screen just said "Connected to host" forever. Say how long we
+        /// have been waiting every 10 s, capped at 30 lines, and stop as soon as the roster or a load instruction
+        /// lands (either one means the host accepted us).</summary>
+        public static void TickJoinWaitReport()
+        {
+            try
+            {
+                if (!IsConnected || MPServer.IsRunning || InMpGame || !_helloClock.IsRunning) { _joinWaitLines = 0; return; }
+                if (LobbyPlayers.Count > 0) { _joinWaitLines = 0; return; }   // roster arrived — we are in
+                // Armed on the transport thread (no UnityEngine.Time there), so the first Unity tick after
+                // the Hello sets the clock and the first line lands 10 s later, not instantly.
+                float now = UnityEngine.Time.unscaledTime;
+                if (_joinWaitNextAt <= 0f) { _joinWaitNextAt = now + 10f; return; }
+                if (now < _joinWaitNextAt) return;
+                _joinWaitNextAt = now + 10f;
+                if (_joinWaitLines >= 30) return;
+                _joinWaitLines++;
+                Plugin.Logger.LogInfo($"[Join] waiting: host-approval {_helloClock.Elapsed.TotalSeconds:0}s (hello sent {_helloSentAtText})");
+            }
+            catch { }
+        }
+
         public static void TickJoinDownloadReport()
         {
             try

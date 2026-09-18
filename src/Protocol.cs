@@ -1836,6 +1836,13 @@ namespace BigAmbitionsMP
         /// player's self-chosen age.  Cash is host-dictated and not synced for display.</summary>
         public Dictionary<string, int> Ages { get; set; } = new();
 
+        /// <summary>JOIN-WAIT-1 (additive field, no protocol Version change): a status TOKEN for a client that
+        /// is connected but not yet in the roster — currently only "awaiting-approval", set when the host parks
+        /// a mid-game join request. Empty on every ordinary lobby broadcast, which is what clears the client's
+        /// notice once the roster arrives. A TOKEN, not a sentence: the wording lives in the client's UI, so a
+        /// host can never push arbitrary text onto a client's screen.</summary>
+        public string JoinStatus { get; set; } = "";
+
         /// <summary>True if the host is RESUMING a saved game (not starting a new one).
         /// Clients hide the new-game settings (age/cash) since they come from the save.</summary>
         public bool   LoadMode        { get; set; }

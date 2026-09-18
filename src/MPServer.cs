@@ -1772,6 +1772,7 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] Peer disconnected: {peer.Id} — {reason}");
             _clients.TryRemove(peer, out _);
             lock (_pendingJoins) _pendingJoins.Remove(peer.Id);   // abandoned join request
+            lock (_pendingSince) { _pendingSince.Remove(peer.Id); _pendingHbLines.Remove(peer.Id); }   // JOIN-WAIT-1
             // Round-281: drop the build record UNCONDITIONALLY (not inside the named-peer branch
             // below) — a transport can hand the same peer.Id to a LATER connection, and a stale
             // "cargo-delta capable" record inherited by a peer that never announced it is exactly
@@ -3024,6 +3025,70 @@ namespace BigAmbitionsMP
         // poll thread (HandleHello ban check).  ConcurrentDictionary used as a set.
         private static readonly ConcurrentDictionary<string, byte> _banned = new();
         private static readonly Dictionary<int, (MPLink peer, HelloPayload hello)> _pendingJoins = new();
+        // JOIN-WAIT-1 (C3): when each parked request arrived, and how many heartbeat lines it has spent.
+        private static readonly Dictionary<int, long> _pendingSince = new();
+        private static readonly Dictionary<int, int>  _pendingHbLines = new();
+        private static long _pendingHbNextMs;
+
+        /// <summary>JOIN-WAIT-1 (C2): a parked joiner is not in _clients, so no broadcast reaches them and they sat on
+        /// "Connected to host" with an empty player list and no timeout. Send THIS peer a lobby update carrying the
+        /// awaiting-approval token; the real roster (empty token) replaces it the moment the host accepts.</summary>
+        private static void SendJoinParkedNotice(MPLink peer)
+        {
+            try
+            {
+                var payload = new LobbyUpdatePayload
+                {
+                    Players = new List<string>(),   // they are NOT in the roster yet — saying otherwise would be a lie on their screen
+                    EnforceStartingCash = EnforceStartingCash,
+                    LoadMode = !string.IsNullOrEmpty(ChosenLoadSession),
+                    LoadSessionName = ChosenLoadSession,
+                    HostExpress = true,
+                    JoinStatus = "awaiting-approval",
+                };
+                peer.Send(MessageEnvelope.Create(MessageType.LobbyUpdate, "host", payload));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] parked-join notice (JOIN-WAIT-1): {ex.Message}"); }
+        }
+
+        /// <summary>JOIN-WAIT-1 (C3): while any join request is parked, say so every 10 s — the host's approval popup
+        /// only ticks while in game, and a missed popup used to leave the joiner (and the disconnect pause) hanging
+        /// with nothing in the log. Capped at 30 lines per waiting request.</summary>
+        private static void TickPendingJoinHeartbeat()
+        {
+            try
+            {
+                long now = TickMs64;
+                if (now < _pendingHbNextMs) return;
+                _pendingHbNextMs = now + 10000;
+                int n;
+                var parked = new List<(int peerId, string pid)>();
+                lock (_pendingJoins)
+                {
+                    n = _pendingJoins.Count;
+                    foreach (var kv in _pendingJoins) parked.Add((kv.Key, kv.Value.hello.PlayerId));
+                }
+                if (n == 0) { lock (_pendingSince) { _pendingSince.Clear(); _pendingHbLines.Clear(); } return; }
+                // Review L1: every parked request on the line; the 30-line cap is PER request, so a newer
+                // request keeps reporting after an older one has spent its lines.
+                var parts = new List<string>();
+                lock (_pendingSince)
+                {
+                    foreach (var (peerId, pid) in parked)
+                    {
+                        long since = now;
+                        if (_pendingSince.TryGetValue(peerId, out var t)) since = t;
+                        _pendingHbLines.TryGetValue(peerId, out int lines);
+                        if (lines >= 30) continue;                 // capped: 30 lines per wait
+                        _pendingHbLines[peerId] = lines + 1;
+                        parts.Add($"'{pid}' {((now - since) / 1000)}s");
+                    }
+                }
+                if (parts.Count == 0) return;
+                Plugin.Logger.LogInfo($"[Join] {n} request(s) pending approval: {string.Join(", ", parts)}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Join] pending-join heartbeat (JOIN-WAIT-1): {ex.Message}"); }
+        }
 
         /// <summary>Snapshot for the host's approval popup.</summary>
         public static List<(int peerId, string playerId)> PendingJoinList
@@ -3046,6 +3111,7 @@ namespace BigAmbitionsMP
                 if (!_pendingJoins.TryGetValue(peerId, out entry)) return;
                 _pendingJoins.Remove(peerId);
             }
+            lock (_pendingSince) { _pendingSince.Remove(peerId); _pendingHbLines.Remove(peerId); }   // JOIN-WAIT-1: this wait is over
             if (!entry.peer.IsAlive)
             { Plugin.Logger.LogInfo($"[Server] join request from '{entry.hello.PlayerId}' expired (disconnected)."); return; }
             Plugin.Logger.LogInfo($"[Server] host ACCEPTED mid-game join: '{entry.hello.PlayerId}'.");
@@ -3061,6 +3127,7 @@ namespace BigAmbitionsMP
                 if (!_pendingJoins.TryGetValue(peerId, out entry)) return;
                 _pendingJoins.Remove(peerId);
             }
+            lock (_pendingSince) { _pendingSince.Remove(peerId); _pendingHbLines.Remove(peerId); }   // JOIN-WAIT-1: this wait is over
             Ban(entry.hello);
             try { entry.peer.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:rejected")); } catch { }
             Plugin.Logger.LogInfo($"[Server] host REJECTED mid-game join: '{entry.hello.PlayerId}' (banned until re-host).");
@@ -3096,6 +3163,7 @@ namespace BigAmbitionsMP
         {
             _banned.Clear();
             lock (_pendingJoins) _pendingJoins.Clear();
+            lock (_pendingSince) { _pendingSince.Clear(); _pendingHbLines.Clear(); }   // JOIN-WAIT-1
         }
 
         /// <summary>The Hello binds this connection's identity for the whole
@@ -3326,8 +3394,25 @@ namespace BigAmbitionsMP
             // in-game popup accepts or rejects it.
             if (!IsInLobby)
             {
+                // JOIN-WAIT-1 (C1, user ruling): a RETURNING player skips the popup. "Returning" = this
+                // hosting session already bound their stable id (StableIdByPlayer is written at Hello and is
+                // NOT cleared on disconnect — only by ResetJoinControl/re-host), so they were approved once
+                // already or started in the lobby. Bans are impossible here: the ban gate above disconnects
+                // a kicked/rejected id before this point. Genuinely NEW peers still park for approval.
+                bool returning = false;
+                if (!string.IsNullOrEmpty(hello.StableId))
+                    foreach (var kv in StableIdByPlayer)
+                        if (kv.Value == hello.StableId && kv.Key != MPConfig.PlayerId) { returning = true; break; }
+                if (returning)
+                {
+                    Plugin.Logger.LogInfo($"[Server] returning player '{hello.PlayerId}' auto-accepted (JOIN-WAIT-1)");
+                    RegisterAndProcessJoin(peer, hello);   // exactly what the host's accept click calls
+                    return;
+                }
                 lock (_pendingJoins) _pendingJoins[peer.Id] = (peer, hello);
+                lock (_pendingSince) _pendingSince[peer.Id] = TickMs64;   // JOIN-WAIT-1 (C3): for the host's pending-join heartbeat
                 Plugin.Logger.LogInfo($"[Server] mid-game join request from '{hello.PlayerId}' — awaiting host approval.");
+                SendJoinParkedNotice(peer);   // JOIN-WAIT-1 (C2): tell them they are waiting, instead of a silent empty lobby
                 return;
             }
 
@@ -4367,6 +4452,7 @@ namespace BigAmbitionsMP
         {
             if (!_running) return;
             TickGateHeal();
+            TickPendingJoinHeartbeat();   // JOIN-WAIT-1 (C3): a parked join request must not wait in silence
             bool release = false;
             List<string>? waiting = null;
             lock (_startupLock)

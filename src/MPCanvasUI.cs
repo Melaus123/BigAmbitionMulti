@@ -799,6 +799,7 @@ namespace BigAmbitionsMP
             VehicleStoragePanel.Tick();  // non-owner shared-storage panel (refresh on cargo change / auto-close)
             TimeSync.TickStartupHold();  // round-36: had NO caller (dead since inception) — the hold's timeScale re-clamp
             MPClient.TickJoinDownloadReport();   // round-270: throttled world-download percent → host → everyone's overlay
+            MPClient.TickJoinWaitReport();       // JOIN-WAIT-1: say how long a parked mid-game join has been waiting
             MPClient.TickSettledReport();        // round-271: one-shot 'Settled' phase → host fires the join baseline save
             GameStateReader.TickPendingNativePause();   // round-36c: converge the pause flag onto the last
                                                         // requested state (rate-limit drops lost it before)
@@ -5757,6 +5758,11 @@ namespace BigAmbitionsMP
                 else if (MPClient.IsConnected)
                 {
                     info = "Connected to host";
+                    // JOIN-WAIT-1 (C2): a mid-game join is PARKED until the host clicks accept, with no timeout.
+                    // Until now that looked identical to a healthy connection: "Connected to host" and an empty
+                    // player list, forever. The host sends a token; the wording is ours.
+                    if (MPClient.JoinStatus == "awaiting-approval")
+                        info += "\n<color=#FFB060>Waiting for the host to approve your join.</color>";
                     // Round-270: the joiner's world download, as a status line in the spot
                     // they are already watching. 4s freshness window so slow-relay gaps
                     // between chunks do not blink the line. Direct-UDP joins never report
