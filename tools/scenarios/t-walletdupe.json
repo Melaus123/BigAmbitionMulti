@@ -118,7 +118,17 @@
       "capture": {
         "B": "money=([0-9]+\\.[0-9]{2})"
       },
-      "note": "B = the company balance. The 'money' verb prints `OK money=<F2, invariant> merged=<bool> wallet=<F2> (mirror)` (TestDrive.cs case \"money\"): while merged the money figure IS the mirrored company balance, so B is the pot both members are showing"
+      "note": "B = the company balance. The 'money' verb prints `OK money=<F2, invariant> merged=<bool> wallet=<F2> (mirror)` (TestDrive.cs case \"money\"): while merged the money figure IS the mirrored company balance, so B is the pot both members are showing",
+      "derive": {
+        "B1": [
+          "B",
+          -20000
+        ],
+        "B2": [
+          "B",
+          -40000
+        ]
+      }
     },
     {
       "seq": 15,
@@ -131,8 +141,8 @@
       "seq": 16,
       "role": "h",
       "cmd": "walletdump",
-      "expect_result": "^OK walletdump groups=\\[${grp}:balance=${B} contributed=2/2\\]$",
-      "note": "W6. The host's ledger and pooling guard: one group, the balance the mirrors are showing, and BOTH members recorded as having pooled. `walletdump` prints `OK walletdump groups=[<group>:balance=<F2> contributed=<k>/<members>;...]` and is host-only (a client answers `ERR host only`)"
+      "expect_result": "^OK walletdump groups=\\[${grp}:balance=(?:${B}|${B1}|${B2}) contributed=2/2\\]$",
+      "note": "W6. The host's ledger and pooling guard: one group, the balance the mirrors are showing, and BOTH members recorded as having pooled. `walletdump` prints `OK walletdump groups=[<group>:balance=<F2> contributed=<k>/<members>;...]` and is host-only (a client answers `ERR host only`) REVISED 2026-09-18 (user-approved): B, or B minus one or two $20,000 daily licensing fees - the rejoining member's reloaded clock can cross the opening hour before any lever runs (runs 130339, 175414). A re-pool reads ~2B and still fails."
     },
     {
       "seq": 17,
@@ -258,8 +268,8 @@
       "seq": 32,
       "role": "h",
       "cmd": "walletdump",
-      "expect_result": "^OK walletdump groups=\\[${grp}:balance=${B} contributed=2/2\\]$",
-      "note": "W1+W5, THE CONSERVATION ASSERTION: the ledger came back at exactly B (not 2B - nobody re-pooled) and the contributed-set survived the round trip FULL. contributed=1/2 here would mean the missing member is free to pool their restored wallet again, which is the bug this build closes"
+      "expect_result": "^OK walletdump groups=\\[${grp}:balance=(?:${B}|${B1}|${B2}) contributed=2/2\\]$",
+      "note": "W1+W5, THE CONSERVATION ASSERTION: the ledger came back at exactly B (not 2B - nobody re-pooled) and the contributed-set survived the round trip FULL. contributed=1/2 here would mean the missing member is free to pool their restored wallet again, which is the bug this build closes REVISED 2026-09-18 (user-approved): B, or B minus one or two $20,000 daily licensing fees - the rejoining member's reloaded clock can cross the opening hour before any lever runs (runs 130339, 175414). A re-pool reads ~2B and still fails."
     },
     {
       "seq": 33,

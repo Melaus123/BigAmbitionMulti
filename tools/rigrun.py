@@ -317,6 +317,21 @@ def apply_captures(capture, result_text, vars_):
     return got, None
 
 
+def apply_derives(derive, vars_):
+    """A step's derive map: name -> [sourceVar, delta]. Decimal arithmetic on a captured number, written back with two
+    decimals (the money verbs print F2). Exists so an oracle can accept 'B minus one legitimate fee' (t-walletdupe)."""
+    from decimal import Decimal
+    got = {}
+    for name, spec in (derive or {}).items():
+        try:
+            src, delta = spec
+            got[name] = "%.2f" % (Decimal(str(vars_[src])) + Decimal(str(delta)))
+        except Exception as e:
+            return None, "derive '%s' failed: %s" % (name, e)
+    vars_.update(got)
+    return got, None
+
+
 def validate_scenario(sc):
     """Shape rules for a scenario dict. load_scenario applies them to a parsed file; --selftest calls
     this directly on in-memory dicts. drop/relaunch are cmd-less step kinds, exactly like sleep_s."""
@@ -689,6 +704,12 @@ class Run:
                     verdict, evidence = "FAIL", cerr
                 else:
                     evidence = "captured " + ", ".join("%s=%s" % kv for kv in got.items())
+            if verdict == "PASS" and step.get("derive"):
+                dgot, derr = apply_derives(step["derive"], self.vars)
+                if derr:
+                    verdict, evidence = "FAIL", derr
+                else:
+                    evidence = (evidence + "; " if evidence else "") + "derived " + ", ".join("%s=%s" % kv for kv in dgot.items())
             if verdict == "PASS":
                 for el in step.get("expect_log") or []:
                     lrole = el.get("role", role)
