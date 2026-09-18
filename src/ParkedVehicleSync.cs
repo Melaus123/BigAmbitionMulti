@@ -103,6 +103,168 @@ namespace BigAmbitionsMP
         private static MethodInfo? _miRequest;
         private static MethodInfo? _miRelease;
 
+        // ── AUTOPARK-1 ──────────────────────────────────────────────────────
+        // Native auto-park spots are carved out of a parking lane by
+        // ParkingLaneGenerator.GenerateAutoParkSpots, whose obstacle list is
+        // `transform.GetComponentsInChildren<MeshCollider>()` — i.e. the parked cars
+        // PARENTED UNDER THE LANE (the native spawner parents them; it un-parents
+        // before releasing them back to the pool).  Our client ghosts were rented
+        // from the pool and only positioned, never parented, so every lane on a
+        // client looked EMPTY and produced one lane-long spot in the middle of the
+        // lane — auto-park then teleported the player's car into a parked ghost.
+        // Fix: parent each ghost to the lane it stands in, un-parent before release,
+        // and regenerate the spots of every lane touched, once per pass.
+        // L2: native RegenerateAutoParkSpotsNear scans into a Collider[32] — match it,
+        // so a dense kerb can't overflow our buffer and hide the lane we're standing in.
+        private static readonly Collider[] _laneScan = new Collider[32];
+        // M2/M3: lanes whose parked-car set changed and whose auto-park spots must be
+        // re-carved.  A SET of lane instances (not world positions): the old positions
+        // list fed RegenerateAutoParkSpotsNear, which re-scanned a 6 m sphere and
+        // regenerated EVERY lane it found — defeating the dedupe this list exists for.
+        // Lanes stay in the set until they are actually regenerated, so the set IS the
+        // retry queue for the ones a pass skips.
+        private static readonly HashSet<ParkingLaneGenerator> _dirtyLanes = new();
+        private static readonly List<ParkingLaneGenerator> _laneScratch = new();
+        private const float LaneRegenRadius   = 60f;   // auto-park only ever sees spots near the player
+        private static readonly float LaneRegenRadiusSq = LaneRegenRadius * LaneRegenRadius;
+        private const int   LaneRegenPerPass  = 3;     // the rest stay dirty for the next pass
+        private static int _parentedThisPass, _noLaneThisPass, _releasedThisPass;
+        private static int _autoParkLogBudget = 40;
+
+        // ── AUTOPARK-1 H1 — foreign releases of OUR rented parked cars ───────
+        // Every ghost this client rents from the native pool, so a native release of
+        // one can be told apart from our own.  Two native callers reach them:
+        //   • the lane's own periodic sweep (ParkingLaneGenerator.CleanupParkedVehicles,
+        //     1.0 :938-956) — daily, on business open/close, and unguarded by distance
+        //     while the player is indoors.  It walks the lane's DIRECT children, which is
+        //     exactly where AUTOPARK-1 parents our ghosts.  A host-authoritative parked
+        //     car must not be evicted by a client-local timer, so those children are
+        //     detached for the duration of the sweep and put back afterwards.
+        //   • anything else (e.g. VehicleHelper.DestroyBlockingVehicles clearing room for
+        //     a delivered vehicle, :298) — native intent stands, the release runs, and we
+        //     only fix our own books.
+        // Why the books matter: the pool is built with collectionCheck:false
+        // (Helpers/ParkingSimulator.cs:73), so a natively released ghost we later release
+        // again pushes the SAME object into the pool twice — one car, two keys, rentable
+        // by two callers at once.
+        private static readonly HashSet<GameObject> _rented = new();
+        private static bool _modReleasing;
+        private static int _foreignRefusedSweep, _foreignAllowedOther;
+        private static DateTime _foreignNextLogAt = DateTime.MinValue;
+
+        /// <summary>The lane a car at <paramref name="pos"/> stands in, found the way native
+        /// RegenerateAutoParkSpotsNear does it (6 m sphere on the ParkingArea layer, then
+        /// GetComponentInParent).  Nearest collider surface wins.  Null = no lane here.</summary>
+        private static ParkingLaneGenerator? FindLaneFor(Vector3 pos)
+        {
+            try
+            {
+                int n = Physics.OverlapSphereNonAlloc(pos, 6f, _laneScan,
+                                                      LayerHelper.parkingAreaLayerMask,
+                                                      QueryTriggerInteraction.Collide);
+                ParkingLaneGenerator? best = null;
+                float bestSq = float.MaxValue;
+                for (int i = 0; i < n; i++)
+                {
+                    var col = _laneScan[i];
+                    if (col == null) continue;
+                    var lane = col.GetComponentInParent<ParkingLaneGenerator>();
+                    if (lane == null) continue;
+                    float sq = (col.ClosestPoint(pos) - pos).sqrMagnitude;
+                    if (sq < bestSq) { bestSq = sq; best = lane; }
+                }
+                return best;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ParkedSync] FindLaneFor (AUTOPARK-1): {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>Remember a lane whose parked-car set changed, deduped (a HashSet of the
+        /// lane instances themselves — we regenerate exactly those lanes, never a sphere of
+        /// bystanders).  A lane stays marked until it is actually regenerated.</summary>
+        private static void MarkLane(ParkingLaneGenerator? lane)
+        {
+            if (lane == null) return;
+            _dirtyLanes.Add(lane);
+        }
+
+        /// <summary>True while the local player's car is holding an auto-park spot — regenerating
+        /// a lane DESTROYS its spot objects, so doing it now would pull the spot out from under the
+        /// car that is about to use it.  VehicleParkingHelper has no parking-state field in 1.0
+        /// (checked): `availableAutoParkSpot` is the whole of its public state, and the parking
+        /// state it writes lives on the car (CarController.vehicleInstance.parkingState) and only
+        /// AFTER the park completes — so the held spot is the signal.</summary>
+        private static bool LocalCarHoldsAutoParkSpot()
+        {
+            try
+            {
+                var vc = VehicleHelper.GetCurrentVehicleBase();
+                if (vc == null) return false;
+                var vph = vc.GetComponentInChildren<VehicleParkingHelper>(true);
+                return vph != null && vph.availableAutoParkSpot != null;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Re-carve the auto-park spots of the dirty lanes, at most LaneRegenPerPass per
+        /// pass.  GenerateAutoParkSpots destroys + clears the lane's old spots before emitting the
+        /// new ones (verified in the 1.0 decompile), so repeated calls do not accumulate spots; it
+        /// is called DIRECTLY on the lane (publicized) instead of through
+        /// RegenerateAutoParkSpotsNear, which would re-scan a 6 m sphere and regenerate every
+        /// bystander lane it hit.  A lane that is skipped (far away, or the local car is holding a
+        /// spot) STAYS dirty — the set is the retry queue.</summary>
+        private static int FlushLaneRegen()
+        {
+            int done = 0;
+            if (_dirtyLanes.Count == 0) return 0;
+            try
+            {
+                Vector3 p;
+                var rideT = PassengerRide.RideAnchorTransform();
+                if (rideT != null) p = rideT.position;
+                else
+                {
+                    var localChar = PlayerHelper.PlayerController?.Character;
+                    if (localChar == null) return 0;     // no player position — everything stays dirty
+                    p = localChar.transform.position;
+                }
+                if (LocalCarHoldsAutoParkSpot()) return 0;
+
+                _laneScratch.Clear();
+                _laneScratch.AddRange(_dirtyLanes);
+                _dirtyLanes.Clear();
+                for (int i = 0; i < _laneScratch.Count; i++)
+                {
+                    var lane = _laneScratch[i];
+                    if (lane == null) continue;          // destroyed with the scene — drop it
+                    if (done >= LaneRegenPerPass) { _dirtyLanes.Add(lane); continue; }
+                    try
+                    {
+                        var near = lane.GetClosestLanePoint(p);
+                        float dx = near.x - p.x, dy = near.y - p.y, dz = near.z - p.z;
+                        if (dx * dx + dy * dy + dz * dz > LaneRegenRadiusSq)
+                        { _dirtyLanes.Add(lane); continue; }   // too far to matter — stays dirty
+                        lane.GenerateAutoParkSpots();
+                        done++;
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Logger.LogWarning($"[ParkedSync] GenerateAutoParkSpots (AUTOPARK-1): {ex.Message}");
+                    }
+                }
+                _laneScratch.Clear();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ParkedSync] FlushLaneRegen (AUTOPARK-1): {ex.Message}");
+            }
+            return done;
+        }
+
+
         // CLAUDE-DIAGNOSTIC — F6 toggle for the entry-bug investigation.
         // Default ON.  Flipping OFF lets the client's ParkingLaneGenerator
         // run as normal — used to test whether parked-vehicle suppression
@@ -151,6 +313,9 @@ namespace BigAmbitionsMP
             }
             _clientGhosts.Clear();
             _clientKnown.Clear();
+            _rented.Clear();    // AUTOPARK-1 H1: nothing of ours is in the world any more
+            FlushLaneRegen();   // AUTOPARK-1: the lanes just emptied re-carve their spots once each
+            _parentedThisPass = _noLaneThisPass = _releasedThisPass = 0;
             Plugin.Logger.LogInfo($"[ClientFix] Client parked-vehicle sync — released {releasedCount} ghost(s) back to pool, cleared known set.");
         }
 
@@ -194,6 +359,14 @@ namespace BigAmbitionsMP
             }
             _clientGhosts.Clear();
             _clientKnown.Clear();
+            _rented.Clear();            // AUTOPARK-1 H1
+            _foreignRefusedSweep = _foreignAllowedOther = 0;
+            _foreignNextLogAt = DateTime.MinValue;
+            // AUTOPARK-1: session teardown — the lanes themselves are going away with the
+            // scene, so drop the pending regeneration set rather than touching dead objects.
+            _dirtyLanes.Clear();
+            _laneScratch.Clear();
+            _parentedThisPass = _noLaneThisPass = _releasedThisPass = 0;
         }
 
         // Per-frame entry point — called from MPCanvasUI.TickPositionSync.
@@ -709,6 +882,19 @@ namespace BigAmbitionsMP
                     var t = go.transform;
                     t.position = new Vector3(dto.X, dto.Y, dto.Z);
                     t.rotation = new Quaternion(dto.Qx, dto.Qy, dto.Qz, dto.Qw);
+                    // AUTOPARK-1: parent the ghost to its lane, exactly as the native parked-car
+                    // spawner does — a lane counts only its CHILD MeshColliders as obstacles when
+                    // it carves auto-park spots.  No lane found (open kerb, garage, lot) → leave it
+                    // free-standing, which is what an unparented native car would be too.
+                    var lane = FindLaneFor(t.position);
+                    if (lane != null)
+                    {
+                        t.SetParent(lane.transform, worldPositionStays: true);
+                        MarkLane(lane);
+                        _parentedThisPass++;
+                    }
+                    else _noLaneThisPass++;
+
                     // Round-31 (user: the one-color delivery truck showed up GREEN, a color it can't be):
                     // RandomVehicleColor's presence is the game's own marker for "this model wears palette
                     // colors" — GetRandomVehicleColor has NO other caller, so prefabs without the component
@@ -724,8 +910,23 @@ namespace BigAmbitionsMP
                         if (!ApplyNativeColor(go, dto))
                             ApplyBodyColors(go, dto.Colors);
                     }
+                    _rented.Add(go);              // AUTOPARK-1 H1: ours until CallPoolRelease hands it back
                     _clientGhosts[dto.Key] = go;
                 }
+
+                // AUTOPARK-1: one regeneration per lane touched by this pass (spawns AND the
+                // releases above, which route through CallPoolRelease), never one per car.
+                int lanesRegenerated = FlushLaneRegen();
+                if (_autoParkLogBudget > 0 &&
+                    (_parentedThisPass + _noLaneThisPass + _releasedThisPass + lanesRegenerated) > 0)
+                {
+                    _autoParkLogBudget--;
+                    Plugin.Logger.LogInfo(
+                        $"[ParkedSync] lanes: parented={_parentedThisPass} noLane={_noLaneThisPass} " +
+                        $"released={_releasedThisPass} lanesRegenerated={lanesRegenerated} " +
+                        $"lanesDirty={_dirtyLanes.Count} (AUTOPARK-1)");
+                }
+                _parentedThisPass = _noLaneThisPass = _releasedThisPass = 0;
             }
             catch (Exception ex)
             {
@@ -755,8 +956,27 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>Hand a ghost back to the game's parked-vehicle pool.
+        /// AUTOPARK-1: un-parent it from its lane FIRST, the way the native release path does
+        /// (SetParent(null) then ParkingSimulator.ReleaseParkedVehicle), and remember the lane
+        /// so the pass that released it regenerates that lane's auto-park spots.  Every client
+        /// release path in this file funnels through here, so this covers all of them.</summary>
         private static void CallPoolRelease(GameObject go)
         {
+            try
+            {
+                var rt = go.transform;
+                if (rt.parent != null)
+                {
+                    MarkLane(rt.parent.GetComponentInParent<ParkingLaneGenerator>());
+                    rt.SetParent(null);
+                }
+                _releasedThisPass++;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ParkedSync] CallPoolRelease un-parent (AUTOPARK-1): {ex.Message}");
+            }
             try
             {
                 if (_miRelease == null)
@@ -765,12 +985,115 @@ namespace BigAmbitionsMP
                     _miRelease = simT?.GetMethod("ReleaseParkedVehicle",
                         BindingFlags.Public | BindingFlags.Static);
                 }
-                _miRelease?.Invoke(null, new object[] { go });
+                // AUTOPARK-1 H1: this is OUR release — drop the rental first and flag the
+                // window, so the ReleaseParkedVehicle prefix doesn't read it as a foreign one.
+                _rented.Remove(go);
+                _modReleasing = true;
+                try { _miRelease?.Invoke(null, new object[] { go }); }
+                finally { _modReleasing = false; }
             }
             catch (Exception ex)
             {
+                _modReleasing = false;
                 Plugin.Logger.LogWarning($"[ParkedSync] CallPoolRelease: {ex.Message}");
             }
+        }
+
+        // ── AUTOPARK-1 H1 — native releases of our rented ghosts ─────────────
+
+        /// <summary>The client owns the parked cars in the world right now (host snapshots are
+        /// the only source) — the same gate the apply/cull path runs under.</summary>
+        internal static bool ClientGhostsAuthoritative
+            => !MPServer.IsRunning && MPClient.IsConnected && ClientApplyEnabled;
+
+        /// <summary>True when <paramref name="go"/> is a car WE rented and something other than
+        /// our own release path is handing it back to the pool.</summary>
+        internal static bool IsForeignReleaseOfRented(GameObject go)
+            => !_modReleasing && go != null && _rented.Contains(go);
+
+        /// <summary>A native caller is releasing one of our rented ghosts and its intent stands
+        /// (the lane's own periodic sweep is handled separately, below).  Un-parenting is the pool's
+        /// job — Get/Release reparents — so we only fix OUR books: the rental is over, the lane it
+        /// stood in needs its spots re-carved, and the ghost slot keeps its KEY with a null VALUE so
+        /// the next culling pass doesn't instantly re-rent a car into the space native just cleared.
+        /// Every _clientGhosts consumer null-checks the value (verified: ReleaseAllGhosts, Reset,
+        /// ApplySnapshot full + diff, CullingPass), and ContainsKey is what suppresses the respawn.</summary>
+        internal static void OnForeignRelease(GameObject go)
+        {
+            try
+            {
+                if (go == null) return;
+                _rented.Remove(go);
+                var t = go.transform;
+                if (t.parent != null)
+                    MarkLane(t.parent.GetComponentInParent<ParkingLaneGenerator>());
+                long hit = 0; bool found = false;
+                foreach (var kv in _clientGhosts)
+                    if (ReferenceEquals(kv.Value, go)) { hit = kv.Key; found = true; break; }
+                if (found) _clientGhosts[hit] = null!;
+                _foreignAllowedOther++;
+                MaybeLogForeign();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[ParkedSync] OnForeignRelease (AUTOPARK-1 H1): {ex.Message}");
+            }
+        }
+
+        /// <summary>Called from the Prefix on ParkingLaneGenerator.CleanupParkedVehicles: detach every
+        /// ghost of ours that is a direct child of this lane, so the sweep's `GetChildren()` never sees
+        /// them.  Chosen over refusing the release inside ReleaseParkedVehicle because the sweep fires
+        /// `onReleaseVehicle` BEFORE the release and that event's only subscriber —
+        /// ParkingBuildingWithDifferentHeightsManager.RemoveCarToHide — MUTATES the car (drops its
+        /// MeshRenderers from the floor hider and force-shows them), which a refused release would
+        /// leave behind on a car that never left.  Returns the detached cars for the Finalizer.</summary>
+        internal static List<GameObject>? DetachRentedLaneChildren(ParkingLaneGenerator? lane)
+        {
+            if (lane == null || _rented.Count == 0 || !ClientGhostsAuthoritative) return null;
+            List<GameObject>? moved = null;
+            var lt = lane.transform;
+            for (int i = lt.childCount - 1; i >= 0; i--)
+            {
+                var ch = lt.GetChild(i);
+                if (ch == null) continue;
+                var go = ch.gameObject;
+                if (!_rented.Contains(go)) continue;
+                (moved ??= new List<GameObject>()).Add(go);
+                ch.SetParent(null, worldPositionStays: true);
+            }
+            if (moved != null)
+            {
+                // The sweep also destroys this lane's auto-park spots — re-carve them once the
+                // cars are back under it.
+                MarkLane(lane);
+                _foreignRefusedSweep += moved.Count;
+                MaybeLogForeign();
+            }
+            return moved;
+        }
+
+        /// <summary>Put the cars DetachRentedLaneChildren pulled out back under the lane.  A lane that
+        /// died during the sweep leaves them free-standing, which is what an unparented native car
+        /// would be too.</summary>
+        internal static void ReattachRentedLaneChildren(ParkingLaneGenerator? lane, List<GameObject>? moved)
+        {
+            if (moved == null) return;
+            for (int i = 0; i < moved.Count; i++)
+            {
+                var go = moved[i];
+                if (go == null || lane == null) continue;
+                if (!_rented.Contains(go)) continue;   // released in the meantime — leave it alone
+                go.transform.SetParent(lane.transform, worldPositionStays: true);
+            }
+        }
+
+        private static void MaybeLogForeign()
+        {
+            if (DateTime.UtcNow < _foreignNextLogAt) return;
+            _foreignNextLogAt = DateTime.UtcNow.AddSeconds(60);
+            Plugin.Logger.LogInfo(
+                $"[ParkedSync] native releases of host-placed parked cars on this client: " +
+                $"refused(sweep)={_foreignRefusedSweep} allowed(other)={_foreignAllowedOther} (AUTOPARK-1 H1)");
         }
 
         // ── SH_Vehicle colour reader/applier ─────────────────────────────────

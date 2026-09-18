@@ -1167,11 +1167,49 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!MPServer.IsRunning) return;
                     if (__0 == null) return;
-                    ParkedVehicleSync.HostOnRelease(__0);
+                    if (MPServer.IsRunning) { ParkedVehicleSync.HostOnRelease(__0); return; }
+                    // AUTOPARK-1 H1 (client): a NATIVE caller is releasing a car this client
+                    // rented for a host-placed parked ghost — e.g. VehicleHelper
+                    // .DestroyBlockingVehicles clearing room for a delivered vehicle (1.0 :298).
+                    // Native intent stands (the release runs); we only fix our own books, so the
+                    // object can never be pushed into the collectionCheck:false pool twice.
+                    // The lane's own periodic sweep never reaches this point — its children are
+                    // detached by the CleanupParkedVehicles prefix below.
+                    if (ParkedVehicleSync.IsForeignReleaseOfRented(__0))
+                        ParkedVehicleSync.OnForeignRelease(__0);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] ReleaseParkedVehicle prefix: {ex.Message}"); }
+            }
+        }
+
+        // AUTOPARK-1 H1 — ParkingLaneGenerator.CleanupParkedVehicles (1.0 :938-956) walks the
+        // lane's DIRECT children and releases every one on the ParkedVehicles layer.  It runs
+        // daily (RunDaily -> ParkingLaneRegeneration), on every business open/close flip, and is
+        // forced at :393/:693/:1208 — and its distance guard is bypassed while the player is
+        // indoors.  Nothing suppresses it on a client, so this local timer would evict
+        // HOST-AUTHORITATIVE parked cars; the host's snapshot is the only thing allowed to decide
+        // when one leaves.  Detach our rented children for the duration of the sweep (the method
+        // snapshots GetChildren() itself, so a prefix detach is invisible to it) and put them back
+        // in the Finalizer.  Chosen over refusing the release inside ReleaseParkedVehicle because
+        // the sweep fires onReleaseVehicle FIRST and its subscriber mutates the car — see
+        // ParkedVehicleSync.DetachRentedLaneChildren.
+        [HarmonyPatch(typeof(ParkingLaneGenerator), nameof(ParkingLaneGenerator.CleanupParkedVehicles))]
+        public static class Patch_ParkingLane_CleanupKeepsHostCars
+        {
+            static void Prefix(ParkingLaneGenerator __instance,
+                               out System.Collections.Generic.List<UnityEngine.GameObject>? __state)
+            {
+                __state = null;
+                try { __state = ParkedVehicleSync.DetachRentedLaneChildren(__instance); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] CleanupParkedVehicles prefix (AUTOPARK-1 H1): {ex.Message}"); }
+            }
+
+            static void Finalizer(ParkingLaneGenerator __instance,
+                                  System.Collections.Generic.List<UnityEngine.GameObject>? __state)
+            {
+                try { ParkedVehicleSync.ReattachRentedLaneChildren(__instance, __state); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patch] CleanupParkedVehicles finalizer (AUTOPARK-1 H1): {ex.Message}"); }
             }
         }
 
@@ -7472,10 +7510,64 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(SaveGamePathHelper), nameof(SaveGamePathHelper.CurrentVersionFolderPath))]
         public static class Patch_CurrentVersionFolderPath_MpRedirect
         {
+            // PROTON-1 (bundle bamp-bug-20260907-115848, Linux/Proton): after this patch was
+            // attached, the NATIVE method began throwing NullReferenceException on every call --
+            // including the game's own callers -- 27,899 times in one session.  The cause is still
+            // unknown (the old log printed ex.Message only).  A Finalizer swallows the throw and
+            // serves the folder we cached before patching, so the mod's store paths never silently
+            // go relative and the game's own save scan keeps working.
+            private static bool _threwLogged;
+            private static int  _threwSince;
+            private static DateTime _threwNextAt = DateTime.MinValue;
+
             static void Postfix(ref string __result)
             {
-                var redirect = MPSaveCoordinator.LoadRedirectFolder;
-                if (!string.IsNullOrEmpty(redirect)) __result = redirect;
+                try
+                {
+                    var redirect = MPSaveCoordinator.LoadRedirectFolder;
+                    if (!string.IsNullOrEmpty(redirect)) __result = redirect;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[MPSave] CurrentVersionFolderPath postfix (PROTON-1): {ex.Message}");
+                }
+            }
+
+            static Exception? Finalizer(Exception __exception, ref string __result)
+            {
+                if (__exception == null) return null;
+                string cached = MPSaveManager.CachedVersionFolderOrEmpty;
+                if (cached.Length == 0) return __exception;   // nothing better to serve -- let it throw
+
+                // Explicit null checks, not string.IsNullOrEmpty: on net48 the reference
+                // assemblies carry no nullable annotations, so IsNullOrEmpty does not narrow
+                // and every later use would flag CS8600/CS8601.
+                string serve = cached;
+                try
+                {
+                    var r = MPSaveCoordinator.LoadRedirectFolder;
+                    if (r != null && r.Length > 0) serve = r;
+                }
+                catch { }
+                __result = serve;
+
+                if (!_threwLogged)
+                {
+                    _threwLogged = true;
+                    _threwNextAt = DateTime.UtcNow.AddSeconds(30);
+                    Plugin.Logger.LogWarning($"[MPSave] CurrentVersionFolderPath threw after patching - serving the cached folder (PROTON-1): {__exception}");
+                }
+                else
+                {
+                    _threwSince++;
+                    if (DateTime.UtcNow >= _threwNextAt)
+                    {
+                        _threwNextAt = DateTime.UtcNow.AddSeconds(30);
+                        Plugin.Logger.LogWarning($"[MPSave] CurrentVersionFolderPath still throwing: {_threwSince} more (PROTON-1)");
+                        _threwSince = 0;
+                    }
+                }
+                return null;
             }
         }
 
