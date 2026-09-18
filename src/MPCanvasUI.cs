@@ -840,6 +840,7 @@ namespace BigAmbitionsMP
             // window is open (the lobby window is typically open all session).
             _sub = MPPerf.Begin(); MPPriceFillProbe.Tick(); MPPerf.End("F.PriceP", _sub);   // PROBE PriceFill (round-101 item 3) — remove when resolved
             _sub = MPPerf.Begin(); MPDemandProbe.Tick(); MPPerf.End("F.DemP", _sub);        // PROBE Demand (round-102) — remove when resolved
+            _sub = MPPerf.Begin(); CustProbe.Tick(); MPPerf.End("F.CustP", _sub);         // PROBE CustStall (P-CUST-STALL) — remove when resolved
             // (quiesce-off 4s timer RETIRED 2026-06-11 — stage-4 migration #1:
             //  the quiesce now ends on the lifecycle WorldReady EVENT; see
             //  OnLifecyclePhase below.)
