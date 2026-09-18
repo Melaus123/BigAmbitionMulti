@@ -880,8 +880,19 @@ namespace BigAmbitionsMP
                         // indoors. Stateless: re-evaluated every fleet packet, so any input
                         // change (step outside, tag repaired, possession) recovers in seconds.
                         string myBldg = MPRegisterSync.CurrentShopAddress ?? "";
+                        bool parkingTag = IsStreetParking(e.Bldg ?? "");   // GARAGE-MASK-1
+                        // FOLD F3 (M2, 2026-09-18): every garage NUMBER shares ONE instantiated layout at the
+                        // same coordinates — UndergroundParkingManager.EnterParkingCoroutine loads the single
+                        // "ba:buildingsize_parking" size and calls BuildingManager.ToggleLayout on it, and the
+                        // size resolver hands out one instance per size+version.  So an UNCONDITIONAL garage
+                        // exemption paints a partner's car parked in garage #3 into the view of someone
+                        // standing in garage #5.  A parking-tagged ghost is shown only to a viewer inside the
+                        // SAME numbered garage, read from the game's own state (IsInsideParking +
+                        // CurrentStreetNumber, which the parking entrance stamps from its own Address).
+                        bool sameGarage = parkingTag && ViewerInGarage(GarageNumberOfTag(e.Bldg ?? ""));
                         bool maskVeh;
                         if (iPossessIt) maskVeh = false;
+                        else if (parkingTag) maskVeh = !sameGarage;                                        // GARAGE-MASK-1 + FOLD F3: a garage is not an interior, but it IS a numbered place
                         else if (!string.IsNullOrEmpty(e.Bldg)) maskVeh = e.Bldg != myBldg;                // tagged: unchanged rule
                         else maskVeh = myBldg.Length > 0 && IsHandCartType(e.TypeName ?? "");             // '' + viewer indoors → hide (carts only)
                         if (rv.Go.activeSelf == maskVeh)
@@ -907,7 +918,8 @@ namespace BigAmbitionsMP
                             }
                             Plugin.Logger.LogInfo(
                                 $"[InteriorMask] ghost '{e.TypeName}' ({e.VehicleId}) {(maskVeh ? "hidden" : "shown")} — " +
-                                $"tag='{e.Bldg}' mine='{MPRegisterSync.CurrentShopAddress}' possessed={iPossessIt}.");
+                                $"tag='{e.Bldg}' mine='{MPRegisterSync.CurrentShopAddress}' possessed={iPossessIt}" +
+                                $"{(parkingTag && !iPossessIt ? (sameGarage ? " — parked in a garage, same garage as the viewer (GARAGE-MASK-1)" : " — parked in a garage, other garage or outside (GARAGE-MASK-1)") : "")}.");
                         }
                     }
                 }
@@ -2312,6 +2324,81 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] data-follow: {ex.Message}"); }
         }
 
+        /// <summary>GARAGE-MASK-1: true when a building tag ("<number> <street>") names a parking
+        /// garage.  The plain game never treats a garage as an interior, so neither mask may hide a
+        /// vehicle parked in one.</summary>
+        internal static bool IsStreetParking(string bldg)
+        {
+            if (string.IsNullOrEmpty(bldg)) return false;
+            int sp = bldg.IndexOf(' ');
+            string street = sp >= 0 ? bldg.Substring(sp + 1) : bldg;
+            return string.Equals(street, "ba:street_parking", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>FOLD F3: the garage NUMBER out of a parking building tag ("&lt;number&gt; ba:street_parking",
+        /// built at the tagger from streetNumber + streetName), or -1 when the tag names no garage.</summary>
+        internal static int GarageNumberOfTag(string bldg)
+        {
+            if (!IsStreetParking(bldg)) return -1;
+            int sp = bldg.IndexOf(' ');
+            if (sp <= 0) return -1;
+            return int.TryParse(bldg.Substring(0, sp), out int n) ? n : -1;
+        }
+
+        /// <summary>FOLD F3: is the LOCAL viewer standing in that same numbered underground garage?  All
+        /// garage numbers share one layout instance, so "inside a garage" alone is not enough.</summary>
+        internal static bool ViewerInGarage(int number)
+        {
+            if (number < 0) return false;
+            try
+            {
+                return Parking.UndergroundParking.UndergroundParkingManager.IsInsideParking
+                       && SaveGameManager.Current != null
+                       && SaveGameManager.Current.CurrentStreetNumber == number;
+            }
+            catch { return false; }
+        }
+
+        // GARAGE-MASK-1 diagnostic (log-only, once per world-ready, 40 lines max): where each owned
+        // vehicle actually is, and whether the owner-side mask is currently hiding it.  Dormant = a
+        // save record with no live VehicleController in VehicleHelper.AllPlayerVehicles.
+        public static void LogOwnedVehicleCensus(string reason)
+        {
+            try
+            {
+                var records = SaveGameManager.Current?.VehicleInstances;
+                if (records == null) return;
+                var liveById = new Dictionary<string, VehicleController>();
+                var list = VehicleHelper.AllPlayerVehicles;
+                if (list != null)
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var lvc = list[i];
+                        var lvi = lvc?.vehicleInstance;
+                        if (lvc == null || lvi == null || string.IsNullOrEmpty(lvi.id)) continue;
+                        if (!liveById.ContainsKey(lvi.id)) liveById[lvi.id] = lvc;
+                    }
+                int owned = 0, liveN = 0, lines = 0;
+                foreach (var inst in records)
+                {
+                    if (inst == null || string.IsNullOrEmpty(inst.id)) continue;
+                    owned++;
+                    bool isLive = liveById.TryGetValue(inst.id, out var lvc2) && lvc2 != null;
+                    if (isLive) liveN++;
+                    string bldg = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}";
+                    _ownedMaskState.TryGetValue(inst.id, out bool masked);
+                    string pos = "n/a";
+                    try { pos = $"({inst.position.x:0.0},{inst.position.y:0.0},{inst.position.z:0.0})"; } catch { }
+                    if (lines++ < 40)
+                        Plugin.Logger.LogInfo($"[Vehicle] census: {inst.id} {inst.vehicleTypeName} @ '{bldg}' " +
+                                              $"parking={(IsStreetParking(bldg) ? "Y" : "N")} pos={pos} " +
+                                              $"live={(isLive ? "Y" : "N")} masked={(masked ? "Y" : "N")}");
+                }
+                Plugin.Logger.LogInfo($"[Vehicle] census: {owned} owned, {liveN} live, {owned - liveN} dormant ({reason}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] census (GARAGE-MASK-1): {ex.Message}"); }
+        }
+
         // ── Round-74b: owner-side interior visibility for OWN vehicles ──
         private static readonly Dictionary<string, bool> _ownedMaskState = new();   // vid → currently hidden
 
@@ -2332,7 +2419,13 @@ namespace BigAmbitionsMP
                 string bldg;
                 if (_ownedFollowing.TryGetValue(inst.id, out var f)) bldg = f.Bldg ?? "";
                 else bldg = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}";
-                bool hide = bldg.Length > 0 && bldg != mine;             // same rule as the ghost mask
+                // GARAGE-MASK-1 (2026-09-18): an underground garage is NOT an interior in the plain
+                // game — the car sits in the world under the city and is never hidden.  This rule
+                // read any non-empty tag as "somewhere else", so an own car parked at
+                // '<n> ba:street_parking' was hidden FOREVER (renderers + colliders off: invisible
+                // and unclickable), because no shop address can ever equal a parking street.
+                bool parking = IsStreetParking(bldg);
+                bool hide = !parking && bldg.Length > 0 && bldg != mine;   // same rule as the ghost mask
                 _ownedMaskState.TryGetValue(inst.id, out bool wasHidden);
                 if (hide == wasHidden) continue;
                 _ownedMaskState[inst.id] = hide;
@@ -2342,7 +2435,8 @@ namespace BigAmbitionsMP
                     foreach (var c in vc.GetComponentsInChildren<Collider>(true)) if (c != null) c.enabled = !hide;
                 }
                 catch { }
-                Plugin.Logger.LogInfo($"[Vehicle] own '{inst.vehicleTypeName}' ({inst.id}) {(hide ? "hidden" : "shown")} — its bldg='{bldg}' mine='{mine}' (owner-side interior mask, round-74b).");
+                Plugin.Logger.LogInfo($"[Vehicle] own '{inst.vehicleTypeName}' ({inst.id}) {(hide ? "hidden" : "shown")} — its bldg='{bldg}' mine='{mine}'" +
+                                      $"{(parking ? " — parked in a garage, never hidden (GARAGE-MASK-1)" : "")} (owner-side interior mask, round-74b).");
             }
         }
 

@@ -587,6 +587,7 @@ namespace BigAmbitionsMP
             MPRegisterSync.DemoteForeignAssignedStaff("world-ready");      // round-196: interrupted-transfer staff residue
             MergerDissolve.HealIfPending("world-ready");   // DISSOLVE fold d: the heal armed by a first non-member state that landed before the world did
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
+            VehicleManager.LogOwnedVehicleCensus("world-ready");   // GARAGE-MASK-1: log-only owned-vehicle census (where each car is, and whether the mask hides it)
             OptionsGuard.PinClock("world-ready");   // SPEED-SHARED: adopt the session clock speed as the world opens (the host's own slider on the host, the value the host sent on a client)
             MPSaveCoordinator.EnsurePortraitFolderForWorld("world-ready");   // DISK-JUNK backstop: the scene-loaded call bails while the session name is still unknown
             GameStatePatcher.SweepLedgerVsRivalBusinesses("world-ready");   // round-50: drop player reservations on AI-rival-run addresses (host-only inside)
