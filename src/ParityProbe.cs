@@ -40,7 +40,8 @@ namespace BigAmbitionsMP
                     var t = m?.DeclaringType;
                     if (m == null || t == null) continue;
                     string full = t.FullName ?? "";
-                    if (t == typeof(Notifications) || full.Contains("ParityProbe") || full.StartsWith("HarmonyLib", StringComparison.Ordinal)) continue;
+                    if (t == typeof(Notifications) || full.Contains("ParityProbe") || full.StartsWith("HarmonyLib", StringComparison.Ordinal)
+                        || full.StartsWith("MonoMod", StringComparison.Ordinal) || m.Name.Contains("_Patch")) continue;   // the generated stub is not the caller
                     return full + "." + m.Name;
                 }
             }
