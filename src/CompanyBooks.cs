@@ -741,17 +741,31 @@ namespace BigAmbitionsMP
                     }
 
                     // D19-1: fold the partner's WHOLE day record — every float it holds.
+                    var foldedDays = new List<int>();   // DAYTABLE-1 C3(ii)
                     foreach (var t in p.Totals)
                     {
                         if (t == null) continue;
                         var rec = gi.financialSummaries.Find(x => x != null && x.dayNumber == t.Day);
-                        if (rec == null) continue;
+                        if (rec == null)
+                        {
+                            // DAYTABLE-1 C1: this day's whole partner total is dropped on the floor here.
+                            // The user suspects MONEY is being missed, not only a display difference — this
+                            // line is what two players' logs compare.  Behaviour unchanged (still `continue`).
+                            if (_foldDropLines < 60)
+                            {
+                                _foldDropLines++;
+                                Plugin.Logger.LogWarning($"[Books] fold DROPPED: no local day record for day {t.Day} from '{pid}' (their total {t.TotalProfit:F2})");
+                            }
+                            continue;
+                        }
                         skipped.TryGetValue(t.Day, out var skip);
                         skippedRealEstate.TryGetValue(t.Day, out var skipRe);
                         var L = LedgerOf(t.Day, pid);
                         Fold(rec, L, t, skip, skipRe);
                         added += t.TotalProfit - skip - skipRe;
+                        if (!foldedDays.Contains(t.Day)) foldedDays.Add(t.Day);
                     }
+                    foreach (var fd in foldedDays) LogDayTable(fd, "fold");   // DAYTABLE-1 C3(ii)
                 }
 
                 _pending = false;
@@ -987,6 +1001,7 @@ namespace BigAmbitionsMP
                 _pending = true;
                 Publish("day change");
                 Apply("day change");
+                try { LogDayTable((SaveGameManager.Current?.Day ?? 0) - 1, "publish"); } catch { }   // DAYTABLE-1 C3(iii)
                 try { MPPatches.RefreshTopbarMoneyChange(); } catch { }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] day change: {ex.Message}"); }
@@ -1543,6 +1558,94 @@ namespace BigAmbitionsMP
         }
 
         // ── helpers ─────────────────────────────────────────────────────────────────────────────
+        // ── DAYTABLE-1 (log-only) ──────────────────────────────────────────
+        /// <summary>C1 budget: silent fold drops reported (max 60 per session).</summary>
+        private static int _foldDropLines;
+        /// <summary>C3 budgets: DAYTABLE lines emitted, overall and from the fold path.</summary>
+        private static int _dayTableLines, _dayTableFoldLines;
+
+        /// <summary>C2: ONE line describing a day record end to end.  own{} is the record MINUS every
+        /// float this machine folded into it (the removal ledger is the exact record of that), folded{}
+        /// is what each partner's fold added, recordTotal is rec.totalProfit as it stands right now —
+        /// which is the number the end-of-day popup reads (DailySummary.cs:70-79).  Read-only: it
+        /// touches no record and no ledger.  Field names are FinancialSummary's own
+        /// (decompile Entities/FinancialSummary.cs:61-89).</summary>
+        internal static string DayTableLine(int day, string why)
+        {
+            var sb = new System.Text.StringBuilder();
+            try
+            {
+                string t = "-";
+                try { t = $"D{TimeHelper.CurrentDay} {TimeHelper.CurrentHour:00}:{(int)TimeHelper.CurrentMinute:00}"; } catch { }
+                sb.Append("[Books] DAYTABLE day=").Append(day).Append(" why=").Append(why)
+                  .Append(" me=").Append(MPConfig.PlayerId).Append(" t=").Append(t);
+
+                var rec = SaveGameManager.Current?.financialSummaries?.Find(x => x != null && x.dayNumber == day);
+                if (rec == null) { sb.Append(" own{NO LOCAL RECORD} folded{} recordTotal=-"); return sb.ToString(); }
+
+                float fBP = 0f, fLoan = 0f, fHI = 0f, fHH = 0f, fRE = 0f, fNI = 0f, fPF = 0f, fSI = 0f, fRes = 0f, fUW = 0f, fTP = 0f;
+                var folded = new System.Text.StringBuilder();
+                if (_overlaid.TryGetValue(day, out var perPid))
+                    foreach (var kv in perPid)
+                    {
+                        var L = kv.Value;
+                        fBP += L.BusinessProfit; fLoan += L.LoanExpenses; fHI += L.HealthInsurance;
+                        fHH += L.HeadhunterFees; fRE += L.RealEstateTotal; fNI += L.NegativeInterest;
+                        fPF += L.ParkingFees;    fSI += L.SalaryIncome;   fRes += L.ResidentialExpenses;
+                        fUW += L.UnassignedWages; fTP += L.TotalProfit;
+                        if (folded.Length > 0) folded.Append("; ");
+                        folded.Append(kv.Key).Append(":{total=").Append(L.TotalProfit.ToString("F2"))
+                              .Append(" business=").Append(L.BusinessProfit.ToString("F2"))
+                              .Append(" loan=").Append(L.LoanExpenses.ToString("F2"))
+                              .Append(" healthIns=").Append(L.HealthInsurance.ToString("F2"))
+                              .Append(" headhunter=").Append(L.HeadhunterFees.ToString("F2"))
+                              .Append(" realEstate=").Append(L.RealEstateTotal.ToString("F2"))
+                              .Append(" negInterest=").Append(L.NegativeInterest.ToString("F2"))
+                              .Append(" parking=").Append(L.ParkingFees.ToString("F2"))
+                              .Append(" salary=").Append(L.SalaryIncome.ToString("F2"))
+                              .Append(" residential=").Append(L.ResidentialExpenses.ToString("F2"))
+                              .Append(" unassignedWages=").Append(L.UnassignedWages.ToString("F2"))
+                              .Append(" rows=").Append(L.Addresses.Count).Append("+").Append(L.RealEstate.Count)
+                              .Append("}");
+                    }
+
+                sb.Append(" own{total=").Append((rec.totalProfit - fTP).ToString("F2"))
+                  .Append(" salaryIncome=").Append((rec.salaryIncome - fSI).ToString("F2"))
+                  .Append(" totalBusinessProfit=").Append((rec.totalBusinessProfit - fBP).ToString("F2"))
+                  .Append(" totalLoanExpenses=").Append((rec.totalLoanExpenses - fLoan).ToString("F2"))
+                  .Append(" totalHealthInsuranceExpenses=").Append((rec.totalHealthInsuranceExpenses - fHI).ToString("F2"))
+                  .Append(" totalHeadhunterReplacementFees=").Append((rec.totalHeadhunterReplacementFees - fHH).ToString("F2"))
+                  .Append(" totalRealEstate=").Append((rec.totalRealEstate - fRE).ToString("F2"))
+                  .Append(" negativeInterestRates=").Append((rec.negativeInterestRates - fNI).ToString("F2"))
+                  .Append(" parkingFees=").Append((rec.parkingFees - fPF).ToString("F2"))
+                  .Append(" totalResidentialExpenses=").Append((rec.totalResidentialExpenses - fRes).ToString("F2"))
+                  .Append(" totalUnassignedStaffWages=").Append((rec.totalUnassignedStaffWages - fUW).ToString("F2"))
+                  .Append(" bizRows=").Append(rec.businessIncomeStatements?.Count ?? 0)
+                  .Append(" reRows=").Append(rec.realEstateStatements?.Count ?? 0)
+                  .Append(" resRows=").Append(rec.residentialStatements?.Count ?? 0)
+                  .Append("}");
+                sb.Append(" folded{").Append(folded).Append("}");
+                sb.Append(" recordTotal=").Append(rec.totalProfit.ToString("F2"));
+            }
+            catch (Exception ex) { sb.Append(" [DAYTABLE failed: ").Append(ex.Message).Append("]"); }
+            return sb.ToString();
+        }
+
+        /// <summary>C3: budgeted emitter — merged sessions only (the same membership test every other
+        /// books path uses).  Log-only; no behaviour anywhere depends on it.</summary>
+        internal static void LogDayTable(int day, string why)
+        {
+            try
+            {
+                if (!MergerSync.IAmMember) return;
+                if (_dayTableLines >= 300) return;
+                if (why == "fold") { if (_dayTableFoldLines >= 120) return; _dayTableFoldLines++; }
+                _dayTableLines++;
+                Plugin.Logger.LogInfo(DayTableLine(day, why));
+            }
+            catch { }
+        }
+
         private static Ledger LedgerOf(int day, string pid)
         {
             if (!_overlaid.TryGetValue(day, out var perPid)) { perPid = new Dictionary<string, Ledger>(); _overlaid[day] = perPid; }

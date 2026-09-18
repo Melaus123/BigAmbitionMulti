@@ -3696,6 +3696,47 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: JobDemand.Fulfilled(string, List<ScheduleDay>) ─ orphan guard ─
+        // INFOBOX-GUARD-1: the STRING overload (decompile
+        // Entities.Employee.JobDemands/JobDemand.cs:58-62) resolves the id with
+        // EmployeeHelper.GetEmployeeById and hands the result to the abstract
+        // EmployeeInstance overload UNCHECKED.  For a shift naming an id this save
+        // does not hold, HoursWorkingPerWeek.Fulfilled derefs null
+        // (instance.assignedWeeklyHours, Requirements/HoursWorkingPerWeek.cs:24-26)
+        // and ScheduleEmployeeInfoBox.SetUpDemand throws on EVERY redraw — the
+        // employee info box stays blank (error census B4: 190 throws in one bundle).
+        // The ONLY caller of the string overload is that SetUpDemand
+        // (UI.Smartphone.Apps.BizMan.Schedule/ScheduleEmployeeInfoBox.cs:34, reached
+        // from ScheduleEmployeeCellView.cs:188); it uses the bool for
+        // notFulfilledBackground.SetActive(!flag) and nothing else, so `false`
+        // paints the "not fulfilled" backing and writes nothing anywhere.
+        // JobDemand is abstract but THIS overload is concrete, so the patch is
+        // pinned by argument types and can only bind to it.
+        [HarmonyPatch(typeof(Entities.Employee.JobDemands.JobDemand), "Fulfilled",
+                      new Type[] { typeof(string), typeof(List<ScheduleDay>) })]
+        public static class Patch_JobDemand_Fulfilled_OrphanGuard
+        {
+            private static readonly System.Collections.Generic.HashSet<string> _loggedIds = new();
+            static bool Prefix(string __0, ref bool __result)
+            {
+                try
+                {
+                    Entities.EmployeeInstance? emp = null;
+                    try { emp = Helpers.EmployeeHelper.GetEmployeeById(__0 ?? ""); } catch { }
+                    if (emp != null) return true;   // resolvable — native runs untouched
+                    if (_loggedIds.Count < 40 && _loggedIds.Add(__0 ?? ""))
+                        Plugin.Logger.LogWarning($"[ScheduleDiag] JobDemand.Fulfilled: shift names unknown employee '{__0}' — demand reported unfulfilled, nothing changed (INFOBOX-GUARD-1).");
+                    __result = false;
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[Patch_JobDemand_Fulfilled_OrphanGuard] {ex.Message}");
+                    return true;
+                }
+            }
+        }
+
         // ── Patch: ScheduleHelper.UpdateEmployeeAfterWorkShiftChange(string) ──
         // The removal path (right-click → RemoveWorkShift) indexes
         // EmployeesById[employeeId] AFTER removing the shift but BEFORE the two
@@ -9941,6 +9982,10 @@ namespace BigAmbitionsMP
             {
                 try { CompanyBooks.ApplyPending("daily popup"); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] daily popup hook: {ex.Message}"); }
+                // DAYTABLE-1 C3(i): AFTER the apply above — this is the Day-1 figure the player is about
+                // to see (DailySummary.ExecuteSequence reads financialSummaries[dayNumber == Day-1]).
+                try { CompanyBooks.LogDayTable((SaveGameManager.Current?.Day ?? 0) - 1, "popup"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] daily popup daytable: {ex.Message}"); }
             }
         }
 
