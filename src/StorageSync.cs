@@ -42,6 +42,7 @@ namespace BigAmbitionsMP
         internal static void SendOp(StorageOpPayload req)
         {
             if (req == null) return;
+            req.NestedAware = true;   // CARTBAG-1: this build carries container contents on every op (see StorageOpPayload.NestedAware)
 #if DEBUG || BAMP_DEV
             DebugWireRoundTripOnce();
 #endif
@@ -72,6 +73,85 @@ namespace BigAmbitionsMP
 
         // NULLNAME-1: session budget for the wire-side skip notice (this file's decoder half).
         private static int _namelessWireLogged;
+        // CARTBAG-1 diagnostic budgets (log-only, per session).
+        private static int _nestedDecodeLogged, _bundleHandoffLogged;
+
+        // ── CARTBAG-1 H2: the mirror-take contents cache (owner-side, no wire, no version map) ──
+        // A borrower running a build WITHOUT the nested band mirror-TAKES a filled bundle here and
+        // mirror-PUTS it back with an EMPTY Nested band; the put would then rebuild a BARE
+        // container and every good inside would be destroyed. The owner cannot learn the peer's
+        // version (see the note in TakeLoose phase B), so it remembers what a Silent take just
+        // removed and re-attaches it when the matching hollow put arrives. The wire always wins
+        // when the put DOES carry contents. Deliberately tiny and short-lived: at most 8 entries,
+        // 120 s each — a stale entry can only ever re-fill an instance of the very same
+        // (vehicle, name, amount, paid) whose contents this machine itself removed.
+        private const int MirrorNestedCacheMax = 8;
+        private const float MirrorNestedCacheSeconds = 120f;
+        private sealed class MirrorNestedEntry
+        {
+            internal string Key = "";
+            internal System.Collections.Generic.List<CargoNestedInfo> Nested = new System.Collections.Generic.List<CargoNestedInfo>();
+            internal float At;
+        }
+        private static readonly System.Collections.Generic.List<MirrorNestedEntry> _mirrorNested = new System.Collections.Generic.List<MirrorNestedEntry>();
+
+        /// <summary>Scene boundary: the mirror-take memory never crosses a world change (re-check R2 note b).</summary>
+        internal static void ResetMirrorNested() { try { _mirrorNested.Clear(); } catch { } }
+
+        private static string MirrorNestedKey(string? vehicleId, string? itemName, int amount, bool paid)
+            => (vehicleId ?? "") + "|" + (itemName ?? "") + "|" + amount + "|" + (paid ? "1" : "0");
+
+        /// <summary>CARTBAG-1 H2 — remember the contents a SILENT (mirror) whole-bundle take just
+        /// removed from a vehicle, keyed by (VehicleId, itemName, amount, paid).</summary>
+        private static void RememberMirrorNested(StorageOpPayload req, StorageResPayload res)
+        {
+            try
+            {
+                if (req == null || res == null || !req.Silent) return;
+                if (string.IsNullOrEmpty(req.VehicleId)) return;          // the cache key is a vehicle's
+                if (res.Nested == null || res.Nested.Count == 0) return;  // nothing to lose
+                float now = UnityEngine.Time.unscaledTime;
+                string key = MirrorNestedKey(req.VehicleId, req.ItemName, res.Amount, res.Paid);
+                for (int i = _mirrorNested.Count - 1; i >= 0; i--)
+                {
+                    var e = _mirrorNested[i];
+                    if (e == null || now - e.At > MirrorNestedCacheSeconds || e.Key == key) _mirrorNested.RemoveAt(i);
+                }
+                _mirrorNested.Add(new MirrorNestedEntry { Key = key, Nested = res.Nested, At = now });
+                while (_mirrorNested.Count > MirrorNestedCacheMax) _mirrorNested.RemoveAt(0);
+            }
+            catch { }
+        }
+
+        /// <summary>CARTBAG-1 H2 — the other half: a SILENT vehicle put that carries no contents
+        /// gets back what the matching mirror take removed. Any matching put (hollow or not) drops
+        /// the entry: one take, one put.</summary>
+        private static void ApplyMirrorNestedFallback(StorageOpPayload req, CargoInstance ci)
+        {
+            try
+            {
+                if (req == null || ci == null || string.IsNullOrEmpty(req.VehicleId)) return;
+                if (_mirrorNested.Count == 0) return;
+                string key = MirrorNestedKey(req.VehicleId, req.ItemName, req.Amount, req.Paid);
+                float now = UnityEngine.Time.unscaledTime;
+                for (int i = _mirrorNested.Count - 1; i >= 0; i--)
+                {
+                    var e = _mirrorNested[i];
+                    if (e == null || now - e.At > MirrorNestedCacheSeconds) { _mirrorNested.RemoveAt(i); continue; }
+                    if (e.Key != key) continue;
+                    _mirrorNested.RemoveAt(i);
+                    if (!req.Silent || (req.Nested != null && req.Nested.Count > 0)) return;   // the wire wins
+                    // Re-check R2 (goods DUPLICATION): a sender that is NestedAware would have sent the contents - an
+                    // empty band from it means the bag really IS empty (she kept the filled one). Only a 0.3.0 sender,
+                    // which can never send contents on a mirror put, gets them put back.
+                    if (req.NestedAware) return;
+                    DecodeNestedInto(ci, e.Nested);
+                    Plugin.Logger.LogWarning($"[VStore] mirror put of '{req.ItemName}' arrived without contents — re-attached {e.Nested.Count} nested entr(ies) the matching mirror take removed (CARTBAG-1 H2).");
+                    return;
+                }
+            }
+            catch { }
+        }
 
         internal static void DecodeNestedInto(CargoInstance ci, System.Collections.Generic.List<CargoNestedInfo>? nested)
         {
@@ -89,6 +169,8 @@ namespace BigAmbitionsMP
             }
             if (skipped > 0 && _namelessWireLogged++ < 20)
                 Plugin.Logger.LogInfo($"[Cargo] skipped a nameless nested entry from the wire (NULLNAME-1) ×{skipped}");
+            if (_nestedDecodeLogged++ < 60)
+                Plugin.Logger.LogInfo($"[Cargo] nested applied={nested.Count - skipped} into '{ci.itemName}' (CARTBAG-1).");
         }
 
 #if DEBUG || BAMP_DEV
@@ -391,8 +473,9 @@ namespace BigAmbitionsMP
                     // the next manifest (inherited round-32 semantics, both containers).
                     var ci = new CargoInstance(req.ItemName, req.Amount, req.PricePerUnit, req.Paid);
                     DecodeNestedInto(ci, req.Nested);   // ONE codec — a sealed give-back keeps its contents (Stage C)
+                    ApplyMirrorNestedFallback(req, ci);   // CARTBAG-1 H2 — a hollow mirror put gets its contents back
                     if (inst.TryToAddToCargo(ci)) { res.Ok = true; res.Reason = ""; }
-                    else if (req.Ctx == "boxreturn" || req.Ctx == "return")
+                    else if (req.Ctx == "boxreturn" || req.Ctx == "return" || req.Silent)
                     {
                         // R9 hardening (user-approved 2026-08-25): a give-back is the second half
                         // of a removal this container just granted — refusing it DESTROYS the item
@@ -401,9 +484,14 @@ namespace BigAmbitionsMP
                         // already holds only what the partial merge didn't absorb, and a bundle
                         // never partial-merges (native MergeIntoCargo refuses nested). Overfill-
                         // by-one mirrors the native sealed pass; the next take drains it.
+                        // CARTBAG-1 M2: a SILENT (mirror) put needs the same landing. The borrower
+                        // already performed the native add on her proxy and the Silent early-out
+                        // discards this result, so a refusal here is invisible to her and the next
+                        // manifest refresh wipes her copy — the goods would simply be gone.
                         inst.AddToCargo(ci);
                         res.Ok = true; res.Reason = "";
-                        Plugin.Logger.LogWarning($"[VStore] give-back force-landed {ci.amount}×{ci.itemName} on '{req.VehicleId}' — holder refused 'full' (overfill-by-one, R9 hardening).");
+                        bool mirrorPut = req.Ctx != "boxreturn" && req.Ctx != "return";
+                        Plugin.Logger.LogWarning($"[VStore] {(mirrorPut ? "mirror put" : "give-back")} force-landed {ci.amount}×{ci.itemName} on '{req.VehicleId}' — holder refused 'full' (overfill-by-one, {(mirrorPut ? "CARTBAG-1 M2" : "R9 hardening")}).");
                     }
                     else
                     {
@@ -631,27 +719,75 @@ namespace BigAmbitionsMP
             if (res.Ok)
             {
                 res.Ctx = "boxtake";   // designed-in requirement #1: delivery + give-back route by ctx
-                // Review NEW-8: the preservation guarantee is conditional on DELIVERY. A
-                // Silent mirror (ctx "" by construction) never delivers — its res is
-                // discarded at the Silent early-out, so the contents are NOT echoed anywhere
-                // (unchanged from pre-fix: the borrower's native copy was nested-free; a
-                // refusal here would DUPLICATE the bag instead). Name that honestly.
+                // Review NEW-8, REWRITTEN by CARTBAG-1: a Silent mirror still echoes nothing (its
+                // res is discarded at the Silent early-out), but it no longer LOSES anything. The
+                // borrower's own copy of this bag now arrives with its real contents on the fleet
+                // manifest (VehicleEntry.CargoNested), so removing the owner's whole bundle here
+                // mirrors a native take of an equally-filled bag. The old sentence — "contents are
+                // not delivered on a mirror" — described a real destruction of the owner's goods
+                // and is retired.
+                // NOT GUARDED, deliberately: a peer running a build WITHOUT the nested band would
+                // still mirror a bare copy back, and this machine cannot tell. A peer's mod version
+                // is known only to the HOST, at Hello (MPServer.cs _peerBuild, keyed by the
+                // LiteNetLib peer id, not by PlayerId), and the owner applying a mirror may be a
+                // client that has no such map at all — so the check is not cheaply available here.
                 if (req.Silent)
-                    Plugin.Logger.LogInfo($"[{Tag(req.Container)}] mirror take of '{req.ItemName}' matched a BUNDLE — removed whole to mirror the native take; contents are not delivered on a mirror (pre-existing shape, F-2026-08-25-I).");
+                    Plugin.Logger.LogInfo($"[{Tag(req.Container)}] mirror take of '{req.ItemName}' matched a BUNDLE — removed whole to mirror the native take; its contents travelled to the borrower on the fleet manifest (CARTBAG-1).");
                 else
                     Plugin.Logger.LogInfo($"[{Tag(req.Container)}] plain take of '{req.ItemName}' matched a BUNDLE — upgraded to whole-instance take, contents echoed (F-2026-08-25-I).");
             }
         }
 
-        /// <summary>THE bundle matcher (one home): the first unsealed NESTED-BEARING instance
-        /// matching name (paid-preference two-pass) with an instance-EXACT amount, taken whole
-        /// via TakeWholeOf. Callers: TakeLoose phase B (the plain-take upgrade, which then stamps
+        /// <summary>CARTBAG-1 F1 — do two bundles hold the SAME goods? Order-insensitive multiset
+        /// compare of (ItemName, Amount, PricePerUnit) between a live instance's contents and the
+        /// contents a request names. Price compared with a cent-sized tolerance: both sides are
+        /// floats that have been through the wire codec.</summary>
+        private static bool NestedEquals(System.Collections.Generic.List<NestedCargoInstance>? have,
+                                         System.Collections.Generic.List<CargoNestedInfo>? want)
+        {
+            int haveCount = 0, wantCount = 0;
+            if (have != null) foreach (var h in have) if (h != null) haveCount++;
+            if (want != null) foreach (var w in want) if (w != null) wantCount++;
+            if (haveCount != wantCount) return false;
+            if (wantCount == 0) return true;
+            var used = new bool[want!.Count];
+            foreach (var h in have!)
+            {
+                if (h == null) continue;
+                bool hit = false;
+                for (int i = 0; i < want.Count; i++)
+                {
+                    var w = want[i];
+                    if (w == null || used[i]) continue;
+                    if ((w.ItemName ?? "") != (h.itemName ?? "")) continue;
+                    if (w.Amount != h.amount) continue;
+                    if (Math.Abs(w.PricePerUnit - h.pricePerUnit) > 0.01f) continue;
+                    used[i] = true; hit = true; break;
+                }
+                if (!hit) return false;
+            }
+            return true;
+        }
+
+        /// <summary>THE bundle matcher (one home): an unsealed NESTED-BEARING instance matching
+        /// name (paid-preference two-pass) with an instance-EXACT amount, taken whole via
+        /// TakeWholeOf. Callers: TakeLoose phase B (the plain-take upgrade, which then stamps
         /// res.Ctx) and the bundlesell/bundlediscard ctx routes (removal-only; ctx untouched so
-        /// the result routes to the credit branch, never to delivery).</summary>
+        /// the result routes to the credit branch, never to delivery).
+        ///
+        /// CARTBAG-1 F1: two filled bags of the SAME name on one cart is ordinary, and since the
+        /// borrower's copy carries real contents her mirror take NAMES the one she took
+        /// (req.Nested). So when the request carries contents, the instance holding exactly those
+        /// contents WINS; the first (name, paid, amount) match is only the fallback, and taking it
+        /// is logged as a warning because it means bag A was removed for a take of bag B.
+        /// A request carrying NO contents never reaches here while a bare instance exists: phase A
+        /// (TakeLoose) runs first and takes plain instances only.</summary>
         private static void TakeBundleInstance(System.Collections.Generic.List<CargoInstance>? src, StorageOpPayload req, StorageResPayload res,
                                                Action<CargoInstance> removeWhole)
         {
             if (src == null) return;
+            bool wantNested = req.Nested != null && req.Nested.Count > 0;
+            CargoInstance? fallback = null;   // first (name, paid, amount) match whose contents differ
             for (int pass = 0; pass < 2 && !res.Ok; pass++)
                 for (int c = 0; c < src.Count; c++)
                 {
@@ -663,9 +799,21 @@ namespace BigAmbitionsMP
                     if (ci.itemName != req.ItemName) continue;
                     if (pass == 0 && ci.paid != req.Paid) continue;
                     if (ci.amount != req.Amount) continue;   // whole move — instance-exact (bundles are amount 1 by ConvertToCargoInstance)
+                    if (wantNested && !NestedEquals(ci.nestedCargoInstances, req.Nested))
+                    {
+                        if (fallback == null) fallback = ci;   // pass 0 first, so a paid-matching one wins
+                        continue;
+                    }
                     TakeWholeOf(ci, res, removeWhole);
+                    RememberMirrorNested(req, res);   // CARTBAG-1 H2
                     break;
                 }
+            if (!res.Ok && fallback != null)
+            {
+                Plugin.Logger.LogWarning($"[{Tag(req.Container)}] take of '{req.ItemName}' named {req.Nested!.Count} nested entr(ies), but no bundle here holds exactly those — took the first same-name bundle instead (CARTBAG-1 F1).");
+                TakeWholeOf(fallback, res, removeWhole);
+                RememberMirrorNested(req, res);   // CARTBAG-1 H2
+            }
         }
 
         /// <summary>THE whole-instance mutation body (review NEW-7 / ruling 37 — one home):
@@ -676,6 +824,11 @@ namespace BigAmbitionsMP
         {
             res.Paid = ci.paid; res.PricePerUnit = ci.pricePerUnit; res.Amount = ci.amount;
             res.Nested = EncodeNested(ci.nestedCargoInstances);   // ONE codec (R7/R11)
+            if (res.Nested.Count > 0 && _bundleHandoffLogged++ < 60)
+            {
+                bool sealedLog = false; try { sealedLog = ci.IsSealed; } catch { }
+                Plugin.Logger.LogInfo($"[Cargo] bundle '{ci.itemName}' sealed={sealedLog} nested sent={res.Nested.Count} — whole-instance take (CARTBAG-1).");
+            }
             removeWhole(ci);
             res.Ok = true; res.Reason = "";
         }

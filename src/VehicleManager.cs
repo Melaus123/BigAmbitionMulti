@@ -215,11 +215,27 @@ namespace BigAmbitionsMP
         /// both readers (GhostCargoFor and ApplyCargoManifest) go through here BY CONSTRUCTION.</summary>
         internal static System.Collections.Generic.List<(string item, int amount, bool paid, float price)> ParseCargoManifest(string? manifest)
         {
-            var rows = new System.Collections.Generic.List<(string, int, bool, float)>();
+            var indexed = ParseCargoManifestIndexed(manifest);
+            var rows = new System.Collections.Generic.List<(string, int, bool, float)>(indexed.Count);   // pre-sized: no re-grow
+            foreach (var r in indexed) rows.Add((r.item, r.amount, r.paid, r.price));
+            return rows;
+        }
+
+        /// <summary>CARTBAG-1 — the SAME one parser, keeping each accepted row's ORDINAL: its
+        /// position among the rows the SENDER wrote (an empty part, e.g. the trailing ';', is not a
+        /// row and is not counted; a REFUSED row still is, because the sender counted it). The
+        /// nested-contents band (VehicleEntry.CargoNested) addresses instances by that ordinal, so a
+        /// row this parser refuses must not silently shift a bag's contents onto its neighbour —
+        /// callers map ordinal → their own position instead of assuming the two agree.</summary>
+        internal static System.Collections.Generic.List<(int ord, string item, int amount, bool paid, float price)> ParseCargoManifestIndexed(string? manifest)
+        {
+            var rows = new System.Collections.Generic.List<(int, string, int, bool, float)>();
             if (string.IsNullOrEmpty(manifest)) return rows;
+            int ord = -1;
             foreach (var part in manifest!.Split(';'))
             {
                 if (string.IsNullOrEmpty(part)) continue;
+                ord++;
                 var bits = part.Split('=');
                 if (bits.Length != 2 && bits.Length != 4) continue;   // 2 = legacy wire, 4 = +paid+price (Option A)
                 if (string.IsNullOrEmpty(bits[0])) continue;
@@ -230,10 +246,78 @@ namespace BigAmbitionsMP
                     paid = bits[2] != "0";
                     float.TryParse(bits[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out price);
                 }
-                rows.Add((bits[0], amount, paid, price));
+                rows.Add((ord, bits[0], amount, paid, price));
             }
             return rows;
         }
+
+        /// <summary>CARTBAG-1 — THE fleet cargo-manifest BUILDER (one home; the live pass and the
+        /// dormant pass both go through it). Writes the ';'-separated "item=amount=paid=price" rows
+        /// ParseCargoManifest reads, and fills <paramref name="nestedOut"/> with the additive nested
+        /// band for every row that is a filled container (or a sealed one), addressed by row
+        /// ordinal. The manifest is NO LONGER visual-only: receivers rebuild real contents from it.
+        /// '=' separator: EA 0.11 item ids CONTAIN colons ("ba:itemname_cheapgift") — ':' made the
+        /// parser skip every entry (no boxes on remote beds). 4-part since Option A (2026-07-07):
+        /// paid + price ride along so the replica is checkout-faithful — the register reads unpaid
+        /// stacks and prices OFF THE REPLICA when a borrower shops with a pushed cart. 24-row cap as
+        /// before (deeper storages list their first 24).</summary>
+        internal static string BuildCargoManifest(System.Collections.Generic.List<BigAmbitions.Items.CargoInstance>? src,
+                                                  System.Collections.Generic.List<VehicleCargoNested> nestedOut)
+        {
+            if (src == null || src.Count == 0) return "";
+            var csb = new System.Text.StringBuilder();
+            int ord = 0;
+            try
+            {
+                for (int ci = 0; ci < src.Count && ci < 24; ci++)
+                {
+                    var c = src[ci];
+                    if (c == null) continue;
+                    csb.Append(c.itemName).Append('=').Append(c.amount)
+                       .Append('=').Append(c.paid ? '1' : '0')
+                       .Append('=').Append(c.pricePerUnit.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
+                       .Append(';');
+                    bool sealedCi = false; try { sealedCi = c.IsSealed; } catch { }
+                    int nn = 0; try { nn = c.nestedCargoInstances?.Count ?? 0; } catch { }
+                    if (nn > 0 || sealedCi)
+                        nestedOut.Add(new VehicleCargoNested
+                        {
+                            Index = ord, Sealed = sealedCi,
+                            Nested = StorageSync.EncodeNested(c.nestedCargoInstances),   // THE codec (R7/R11)
+                        });
+                    ord++;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] cargo manifest build: {ex.Message}"); }
+            return csb.ToString();
+        }
+
+        /// <summary>CARTBAG-1 — a compact change signature over the nested band, so a CONTENTS-only
+        /// change (same bag, different goods inside) counts as a fleet change on both sides: the
+        /// sender's resting signature and the receiver's AppliedCargo compare both append it.
+        /// Without it a bag emptied or filled in place would never reach anyone.</summary>
+        internal static string NestedBandSig(System.Collections.Generic.List<VehicleCargoNested>? band)
+        {
+            if (band == null || band.Count == 0) return "";
+            var sb = new System.Text.StringBuilder(64);
+            foreach (var b in band)
+            {
+                if (b == null) continue;
+                sb.Append(b.Index).Append(b.Sealed ? '#' : '-');
+                if (b.Nested != null)
+                    foreach (var n in b.Nested)
+                    {
+                        if (n == null) continue;
+                        sb.Append(n.ItemName).Append(':').Append(n.Amount).Append(',');
+                    }
+                sb.Append('/');
+            }
+            return sb.ToString();
+        }
+
+        // CARTBAG-1 diagnostic budgets (log-only, per session).
+        private static int _bundleSentLogged;
+        private static int _nestedAppliedLogged;
 
         private static string Snip(string? s)
             => string.IsNullOrEmpty(s) ? "(empty)" : (s!.Length <= 60 ? s : s.Substring(0, 57) + "...");
@@ -457,43 +541,37 @@ namespace BigAmbitionsMP
                     {
                         if (IsOpenVehicle(tn)) openDriven = t;   // hand-IK sync anchor
                     }
-                    // Cargo manifest → remote bed/handtruck boxes (visual only).
-                    string cargo = "";
-                    try
-                    {
-                        if (inst.cargoInstances != null && inst.cargoInstances.Count > 0)
-                        {
-                            var csb = new System.Text.StringBuilder();
-                            for (int ci = 0; ci < inst.cargoInstances.Count && ci < 24; ci++)
-                            {
-                                var c = inst.cargoInstances[ci];
-                                if (c == null) continue;
-                                // '=' separator: EA 0.11 item ids CONTAIN colons
-                                // ("ba:itemname_cheapgift") — ':' made the parser
-                                // skip every entry (no boxes on remote beds).
-                                // 4-part since Option A (2026-07-07): paid + price ride along so the
-                                // replica is checkout-faithful — the register reads unpaid stacks and
-                                // prices OFF THE REPLICA when a borrower shops with a pushed cart.
-                                csb.Append(c.itemName).Append('=').Append(c.amount)
-                                   .Append('=').Append(c.paid ? '1' : '0')
-                                   .Append('=').Append(c.pricePerUnit.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
-                                   .Append(';');
-                            }
-                            cargo = csb.ToString();
-                        }
-                    }
-                    catch { }
+                    // Cargo manifest → remote bed/handtruck boxes, AND (CARTBAG-1) the nested
+                    // CONTENTS of every filled container on it. The manifest used to be visual-only
+                    // on the contents question: a shop bag arrived as a BARE bag everywhere else.
+                    var cargoNested = new System.Collections.Generic.List<VehicleCargoNested>();
+                    string cargo = BuildCargoManifest(inst.cargoInstances, cargoNested);
                     // Carts transport ITEM INSTANCES (cargoIds), not loose cargo
                     // — run-16 evidence: HandTruck manifest "(empty)" with a box
                     // on it.  Ship the count; ghosts render generic boxes.
                     int carried = 0;
                     try { carried = inst.cargoIds?.Count ?? 0; } catch { }
 
-                    string manifestSig = $"{cargo}|{carried}";
+                    // CARTBAG-1: the nested band is part of the signature, so a contents-only
+                    // change re-logs here AND re-sends (RestingFleetSig appends the same band).
+                    string manifestSig = $"{cargo}|{carried}|{NestedBandSig(cargoNested)}";
                     if (!_lastManifestLogged.TryGetValue(inst.id, out var prevCargo) || prevCargo != manifestSig)
                     {
                         _lastManifestLogged[inst.id] = manifestSig;
-                        Plugin.Logger.LogInfo($"[Vehicle] manifest {tn} '{inst.id}': {(cargo.Length > 0 ? cargo : "(empty)")} carried={carried}");
+                        Plugin.Logger.LogInfo($"[Vehicle] manifest {tn} '{inst.id}': {(cargo.Length > 0 ? cargo : "(empty)")} carried={carried} bundles={cargoNested.Count}");
+                        if (cargoNested.Count > 0 && _bundleSentLogged < 60)   // budget spent → skip the re-parse entirely
+                        {
+                            var mrows = ParseCargoManifestIndexed(cargo);
+                            foreach (var b in cargoNested)
+                            {
+                                if (_bundleSentLogged >= 60) break;
+                                if (b == null) continue;
+                                string outer = "?";
+                                foreach (var mr in mrows) if (mr.ord == b.Index) { outer = mr.item; break; }
+                                _bundleSentLogged++;
+                                Plugin.Logger.LogInfo($"[Cargo] bundle '{outer}' sealed={b.Sealed} nested sent={b.Nested?.Count ?? 0} — fleet manifest '{inst.id}' (CARTBAG-1).");
+                            }
+                        }
                     }
 
                     // Cross-interior tag v3 (round-74): the VEHICLE's own native street data is the
@@ -557,6 +635,7 @@ namespace BigAmbitionsMP
                         X = t.position.x, Y = t.position.y, Z = t.position.z,
                         Qx = t.rotation.x, Qy = t.rotation.y, Qz = t.rotation.z, Qw = t.rotation.w,
                         Cargo = cargo,
+                        CargoNested = cargoNested,   // CARTBAG-1 (additive)
                         CarriedItems = carried,
                         Bldg  = bldg,
                     });
@@ -582,30 +661,17 @@ namespace BigAmbitionsMP
                             {
                                 if (inst == null || string.IsNullOrEmpty(inst.id) || live.Contains(inst.id)) continue;
                                 if (inst.id.StartsWith("BAMP_") && !inst.id.StartsWith("BAMP_TESTRIG")) continue;   // leaked ghosts: never re-broadcast
-                                string dCargo = "";
-                                if (inst.cargoInstances != null && inst.cargoInstances.Count > 0)
-                                {
-                                    var csb = new System.Text.StringBuilder();
-                                    for (int ci = 0; ci < inst.cargoInstances.Count && ci < 24; ci++)
-                                    {
-                                        var c = inst.cargoInstances[ci];
-                                        if (c == null) continue;
-                                        csb.Append(c.itemName).Append('=').Append(c.amount)
-                                           .Append('=').Append(c.paid ? '1' : '0')
-                                           .Append('=').Append(c.pricePerUnit.ToString("R", System.Globalization.CultureInfo.InvariantCulture))
-                                           .Append(';');
-                                    }
-                                    dCargo = csb.ToString();
-                                }
+                                var dNested = new System.Collections.Generic.List<VehicleCargoNested>();
+                                string dCargo = BuildCargoManifest(inst.cargoInstances, dNested);   // CARTBAG-1: one builder
                                 int dCarried = 0; try { dCarried = inst.cargoIds?.Count ?? 0; } catch { }
                                 // Car-package instrumentation (2026-08-25): the live pass logged
                                 // manifests, the dormant pass did not — which is exactly where the
                                 // fries triage needed evidence. Same per-id change throttle.
-                                string dManifestSig = $"{dCargo}|{dCarried}";
+                                string dManifestSig = $"{dCargo}|{dCarried}|{NestedBandSig(dNested)}";
                                 if (!_lastManifestLogged.TryGetValue(inst.id, out var dPrev) || dPrev != dManifestSig)
                                 {
                                     _lastManifestLogged[inst.id] = dManifestSig;
-                                    Plugin.Logger.LogInfo($"[Vehicle] manifest (dormant) {inst.vehicleTypeName} '{inst.id}': {(dCargo.Length > 0 ? dCargo : "(empty)")} carried={dCarried}");
+                                    Plugin.Logger.LogInfo($"[Vehicle] manifest (dormant) {inst.vehicleTypeName} '{inst.id}': {(dCargo.Length > 0 ? dCargo : "(empty)")} carried={dCarried} bundles={dNested.Count}");
                                 }
                                 string dBldg = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}";
                                 fleet.Vehicles.Add(new VehicleEntry
@@ -617,7 +683,7 @@ namespace BigAmbitionsMP
                                     Fuel      = inst.fuel,
                                     X = inst.position.x, Y = inst.position.y, Z = inst.position.z,
                                     Qx = inst.rotation.x, Qy = inst.rotation.y, Qz = inst.rotation.z, Qw = inst.rotation.w,
-                                    Cargo = dCargo, CarriedItems = dCarried,
+                                    Cargo = dCargo, CargoNested = dNested, CarriedItems = dCarried,
                                     Bldg = dBldg, Dormant = true,
                                 });
                             }
@@ -733,7 +799,10 @@ namespace BigAmbitionsMP
                   // whose settle jitter straddled a truncation boundary flipped the whole-fleet sig
                   // every tick, silently reverting the split. ColorName added (repaint reaches ≤1 beat).
                   .Append('|').Append(Mathf.RoundToInt(e.X)).Append(',').Append(Mathf.RoundToInt(e.Y)).Append(',').Append(Mathf.RoundToInt(e.Z))
-                  .Append('|').Append((int)(e.Fuel * 20f)).Append(';');
+                  .Append('|').Append((int)(e.Fuel * 20f))
+                  // CARTBAG-1: a CONTENTS-only change (same bag, different goods) must count as a
+                  // fleet change, or a parked cart's bag would never re-send until the heartbeat.
+                  .Append('|').Append(NestedBandSig(e.CargoNested)).Append(';');
             }
             return sb.ToString();
         }
@@ -774,7 +843,10 @@ namespace BigAmbitionsMP
                     var pos = new Vector3(e.X, e.Y, e.Z);
                     var rot = new Quaternion(e.Qx, e.Qy, e.Qz, e.Qw);
 
-                    string cargoSig = $"{e.Cargo}|{e.CarriedItems}";
+                    // CARTBAG-1: third segment = the nested band, so a contents-only change
+                    // drives the in-place RefreshGhostCargo. GhostCargoFor reads up to the FIRST
+                    // '|' only, so the manifest half it parses is unchanged.
+                    string cargoSig = $"{e.Cargo}|{e.CarriedItems}|{NestedBandSig(e.CargoNested)}";
                     if (!_remoteVehicles.TryGetValue(e.VehicleId, out var rv) || rv.Go == null)
                     {
                         var spawned = SpawnRemoteVehicle(p.OwnerId, e, pos, rot);
@@ -1088,7 +1160,8 @@ namespace BigAmbitionsMP
         /// (Option A: a borrower's register reads unpaid stacks off the replica).
         /// ('=' separator — EA 0.11 item ids contain colons.)
         /// Unknown item names are skipped (version drift safe).</summary>
-        private static void ApplyCargoManifest(VehicleInstance inst, string? manifest)
+        private static void ApplyCargoManifest(VehicleInstance inst, string? manifest,
+                                              System.Collections.Generic.List<VehicleCargoNested>? nestedBand)
         {
             if (string.IsNullOrEmpty(manifest)) return;
             try
@@ -1096,8 +1169,37 @@ namespace BigAmbitionsMP
                 if (inst.cargoInstances == null) return;
                 // F-2026-08-25-D: parsing lives in ParseCargoManifest ONLY — this method and the UI
                 // reader consumed the same string through two hand-rolled parsers and diverged.
-                foreach (var (item, amount, paid, price) in ParseCargoManifest(manifest))
+                // CARTBAG-1: remember where each ACCEPTED row landed, keyed by the SENDER's ordinal.
+                // A refused row (unknown shape / bad amount) shifts every later position, so the
+                // nested band is never applied by raw position.
+                // A peer without the band is exactly the old behaviour — and needs no ordinal map
+                // at all, so that allocation happens only when a band is actually present.
+                bool haveBand = nestedBand != null && nestedBand.Count > 0;
+                var posByOrd = haveBand ? new System.Collections.Generic.Dictionary<int, int>() : null;
+                foreach (var (ord, item, amount, paid, price) in ParseCargoManifestIndexed(manifest))
+                {
+                    if (haveBand) posByOrd![ord] = inst.cargoInstances.Count;
                     inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance(item, amount, price, paid));
+                }
+                if (!haveBand) return;
+                int applied = 0, missed = 0;
+                foreach (var b in nestedBand!)
+                {
+                    if (b == null) continue;
+                    if (!posByOrd!.TryGetValue(b.Index, out var pos) || pos < 0 || pos >= inst.cargoInstances.Count) { missed++; continue; }
+                    var ci = inst.cargoInstances[pos];
+                    if (ci == null) { missed++; continue; }
+                    StorageSync.DecodeNestedInto(ci, b.Nested);   // THE codec (R7/R11)
+                    applied++;
+                    // Sealed-ness is item DEFINITION data (F-2026-08-25-F): the rebuilt instance
+                    // derives it from the same item name, so there is nothing to write — only a
+                    // disagreement is worth knowing about (different item content on the two ends).
+                    bool localSealed = false; try { localSealed = ci.IsSealed; } catch { }
+                    if (localSealed != b.Sealed && _nestedAppliedLogged < 60)
+                        Plugin.Logger.LogWarning($"[Cargo] '{ci.itemName}' is sealed={localSealed} here but sealed={b.Sealed} on the sender — the two machines disagree about this item (CARTBAG-1).");
+                }
+                if (_nestedAppliedLogged++ < 60)
+                    Plugin.Logger.LogInfo($"[Cargo] nested applied={applied} of {nestedBand.Count} band entries on '{inst.id}'{(missed > 0 ? $" — {missed} had no parsed row" : "")} (CARTBAG-1).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] cargo manifest: {ex.Message}"); }
         }
@@ -1112,7 +1214,7 @@ namespace BigAmbitionsMP
             {
                 if (inst?.cargoInstances == null) return;
                 inst.cargoInstances.Clear();
-                ApplyCargoManifest(inst, e.Cargo);
+                ApplyCargoManifest(inst, e.Cargo, e.CargoNested);   // CARTBAG-1: contents ride the manifest
                 for (int ci = 0; ci < e.CarriedItems && ci < 12; ci++)
                     inst.cargoInstances.Add(new BigAmbitions.Items.CargoInstance("ba:itemname_cheapgift", 1, 0f, true));
             }

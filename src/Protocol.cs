@@ -1147,6 +1147,11 @@ namespace BigAmbitionsMP
                                                          // accessor-side OnResult must NOT place/consume/toast.
         // Sealed-box ops carry nested contents (ONE codec: StorageSync.EncodeNested/DecodeNested).
         public List<CargoNestedInfo> Nested { get; set; } = new();
+        /// <summary>CARTBAG-1 (additive, 2026-09-18): TRUE on every op sent by a build that carries container contents
+        /// on its mirror ops. A 0.3.0 sender has no such member, so it reads FALSE - the owner's 'put the contents back'
+        /// memory (StorageSync.ApplyMirrorNestedFallback) applies ONLY to those, never to a new-version peer whose bag is
+        /// genuinely empty (that would mint the contents a second time).</summary>
+        public bool NestedAware { get; set; }
     }
 
     /// <summary>Owner → host → accessor: the verdict on a StorageOp. Ok=false → Reason ("gone" /
@@ -1294,6 +1299,22 @@ namespace BigAmbitionsMP
         // shape is not in the decompile tree, so a serializer for it is unverifiable; the loss is
         // cosmetic and pre-existing in both directions. Extend HERE + the one codec pair
         // (StorageSync.EncodeNested/DecodeNested) when the type is read.
+    }
+
+    /// <summary>CARTBAG-1 (additive): the NESTED contents of one filled container riding the fleet
+    /// cargo manifest (a shop paper bag and what is in it). A peer that does not know this member
+    /// ignores it and behaves exactly as it did before, and the VehicleEntry.Cargo string itself is
+    /// untouched — its 2-/4-part rows still parse on a 0.3.0 peer.</summary>
+    public class VehicleCargoNested
+    {
+        /// <summary>Position of the instance in the SAME order VehicleEntry.Cargo lists it (the
+        /// first 24, skipping the same nulls) — NOT a raw cargoInstances index.</summary>
+        public int  Index  { get; set; }
+        /// <summary>Sealed on the SENDER. Carried as a cross-check only: sealed-ness is item
+        /// DEFINITION data (F-2026-08-25-F), so a receiver re-derives it from the item name and has
+        /// nothing to write. A disagreement means the two machines run different item content.</summary>
+        public bool Sealed { get; set; }
+        public List<CargoNestedInfo> Nested { get; set; } = new();
     }
 
     /// <summary>Driver (a granted borrower) → host → all: the live pose of owner O's car V while the borrower
@@ -2097,6 +2118,11 @@ namespace BigAmbitionsMP
         /// ids contain colons) so remote ghosts show the bed/handtruck boxes
         /// (they derive from cargo) — user bug 2026-06-11.</summary>
         public string Cargo { get; set; } = "";
+        /// <summary>CARTBAG-1 (additive): the nested CONTENTS of the manifest's filled containers.
+        /// Until this band existed every receiver rebuilt a shop bag as a BARE container, and the
+        /// borrowed-cart mirror then wrote that bare copy back over the owner's real filled bag.
+        /// Empty from a peer that predates the band — behaviour there is exactly what it was.</summary>
+        public List<VehicleCargoNested> CargoNested { get; set; } = new();
         /// <summary>Count of ITEM INSTANCES being transported (VehicleInstance
         /// .cargoIds — the channel hand trucks use; separate from loose-cargo
         /// amounts).  Receivers render that many generic boxes.</summary>

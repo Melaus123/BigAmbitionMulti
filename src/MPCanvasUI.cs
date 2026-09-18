@@ -588,6 +588,7 @@ namespace BigAmbitionsMP
             MergerDissolve.HealIfPending("world-ready");   // DISSOLVE fold d: the heal armed by a first non-member state that landed before the world did
             MPSaveIntegrity.RunSweep("world-ready");   // dangling-reference repair/detect (includes duty-shift repair); summary rides bug reports
             VehicleManager.LogOwnedVehicleCensus("world-ready");   // GARAGE-MASK-1: log-only owned-vehicle census (where each car is, and whether the mask hides it)
+            GameStatePatcher.LogUnregisteredBusinessTypes("world-ready");   // BIZTYPE-1: log-only — rented addresses whose business type no loaded mod registers (the black-screen start-up abort)
             OptionsGuard.PinClock("world-ready");   // SPEED-SHARED: adopt the session clock speed as the world opens (the host's own slider on the host, the value the host sent on a client)
             MPSaveCoordinator.EnsurePortraitFolderForWorld("world-ready");   // DISK-JUNK backstop: the scene-loaded call bails while the session name is still unknown
             GameStatePatcher.SweepLedgerVsRivalBusinesses("world-ready");   // round-50: drop player reservations on AI-rival-run addresses (host-only inside)
@@ -3452,6 +3453,7 @@ namespace BigAmbitionsMP
                 GameStatePatcher.SweepRivalFieldContamination("scene ready");   // heal renters written into the DEED field (rent-vs-deed split 2026-07-09)
                 _worldHealthAt = Time.unscaledTime + 30f;   // world-integrity line AFTER the rival cache fills (30s)
                 _postSyncHealthDone = false; _postSyncHealthAt = -1f;   // round-50: re-arm the post-sync census for this load
+                StorageSync.ResetMirrorNested();                        // CARTBAG-1: the mirror-take contents memory is per world
                 GameStatePatcher.ResetTenancyConflictLog();             // round-50b: conflict lines are once-per-address-per-load
                 // Round-35: a save can carry a STALE BAMP_ proxy id in ActiveVehicleId (borrowed cart
                 // despawned mid-push before the round-34b exit guard existed). IsUsingVehicle then reads

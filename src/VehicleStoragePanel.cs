@@ -485,13 +485,26 @@ namespace BigAmbitionsMP
                         if (agg.TryGetValue(n.ItemName, out var v)) agg[n.ItemName] = v + n.Amount;
                         else { agg[n.ItemName] = n.Amount; ordered.Add(n.ItemName); }
                     }
-                tip = new System.Collections.Generic.List<string>();
-                foreach (var nm in ordered)
+                // CARTBAG-1 parity (native CargoItemUi :123-131): an UNSEALED container whose
+                // contents are ONE distinct item is NAMED BY THAT ITEM instead of carrying a
+                // tooltip — and only for the containers the card's own contentItemNames lists,
+                // which is exactly the native test. Mixed contents keep the outer name + tooltip.
+                // The mod's one label helper bakes the count INTO the name ("(3) Hot Dog") the way
+                // its sealed rows already read; native splits it into the separate amount label.
+                if (agg.Count == 1 && ordered.Count == 1 && IsContentNamedContainer(it))
                 {
-                    string line = nm;
-                    var lbl = ItemLabelOrNull(nm, agg[nm]);   // JIT-contained binding (MINOR-F)
-                    if (lbl != null) { try { line = lbl.ToString(); } catch { } }
-                    tip.Add(line);
+                    contents = (ordered[0], agg[ordered[0]]);
+                }
+                else
+                {
+                    tip = new System.Collections.Generic.List<string>();
+                    foreach (var nm in ordered)
+                    {
+                        string line = nm;
+                        var lbl = ItemLabelOrNull(nm, agg[nm]);   // JIT-contained binding (MINOR-F)
+                        if (lbl != null) { try { line = lbl.ToString(); } catch { } }
+                        tip.Add(line);
+                    }
                 }
             }
             MakeNativeCard(it, "", () => VehicleStorageSync.RequestTake(vid, owner, it, amt, p, pr, "boxtake"),
@@ -543,6 +556,24 @@ namespace BigAmbitionsMP
 
         // Instantiate a native cargo card from the cloned template and fill it WITHOUT running CargoItemUi
         // (calling SetUp would run owner-side cargo logic). We set its serialized fields directly via reflection.
+        /// <summary>CARTBAG-1: does native rename THIS container by its contents? CargoItemUi keeps
+        /// a serialized list of exactly those items (`contentItemNames`, decompile :81 / :125) —
+        /// read it off the clone TEMPLATE. A miss (field gone, template absent) answers false, which
+        /// leaves the tooltip shape the panel used before: readable, just not native-exact.</summary>
+        private static bool IsContentNamedContainer(string itemName)
+        {
+            try
+            {
+                if (_cargoTemplate == null || string.IsNullOrEmpty(itemName)) return false;
+                var tci = _cargoTemplate.GetComponent<CargoItemUi>();
+                if (tci == null) return false;
+                var names = AccessTools.Field(typeof(CargoItemUi), "contentItemNames")?.GetValue(tci)
+                            as System.Collections.Generic.List<string>;
+                return names != null && names.Contains(itemName);
+            }
+            catch { return false; }
+        }
+
         /// <summary>Stage C (M5): does this item NAME derive a sealed container? Same derivation
         /// the game's own CargoInstance.IsSealed getter runs (F-2026-08-25-F: sealed-ness is item
         /// DEFINITION data, never instance state — a name is enough).</summary>

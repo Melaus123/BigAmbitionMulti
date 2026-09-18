@@ -125,6 +125,10 @@ namespace BigAmbitionsMP
         public bool   Paid;
         public float  Price;
         public string Name;
+        /// <summary>CARTBAG-1: the nested CONTENTS of the instance this mutation moved, captured in
+        /// the prefix (the native call mutates/empties the source). A filled shop bag mirrored
+        /// without them re-created a BARE bag on the owner's real vehicle.</summary>
+        public System.Collections.Generic.List<CargoNestedInfo>? Nested;
     }
 
     // ADD chokepoint. Proxy: block (caller keeps the item in its source — nothing is deleted; the routed
@@ -140,7 +144,8 @@ namespace BigAmbitionsMP
             if (!ProxyCargo.IsProxy(__instance)) return true;
             if (ProxyCargo.IsPossessedPushed(__instance) && cargoInstance != null)
             {
-                __state = new CargoMirrorState { Active = true, Amount = cargoInstance.amount, Paid = cargoInstance.paid, Price = cargoInstance.pricePerUnit, Name = cargoInstance.itemName };
+                __state = new CargoMirrorState { Active = true, Amount = cargoInstance.amount, Paid = cargoInstance.paid, Price = cargoInstance.pricePerUnit, Name = cargoInstance.itemName,
+                                                 Nested = StorageSync.EncodeNested(cargoInstance.nestedCargoInstances) };   // CARTBAG-1
                 return true;   // run the native add on the replica
             }
             __result = false;
@@ -153,7 +158,11 @@ namespace BigAmbitionsMP
             {
                 if (!__state.Active) return;
                 int added = __result ? __state.Amount : __state.Amount - (cargoInstance?.amount ?? __state.Amount);
-                if (added > 0) VehicleStorageSync.MirrorToOwner(VehicleStorageSync.OpPut, __instance, __state.Name, added, __state.Paid, __state.Price);
+                // CARTBAG-1: only a WHOLE add moves a filled container (native MergeIntoCargo
+                // refuses nested instances outright, VehicleInstance.cs:207) — a partial merge is
+                // by definition a loose stack, so it carries no contents.
+                if (added > 0) VehicleStorageSync.MirrorToOwner(VehicleStorageSync.OpPut, __instance, __state.Name, added, __state.Paid, __state.Price,
+                                                                __result ? __state.Nested : null);
             }
             catch { }
         }
@@ -172,7 +181,8 @@ namespace BigAmbitionsMP
             {
                 // ReduceFromCargo calls this internally AFTER zeroing the stack — amount ≤ 0 there, so the
                 // nested mirror self-suppresses (MirrorToOwner rejects amount ≤ 0). No double-count.
-                __state = new CargoMirrorState { Active = true, Amount = cargoInstance.amount, Paid = cargoInstance.paid, Price = cargoInstance.pricePerUnit, Name = cargoInstance.itemName };
+                __state = new CargoMirrorState { Active = true, Amount = cargoInstance.amount, Paid = cargoInstance.paid, Price = cargoInstance.pricePerUnit, Name = cargoInstance.itemName,
+                                                 Nested = StorageSync.EncodeNested(cargoInstance.nestedCargoInstances) };   // CARTBAG-1 (diagnostic)
                 return true;
             }
             return false;
@@ -183,7 +193,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (!__state.Active || __state.Amount <= 0) return;
-                VehicleStorageSync.MirrorToOwner(VehicleStorageSync.OpTake, __instance, __state.Name, __state.Amount, __state.Paid, __state.Price);
+                VehicleStorageSync.MirrorToOwner(VehicleStorageSync.OpTake, __instance, __state.Name, __state.Amount, __state.Paid, __state.Price, __state.Nested);
             }
             catch { }
         }

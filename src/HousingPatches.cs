@@ -391,7 +391,33 @@ namespace BigAmbitionsMP
                     var snap = new System.Collections.Generic.List<CargoInstance>(cargo);
                     foreach (var c in snap)
                         if (c != null && !c.IsSealed && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
-                            BuildingStorageSync.RequestPut(addr, fid, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                        {
+                            // CARTBAG-1: a FILLED container (a shop bag) must be put WITH its
+                            // contents, or the owner's copy lands bare and the goods inside are
+                            // destroyed. Same (empty) ctx on purpose: the owner's put decodes the
+                            // nested band for any ctx that is not producer/stationreturn, while the
+                            // requester's own source-consume must keep running — the give-back ctxs
+                            // ("boxreturn"/"return") skip it. SEALED containers never reach here:
+                            // the !IsSealed filter above matches the game's own refusal
+                            // (FridgeController:113, StorageShelfController:89/104,
+                            // DecorativeItemHolderController:207).
+                            // CARTBAG-1 M1 tripwire (parity with the vehicle deposit,
+                            // VehicleStorageSync RequestDeposit): CargoInstance.Copy()
+                            // (CargoInstance.cs:83) does NOT copy nestedCargoInstances, so an
+                            // amount>1 unsealed bundle would be SPLIT into hollow copies on the
+                            // owner and its contents destroyed. Nothing is sent and nothing is
+                            // moved — the goods stay where they are, with their owner.
+                            if (c.nestedCargoInstances != null && c.nestedCargoInstances.Count > 0 && c.amount > 1)
+                            {
+                                Plugin.Logger.LogWarning($"[Housing] fridge put skipped an unsealed bundle {c.amount}×{c.itemName} (amount>1 would split hollow — left with its owner; CARTBAG-1 M1 tripwire).");
+                                continue;
+                            }
+                            if (c.nestedCargoInstances != null && c.nestedCargoInstances.Count > 0)
+                                BuildingStorageSync.RequestPutBox(addr, fid, c.itemName, c.amount, c.paid, c.pricePerUnit,
+                                                                  StorageSync.EncodeNested(c.nestedCargoInstances), ctx: "");
+                            else
+                                BuildingStorageSync.RequestPut(addr, fid, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                        }
                 }
                 return false;   // routed each item to the owner; skip the native local add
             }
@@ -566,7 +592,33 @@ namespace BigAmbitionsMP
                     var snap = new System.Collections.Generic.List<CargoInstance>(cargo);
                     foreach (var c in snap)
                         if (c != null && !c.IsSealed && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
-                            BuildingStorageSync.RequestPut(addr, hid, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                        {
+                            // CARTBAG-1: a FILLED container (a shop bag) must be put WITH its
+                            // contents, or the owner's copy lands bare and the goods inside are
+                            // destroyed. Same (empty) ctx on purpose: the owner's put decodes the
+                            // nested band for any ctx that is not producer/stationreturn, while the
+                            // requester's own source-consume must keep running — the give-back ctxs
+                            // ("boxreturn"/"return") skip it. SEALED containers never reach here:
+                            // the !IsSealed filter above matches the game's own refusal
+                            // (FridgeController:113, StorageShelfController:89/104,
+                            // DecorativeItemHolderController:207).
+                            // CARTBAG-1 M1 tripwire (parity with the vehicle deposit,
+                            // VehicleStorageSync RequestDeposit): CargoInstance.Copy()
+                            // (CargoInstance.cs:83) does NOT copy nestedCargoInstances, so an
+                            // amount>1 unsealed bundle would be SPLIT into hollow copies on the
+                            // owner and its contents destroyed. Nothing is sent and nothing is
+                            // moved — the goods stay where they are, with their owner.
+                            if (c.nestedCargoInstances != null && c.nestedCargoInstances.Count > 0 && c.amount > 1)
+                            {
+                                Plugin.Logger.LogWarning($"[Housing] holder put skipped an unsealed bundle {c.amount}×{c.itemName} (amount>1 would split hollow — left with its owner; CARTBAG-1 M1 tripwire).");
+                                continue;
+                            }
+                            if (c.nestedCargoInstances != null && c.nestedCargoInstances.Count > 0)
+                                BuildingStorageSync.RequestPutBox(addr, hid, c.itemName, c.amount, c.paid, c.pricePerUnit,
+                                                                  StorageSync.EncodeNested(c.nestedCargoInstances), ctx: "");
+                            else
+                                BuildingStorageSync.RequestPut(addr, hid, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                        }
                 }
                 return false;
             }
@@ -648,7 +700,33 @@ namespace BigAmbitionsMP
                 if (src != null)
                     foreach (var c in src)
                         if (c != null && !c.IsSealed && !string.IsNullOrEmpty(c.itemName) && c.amount > 0)
-                            BuildingStorageSync.RequestPut(addr, shelfId, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                        {
+                            // CARTBAG-1: a FILLED container (a shop bag) must be put WITH its
+                            // contents, or the owner's copy lands bare and the goods inside are
+                            // destroyed. Same (empty) ctx on purpose: the owner's put decodes the
+                            // nested band for any ctx that is not producer/stationreturn, while the
+                            // requester's own source-consume must keep running — the give-back ctxs
+                            // ("boxreturn"/"return") skip it. SEALED containers never reach here:
+                            // the !IsSealed filter above matches the game's own refusal
+                            // (FridgeController:113, StorageShelfController:89/104,
+                            // DecorativeItemHolderController:207).
+                            // CARTBAG-1 M1 tripwire (parity with the vehicle deposit,
+                            // VehicleStorageSync RequestDeposit): CargoInstance.Copy()
+                            // (CargoInstance.cs:83) does NOT copy nestedCargoInstances, so an
+                            // amount>1 unsealed bundle would be SPLIT into hollow copies on the
+                            // owner and its contents destroyed. Nothing is sent and nothing is
+                            // moved — the goods stay where they are, with their owner.
+                            if (c.nestedCargoInstances != null && c.nestedCargoInstances.Count > 0 && c.amount > 1)
+                            {
+                                Plugin.Logger.LogWarning($"[Housing] shelf put skipped an unsealed bundle {c.amount}×{c.itemName} (amount>1 would split hollow — left with its owner; CARTBAG-1 M1 tripwire).");
+                                continue;
+                            }
+                            if (c.nestedCargoInstances != null && c.nestedCargoInstances.Count > 0)
+                                BuildingStorageSync.RequestPutBox(addr, shelfId, c.itemName, c.amount, c.paid, c.pricePerUnit,
+                                                                  StorageSync.EncodeNested(c.nestedCargoInstances), ctx: "");
+                            else
+                                BuildingStorageSync.RequestPut(addr, shelfId, c.itemName, c.amount, c.paid, c.pricePerUnit);
+                        }
                 return false;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] shelf add route: {ex.Message}"); return true; }

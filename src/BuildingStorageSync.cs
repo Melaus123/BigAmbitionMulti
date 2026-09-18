@@ -74,19 +74,28 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Round-47: put a SEALED BOX back (hands-full race after a boxtake) — nested contents
-        /// travel so the give-back doesn't strip the box.</summary>
-        public static void RequestPutBox(string addressKey, string itemId, string itemName, int amount, bool paid, float price, List<CargoNestedInfo> nested)
+        /// travel so the give-back doesn't strip the box. CARTBAG-1 widened it to ANY nested-bearing
+        /// put: the owner's put decodes the nested band for EVERY ctx that is not producer/
+        /// stationreturn (StorageSync.OwnerApplyBuilding), so an ordinary shelf/fridge/holder put of
+        /// a filled bag reuses this body with its own ctx. The ctx MATTERS on the requester side —
+        /// "boxreturn" means "a give-back, consume nothing locally", so a genuine deposit must pass
+        /// its own (empty) ctx or the source bag would never leave the depositor's hands.</summary>
+        public static void RequestPutBox(string addressKey, string itemId, string itemName, int amount, bool paid, float price, List<CargoNestedInfo> nested, string ctx = "boxreturn")
         {
             if (string.IsNullOrEmpty(addressKey) || string.IsNullOrEmpty(itemId) || amount <= 0 || string.IsNullOrEmpty(itemName)) return;
             var req = new StorageOpPayload
             {
                 Container = StorageSync.ContainerBuilding, AddressKey = addressKey, ItemId = itemId,
                 PlayerId = MPConfig.PlayerId, Op = StorageSync.OpPut, ItemName = itemName,
-                Amount = amount, Paid = paid, PricePerUnit = price, Ctx = "boxreturn",
+                Amount = amount, Paid = paid, PricePerUnit = price, Ctx = ctx ?? "boxreturn",
             };
             if (nested != null) req.Nested.AddRange(nested);
+            if (req.Nested.Count > 0 && _putBoxLogged++ < 60)
+                Plugin.Logger.LogInfo($"[Cargo] bundle '{itemName}' nested sent={req.Nested.Count} — put to '{addressKey}'/{itemId} ctx '{req.Ctx}' (CARTBAG-1).");
             StorageSync.SendOp(req);
         }
+
+        private static int _putBoxLogged;   // CARTBAG-1 diagnostic budget (log-only, per session)
 
         /// <summary>Round-32 (business helpers): ask the owner to change what a display/showcase item — or a
         /// producer (ctx="producerset") — stocks. The owner runs the same moves the native dropdown does.</summary>

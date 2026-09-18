@@ -250,12 +250,15 @@ namespace BigAmbitionsMP
             else                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.TrunkDetailReq, MPConfig.PlayerId, req));
         }
 
+        private static int _mirrorBundleLogged;   // CARTBAG-1 diagnostic budget (log-only, per session)
+
         // ── Borrowed-cart shopping (Option A, user-approved 2026-07-07) ──────────────────────────
         // MIRROR of a native cargo mutation that already ran on the possessed pushed proxy: replay the
         // same change on the owner's REAL vehicle, fire-and-forget (Silent — the accessor consumed/placed
         // the item natively; OnResult must not double-place, clear hands, or toast). The next fleet
         // re-sync overwrites the replica with the owner's truth, which now matches — convergent.
-        internal static void MirrorToOwner(byte op, VehicleInstance proxyInst, string itemName, int amount, bool paid, float price)
+        internal static void MirrorToOwner(byte op, VehicleInstance proxyInst, string itemName, int amount, bool paid, float price,
+                                           System.Collections.Generic.List<CargoNestedInfo>? nested = null)
         {
             try
             {
@@ -264,7 +267,14 @@ namespace BigAmbitionsMP
                 // Ruling 38 retired the old "no owner known → mirror LOST" failure: the HOST
                 // resolves the owner now, so a mirror routes even when this machine's owner map
                 // is momentarily cold (the fleet-note race that used to lose them).
-                Send(op, realVid, ownerId: "", itemName, amount, paid, price, silent: true);
+                // CARTBAG-1: a mirrored PUT of a FILLED container must carry its contents through
+                // THE codec. Without them the owner's real bag was rebuilt BARE on the far side —
+                // the reported "he bought fresh food onto his cart, she touched the cart, now both
+                // see 1 paper bag". The take mirror carries them for the diagnostic only (the
+                // owner's take matches the whole instance by name/amount/paid).
+                if (nested != null && nested.Count > 0 && _mirrorBundleLogged++ < 60)
+                    Plugin.Logger.LogInfo($"[Cargo] bundle '{itemName}' nested sent={nested.Count} — mirror {(op == OpPut ? "put" : "take")} to the owner of '{realVid}' (CARTBAG-1).");
+                Send(op, realVid, ownerId: "", itemName, amount, paid, price, silent: true, nested: nested);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[VStore] MirrorToOwner: {ex.Message}"); }
         }

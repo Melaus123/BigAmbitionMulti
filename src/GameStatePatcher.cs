@@ -2748,7 +2748,44 @@ namespace BigAmbitionsMP
         // Round-50b: double-tenancy conflicts logged once per address per load (the record
         // re-arrives every sync — one line carries the signal, repeats would bury it).
         private static readonly HashSet<string> _tenancyConflictLogged = new();
-        public static void ResetTenancyConflictLog() { try { _tenancyConflictLogged.Clear(); _layoutMirrorLogged = 0; _knownNamesCache = null; } catch { } }
+        // BIZTYPE-1: addresses already reported as carrying a business type this machine cannot resolve.
+        private static readonly HashSet<string> _unknownBizTypeLogged = new();
+
+        /// <summary>BIZTYPE-1 (log only, world-ready): every registration THIS machine rents whose
+        /// business type no loaded mod registers — the exact shape the game's own start-up aborts
+        /// on at the next load (CustomerEntriesHelper.Init → ShouldEntriesBeCreated,
+        /// CustomerEntriesHelper.cs:152, dereferences BusinessTypeHelper.GetData UNCHECKED for each
+        /// RentedByPlayer registration, so one unknown type means the cameras never initialise).
+        /// A count of 0 is reported too: its absence would be indistinguishable from the sweep not
+        /// running at all.</summary>
+        public static void LogUnregisteredBusinessTypes(string reason)
+        {
+            try
+            {
+                var regs = SaveGameManager.Current?.BuildingRegistrations;
+                if (regs == null) return;
+                int owned = 0, bad = 0;
+                foreach (var reg in regs)
+                {
+                    if (reg == null) continue;
+                    bool rented = false; try { rented = reg.RentedByPlayer; } catch { }
+                    if (!rented) continue;
+                    owned++;
+                    string type = ""; try { type = reg.businessTypeName ?? ""; } catch { }
+                    if (type.Length == 0) continue;
+                    bool known = true;
+                    try { known = Helpers.BusinessTypeHelper.GetData(type) != null; } catch { known = true; }
+                    if (known) continue;
+                    bad++;
+                    string addr = ""; try { addr = GameStateReader.AddressKey(reg) ?? ""; } catch { }
+                    if (bad <= 40)
+                        Plugin.Logger.LogWarning($"[Startup] owned '{addr}' has unregistered business type '{type}' — the game's start-up would abort on it (BIZTYPE-1).");
+                }
+                Plugin.Logger.LogInfo($"[Startup] business-type check ({reason}): {bad} of {owned} rented registration(s) carry a type this machine cannot resolve (BIZTYPE-1).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Startup] business-type check ({reason}): {ex.Message} (BIZTYPE-1)."); }
+        }
+        public static void ResetTenancyConflictLog() { try { _tenancyConflictLogged.Clear(); _unknownBizTypeLogged.Clear(); _layoutMirrorLogged = 0; _knownNamesCache = null; } catch { } }
 
         /// <summary>Review hollow-heal #2 / review-mopping #17: is this owner id a PLAYER this
         /// WORLD has ever known — independent of the LIVE roster (which is empty on a
@@ -5219,9 +5256,30 @@ namespace BigAmbitionsMP
                     // receiver standing inside the building on the OLD type until re-entry — same
                     // "field written, nothing notified" class as ROUND-122 below. Detect the change
                     // here, notify below.
-                    bool typeChanged = !string.Equals(reg.businessTypeName ?? "", info.BusinessTypeName ?? "", StringComparison.Ordinal);
+                    // BIZTYPE-1: a business type that no mod loaded HERE registers is not a
+                    // display problem — it is fatal at the NEXT start-up. CustomerEntriesHelper.Init
+                    // → ShouldEntriesBeCreated (CustomerEntriesHelper.cs:152) dereferences
+                    // BusinessTypeHelper.GetData(name) UNCHECKED for every RentedByPlayer
+                    // registration, so one unknown name aborts GameManager.Awake and the cameras
+                    // never initialise: a black-screen session. Copying a peer's name verbatim is
+                    // how that name gets here, and a later merger flip / takeover can mark the same
+                    // address RentedByPlayer locally. So: keep the LOCAL type, apply everything
+                    // else, and say so once per address.
+                    string incomingType = info.BusinessTypeName ?? "";
+                    bool typeKnownHere  = true;
+                    if (incomingType.Length > 0)
+                    {
+                        // The by-NAME dictionary lookup (BusinessTypeHelper.cs:112-119), not the
+                        // registration overload — the registration still holds the OLD name here.
+                        try { typeKnownHere = Helpers.BusinessTypeHelper.GetData(incomingType) != null; }
+                        catch { typeKnownHere = true; }   // the lookup itself failing is not evidence the type is unknown
+                    }
+                    bool typeChanged = typeKnownHere
+                                    && !string.Equals(reg.businessTypeName ?? "", info.BusinessTypeName ?? "", StringComparison.Ordinal);
                     reg.BusinessName        = info.BusinessName;
-                    reg.businessTypeName    = info.BusinessTypeName;
+                    if (typeKnownHere) reg.businessTypeName = info.BusinessTypeName;
+                    else if (_unknownBizTypeLogged.Add(info.AddressKey ?? "") && _unknownBizTypeLogged.Count <= 40)
+                        Plugin.Logger.LogWarning($"[BusinessSync] '{info.AddressKey}': type '{incomingType}' from '{info.OwnerPlayerId}' is not registered on this machine (a content mod the peer has and we lack) — local type kept (BIZTYPE-1).");
                     // H-ENTRY-1 (bundle 20260905-170233): a CLIENT mirrors the host's layout-template name. The game nulls it when a
                     // business ends (BuildingRegistration.Reset) and writes a new one when an AI shop opens; on a client that shutdown
                     // is suppressed and this record used to carry no Layout, so a dead business's template outlived it and LoadBuilding
