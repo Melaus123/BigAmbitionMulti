@@ -3,7 +3,7 @@
 Runs a JSON scenario end to end: pre-flight, arm the TestDrive file-drop channel, launch the
 scenario's instances (top-level "instances": 2 or 3, default 2) with local\\launch-mp-test.bat, wait for each instance's ARMED line, send the scenario's
 commands as <role>-<seq>.cmd files, match each .result, grep each role's log from that role's last
-mark, then write a verdict report to local\\runs\\.
+mark, then write a verdict report to .modding\\work\\runs\\.
 
 EVENTS OVER TIMERS: nothing ever "waits N seconds for state" - every wait is for a concrete event
 (a .result file, a log line) with a deadline, and a deadline that expires is a loud logged FAILURE.
@@ -52,7 +52,7 @@ LOGS = {"h": os.path.join(LOCALLOW, "Player.log"),
         "c": os.path.join(LOCALLOW, "Player-instance2.log"),
         "d": os.path.join(LOCALLOW, "Player-instance3.log")}
 LAUNCHER = os.path.join(ROOT, r"local\launch-mp-test.bat")
-RUNS = os.path.join(ROOT, r"local\runs")
+RUNS = os.path.join(ROOT, r".modding\work\runs")   # LOCAL-FOLDER-1: local\ holds only the user's launch .bat files
 GAME_EXE = "Big Ambitions.exe"
 
 ARMED_RE = {r: re.compile(r"\[BAMP\] \[TestDrive\] channel ARMED \(dev build, role '%s'\)" % r) for r in ROLES}

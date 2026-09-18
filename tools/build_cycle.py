@@ -81,10 +81,10 @@ def main():
     # game folder (0 DEV markers) and the next cycle refuses with a false RELEASE HOLD. Keep a copy of whatever was
     # deployed before this cycle and put it back whenever the cycle does not end in a verified Dev deploy.
     # The copy lives OUTSIDE the mod folder (user rule 2026-09-11: nothing test-only may travel with a Workshop
-    # upload, and ModsLocal\BigAmbitionsMP IS the upload source) - under the repo's gitignored local\ folder.
+    # upload, and ModsLocal\BigAmbitionsMP IS the upload source) - under the repo's gitignored .modding\work\build\ folder (LOCAL-FOLDER-1: local\ holds only the user's launch .bat files).
     backup = None
     if os.path.exists(DEPLOYED):
-        backup = os.path.join(ROOT, "local", "deployed-prebuild.dll")
+        backup = os.path.join(ROOT, ".modding", "work", "build", "deployed-prebuild.dll")
         os.makedirs(os.path.dirname(backup), exist_ok=True)
         shutil.copy2(DEPLOYED, backup)
         print(f"== pre-build deployed DLL saved ({md5(DEPLOYED)}, DEV markers {marker_count(DEPLOYED)}) -> {os.path.basename(backup)}")
@@ -126,12 +126,12 @@ def main():
                 if mm:
                     entry = f"{mm.group(1)} {mm.group(2)} {mm.group(3)}"
                     if entry not in seen: seen.append(entry)
-            os.makedirs(os.path.join(ROOT, "local"), exist_ok=True)
-            with open(os.path.join(ROOT, "local", f"build-warnings-{cfg}.txt"), "w", encoding="utf-8") as wf:
+            os.makedirs(os.path.join(ROOT, ".modding", "work", "build"), exist_ok=True)
+            with open(os.path.join(ROOT, ".modding", "work", "build", f"build-warnings-{cfg}.txt"), "w", encoding="utf-8") as wf:
                 wf.write("\n".join(seen) + ("\n" if seen else ""))
             tally = {}
             for e in seen: tally[e.split(" ")[1]] = tally.get(e.split(" ")[1], 0) + 1
-            print("   warning codes: " + ", ".join(f"{k} x{v}" for k, v in sorted(tally.items(), key=lambda kv: -kv[1])) + f"  (distinct {len(seen)}; full list in local/build-warnings-{cfg}.txt)")
+            print("   warning codes: " + ", ".join(f"{k} x{v}" for k, v in sorted(tally.items(), key=lambda kv: -kv[1])) + f"  (distinct {len(seen)}; full list in .modding/work/build/build-warnings-{cfg}.txt)")
         except Exception as wx:
             print(f"   (warning list not written: {wx})")
         if errors or rc != 0:
