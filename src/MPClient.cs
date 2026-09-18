@@ -1332,6 +1332,10 @@ namespace BigAmbitionsMP
             });
         }
 
+        /// <summary>PROTON-1: the save-version refusal below is logged at most once per process.
+        /// It fires from a start handler, which a wedged host can repeat.</summary>
+        private static bool _versionRefusalLogged;
+
         private static void HandleStartGame(MessageEnvelope env, bool isNew)
         {
             IsInLobby = false;
@@ -1352,6 +1356,23 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    // PROTON-1: every MP save path on this machine hangs off the game's save
+                    // version folder.  If it cannot be resolved, the store paths go relative and
+                    // the session corrupts quietly -- refuse instead, and leave the way the Leave
+                    // button does.  Checked HERE, on the main thread: EnsureVersionCached touches
+                    // IL2CPP, and HandleStartGame itself runs on the network poll thread.
+                    MPSaveManager.EnsureVersionCached();
+                    if (string.IsNullOrEmpty(MPSaveManager.CachedVersionFolderOrEmpty))
+                    {
+                        if (!_versionRefusalLogged)
+                        {
+                            _versionRefusalLogged = true;
+                            Plugin.Logger.LogError("[MPSave] REFUSING to start: the game's save version folder cannot be resolved on this machine (PROTON-1)");
+                        }
+                        try { Disconnect(); } catch { }
+                        return;
+                    }
+
                     if (isNew)
                     {
                         Plugin.Logger.LogInfo("[Client] Initialising new game and loading character creation...");

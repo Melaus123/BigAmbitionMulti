@@ -376,15 +376,134 @@ namespace BigAmbitionsMP
 
         /// <summary>Resolve + cache the SP version folder.  MUST be called from the
         /// Unity main thread (it touches IL2CPP).  Idempotent.</summary>
+        /// <summary>The cached SP version folder, or "" if it has never resolved.
+        /// Never touches IL2CPP, so it is safe on any thread (PROTON-1).</summary>
+        internal static string CachedVersionFolderOrEmpty => _spVersionCache ?? "";
+
+        /// <summary>Set by Plugin once the per-class Harmony patch loop is about to run —
+        /// only so the resolve log can say WHICH window produced the path (PROTON-1).</summary>
+        internal static bool PatchingStarted;
+
+        // PROTON-1 failure bookkeeping.  Field bundle bamp-bug-20260907-115848 (Linux/Proton)
+        // showed this failing 27,899 times with nothing but ex.Message each time, which told
+        // us nothing about WHERE it threw.  Full exception ONCE, then a counter at most every
+        // 30 s -- this is called from MPCanvasUI.Update, i.e. a per-frame path.
+        private static bool _ensureFailLogged;
+        private static bool _ensureResolveLogged;
+        private static bool _diskFallbackTried;
+        private static DateTime _diskFallbackNextAt = DateTime.MinValue;
+        private static bool _noVersionLogged;
+        private static int  _ensureFailSince;
+        private static DateTime _ensureFailNextAt = DateTime.MinValue;
+
         public static void EnsureVersionCached()
         {
             if (_spVersionCache != null) return;
             try
             {
                 var p = NativeCurrentVersionFolderPath();
-                if (!string.IsNullOrEmpty(p)) _spVersionCache = p;
+                if (!string.IsNullOrEmpty(p))
+                {
+                    // M1: SaveGamePathHelper.CurrentVersionFolderPath (1.0 :85) is
+                    // Path.Combine(SaveGameFolderPath, GameVersion.GetCurrent()?.GetSaveGameFolderName()
+                    // ?? "No version") — it is NEVER empty, so an unresolved version answers with a
+                    // real-looking path ending in "No version".  Caching that would pin every MP save
+                    // path to a junk folder for the session.  Reject it and let the per-frame retry
+                    // resolve the real one once GameVersion is up.
+                    if (IsNoVersionFolder(p))
+                    {
+                        if (!_noVersionLogged)
+                        {
+                            _noVersionLogged = true;
+                            Plugin.Logger.LogInfo("[MPSave] version folder not ready yet ('No version') - will retry");
+                        }
+                        return;
+                    }
+                    _spVersionCache = p;
+                    if (!_ensureResolveLogged)
+                    {
+                        _ensureResolveLogged = true;
+                        Plugin.Logger.LogInfo($"[MPSave] version folder resolved source={(PatchingStarted ? "native" : "pre-patch")}: '{p}' (PROTON-1)");
+                    }
+                    return;
+                }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] EnsureVersionCached: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                if (!_ensureFailLogged)
+                {
+                    _ensureFailLogged = true;
+                    _ensureFailNextAt = DateTime.UtcNow.AddSeconds(30);
+                    Plugin.Logger.LogWarning($"[MPSave] EnsureVersionCached failed (stack once): {ex}");
+                }
+                else
+                {
+                    _ensureFailSince++;
+                    if (DateTime.UtcNow >= _ensureFailNextAt)
+                    {
+                        _ensureFailNextAt = DateTime.UtcNow.AddSeconds(30);
+                        Plugin.Logger.LogWarning($"[MPSave] EnsureVersionCached still failing: {_ensureFailSince} more");
+                        _ensureFailSince = 0;
+                    }
+                }
+            }
+            TryDiskFallback();
+        }
+
+        /// <summary>M1: the last path segment is the placeholder GameVersion falls back to before
+        /// it has resolved — a path to reject, not to cache.</summary>
+        private static bool IsNoVersionFolder(string path)
+        {
+            var leaf = Path.GetFileName(path.TrimEnd('/', '\\'));
+            return string.Equals(leaf, "No version", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>PROTON-1 last resort: if the game's own path helper can no longer answer,
+        /// read the layout off disk instead.  <persistentDataPath>/SaveGames holds one folder
+        /// per game version plus our own '_BAMP_MP' sibling (and any other '_'-prefixed
+        /// bookkeeping), so the most recently written NON-underscore folder is the version the
+        /// player last used.  Tried once; a wrong guess here is still better than the silent
+        /// relative paths an empty cache produced.</summary>
+        private static void TryDiskFallback()
+        {
+            if (_spVersionCache != null || _diskFallbackTried) return;
+            // M4: do NOT latch the "tried" flag when there is nothing on disk to read yet —
+            // SaveGames is created lazily, so an early call would burn the one attempt against a
+            // directory that does not exist.  Retry at most every 30 s until it has run once
+            // against a real directory.
+            if (DateTime.UtcNow < _diskFallbackNextAt) return;
+            _diskFallbackNextAt = DateTime.UtcNow.AddSeconds(30);
+            try
+            {
+                string root = Path.Combine(UnityEngine.Application.persistentDataPath, "SaveGames");
+                if (!Directory.Exists(root)) return;
+                _diskFallbackTried = true;
+                DirectoryInfo? best = null;
+                DateTime bestAt = DateTime.MinValue;
+                foreach (var d in new DirectoryInfo(root).GetDirectories())
+                {
+                    if (d.Name.StartsWith("_", StringComparison.Ordinal)) continue;
+                    if (string.Equals(d.Name, "No version", StringComparison.OrdinalIgnoreCase)) continue;
+                    // M4: a version folder's OWN mtime doesn't move when a save inside one of its
+                    // character folders is written, so rank by the newest of the folder and its
+                    // immediate sub-directories (the character folders).
+                    DateTime at = d.LastWriteTimeUtc;
+                    try
+                    {
+                        foreach (var sub in d.GetDirectories())
+                            if (sub.LastWriteTimeUtc > at) at = sub.LastWriteTimeUtc;
+                    }
+                    catch { }
+                    if (best == null || at > bestAt) { best = d; bestAt = at; }
+                }
+                if (best == null) return;
+                _spVersionCache = best.FullName;
+                Plugin.Logger.LogWarning($"[MPSave] version folder resolved source=disk-fallback: '{best.FullName}' (PROTON-1)");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[MPSave] disk fallback for the version folder failed (PROTON-1): {ex.Message}");
+            }
         }
 
         /// <summary>The one native touch, isolated (review 2026-08-26). A compile-time binding to a

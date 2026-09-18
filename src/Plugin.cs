@@ -340,6 +340,24 @@ namespace BigAmbitionsMP
             UnityEngine.Object.DontDestroyOnLoad(_uiHost);
             _uiHost.AddComponent<MPCanvasUI>();
 
+            // PROTON-1: resolve and cache the game's save version folder BEFORE a single one
+            // of our patches is applied.  Field bundle bamp-bug-20260907-115848 (Linux/Proton):
+            // SaveGamePathHelper.CurrentVersionFolderPath() answered correctly at startup and
+            // then threw NullReferenceException on EVERY call once our redirect patch was
+            // attached -- for the game's own callers too.  With the cache empty, SpVersionFolder()
+            // returns "" and every MP store path silently becomes RELATIVE.  Caching here means
+            // that one known-good window is never missed.
+            try
+            {
+                MPSaveManager.EnsureVersionCached();
+                Plugin.Logger.LogInfo($"[MPSave] version folder cached before patching: '{MPSaveManager.CachedVersionFolderOrEmpty}'");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[MPSave] version folder caching before patching FAILED: {ex}");
+            }
+            MPSaveManager.PatchingStarted = true;
+
             // Apply Harmony patches per-class so a single bad class can't take
             // down the rest (PatchAll aborts on the first throw).
             //

@@ -1537,9 +1537,25 @@ namespace BigAmbitionsMP
         /// character fallback reuses them (null when the host loaded a save).</summary>
         public static GameVariablesDto? LastStartSettings;
 
+        /// <summary>PROTON-1: the save-version refusal in the two start paths below is logged
+        /// at most once per process -- the Start button can be clicked repeatedly.</summary>
+        private static bool _versionRefusalLogged;
+
         public static void StartNewGame(GameVariablesDto settings)
         {
             if (!_running) return;
+            // PROTON-1: refuse to start a session this machine cannot write saves for -- an
+            // unresolved version folder turns every MP store path relative, silently.
+            MPSaveManager.EnsureVersionCached();
+            if (string.IsNullOrEmpty(MPSaveManager.CachedVersionFolderOrEmpty))
+            {
+                if (!_versionRefusalLogged)
+                {
+                    _versionRefusalLogged = true;
+                    Plugin.Logger.LogError("[MPSave] REFUSING to start: the game's save version folder cannot be resolved on this machine (PROTON-1)");
+                }
+                return;   // lobby untouched -- nothing has flipped yet
+            }
             LastStartSettings = settings;
             MPLoadProfiler.Mark($"HOST StartNewGame ({settings.Difficulty}) — {_clients.Count} client(s)");
             // Round-217: identity at birth — mint the playthrough BEFORE anything can be
@@ -1652,6 +1668,18 @@ namespace BigAmbitionsMP
         public static void StartLoadGame()
         {
             if (!_running) return;
+            // PROTON-1: refuse to start a session this machine cannot write saves for -- an
+            // unresolved version folder turns every MP store path relative, silently.
+            MPSaveManager.EnsureVersionCached();
+            if (string.IsNullOrEmpty(MPSaveManager.CachedVersionFolderOrEmpty))
+            {
+                if (!_versionRefusalLogged)
+                {
+                    _versionRefusalLogged = true;
+                    Plugin.Logger.LogError("[MPSave] REFUSING to start: the game's save version folder cannot be resolved on this machine (PROTON-1)");
+                }
+                return;   // lobby untouched -- nothing has flipped yet
+            }
             MPLoadProfiler.Mark($"HOST StartLoadGame (session='{ChosenLoadSession}') — {_clients.Count} client(s)");
 
             // Round-285: resolve AND validate the target session BEFORE any state flips.
