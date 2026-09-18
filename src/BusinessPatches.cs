@@ -35,14 +35,17 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
-        internal enum RefillResult { NotApplicable, Handled }
+        // TILL-PUT-1 (M1): Routed = amounts actually left our hands for the owner. Handled = we consumed the
+        // gesture but moved NOTHING (one of the two toasts). Only Routed may stand in for a native deposit.
+        internal enum RefillResult { NotApplicable, Handled, Routed }
 
         /// <summary>Shared helper-refill core (round-36d): pour the helper's held/vehicle cargo into a
         /// single-slot stock station (producer OR cash register — same data shape: ItemInstance with one
         /// stock CargoInstance) as routed owner-side ops. Optionally sets the stock name first (empty
         /// station, "producerset" — bare name-set, refused if occupied), then puts amounts CLAMPED to the
         /// station's remaining capacity ("producer" Ctx: owner-side single-slot merge guard + exact-amount
-        /// consume on our side). NotApplicable = shape didn't match; caller decides the fallback.</summary>
+        /// consume on our side). NotApplicable = shape didn't match; Handled = a toast, nothing moved;
+        /// Routed = amounts were actually sent to the owner (TILL-PUT-1 M1). Caller decides the fallback.</summary>
         internal static RefillResult RouteStationRefill(ItemController? station, string addr)
         {
             try
@@ -100,7 +103,7 @@ namespace BigAmbitionsMP
                     return RefillResult.NotApplicable;   // held nothing matching an already-set station
 
                 Plugin.Logger.LogInfo($"[Business] helper station refill {routed}×{stockName} @'{addr}' ({station!.GetType().Name}) → routed to owner.");
-                return RefillResult.Handled;
+                return routed > 0 ? RefillResult.Routed : RefillResult.Handled;   // M1: a bare name-set moved nothing
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] station refill route: {ex.Message}"); return RefillResult.NotApplicable; }
         }
@@ -288,12 +291,18 @@ namespace BigAmbitionsMP
     /// <summary>A helper picking a stock type routes the change to the owner instead of mutating the
     /// replica (native OnStockOptionSelected shuffles cargo between the display, storage shelves, and
     /// parked vehicles — ALL owner-authoritative). Targets the private string overload so both the
-    /// dropdown's int path and any direct calls are covered. Type-guarded to stock DISPLAYS: signs are
-    /// not PointOfSale/ShowcaseShelf (their own override + owner re-check handles them), and producers
-    /// route through the Producer patch below.</summary>
+    /// dropdown's int path and any direct calls are covered. Gated to stock DISPLAYS by FLAGS
+    /// (PointOfSale/ShowcaseShelf) or — TILL-PUT-1 — by SHAPE: a single-slot station that DECLARES
+    /// showcasable items but whose flags carry neither (the reporter's cash register) used to fall through
+    /// to the NATIVE body, so the pick landed
+    /// on the replica and the owner's absolute cargo statement wiped it. Signs never reach this base string
+    /// overload (SignController overrides the int one), and producers route through the Producer patch below.</summary>
     [HarmonyPatch(typeof(ItemController), "OnStockOptionSelected", typeof(string), typeof(UI.Elements.Dropdown))]
     public static class Patch_ItemController_StockSelect_HelperRoute
     {
+        // TILL-PUT-1: one line per station whose flags did not name it but whose shape did.
+        private static readonly System.Collections.Generic.HashSet<string> _shapeLogged = new System.Collections.Generic.HashSet<string>();
+
         static bool Prefix(ItemController __instance, string stockItemName)
         {
             try
@@ -301,7 +310,21 @@ namespace BigAmbitionsMP
                 if (!BusinessHelperRoute.HelperHere(out var addr)) return true;
                 var ii = __instance?.ItemInstance;
                 if (ii == null || ii.ItemCached == null) return true;
-                if ((ii.ItemCached.type & (ItemType.PointOfSale | ItemType.ShowcaseShelf)) == 0) return true;
+                bool byFlags = (ii.ItemCached.type & (ItemType.PointOfSale | ItemType.ShowcaseShelf)) != 0;
+                // L1: one slot alone is too wide a net (a one-slot decorative prop would match too). Require a
+                // STOCK station: one that declares items it can showcase. Enumerated rather than counted so the
+                // test holds whatever collection type the game hands back.
+                bool canShowcase = false;
+                try
+                {
+                    var cs = __instance!.Item?.itemsThatCanShowcase;
+                    if (cs != null) foreach (var s in cs) { canShowcase = true; break; }
+                }
+                catch { }
+                bool byShape = ii.cargoInstances != null && ii.cargoInstances.Count == 1 && canShowcase;   // stock station (TILL-PUT-1 L1)
+                if (!byFlags && !byShape) return true;
+                if (!byFlags && _shapeLogged.Add(ii.id?.ToString() ?? ii.itemName ?? "?"))
+                    Plugin.Logger.LogInfo($"[Business] helper stock-select on '{ii.itemName}' type={ii.ItemCached.type} routed by shape (TILL-PUT-1)");
                 BuildingStorageSync.RequestSetStock(addr, ii.id?.ToString() ?? "", stockItemName ?? "");
                 Plugin.Logger.LogInfo($"[Business] helper stock-select '{stockItemName}' on {ii.itemName} @'{addr}' → routed to owner.");
                 return false;   // the owner's interior push re-renders the shelf; nothing to change locally
@@ -438,7 +461,9 @@ namespace BigAmbitionsMP
                 if (!BusinessHelperRoute.HelperHere(out var addr)) return true;
                 // Visitor-shopping producers (purchaser-enabled) keep their native customer flow.
                 try { var ps = __instance.playerItemPurchaserSettings; if (ps != null && ps.enabled) return true; } catch { }
-                if (BusinessHelperRoute.RouteStationRefill(__instance, addr) == BusinessHelperRoute.RefillResult.Handled)
+                // M1: Handled (a toast) and Routed (a real put) both CONSUME the gesture here — only
+                // NotApplicable falls through to the native body.
+                if (BusinessHelperRoute.RouteStationRefill(__instance, addr) != BusinessHelperRoute.RefillResult.NotApplicable)
                 { __result = true; return false; }
                 return true;   // shape didn't match → native (customer) flow
             }

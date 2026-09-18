@@ -2094,6 +2094,29 @@ namespace BigAmbitionsMP
         /// the kind of log flood this round was opened to reduce — the notices that describe a standing
         /// condition (we own this building; ids we don't know) say it once and then stay quiet.</summary>
         private static readonly Dictionary<string, float> _cargoNoteAt = new(StringComparer.Ordinal);
+        // TILL-PUT-1 diagnostic: the owner's cargo statement is ABSOLUTE — a lower incoming amount on a
+        // single-slot station (cash register / producer) is the moment a deposit that only ever landed on
+        // this replica gets erased. One line per item per minute names the station and both amounts.
+        private static readonly System.Collections.Generic.Dictionary<string, float> _reduceNoted = new System.Collections.Generic.Dictionary<string, float>();
+
+        private static void NoteRemoteReduce(string addr, InteriorCargoItemInfo entry, BigAmbitions.Items.ItemInstance live)
+        {
+            try
+            {
+                if (live.cargoInstances == null || live.cargoInstances.Count != 1) return;
+                if (entry.CargoInstances == null || entry.CargoInstances.Count != 1) return;
+                int liveAmt = live.cargoInstances[0]?.amount ?? 0;
+                int incAmt  = entry.CargoInstances[0]?.Amount ?? 0;
+                if (incAmt >= liveAmt) return;
+                string key = addr + "/" + entry.Id;
+                float now = UnityEngine.Time.unscaledTime;
+                if (_reduceNoted.TryGetValue(key, out var next) && now < next) return;
+                _reduceNoted[key] = now + 60f;
+                Plugin.Logger.LogInfo($"[Cargo] REMOTE REDUCE '{addr}'/{entry.Id} '{live.itemName}' {liveAmt}->{incAmt} — the owner's statement is absolute (TILL-PUT-1 diagnostic)");
+            }
+            catch (Exception ex) { try { Plugin.Logger.LogWarning($"[Cargo] NoteRemoteReduce: {ex.Message}"); } catch { } }
+        }
+
         private static void CargoNoteThrottled(string addr, string kind, string message)
         {
             try
@@ -2284,6 +2307,7 @@ namespace BigAmbitionsMP
                         if (entry == null || string.IsNullOrEmpty(entry.Id)) continue;
                         if (!reg.itemInstances.TryGetValue(entry.Id, out var live) || live == null) { unknown++; continue; }
                         if (!CargoDiffers(live, entry.CargoInstances)) continue;
+                        NoteRemoteReduce(addr, entry, live);   // TILL-PUT-1 diagnostic
                         FillCargoInstances(live, entry.CargoInstances, addr);
                         // The native announcement a local deposit/sale makes — ShelfController and
                         // friends redraw their boxes off this, so it is what makes the change VISIBLE.
@@ -4695,6 +4719,8 @@ namespace BigAmbitionsMP
                     if (lastDeposit > 0f)
                     {
                         try { SaveGameManager.Current.Money += lastDeposit; } catch { }
+                        // DESIGNER-MONEY-1 (M2): direct wallet write — keep an open designer session in step.
+                        DesignerBalanceKeeper.OnExternalMoneyChange(lastDeposit, "rent-rollback refund");
                         // The optimistic rent's charge went through native ChangeMoney (forwarded to
                         // the shared ledger) — the refund must follow or the reconcile erases it.
                         MergerWallet.ForwardExternal(lastDeposit, "rent-rollback refund");
@@ -4723,6 +4749,8 @@ namespace BigAmbitionsMP
                         if (refund > 0f)
                         {
                             try { gi.Money += refund; } catch { }
+                            // DESIGNER-MONEY-1 (M2): direct wallet write — keep an open designer session in step.
+                            DesignerBalanceKeeper.OnExternalMoneyChange(refund, "buy-rollback refund");
                             // Slice 4: the denied buy's CHARGE went through native ChangeMoney (forwarded
                             // to the shared ledger) — the refund must follow or the reconcile erases it.
                             MergerWallet.ForwardExternal(refund, "buy-rollback refund");

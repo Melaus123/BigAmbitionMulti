@@ -6,7 +6,8 @@ using Helpers;
 namespace BigAmbitionsMP
 {
     /// <summary>
-    /// Permanent field guard (round-67, promoted from the DepositMerge probe): any NATIVE cargo merge
+    /// Permanent field guard (round-67, promoted from the DepositMerge probe; ROUTING added by TILL-PUT-1):
+    /// any NATIVE cargo merge
     /// INTO an interior item of a building the local player doesn't rent is an UNROUTED deposit — the
     /// class of silent replica divergence behind savvyfish 20260722-200341 (goods leave the owner's
     /// storage via routed takes, deposits land only on the guest's replica, the owner's cargo shield
@@ -20,24 +21,89 @@ namespace BigAmbitionsMP
     internal static class DepositGuard
     {
         private static float _nextLog;   // 5s throttle — a leaking loop shouldn't flood the ring buffer
+        // TILL-PUT-1 (H3): ICargoHolder.TryToMergeAndMoveCargoBetweenHolders (asm ICargoHolder.cs:36,42) calls
+        // MergeIntoCargo(c) and THEN TryToAddToCargo(c) for the SAME CargoInstance, so both prefixes below fire
+        // on ONE deposit and we routed it twice (two puts; the helper's hands drained twice, StorageSync.cs:1611).
+        // Remember which instance we routed and on which frame; the second prefix of the pair then stands down.
+        private static CargoInstance? _routedCargo;
+        private static int            _routedFrame = -1;
+        // TILL-PUT-1: ids we have already announced a routed deposit for (one INFO line per station).
+        private static readonly System.Collections.Generic.HashSet<string> _routedLogged = new System.Collections.Generic.HashSet<string>();
 
-        internal static void Check(string via, ItemInstance? dest, CargoInstance? inc)
+        /// <summary>TILL-PUT-1 — returns TRUE to let the native primitive run, FALSE when this deposit has
+        /// been ROUTED to the owner instead (the caller's prefix then skips the local merge).</summary>
+        internal static bool Check(string via, ItemInstance? dest, CargoInstance? inc)
         {
             try
             {
-                if (dest == null) return;
-                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                if (dest == null) return true;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                 var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
-                if (reg == null || reg.RentedByPlayer) return;                    // own building → native is legit
+                if (reg == null || reg.RentedByPlayer) return true;              // own building → native is legit
                 string id = dest.id?.ToString() ?? "";
-                if (reg.itemInstances == null || id.Length == 0 || !reg.itemInstances.ContainsKey(id)) return;   // held boxes / vehicles are legit local targets
-                if (UnityEngine.Time.unscaledTime < _nextLog) return;
+                if (reg.itemInstances == null || id.Length == 0 || !reg.itemInstances.ContainsKey(id)) return true;   // held boxes / vehicles are legit local targets
+
+                // TILL-PUT-1 (round-67 → routed): warning alone was never enough.  A helper's hand/box deposit
+                // into a SINGLE-SLOT station (cash register or producer — one stock CargoInstance, same data
+                // shape) landed on the local replica only; the owner's next cargo statement is ABSOLUTE
+                // (GameStatePatcher's cargo apply) and overwrote the slot, so the goods evaporated.  The routed
+                // refill the stock dropdown already uses covers exactly this shape, so send it there.
+                if (dest.cargoInstances != null && dest.cargoInstances.Count == 1
+                    && BusinessHelperRoute.HelperHere(out var addr))
+                {
+                    // H3: the other half of this deposit's pair already routed this very CargoInstance this
+                    // frame — swallow it, but do NOT route (and so do not put) a second time.
+                    if (inc != null && ReferenceEquals(inc, _routedCargo) && UnityEngine.Time.frameCount == _routedFrame)
+                        return false;
+
+                    // H4: RouteStationRefill never reads `inc` — it pours from the helper's HANDS or, empty-handed,
+                    // the CURRENT VEHICLE (BusinessPatches.cs:53-57). Routing a deposit that came from anywhere
+                    // else would send the WRONG goods, so route only when `inc` is by reference one of the
+                    // instances that selection will read; otherwise keep the old behaviour (warn, native runs).
+                    if (IsRoutableSource(inc))
+                    {
+                        ItemController? ctrl = null;
+                        try { ctrl = ItemHelper.GetItemControllerByID(dest.id); } catch { }
+                        // M1: only a REAL put (Routed) may stand in for the native merge — Handled is a toast and
+                        // NotApplicable moved nothing, and skipping native on either loses the deposit outright.
+                        if (ctrl != null
+                            && BusinessHelperRoute.RouteStationRefill(ctrl, addr) == BusinessHelperRoute.RefillResult.Routed)
+                        {
+                            _routedCargo = inc; _routedFrame = UnityEngine.Time.frameCount;
+                            if (_routedLogged.Add(id))
+                                Plugin.Logger.LogInfo($"[DepositGuard] helper deposit into '{dest.itemName}' @{addr} routed to the owner (TILL-PUT-1)");
+                            return false;   // skip the native LOCAL merge; the owner's OK is what consumes our held amount
+                        }
+                    }
+                }
+
+                if (UnityEngine.Time.unscaledTime < _nextLog) return true;
                 _nextLog = UnityEngine.Time.unscaledTime + 5f;
                 Plugin.Logger.LogWarning(
                     $"[DepositGuard] UNROUTED native {via} into interior item '{dest.itemName}' id={id} "
                     + $"@'{GameStateReader.AddressKey(reg)}' inc='{inc?.itemName}'x{inc?.amount} — path: {ShortStack()}");
             }
+            catch (Exception ex) { try { Plugin.Logger.LogWarning($"[DepositGuard] Check ({via}): {ex.Message}"); } catch { } }
+            return true;
+        }
+
+        /// <summary>TILL-PUT-1 (H4) — true when `inc` is BY REFERENCE one of the cargo instances
+        /// RouteStationRefill will pour from: the helper's held item, or, empty-handed, the current
+        /// vehicle. Same selection as BusinessPatches.cs:53-57.</summary>
+        private static bool IsRoutableSource(CargoInstance? inc)
+        {
+            if (inc == null) return false;
+            try
+            {
+                ICargoHolder? holder = !PlayerHelper.IsHoldingItem
+                    ? VehicleHelper.GetCurrentVehicle()
+                    : (ICargoHolder?)PlayerHelper.ItemInstanceInHands;
+                var src = holder?.GetCargoInstances();
+                if (src == null) return false;
+                foreach (var c in src) if (ReferenceEquals(c, inc)) return true;
+            }
             catch { }
+            return false;
         }
 
         private static string ShortStack()
@@ -65,7 +131,9 @@ namespace BigAmbitionsMP
     [HarmonyPatch(typeof(ItemInstance), nameof(ItemInstance.TryToAddToCargo))]
     public static class Patch_DepositGuard_TryToAdd
     {
-        static void Prefix(ItemInstance __instance, CargoInstance cargoInstance)
+        // Skipping leaves __result at default(false) = "it did not go in locally" — deliberate: the routed
+        // op's owner-side OK is what consumes the held amount, so the caller must not also drop it (TILL-PUT-1).
+        static bool Prefix(ItemInstance __instance, CargoInstance cargoInstance)
             => DepositGuard.Check("TryToAddToCargo", __instance, cargoInstance);
     }
 
@@ -74,7 +142,7 @@ namespace BigAmbitionsMP
                   typeof(CargoInstance), typeof(CargoInstance), typeof(int))]
     public static class Patch_DepositGuard_Merge
     {
-        static void Prefix(ItemInstance __instance, CargoInstance fromCargoInstance)
+        static bool Prefix(ItemInstance __instance, CargoInstance fromCargoInstance)
             => DepositGuard.Check("MergeCargo", __instance, fromCargoInstance);
     }
 }
