@@ -70,11 +70,25 @@ namespace BigAmbitionsMP
             return outList;
         }
 
+        // NULLNAME-1: session budget for the wire-side skip notice (this file's decoder half).
+        private static int _namelessWireLogged;
+
         internal static void DecodeNestedInto(CargoInstance ci, System.Collections.Generic.List<CargoNestedInfo>? nested)
         {
             if (ci == null || nested == null || nested.Count == 0) return;
+            int skipped = 0;   // NULLNAME-1
             foreach (var n in nested)
-                if (n != null) ci.nestedCargoInstances.Add(new NestedCargoInstance(n.ItemName, n.Amount, n.PricePerUnit, null));
+            {
+                if (n == null) continue;
+                // NULLNAME-1 (bundle 20260918-013040): a nameless nested entry crashes vanilla
+                // CargoItemUi.SetUp (it keys a Dictionary on the name) and aborts EnterVehicle
+                // mid-possession. It names no item, so dropping it loses nothing. Encode already
+                // writes "" for a null name (EncodeNested above) — both are skipped here.
+                if (string.IsNullOrEmpty(n.ItemName)) { skipped++; continue; }
+                ci.nestedCargoInstances.Add(new NestedCargoInstance(n.ItemName, n.Amount, n.PricePerUnit, null));
+            }
+            if (skipped > 0 && _namelessWireLogged++ < 20)
+                Plugin.Logger.LogInfo($"[Cargo] skipped a nameless nested entry from the wire (NULLNAME-1) ×{skipped}");
         }
 
 #if DEBUG || BAMP_DEV

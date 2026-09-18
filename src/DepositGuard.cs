@@ -20,7 +20,13 @@ namespace BigAmbitionsMP
     /// </summary>
     internal static class DepositGuard
     {
-        private static float _nextLog;   // 5s throttle — a leaking loop shouldn't flood the ring buffer
+        // PUT-PERM-1 (A3, 2026-09-18): the old 5 s throttle hid the SHAPE of a leak — one line, then
+        // silence while the rest of the drag leaked unrecorded. One line per (destination id + item
+        // name) instead, carrying the running total and the reason every route above declined, capped
+        // at 80 lines a session so a pathological loop still cannot flood the ring buffer.
+        private static readonly System.Collections.Generic.HashSet<string> _unroutedSeen = new System.Collections.Generic.HashSet<string>();
+        private static int _unroutedCount;
+        private static int _unroutedLines;
         // TILL-PUT-1 (H3): ICargoHolder.TryToMergeAndMoveCargoBetweenHolders (asm ICargoHolder.cs:36,42) calls
         // MergeIntoCargo(c) and THEN TryToAddToCargo(c) for the SAME CargoInstance, so both prefixes below fire
         // on ONE deposit and we routed it twice (two puts; the helper's hands drained twice, StorageSync.cs:1611).
@@ -39,9 +45,27 @@ namespace BigAmbitionsMP
                 if (dest == null) return true;
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                 var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
-                if (reg == null || reg.RentedByPlayer) return true;              // own building → native is legit
+                if (reg == null) return true;
                 string id = dest.id?.ToString() ?? "";
-                if (reg.itemInstances == null || id.Length == 0 || !reg.itemInstances.ContainsKey(id)) return true;   // held boxes / vehicles are legit local targets
+                bool interior = reg.itemInstances != null && id.Length > 0 && reg.itemInstances.ContainsKey(id);   // held boxes / vehicles are legit local targets
+
+                // PUT-PERM-1 (user ruling 2026-09-18) — an UNGRANTED visitor's deposit must be refused
+                // before the native primitive runs, and it has to be decided BEFORE the own-building
+                // early-out below (a partner's shop replica can read RentedByPlayer on this machine, and
+                // that line used to wave the deposit straight through). Skipping the native leaves the
+                // SOURCE cargo UNTOUCHED, which is what makes "the goods stay in hand" true: the only
+                // caller that deletes the source, ICargoHolder.TryToMergeAndMoveCargoBetweenHolders
+                // (asm ICargoHolder.cs:36-47), removes it when the merge ZEROED the source or when
+                // TryToAddToCargo answered true — a skipped MergeCargo leaves the amount unchanged and a
+                // skipped TryToAddToCargo leaves __result at default(false), so neither branch fires.
+                if (interior && MPPatches.Patch_ItemController_TryToGrabItem_ForeignShopGate.RefusedForeignGrab(out string putOwner))
+                {
+                    MPPatches.Patch_ItemController_TryToGrabItem_ForeignShopGate.PutRefusalToast(putOwner, $"'{dest.itemName}'");
+                    return false;
+                }
+
+                if (reg.RentedByPlayer) return true;              // own building → native is legit
+                if (!interior) return true;
 
                 // TILL-PUT-1 (round-67 → routed): warning alone was never enough.  A helper's hand/box deposit
                 // into a SINGLE-SLOT station (cash register or producer — one stock CargoInstance, same data
@@ -77,11 +101,26 @@ namespace BigAmbitionsMP
                     }
                 }
 
-                if (UnityEngine.Time.unscaledTime < _nextLog) return true;
-                _nextLog = UnityEngine.Time.unscaledTime + 5f;
-                Plugin.Logger.LogWarning(
-                    $"[DepositGuard] UNROUTED native {via} into interior item '{dest.itemName}' id={id} "
-                    + $"@'{GameStateReader.AddressKey(reg)}' inc='{inc?.itemName}'x{inc?.amount} — path: {ShortStack()}");
+                _unroutedCount++;
+                if (_unroutedSeen.Add(id + "|" + (inc?.itemName ?? "")) && _unroutedLines++ < 80)
+                {
+                    // A3: name WHY every route above declined, so the log distinguishes "no helper here"
+                    // from "wrong shape" from "ungranted but not a foreign business" without a rebuild.
+                    bool rented = false; try { rented = reg.RentedByPlayer; } catch { }
+                    bool granted = false;
+                    try
+                    {
+                        string shopOwner = MPRegisterSync.CurrentShopOwner;
+                        granted = shopOwner.Length > 0 && GrantSync.IsGranted(GrantKind.Business, shopOwner, MPConfig.PlayerId);
+                    }
+                    catch { }
+                    bool helper = false; try { helper = BusinessHelperRoute.HelperHere(out _); } catch { }
+                    int slots = dest.cargoInstances != null ? dest.cargoInstances.Count : -1;
+                    Plugin.Logger.LogWarning(
+                        $"[DepositGuard] UNROUTED native {via} into interior item '{dest.itemName}' id={id} "
+                        + $"@'{GameStateReader.AddressKey(reg)}' inc='{inc?.itemName}'x{inc?.amount} (#{_unroutedCount}) "
+                        + $"— declined: rented={rented} granted={granted} helper={helper} slots={slots} — path: {ShortStack()}");
+                }
             }
             catch (Exception ex) { try { Plugin.Logger.LogWarning($"[DepositGuard] Check ({via}): {ex.Message}"); } catch { } }
             return true;

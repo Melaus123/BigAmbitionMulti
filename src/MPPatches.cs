@@ -6803,11 +6803,17 @@ namespace BigAmbitionsMP
         public static class Patch_ItemController_TryToGrabItem_ForeignShopGate
         {
             private static int _logged;
+            private static int _sessionOwnerLogged;
 
             /// <summary>The one foreign-grab refusal decision (grab audit P3 extracted it so the
             /// in-vehicle gate below cannot drift from this one): refuse when the current building
             /// is another player's business and the local player holds neither a Business grant
-            /// from its owner nor a merger flip on it.</summary>
+            /// from its owner nor a merger flip on it.  FOLD F1 (review 2026-09-18): ownership is
+            /// decided LOCALLY here — the stamped owner id is non-empty, not ours, and is either a
+            /// session player (IsSessionPlayerRivalId) or the registration carries the inherited
+            /// rented flag — so the gate now holds in EVERY direction (host standing in a client's
+            /// shop, client standing in another client's shop), not only where RentedByPlayer
+            /// happens to be set on this machine.</summary>
             internal static bool RefusedForeignGrab(out string owner)
             {
                 owner = "";
@@ -6815,9 +6821,23 @@ namespace BigAmbitionsMP
                 {
                     if (!MPServer.IsRunning && !MPClient.IsClientInWorld && !MPClient.OfflineFork) return false;   // H-FORK-1: holds in the offline fork
                     var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
-                    if (reg == null || !GameStatePatcher.IsForeignPlayerBusiness(reg)) return false;
+                    if (reg == null) return false;
+                    // F1 (H1, review 2026-09-18): NOT IsForeignPlayerBusiness — its tail is
+                    // `return reg.RentedByPlayer`, which is MACHINE-LOCAL: on the host a client's
+                    // shop reads false and on client B a client-A mid-session rental reads false,
+                    // so the gate never fired in those directions. IsForeignPlayerBusiness itself
+                    // stays as is (the employee-dropdown filter wants its rented meaning).
+                    string o = "";
+                    try { o = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                    if (string.IsNullOrEmpty(o) || o == MPConfig.PlayerId) return false;
+                    bool rented = false;
+                    try { rented = reg.RentedByPlayer; } catch { }
+                    bool sessionOwner = !rented && GameStatePatcher.IsSessionPlayerRivalId(o);
+                    if (!rented && !sessionOwner) return false;
+                    if (sessionOwner && _sessionOwnerLogged++ == 0)
+                        Plugin.Logger.LogInfo("[PickupGate] foreign-shop gate: session-player ownership test active (PUT-PERM-1 H1)");
                     owner = MPRegisterSync.CurrentShopOwner;
-                    if (string.IsNullOrEmpty(owner)) { try { owner = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { } }
+                    if (string.IsNullOrEmpty(owner)) owner = o;
                     bool granted = !string.IsNullOrEmpty(owner) && GrantSync.IsGranted(GrantKind.Business, owner, MPConfig.PlayerId);
                     bool flipped = false;
                     try { flipped = MergerFlip.IsFlipped(GameStateReader.AddressKey(reg)); } catch { }
@@ -6831,6 +6851,30 @@ namespace BigAmbitionsMP
                 PassengerHud.Toast($"This belongs to {(string.IsNullOrEmpty(owner) ? "another player" : owner)} — you need permission to take items here.");
                 if (_logged++ < 10)
                     Plugin.Logger.LogInfo($"[PickupGate] grab refused at {where} (owner '{owner}', no Business grant).");
+            }
+
+            // PUT-PERM-1 (user ruling 2026-09-18) — the MIRROR of the take refusal above. A visitor
+            // WITHOUT permission may not put goods into a partner's shelf/fridge/till/station either:
+            // bundle 20260918-195543 showed six items merged into the host's shelf on the visitor's
+            // replica only, and the owner's next absolute cargo statement erased them for good. Every
+            // put entry point refuses BEFORE anything leaves the hands, so the goods stay in hand.
+            // Same ownership decision (RefusedForeignGrab), same owner fallback, same log budget; the
+            // toast gets its own 2 s throttle because one drag fires several hooks (merge + add, the
+            // housing route and the deposit guard) and must not stack three identical toasts.
+            private static int   _putLogged;
+            private static float _nextPutToast;
+
+            internal static void PutRefusalToast(string owner, string where)
+            {
+                float now = 0f;
+                try { now = UnityEngine.Time.unscaledTime; } catch { }
+                if (now >= _nextPutToast)
+                {
+                    _nextPutToast = now + 2f;
+                    PassengerHud.Toast($"This belongs to {(string.IsNullOrEmpty(owner) ? "another player" : owner)} — you need permission to put items here.");
+                }
+                if (_putLogged++ < 10)
+                    Plugin.Logger.LogInfo($"[PutGate] put refused at {where} (owner '{owner}', no Business grant).");
             }
 
             static bool Prefix(ItemController __instance, ref bool __result)

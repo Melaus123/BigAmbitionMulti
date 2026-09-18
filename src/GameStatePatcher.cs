@@ -2117,6 +2117,78 @@ namespace BigAmbitionsMP
             catch (Exception ex) { try { Plugin.Logger.LogWarning($"[Cargo] NoteRemoteReduce: {ex.Message}"); } catch { } }
         }
 
+        // PUT-PERM-1 (A3, 2026-09-18): REMOTE REDUCE above only ever speaks for a ONE-slot holder.
+        // The multi-slot holders — a storage shelf, a fridge, a display with several stacks — had no
+        // line at all, and that is exactly where an ungranted visitor's local-only deposit died in
+        // silence (bundle 20260918-195543: six items merged into the host's shelf, erased by the
+        // owner's next absolute statement). This machine is NOT the owner of the building here (the
+        // authority shield above already returned for buildings we own), so anything the owner's
+        // statement drops or reduces was local-only. Budgeted, not change-tracked: 60 lines a session.
+        private static int _applyDiscardedLines;
+
+        // NULLNAME-1: session budget for the wire-side skip notice (this file's writer half).
+        private static int _namelessWireLogged;
+
+        // FOLD F2 (M1+M2, review 2026-09-18): this diagnostic runs on the HEALTHY path of every
+        // remote cargo apply, so it allocates nothing there.  ApplyInteriorCargoSync's whole body is
+        // inside RunOnMainThread (GameStatePatcher.cs:2294), so these three scratch buffers are
+        // MAIN-THREAD ONLY and safe to reuse; each call Clear()s them first.
+        private static readonly Dictionary<string, int> _adIncoming = new Dictionary<string, int>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int> _adMine     = new Dictionary<string, int>(StringComparer.Ordinal);
+        private static readonly System.Text.StringBuilder _adLost   = new System.Text.StringBuilder();
+        private static bool _applyDiscardedFailLogged;   // budget the guard: first failure only
+
+        private static void NoteApplyDiscarded(string addr, InteriorCargoItemInfo entry, BigAmbitions.Items.ItemInstance live)
+        {
+            try
+            {
+                if (_applyDiscardedLines >= 60) return;
+                var liveCargo = live.cargoInstances;
+                if (liveCargo == null || liveCargo.Count <= 1) return;   // the one-slot case keeps its REMOTE REDUCE line
+                // Cheap allocation-free pre-pass: a holder that holds nothing cannot have lost
+                // anything.  NOTE the per-name comparison below is NOT replaceable by a count/total
+                // test — equal counts and equal totals still hide "lost 3 apples, gained 3 pears".
+                int liveTotal = 0;
+                for (int i = 0; i < liveCargo.Count; i++) { var lc = liveCargo[i]; if (lc != null) liveTotal += lc.amount; }
+                if (liveTotal <= 0) return;
+
+                var incoming = _adIncoming; incoming.Clear();
+                if (entry.CargoInstances != null)
+                    foreach (var c in entry.CargoInstances)
+                    {
+                        if (c == null) continue;
+                        string cn = c.ItemName ?? "";   // M1: null names key as "" on BOTH halves
+                        incoming.TryGetValue(cn, out var had);
+                        incoming[cn] = had + c.Amount;
+                    }
+                var mine = _adMine; mine.Clear();
+                foreach (var c in liveCargo)
+                {
+                    if (c == null) continue;
+                    string n = c.itemName ?? "";
+                    mine.TryGetValue(n, out var had);
+                    mine[n] = had + c.amount;
+                }
+                var lost = _adLost; lost.Clear();
+                foreach (var kv in mine)
+                {
+                    incoming.TryGetValue(kv.Key, out var inc);
+                    if (inc >= kv.Value) continue;
+                    if (lost.Length > 0) lost.Append(", ");
+                    lost.Append($"{kv.Key}x{kv.Value - inc}");
+                }
+                if (lost.Length == 0) return;
+                _applyDiscardedLines++;
+                Plugin.Logger.LogWarning($"[Cargo] APPLY DISCARDED {addr} '{live.itemName}' id={entry.Id}: {lost}");
+            }
+            catch (Exception ex)
+            {
+                if (_applyDiscardedFailLogged) return;
+                _applyDiscardedFailLogged = true;
+                try { Plugin.Logger.LogWarning($"[Cargo] NoteApplyDiscarded: {ex.Message} (further failures silent)"); } catch { }
+            }
+        }
+
         private static void CargoNoteThrottled(string addr, string kind, string message)
         {
             try
@@ -2308,6 +2380,7 @@ namespace BigAmbitionsMP
                         if (!reg.itemInstances.TryGetValue(entry.Id, out var live) || live == null) { unknown++; continue; }
                         if (!CargoDiffers(live, entry.CargoInstances)) continue;
                         NoteRemoteReduce(addr, entry, live);   // TILL-PUT-1 diagnostic
+                        NoteApplyDiscarded(addr, entry, live); // PUT-PERM-1 (A3) diagnostic
                         FillCargoInstances(live, entry.CargoInstances, addr);
                         // The native announcement a local deposit/sale makes — ShelfController and
                         // friends redraw their boxes off this, so it is what makes the change VISIBLE.
@@ -4210,8 +4283,13 @@ namespace BigAmbitionsMP
                 if (ci.nestedCargoInstances != null && c.NestedCargoInstances != null)
                 {
                     ci.nestedCargoInstances.Clear();
+                    int namelessNested = 0;   // NULLNAME-1
                     foreach (var n in c.NestedCargoInstances)
                     {
+                        // NULLNAME-1 (bundle 20260918-013040): a nested entry with no name is poison —
+                        // vanilla CargoItemUi.SetUp keys a Dictionary on it and throws. SKIP it rather
+                        // than write it: an unnamed entry names no item, so nothing is lost by dropping it.
+                        if (n == null || string.IsNullOrEmpty(n.ItemName)) { namelessNested++; continue; }
                         var nci = new BigAmbitions.Items.NestedCargoInstance
                         {
                             itemName     = n.ItemName,
@@ -4227,6 +4305,8 @@ namespace BigAmbitionsMP
                         }
                         ci.nestedCargoInstances.Add(nci);
                     }
+                    if (namelessNested > 0 && _namelessWireLogged++ < 20)
+                        Plugin.Logger.LogInfo($"[Cargo] skipped a nameless nested entry from the wire (NULLNAME-1) ×{namelessNested}");
                 }
                 ii.cargoInstances.Add(ci);
             }

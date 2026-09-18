@@ -350,6 +350,16 @@ namespace BigAmbitionsMP
                 // 20260806-010308 permanent "On-Duty Staff" alerts).
                 int todosFixed = PurgeForeignTodos(reason);
                 if (todosFixed > 0) parts.Add($"foreign-todos×{todosFixed} repaired");
+
+                // ── Class 8: nameless nested cargo (DETECT, NULLNAME-1) ──────
+                // Bundle 20260918-013040: a nested cargo entry with a NULL name crashes vanilla
+                // CargoItemUi.SetUp, which aborts EnterVehicle after possession was already set.
+                // The UI prefix and both wire writers now strip these, but a save can already
+                // hold them — detect-only here, because the owning holder is the authority and a
+                // sweep-time edit would fight the same absolute statements the rest of the mod
+                // obeys. ONE line per holder, 30 max, plus a count line that always prints.
+                int namelessHolders = ScanNamelessNestedCargo(reason, gi);
+                if (namelessHolders > 0) parts.Add($"nameless-nested×{namelessHolders} logged");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] sweep ({reason}): {ex.Message}"); }
 
@@ -421,6 +431,65 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] foreign-todos: {ex.Message}"); }
             return removed;
+        }
+
+        /// <summary>NULLNAME-1 (2026-09-18) — world-ready census of nested cargo entries with no item
+        /// name, across the three holder families that reach CargoItemUi: this player's vehicles, the
+        /// item in their hands, and the interior items of every building they rent. DETECT ONLY.
+        /// Returns the number of holders found (0 on a healthy save); one log line per holder, 30 max,
+        /// and always one summary line so a clean census proves it ran.</summary>
+        private static int ScanNamelessNestedCargo(string reason, GameInstance gi)
+        {
+            int holders = 0, logged = 0;
+            try
+            {
+                void Scan(string kind, string who, System.Collections.Generic.List<BigAmbitions.Items.CargoInstance>? cargo)
+                {
+                    if (cargo == null) return;
+                    for (int i = 0; i < cargo.Count; i++)
+                    {
+                        var ci = cargo[i];
+                        var nested = ci?.nestedCargoInstances;
+                        if (nested == null || nested.Count == 0) continue;
+                        for (int j = 0; j < nested.Count; j++)
+                        {
+                            var n = nested[j];
+                            if (n != null && n.itemName != null && n.itemName.Length > 0) continue;
+                            holders++;
+                            if (logged++ < 30)
+                                Plugin.Logger.LogWarning($"[Integrity] nameless nested cargo: {kind} {who} outer='{ci!.itemName}' sealed={ci!.IsSealed} index={j} amount={(n != null ? n.amount : 0)} (NULLNAME-1)");
+                            return;   // ONE line per holder
+                        }
+                    }
+                }
+
+                if (gi.VehicleInstances != null)
+                    foreach (var v in gi.VehicleInstances)
+                        if (v != null) Scan("vehicle", v.id ?? "?", v.cargoInstances);
+
+                try
+                {
+                    var held = Helpers.PlayerHelper.ItemInstanceInHands;
+                    if (held != null) Scan("hands", held.itemName ?? "?", held.cargoInstances);
+                }
+                catch { }
+
+                if (gi.BuildingRegistrations != null)
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null || !reg.RentedByPlayer || reg.itemInstances == null) continue;
+                        string addr = ""; try { addr = GameStateReader.AddressKey(reg); } catch { }
+                        foreach (var kv in reg.itemInstances)
+                        {
+                            var ii = kv.Value;
+                            if (ii != null) Scan("building", addr + "/" + (ii.id ?? "?"), ii.cargoInstances);
+                        }
+                    }
+
+                Plugin.Logger.LogInfo($"[Integrity] {reason}: nameless nested cargo census — {holders} holder(s) (NULLNAME-1).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] nameless-nested: {ex.Message}"); }
+            return holders;
         }
 
         /// <summary>Round-246 shared predicate — the ONE definition of "foreign todo

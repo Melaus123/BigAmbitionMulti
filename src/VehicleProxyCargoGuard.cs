@@ -62,6 +62,61 @@ namespace BigAmbitionsMP
         static void Finalizer() { if (EnterVehicleScope.Depth > 0) EnterVehicleScope.Depth--; }
     }
 
+    /// <summary>NULLNAME-1 (bundle 20260918-013040) — HALF-POSSESSION ROLLBACK. VehicleController.
+    /// EnterVehicle (decompile VehicleController.cs:305-375) sets SaveGameManager.Current.ActiveVehicleId
+    /// and controlledByPlayer at :340-341 and only THEN calls ItemPanelUI.SetVehicle at :357. A throw in
+    /// that UI build — the nameless-nested ArgumentNullException the CargoItemUi guard now prevents, but
+    /// any other UI fault does the same — leaves the save claiming the player is driving a vehicle that
+    /// was never parented: every later click throws again. Restore exactly the two possession fields and
+    /// RE-THROW: swallowing would hide a real fault and leave the half-built HUD in place.</summary>
+    public struct EnterVehiclePossessionState
+    {
+        public bool   Captured;
+        public string ActiveVehicleId;
+        public bool   Controlled;
+    }
+
+    [HarmonyPatch(typeof(VehicleController), nameof(VehicleController.EnterVehicle))]
+    public static class Patch_VehicleController_EnterVehicle_PossessionRollback
+    {
+        // One FULL exception per vehicle id — never ex.Message on a repeat (this can fire per click).
+        private static readonly System.Collections.Generic.HashSet<string> _logged = new System.Collections.Generic.HashSet<string>();
+
+        static void Prefix(VehicleController __instance, out EnterVehiclePossessionState __state)
+        {
+            __state = default;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return;
+                __state = new EnterVehiclePossessionState
+                {
+                    Captured        = true,
+                    ActiveVehicleId = gi.ActiveVehicleId,
+                    Controlled      = __instance != null && __instance.controlledByPlayer,
+                };
+            }
+            catch (Exception ex) { __state = default; Plugin.Logger.LogWarning($"[Vehicle] EnterVehicle rollback capture (NULLNAME-1): {ex.Message}"); }
+        }
+
+        static Exception? Finalizer(VehicleController __instance, Exception? __exception, EnterVehiclePossessionState __state)
+        {
+            if (__exception == null || !__state.Captured) return __exception;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi != null) gi.ActiveVehicleId = __state.ActiveVehicleId;
+                if (__instance != null) __instance.controlledByPlayer = __state.Controlled;
+                string vid = "";
+                try { vid = __instance?.vehicleInstance?.id ?? ""; } catch { }
+                if (_logged.Add(vid))
+                    Plugin.Logger.LogWarning($"[Vehicle] EnterVehicle threw - possession rolled back (NULLNAME-1) vehicle='{vid}': {__exception}");
+            }
+            catch (Exception ex) { try { Plugin.Logger.LogWarning($"[Vehicle] EnterVehicle rollback (NULLNAME-1): {ex.Message}"); } catch { } }
+            return __exception;   // unchanged — the fault still surfaces
+        }
+    }
+
     // Per-call capture for the mirror postfixes (Harmony __state).
     public struct CargoMirrorState
     {

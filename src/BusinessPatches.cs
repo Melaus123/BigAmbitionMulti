@@ -307,7 +307,19 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!BusinessHelperRoute.HelperHere(out var addr)) return true;
+                if (!BusinessHelperRoute.HelperHere(out var addr))
+                {
+                    // PUT-PERM-1 (2026-09-18): the dropdown's native body shuffles cargo between the
+                    // display, the storage shelves and parked vehicles — all of it the OWNER's. An
+                    // UNGRANTED visitor doing that only mutates their own replica, so refuse it with the
+                    // same message as the shelf/fridge put. A granted helper falls into the route above.
+                    if (MPPatches.Patch_ItemController_TryToGrabItem_ForeignShopGate.RefusedForeignGrab(out string putOwner))
+                    {
+                        MPPatches.Patch_ItemController_TryToGrabItem_ForeignShopGate.PutRefusalToast(putOwner, "the stock dropdown");
+                        return false;
+                    }
+                    return true;
+                }
                 var ii = __instance?.ItemInstance;
                 if (ii == null || ii.ItemCached == null) return true;
                 bool byFlags = (ii.ItemCached.type & (ItemType.PointOfSale | ItemType.ShowcaseShelf)) != 0;
@@ -601,6 +613,56 @@ namespace BigAmbitionsMP
                 return false;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] sell-all route: {ex.Message}"); return true; }
+        }
+    }
+
+    /// <summary>NULLNAME-1 (bundle 20260918-013040) — CRASH GUARD, single-player included. Vanilla
+    /// CargoItemUi.SetUp (decompile UI.PlayerHUD/CargoItemUi.cs:110-121) builds a Dictionary keyed on
+    /// nestedCargoInstance.itemName for an UNSEALED container: a nested entry whose name is NULL throws
+    /// ArgumentNullException out of TryGetValue. That abort lands inside ItemPanelUI.SetVehicle, which
+    /// VehicleController.EnterVehicle calls at :357 — AFTER :340-341 already set ActiveVehicleId and
+    /// controlledByPlayer — so the player half-possesses a hand truck that was never parented and every
+    /// later click throws again. Strip the nameless entries before the native body sees them: REMOVE,
+    /// never blank, because "" flows on into the label lookup and the dictionary indexer at :121.
+    /// This is a repair of data already sitting in a save, so it must run outside multiplayer too.</summary>
+    [HarmonyPatch(typeof(UI.PlayerHUD.CargoItemUi), nameof(UI.PlayerHUD.CargoItemUi.SetUp))]
+    public static class Patch_CargoItemUi_DropNamelessNested
+    {
+        private static int _logged;
+
+        /// <summary>FOLD F3: the native SetUp reads ONLY cargoInstances[0] (decompile
+        /// UI.PlayerHUD/CargoItemUi.cs:95, :101, :111 — firstCargoInstance and its
+        /// nestedCargoInstances), so that is the only instance we strip; the other slots keep
+        /// their data.</summary>
+        private static BigAmbitions.Items.CargoInstance? FirstCargoInstance(BigAmbitions.Items.CargoItem? cargoItem)
+        {
+            var list = cargoItem?.cargoInstances;
+            return (list == null || list.Count == 0) ? null : list[0];
+        }
+
+        static void Prefix(BigAmbitions.Items.CargoItem cargoItem)
+        {
+            try
+            {
+                var ci = FirstCargoInstance(cargoItem);
+                if (ci == null) return;
+                {
+                    var nested = ci.nestedCargoInstances;
+                    if (nested == null || nested.Count == 0) return;
+                    int dropped = 0;
+                    for (int i = nested.Count - 1; i >= 0; i--)
+                    {
+                        var n = nested[i];
+                        if (n != null && n.itemName != null && n.itemName.Length > 0) continue;
+                        nested.RemoveAt(i);
+                        dropped++;
+                    }
+                    if (dropped > 0 && _logged++ < 20)
+                        Plugin.Logger.LogWarning($"[Cargo] dropped {dropped} nameless nested entr(ies) from '{ci.itemName}' (NULLNAME-1)"
+                                                 + (nested.Count == 0 ? " - container now empty" : ""));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] Patch_CargoItemUi_DropNamelessNested: {ex.Message}"); }
         }
     }
 

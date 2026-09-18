@@ -332,6 +332,24 @@ namespace BigAmbitionsMP
             }
             catch { return false; }
         }
+
+        /// <summary>PUT-PERM-1 (2026-09-18) — the companion of GuestRoute for the PUT paths only.
+        /// GuestRoute answers "route this to the owner"; it says nothing about a visitor who holds NO
+        /// grant at all, and those fell through to the native local add (bundle 20260918-195543).
+        /// Returns TRUE when the local player is an ungranted visitor in another player's building and
+        /// the put must be REFUSED (the toast is raised here, once per drag); FALSE for the owner, for
+        /// single-player and for a granted guest/helper, who keep today's behaviour exactly. Uses the
+        /// pickup gate's own ownership decision so the take and put gates can never drift apart.</summary>
+        internal static bool RefusedUngrantedPut(string where)
+        {
+            try
+            {
+                if (!MPPatches.Patch_ItemController_TryToGrabItem_ForeignShopGate.RefusedForeignGrab(out string owner)) return false;
+                MPPatches.Patch_ItemController_TryToGrabItem_ForeignShopGate.PutRefusalToast(owner, where);
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Housing] RefusedUngrantedPut ({where}): {ex.Message}"); return false; }
+        }
     }
 
     [HarmonyPatch(typeof(FridgeController), nameof(FridgeController.ConsumeItem))]
@@ -364,7 +382,9 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (cargoHolder == null || !HousingFridge.GuestRoute(__instance, out var addr, out var fid)) return true;
+                if (cargoHolder == null) return true;
+                // PUT-PERM-1: an ungranted visitor is refused here, before the native local add.
+                if (!HousingFridge.GuestRoute(__instance, out var addr, out var fid)) return !HousingFridge.RefusedUngrantedPut("the fridge");
                 var cargo = cargoHolder.GetCargoInstances();
                 if (cargo != null)
                 {
@@ -423,7 +443,15 @@ namespace BigAmbitionsMP
             try
             {
                 if (cargoInstance == null || cargoInstance.IsSealed) return true;                      // native refuses these itself
-                if (!HousingFridge.GuestRoute(__instance, out _, out _)) return true;                   // owner / non-guest → native
+                if (!HousingFridge.GuestRoute(__instance, out _, out _))
+                {
+                    // PUT-PERM-1: an UNGRANTED visitor gets the same shape of refusal as the partner's-
+                    // fridge case below — the stack stays in the box, nothing is moved, nothing to undo.
+                    if (!HousingFridge.RefusedUngrantedPut("the package tool")) return true;             // owner / non-guest → native
+                    shouldRemoveSourceCargo = false;
+                    __result = false;
+                    return false;
+                }
                 shouldRemoveSourceCargo = false;  // the stack stays in the box — nothing was moved, nothing to undo
                 __result = false;                 // == the native refusal; the caller answers CargoStorageMoveResult.Failed
                 if (!_refusalLogged)
@@ -529,7 +557,9 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (cargoHolder == null || !HousingFridge.GuestRoute(__instance, out var addr, out var hid)) return true;
+                if (cargoHolder == null) return true;
+                // PUT-PERM-1: an ungranted visitor is refused here, before the native local add.
+                if (!HousingFridge.GuestRoute(__instance, out var addr, out var hid)) return !HousingFridge.RefusedUngrantedPut("the item holder");
                 var cargo = cargoHolder.GetCargoInstances();
                 if (cargo != null)
                 {
@@ -554,7 +584,8 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!HousingFridge.GuestRoute(__instance, out var addr, out var hid)) return true;
+                // PUT-PERM-1: an ungranted visitor is refused here, before the native local store.
+                if (!HousingFridge.GuestRoute(__instance, out var addr, out var hid)) return !HousingFridge.RefusedUngrantedPut("the item holder");
                 var acc = SaveGameManager.Current?.accessoriesData;
                 if (acc == null) return true;
                 // 1.0 PORT (sweep-2 backlog): the phone is now a WEARABLE accessory and native's pick
@@ -588,8 +619,12 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!HousingFridge.GuestRoute(__instance, out var addr, out var sid)) return true;
+                // PUT-PERM-1 (bundle 20260918-195543 — the exact reported route): an ungranted visitor is
+                // refused here, before the native merge moves anything out of the hands.
+                // FOLD F4: the basket early-out runs FIRST — a basket shopper is on the native
+                // warn-only path, so they must keep the native warning instead of our refusal.
                 if (PlayerHelper.IsHoldingShoppingBasket) return true;   // native path just warns — parity
+                if (!HousingFridge.GuestRoute(__instance, out var addr, out var sid)) return !HousingFridge.RefusedUngrantedPut("the storage shelf");
                 string shelfId = sid;
                 System.Collections.Generic.IEnumerable<CargoInstance>? src = null;
                 if (PlayerHelper.IsUsingVehicle)
