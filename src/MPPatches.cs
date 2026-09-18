@@ -3607,6 +3607,38 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── Patch: WorkShiftSlider.SetUp — orphan-shift colour guard ────────
+        // SHIFT-SETUP-1: native SetUp ENDS with
+        //   background.color = ScheduleHelper.GetEmployeeColor(_workShift.employeeId)
+        // and GetEmployeeColor uses the dictionary INDEXER (ScheduleHelper.cs:142-145),
+        // so a shift naming an employee id with no record throws KeyNotFoundException
+        // in SetUp — which runs BEFORE the two guards below.  The cell then dies and
+        // the day's REMAINING shifts are never drawn.  The mod deliberately leaves
+        // real-id orphan shifts in place (MPSaveIntegrity: an id can be legitimately
+        // absent for a while — a partner's staff not yet delivered), so the shift is
+        // not ours to delete or rewrite.  The colour is the last statement in SetUp:
+        // swallowing ONLY the missing-key case loses nothing but the tint.
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider), "SetUp")]
+        public static class Patch_WorkShiftSlider_SetUp_OrphanColourGuard
+        {
+            private static readonly System.Collections.Generic.HashSet<string> _loggedIds = new();
+            static Exception? Finalizer(Exception __exception, WorkShift __2)
+            {
+                if (__exception is not System.Collections.Generic.KeyNotFoundException) return __exception;
+                try
+                {
+                    string id = __2?.employeeId ?? "";
+                    Entities.EmployeeInstance? emp = null;
+                    try { emp = Helpers.EmployeeHelper.GetEmployeeById(id); } catch { }
+                    if (emp != null) return __exception;   // resolvable employee — some other missing key
+                    if (_loggedIds.Add($"{__2?.itemInstanceId}|{id}"))
+                        Plugin.Logger.LogWarning($"[ScheduleDiag] SetUp: shift names unknown employee '{id}' — colour skipped (SHIFT-SETUP-1).");
+                    return null;
+                }
+                catch { return __exception; }
+            }
+        }
+
         // ── Patch: WorkShiftSlider.UpdateState — orphan-shift render guard ───
         // A WorkShift whose employeeId resolves to no record makes UpdateState
         // NRE at employeeById.characterData.name BEFORE the name label is set —
