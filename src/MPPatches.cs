@@ -52,6 +52,25 @@ namespace BigAmbitionsMP
         // method-level patches on MPPatches → they were silently NEVER applied,
         // so a client's rent was never sent to the host (the bug being fixed).
 
+        // RENT-DIAG: addresses already reported this session.
+        private static readonly System.Collections.Generic.HashSet<string> _rentDiagSeen = new System.Collections.Generic.HashSet<string>();
+
+        private static void RentDiag(Building building, float dailyRent, float lastDeposit)
+        {
+            try
+            {
+                if (building == null) return;
+                string addr = GameStateReader.AddressKey(building);
+                if (!_rentDiagSeen.Add(addr)) return;
+                string native = "-", sqm = "-", nbh = "-";
+                try { native = building.GetBuildingDailyMarketRent().ToString(); } catch { }
+                try { sqm = Buildings.BuildingSizeHelper.GetData(building.BuildingSize).squareMeters.ToString(); } catch { }
+                try { nbh = building.Neighbourhood ?? "-"; } catch { }
+                Plugin.Logger.LogInfo($"[RentDiag] {addr} native={native} quoted={dailyRent:F0} deposit={lastDeposit:F0} sqm={sqm} nbh={nbh}");
+            }
+            catch (Exception ex) { try { Plugin.Logger.LogWarning($"[RentDiag] {ex.Message}"); } catch { } }
+        }
+
         [HarmonyPatch(typeof(BuildingHelper), nameof(BuildingHelper.RentBuilding))]
         public static class Patch_RentBuilding
         {
@@ -62,6 +81,11 @@ namespace BigAmbitionsMP
 
                 // Server-confirmed execution dispatched by GameStatePatcher — allow it.
                 if (SuppressNextRentRequest) { SuppressNextRentRequest = false; return true; }
+
+                // RENT-DIAG (2026-09-17): one line per address per session. A native != quoted gap names a
+                // LOCAL rent mod on this machine — the two players are then renting at different prices and
+                // every downstream rent figure diverges. Anything unreachable prints '-'.
+                RentDiag(building, dailyRent, lastDeposit);
 
                 // Client — rent LOCALLY (so the UI flows to the start-business /
                 // terminate-contract window and the client actually owns it), AND
@@ -8326,6 +8350,10 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSale] kiosk intake: {ex.Message}"); }
             }
 
+            // GUEST-PARITY-2b: one line per address where a permitted guest's services were priced free.
+            private static readonly System.Collections.Generic.HashSet<string> _freeSvcLogged =
+                new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+
             static bool Prefix(EmployeeStationController __instance,
                                System.Collections.Generic.List<BigAmbitions.Items.CargoInstance> orderedCargoInstances)
             {
@@ -8348,12 +8376,21 @@ namespace BigAmbitionsMP
                 {
                     try
                     {
+                        // GUEST-PARITY-2b (M3): native OnPlaceOrder prices BOTH fees with the owner's own rule,
+                        // IsPlayerOwnedBusiness ? 0f : price (HairdresserChairController.cs:191/:246). This routed
+                        // MP path never read ownership: a permitted guest saw the native flip's $0 preview in the
+                        // chair UI and was then charged the FULL price through RemoteSalePayload. Apply the same
+                        // rule here — permitted here means the shop is one this player may run, so it is free.
+                        bool svcFree = false;
+                        try { svcFree = CinemaGuestParity.PermittedHere(out _); } catch { }
                         var fees = new System.Collections.Generic.List<(string name, int amount, float price)>();
                         if (hc.hasPlayerHairVariantChanged || hc.hasPlayerEyebrowVariantChanged || hc.hasPlayerBeardVariantChanged)
-                            fees.Add(("ba:itemname_haircuttingfee", 1, ItemHelper.GetPriceOnCurrentBusiness("ba:itemname_haircuttingfee")));
+                            fees.Add(("ba:itemname_haircuttingfee", 1, svcFree ? 0f : ItemHelper.GetPriceOnCurrentBusiness("ba:itemname_haircuttingfee")));
                         if (hc.hasPlayerHairColorChanged || hc.hasPlayerEyebrowColorChanged || hc.hasPlayerBeardColorChanged)
-                            fees.Add(("ba:itemname_hairchemicalfee", 1, ItemHelper.GetPriceOnCurrentBusiness("ba:itemname_hairchemicalfee")));
+                            fees.Add(("ba:itemname_hairchemicalfee", 1, svcFree ? 0f : ItemHelper.GetPriceOnCurrentBusiness("ba:itemname_hairchemicalfee")));
                         if (fees.Count == 0) return false;   // nothing changed — charge nothing (finally releases the panel)
+                        if (svcFree && _freeSvcLogged.Add(MPRegisterSync.CurrentShopAddress))   // never null (MPRegisterSync.cs:79); a ?? here re-flags the property maybe-null for :8428
+                            Plugin.Logger.LogInfo("[Order] haircut fees 0 for a permitted guest (GUEST-PARITY-2b)");
 
                         // Review-family #7a: native consumes one hair-care product per service and
                         // ABORTS UNPAID when the shop has none (HairdresserStylistEmployee:171-175 →
