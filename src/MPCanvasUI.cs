@@ -3105,12 +3105,12 @@ namespace BigAmbitionsMP
                 var box = MakeGO("Box", _mergerConfirmGO.transform);
                 var brt = box.GetComponent<RectTransform>();
                 brt.anchorMin = brt.anchorMax = brt.pivot = new Vector2(0.5f, 0.5f);
-                brt.sizeDelta = new Vector2(470f, 220f);
+                brt.sizeDelta = new Vector2(470f, 300f);   // MERGE-NOTICE-1: grown 80 px for the experimental-feature paragraph
                 var bimg = box.AddComponent<Image>(); bimg.color = _boxCol;
                 var sprite = IsAlive(_panelSprite) ? _panelSprite : null;
                 if (sprite != null) { try { bimg.sprite = sprite; bimg.type = Image.Type.Sliced; } catch { } }
 
-                _mergerConfirmLbl = MakeLabel(box.transform, "", 13, _inkHi, 18f, -14f, 434f, 140f, TextAlignmentOptions.TopLeft);
+                _mergerConfirmLbl = MakeLabel(box.transform, "", 13, _inkHi, 18f, -14f, 434f, 220f, TextAlignmentOptions.TopLeft);
                 ApplyFont(_mergerConfirmLbl); _mergerConfirmLbl.enableWordWrapping = true;
 
                 var (ok, okLbl) = MakeHubButton("Confirm", Vector2.zero, 110f, new Color(0.35f, 0.31f, 0.81f, 1f), 30f, sprite);
@@ -3126,14 +3126,19 @@ namespace BigAmbitionsMP
                 cxLbl.fontSize = 12; _rtMergerCancel = cx;
             }
             _mergerConfirmMode = mode; _mergerConfirmPid = pid;
+            // MERGE-NOTICE-1 (user's exact approved wording, 2026-09-17): shown at the top of both modes until the
+            // feature is judged stable; the user will ask for its removal.
+            string warn = "<b>Experimental feature.</b> Company mergers are new and may still have bugs. If something " +
+                          "looks wrong, report it from the Escape menu under Multiplayer, Report a Bug, or the Report " +
+                          "button in the top bar, and say what you were doing when it happened.";
             string terms = "A merger runs your companies as <b>one</b>: every member gets full access to " +
                            "everything the others own — businesses, registers and storage, homes, and " +
                            "vehicles — including selling and spending on the company's behalf. Any member " +
                            "can leave the merger at any time.";
             if (_mergerConfirmLbl != null)
                 _mergerConfirmLbl.text = mode == "propose"
-                    ? $"<b>Propose merging companies with {MPNames.Resolve(pid)}?</b>\n\n{terms}\n\nThey will be asked to accept."
-                    : $"<b>Merge companies with {MPNames.Resolve(pid)}?</b>\n\n{terms}";
+                    ? $"{warn}\n\n<b>Propose merging companies with {MPNames.Resolve(pid)}?</b>\n\n{terms}\n\nThey will be asked to accept."
+                    : $"{warn}\n\n<b>Merge companies with {MPNames.Resolve(pid)}?</b>\n\n{terms}";
             _mergerConfirmGO.SetActive(true);
             _mergerConfirmGO.transform.SetAsLastSibling();   // above the tab content
         }
