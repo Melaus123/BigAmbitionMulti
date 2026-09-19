@@ -250,7 +250,16 @@ namespace BigAmbitionsMP
             {
                 if (MPServer.IsRunning && addrKey.Length > 0
                     && MPServer.BuildingOwners.TryGetValue(addrKey, out var ledger)
-                    && !string.IsNullOrEmpty(ledger)) { label = ledger; return true; }
+                    && !string.IsNullOrEmpty(ledger))
+                {
+                    // A1 (2026-09-18, log only): the ledger files the HOST's own buildings under the literal
+                    // alias "host" (GameStatePatcher.IsHostLedgerId), so the render line read
+                    // "(rented by 'host')" on the host's own screen. Resolve the alias to the host's real
+                    // player id the way the rest of the mod does (BusinessSync :914/:961,
+                    // `o == "host" ? MPConfig.PlayerId : o`). Display only — still never an id to key on.
+                    label = (ledger == "host" && MPConfig.PlayerId.Length > 0) ? MPConfig.PlayerId : ledger;
+                    return true;
+                }
                 string runner = ""; try { runner = reg.businessOwnerRivalId ?? ""; } catch { }
                 if (GameStatePatcher.IsSessionPlayerRivalId(runner)) { label = runner; return true; }
                 string deed = ""; try { deed = reg.buildingOwnerRivalId ?? ""; } catch { }
@@ -522,6 +531,45 @@ namespace BigAmbitionsMP
                 if (HamptonsAccess.GrantOpensFence(__instance.privateFenceIndex)) __result = false;
             }
             catch { }
+        }
+    }
+
+    /// <summary>T1 (2026-09-18, part of MANOR-1; user hands-on: "it said i needed to own the house to enter,
+    /// even when i had permissions"). TaxiSystem.CanEnterPrivateFence (decompile :132-146) is a THIRD copy of
+    /// the Hamptons tenancy scan — RentedByPlayer/BuildingOwnedByPlayer on a registration that unlocks this
+    /// fence — and TravelTo (:48-52) refuses the ride with 'hamptons_private_zone_locked_message' when it
+    /// answers false. That is the same question the fence DOOR asks, so a residence grant behind the fence
+    /// answers it here too (GrantOpensFence). Postfix only: a natively true result is never touched, and
+    /// single player keeps the native answer. The method is private static, hence the typed lookup.</summary>
+    [HarmonyPatch]
+    public static class Patch_TaxiFence_GrantAllows
+    {
+        private static bool _logged;
+
+        // TargetMethods (plural), never TargetMethod: a null from the singular form makes Harmony THROW, which counts
+        // as a failed patch class (ten of those disable multiplayer entry). A method that moved binds nothing instead.
+        static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            var m = AccessTools.Method(typeof(TaxiSystem), "CanEnterPrivateFence", new[] { typeof(int) });
+            Plugin.Logger.LogInfo($"[Hamptons] TaxiSystem.CanEnterPrivateFence(int): {(m != null ? "patched" : "NOT FOUND")}");
+            if (m != null) yield return m;
+        }
+
+        static void Postfix(int privateFenceIndex, ref bool __result)
+        {
+            try
+            {
+                if (__result) return;                                         // natively allowed — done
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return; // single player — native
+                if (!HamptonsAccess.GrantOpensFence(privateFenceIndex)) return;
+                __result = true;
+                if (!_logged)
+                {
+                    _logged = true;
+                    Plugin.Logger.LogInfo($"[Hamptons] taxi into private fence {privateFenceIndex} allowed by a housing grant.");
+                }
+            }
+            catch (Exception ex) { HamptonsAccess.WarnOnce("Patch_TaxiFence_GrantAllows", ex); }
         }
     }
 

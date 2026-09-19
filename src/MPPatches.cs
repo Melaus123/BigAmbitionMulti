@@ -6280,14 +6280,68 @@ namespace BigAmbitionsMP
             }
 
             private static int _swallowed;
-            static Exception? Finalizer(Exception __exception)
+            private static int _detailed;
+
+            // N1 (2026-09-18, H-LEFTOVERNRE-1, LOG ONLY): the line used to end "— ghost contact", which was a
+            // GUESS — rig T-TRAFFIC-APART-20260918-190014 caught 2 swallows on a client during the ghost-mode
+            // fade with every traffic ghost already on the sensed layer, so nothing proved the other side was a
+            // ghost at all. The words are gone and the first 10 swallows per session now say WHAT was touched.
+            // All three patched methods take the collider as `other` (GleyTrafficSystem/VehicleComponent.cs:417
+            // OnTriggerEnter, :460 NewColliderHit, :469 OnTriggerExit), so Harmony injects it by name.
+            // Counter cadence unchanged; budget 10 detail lines per session; nothing here runs per frame.
+            static Exception? Finalizer(Exception __exception, VehicleComponent __instance, UnityEngine.Collider other)
             {
                 if (__exception == null) return null;
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return __exception;
                 _swallowed++;
+                string detail = "";
+                if (_detailed < 10)
+                {
+                    _detailed++;
+                    try { detail = SwallowDetail(__exception, __instance, other); }
+                    catch (Exception ex2) { detail = " | detail unavailable: " + ex2.Message; }
+                }
                 if (_swallowed <= 5 || _swallowed % 500 == 0)
-                    Plugin.Logger.LogWarning($"[Gley] swallowed {__exception.GetType().Name} in traffic collider handler (#{_swallowed}) — ghost contact.");
+                    Plugin.Logger.LogWarning($"[Gley] swallowed {__exception.GetType().Name} in traffic collider handler (#{_swallowed}).{detail}");
+                else if (detail.Length > 0)
+                    Plugin.Logger.LogWarning($"[Gley] swallowed {__exception.GetType().Name} in traffic collider handler (#{_swallowed}) — detail only.{detail}");
                 return null;
+            }
+
+            /// <summary>N1 probe text: the other collider (name, layer, flags, root, whether it is one of OUR
+            /// ghost bodies or another Gley car), what the receiving car is to THIS machine, and the exception's
+            /// first stack frame. Read-only — no scene sweep, only component lookups on the two objects in hand.</summary>
+            private static string SwallowDetail(Exception ex, VehicleComponent inst, UnityEngine.Collider other)
+            {
+                string o;
+                if (other == null) o = "other=NULL (no collider argument reached the handler)";
+                else
+                {
+                    var go = other.gameObject;
+                    int layer = go != null ? go.layer : -1;
+                    string layerName = "";
+                    try { layerName = layer >= 0 ? UnityEngine.LayerMask.LayerToName(layer) : "?"; } catch { layerName = "?"; }
+                    UnityEngine.Transform? root = go != null ? go.transform.root : null;
+                    bool modGhost = go != null && go.GetComponentInParent<ModGhostMarker>() != null;
+                    VehicleComponent? vc = go != null ? go.GetComponentInParent<VehicleComponent>() : null;
+                    o = $"other='{other.name}' layer='{layerName}'({layer}) isTrigger={other.isTrigger} "
+                      + $"enabled={other.enabled} activeInHierarchy={(go != null && go.activeInHierarchy)} "
+                      + $"rigidbody={(other.attachedRigidbody == null ? "null" : "present")} "
+                      + $"root='{(root != null ? root.name : "?")}' modGhost={modGhost} "
+                      + $"gleyCar={(vc == null ? "no" : "yes(active=" + vc.gameObject.activeInHierarchy + ")")}";
+                }
+                string frame = "";
+                try
+                {
+                    string st = ex.StackTrace ?? "";
+                    int nl = st.IndexOf('\n');
+                    frame = (nl > 0 ? st.Substring(0, nl) : st).Trim();
+                }
+                catch { }
+                bool leftover = false;
+                try { leftover = TrafficSync.IsPublishedLeftover(inst); } catch { }
+                return $" | inst='{(inst == null ? "null" : inst.name)}' publishedLeftover={leftover} "
+                     + $"clientLocalTraffic={TrafficSync.ClientRunsLocalTraffic} | {o} | first frame: {frame}";
             }
         }
 

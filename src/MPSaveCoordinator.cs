@@ -1698,6 +1698,17 @@ namespace BigAmbitionsMP
         //                      and rig log on hand.
         /// <summary>Sticky for bug reports (report.md TornSaveReads line).</summary>
         public static string LastTornRead = "";
+
+        /// <summary>W1 (2026-09-18): which of the TWO native-Load failures the last containment ran on.
+        /// true = the save file was NOT THERE — TryPrepareLoad returns false without an exception on
+        /// `saveGame == null || !File.Exists(saveGame.FilePath)` (SaveGameManager.cs:326-341), which is
+        /// exactly what a .meta whose CharacterPath names another player's folder produces;
+        /// false = the file was present and the read itself failed. Exposed for the LATER on-screen
+        /// wording — SaveLoadGuard.ContainFailedLoad keeps its current strings until the user approves
+        /// new ones, so nothing else in the containment changes.</summary>
+        public static bool LastLoadFailWasMissing;
+        /// <summary>The path the verdict above was taken on (log / report only).</summary>
+        public static string LastLoadFailPath = "";
         private static string? _pendingTornNotice;
 
         public static bool GuardedNativeLoad(SaveGameManager.SaveGameStruct save, bool loadScene, string context, string displayName = "")
@@ -1710,6 +1721,28 @@ namespace BigAmbitionsMP
             int torn = 0;
             UnityEngine.Application.LogCallback probe = (cond, _, _) =>
             { try { if (cond != null && cond.Contains("Reading array went wrong")) torn++; } catch { } };
+            // W1 (2026-09-18): native Load returns false for TWO different reasons, and the old line only
+            // told the player one of them. TryPrepareLoad bails with no exception and no torn-read line when
+            // `saveGame == null || !File.Exists(saveGame.FilePath)` (SaveGameManager.cs:326-341) — the
+            // NOT-FOUND case. Decide which it is BEFORE the call, while the MP folder redirect is still in
+            // place, i.e. at the same moment native TryPrepareLoad evaluates FilePath. The path is rebuilt
+            // from the raw folder segment (P5 / audit F4): never the CharacterPath or FilePath getters, which
+            // Directory.CreateDirectory a junk folder under the SINGLE-PLAYER store.
+            string charId = ""; try { charId = save?.characterId ?? ""; } catch { }
+            string probePath = "";
+            try
+            {
+                string root = SaveGamePathHelper.CurrentVersionFolderPath()?.ToString() ?? "";
+                if (save != null && root.Length > 0 && name.Length > 0)
+                    probePath = Path.Combine(root, charId,
+                        name + "." + (save.saveGameType == SaveGameManager.SaveGameStruct.SaveGameType.json ? "json" : "hsg"));
+            }
+            catch { }
+            // 'missing' needs a REAL path that REALLY is not there. A probe that could not build its path (or a null
+            // struct, which native resolves by itself) says nothing - keep the damaged wording for those.
+            bool missing = false;
+            try { missing = save != null && probePath.Length > 0 && !File.Exists(probePath); } catch { }
+
             bool ok = false;
             UnityEngine.Application.logMessageReceived += probe;
             try { ok = SaveGameManager.Load(save, loadScene); }
@@ -1717,8 +1750,13 @@ namespace BigAmbitionsMP
 
             if (!ok)
             {
+                LastLoadFailWasMissing = missing;
+                LastLoadFailPath = probePath;
                 Plugin.Logger.LogError($"[MPSave] native Load returned FALSE for '{shown}' (file '{name}'; {context}; torn-read lines during load: {torn}) — "
-                    + "the file is damaged or unreadable; running containment instead of continuing on a half-initialized world (round-251A).");
+                    + (missing
+                        ? $"the save file was NOT FOUND at '{probePath}' (characterId '{charId}') — a .meta whose CharacterPath names another player's folder does this; "
+                        : "the file is damaged or unreadable; ")
+                    + "running containment instead of continuing on a half-initialized world (round-251A).");
                 SaveLoadGuard.ContainFailedLoad(shown);
                 return false;
             }
