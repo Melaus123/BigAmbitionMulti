@@ -1,0 +1,265 @@
+{
+  "id": "T-MERGERTRAIN",
+  "title": "H-MERGERTRAIN-1, two players: a merged partner's BENCH employee can be trained from the member's own My Employees panel - the click routes to the OWNER, who is the only machine that charges the wallet and writes the trainingSession, and the session then shows on the member's copy; ends dissolved, NO save",
+  "preconditions": "Fixture save1. Build H-MERGERTRAIN-1 deployed on both machines. FIXTURE REQUIREMENT: the HOST must hold at least one UNASSIGNED employee (on their bench) whose PRIMARY skill is below 100 and who is not already in training - step 13 discovers them on the CLIENT, off the bench publish, and the run is blocked if the capture finds nobody. If a future fixture benches nobody, seed one first with the routed unassign this build adds: `staffop <num> <ba:street_x> <employeeId> unassign` from the member, wait a few seconds, then re-read `bench`. The rig draws no screen: the `train` lever drives the same commit seam the panel's confirm dialog is replaced by, and `employees id=<employeeId>` reads one named employee's training state on either machine.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "bench train NOT routed",
+    "bench staff op .* dropped",
+    "bench train by .* dropped",
+    "routed bench training of .* - ignored",
+    "routed training of .* (implausible|is not at|no skill|no primary skill|the game prices it at|the game refused the payment) ",
+    "\\[Merger\\] accept .* REFUSED",
+    "bench train arm:",
+    "bench train confirm:",
+    "CommitBenchTrain:",
+    "HostRouteBenchStaffEdit:"
+  ],
+  "oracles_report": [
+    "bench train routed to owner",
+    "applied routed training of",
+    "they priced it at",
+    "\\[SharedShop\\] bench of"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST MERGERTRAIN START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "sleep_s": 30,
+      "note": "the worlds settle and the first roster and bench publishes cross"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "bench",
+      "expect_result": "^OK bench [1-9]\\d* ",
+      "note": "THE SUBJECT: a copy of one of the host's BENCHED employees, discovered at runtime. Both captures are anchored on the same line shape - a copy owned by the host, with a primary skill below 100 (native refuses to train at 100) and no session running - so they always describe the same employee",
+      "capture": {
+        "benchEmp": "([^ :]+):${hostPid}:training=\\|-1:skillvalue=(?:\\d|[1-9]\\d):skill=\\S",
+        "benchSkill": "[^ :]+:${hostPid}:training=\\|-1:skillvalue=(?:\\d|[1-9]\\d):skill=(\\S+)"
+      }
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "employees id=${benchEmp}",
+      "expect_result": "${benchEmp}\\|[^|]*\\|assigned=\\|injected=False\\|.*\\|training=\\|-1",
+      "note": "the same id on the OWNER's machine is a REAL record (injected=False), on the bench (assigned= empty) and not training - the three things the owner-side apply re-checks for itself before it charges anything"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "^OK money=",
+      "capture": {
+        "m0": "money=([0-9.-]+)"
+      },
+      "note": "the owner's balance before. Under a merger this figure IS the shared company wallet (MergerWallet's mirror), so it is evidence, not the assertion - the assertion that one charge happened, and happened at the owner, is the log line at step 18 carrying the cost the member computed"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "train ${benchEmp} ${benchSkill}",
+      "expect_result": "^OK train addr='' employee='${benchEmp}' skill='${benchSkill}' cost=[0-9.]+ bench=True owner='${hostPid}' routed=True",
+      "capture": {
+        "trainCost": "cost=([0-9.]+)"
+      },
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "bench train routed to owner '${hostPid}' for '${benchSkill}' \\(${benchEmp}, [0-9.]+\\) - nothing charged here, no session written",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "applied routed training of '[^']+' from '${clientPid}' - ${benchSkill} \\+[0-9]+ for ${trainCost}\\.",
+          "within_s": 20
+        }
+      ],
+      "note": "THE LOG ORACLE for 'no local write': the member's own line at the moment of commitment says the route left and that neither the wallet nor a trainingSession was touched here. bench=True is the member's read of (a) - an injected copy of a CONNECTED merged co-member's employee, unassigned, not a direct grantee"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "employees id=${benchEmp}",
+      "expect_result": "training=(\\|-1|${benchSkill}\\|[0-9]+)",
+      "note": "read straight after the commit. Either value passes on purpose: '|-1' is the copy still untouched, and the owner's value means their republish has already come back over the loopback - which is convergence, not a local write. The claim that nothing was written HERE is step 16's log line; step 20 is the claim that the owner's session does arrive"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "employees id=${benchEmp}",
+      "expect_result": "${benchEmp}\\|[^|]*\\|assigned=\\|injected=False\\|.*\\|training=${benchSkill}\\|[0-9]+",
+      "note": "the owner's record now holds the session (the owner's log line is asserted at step 16, where it is written). THE OWNER is the machine that paid and the machine that holds the session. The cost in the line is the OWNER's own recomputed figure and it equals the member's ${trainCost} to the cent - so the member's number was a bound that matched, and exactly one charge of that amount left the shared wallet, here"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "sleep_s": 5,
+      "note": "the owner's bench republish crosses"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "employees id=${benchEmp}",
+      "expect_result": "${benchEmp}\\|[^|]*\\|assigned=\\|injected=True\\|.*\\|training=${benchSkill}\\|[0-9]+",
+      "note": "PART 2: the copy now carries the owner's session, so the member sees 'in training' instead of 'No tasks'. It got there because the bench signature includes the training state - a session that starts changes nothing else on a benched record"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "bench",
+      "expect_result": "${benchEmp}:${hostPid}:training=${benchSkill}\\|[0-9]+:skillvalue=[0-9]+:skill=${benchSkill}",
+      "note": "the same fact off the bench listing, and the skill is still at its OLD value: +10 lands at the finish, on the owner, and reaches the copy as the next republish"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "train ${benchEmp} ${benchSkill}",
+      "expect_result": "^OK train .* routed=(True|False)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "routed training of '[^']+' by '${clientPid}': they cannot be trained right now",
+          "within_s": 20
+        }
+      ],
+      "note": "A SECOND train for the same employee is refused BY THE OWNER, on the owner's own CanTrainSkill - the copy is not the gate and nothing is charged twice. This is the refusal mechanism the routed staff ops already use: a warning on the runner and no write, with the copies left converged on the republish that already happened"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "^OK money=",
+      "note": "the owner's balance after (it was ${m0} at step 15). Reported, not asserted: rent, wages and stock move the shared wallet on their own during a 40 s run"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved; NO save. The host's employee is left in the session this run started, in memory only"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 27,
+      "role": "both",
+      "cmd": "mark TEST MERGERTRAIN DISSOLVE-LEAVES-NOTHING",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "bench",
+      "expect_result": "^OK bench 0\\b",
+      "note": "off the merger the member holds no copy of the partner's bench at all - so nothing on this machine can be pointed at that training session any more"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "employees id=${benchEmp}",
+      "expect_result": "${benchEmp}\\|[^|]*\\|assigned=\\|injected=False\\|.*\\|training=${benchSkill}\\|[0-9]+",
+      "note": "and the session the member started is still the OWNER's, after the company it was started under is gone: it was always their record"
+    },
+    {
+      "seq": 32,
+      "role": "both",
+      "cmd": "mark TEST MERGERTRAIN END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

@@ -2071,6 +2071,9 @@ namespace BigAmbitionsMP
                   .Append('|').Append(s.Wage.ToString("F1", System.Globalization.CultureInfo.InvariantCulture))
                   .Append('|').Append(s.Satisfaction.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))
                   .Append('|').Append(s.Skills != null ? string.Join(",", s.Skills) : "")
+                  // H-MERGERTRAIN-1: a training session that starts or ends changes nothing else on the record
+                  // (the skill only moves at the FINISH), so without these two the copies would never be told.
+                  .Append('|').Append(s.TrainingSkill).Append('|').Append(s.TrainingStartDay)
                   .Append(';');
             return sb.ToString();
         }
@@ -2109,6 +2112,7 @@ namespace BigAmbitionsMP
                         try { si.Wage = e.hourlyWage; } catch { }
                         try { si.Satisfaction = e.satisfaction; } catch { }
                         try { si.AgeDays = e.characterData?.ageInDays ?? 0; } catch { }
+                        try { if (e.trainingSession != null) { si.TrainingSkill = e.trainingSession.skill ?? ""; si.TrainingStartDay = e.trainingSession.startDay; } } catch { }   // H-MERGERTRAIN-1
                         try
                         {
                             // characterData.skills is THE skill list (HasSkill/GetPrimarySkill read it;
@@ -2355,6 +2359,7 @@ namespace BigAmbitionsMP
             try { si.Wage = e.hourlyWage; } catch { }
             try { si.Satisfaction = e.satisfaction; } catch { }
             try { si.AgeDays = e.characterData?.ageInDays ?? 0; } catch { }
+            try { if (e.trainingSession != null) { si.TrainingSkill = e.trainingSession.skill ?? ""; si.TrainingStartDay = e.trainingSession.startDay; } } catch { }   // H-MERGERTRAIN-1
             try
             {
                 var skills = e.characterData?.skills;
@@ -2578,6 +2583,12 @@ namespace BigAmbitionsMP
             {
                 if (s.Wage > 0f) inst.hourlyWage = s.Wage;
                 if (s.Satisfaction > 0f) inst.satisfaction = s.Satisfaction;
+                // H-MERGERTRAIN-1: the OWNER's training session, mirrored onto the copy exactly as the absence
+                // hand-over mirrors it onto a lifted record (MergerEmployeeSync :1228-1237). The copy only ever
+                // READS this: it is stripped from the hourly pass (MPPatches Patch_EmployeeHelper_RunHourly_
+                // SkipModRecords), so it can never run FinishTraining - the owner's republish is what ends it.
+                if (string.IsNullOrEmpty(s.TrainingSkill)) inst.trainingSession = null;
+                else inst.trainingSession = new EmployeeInstance.TrainingInstance { skill = s.TrainingSkill, startDay = s.TrainingStartDay };
                 if (s.AgeDays > 0) inst.characterData.ageInDays = s.AgeDays;
                 if (s.Skills != null && s.Skills.Count > 0)
                 {
@@ -2679,6 +2690,7 @@ namespace BigAmbitionsMP
                     try { si.Wage = e.hourlyWage; } catch { }
                     try { si.Satisfaction = e.satisfaction; } catch { }
                     try { si.AgeDays = e.characterData?.ageInDays ?? 0; } catch { }
+                    try { if (e.trainingSession != null) { si.TrainingSkill = e.trainingSession.skill ?? ""; si.TrainingStartDay = e.trainingSession.startDay; } } catch { }   // H-MERGERTRAIN-1
                     try
                     {
                         var skills = e.characterData?.skills;

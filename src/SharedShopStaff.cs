@@ -321,6 +321,11 @@ namespace BigAmbitionsMP
             {
                 sb.Append(s.Id).Append('|').Append(s.Name).Append('|').Append(s.Wage.ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
                 if (s.Skills != null) foreach (var sk in s.Skills) sb.Append('|').Append(sk);
+                // H-MERGERTRAIN-1: the TRAINING state is in the signature because a session that starts or ends
+                // changes nothing else on a benched record - the skill only moves when it FINISHES, and the wage
+                // rise that comes with it can round to the same two decimals. Without this the copies would keep
+                // showing 'No tasks' through the whole session and the finish would arrive late or not at all.
+                sb.Append('|').Append(s.TrainingSkill).Append('|').Append(s.TrainingStartDay);
                 sb.Append(';');
             }
             string sig = sb.ToString();
@@ -636,15 +641,34 @@ namespace BigAmbitionsMP
                     if (!(tsent > 0f) || tsent > 10000000f)
                     { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': implausible cost {tsent} - ignored."); return; }
                     // The same per-ADDRESS test as the raise and the bonus (W3-0 r1): holding one of my shops
-                    // must not buy training for any of my employees - bench, headquarters and drivers included.
+                    // must not buy training for any of my employees - headquarters and drivers included.
+                    // H-MERGERTRAIN-1: an EMPTY key is not "any address will do", it is the BENCH - and it is
+                    // held to exactly that, so the address-keyed op can still never reach an unassigned record
+                    // and the bench op can never reach a working one.
                     string tatKey = (AddrOf(emp.assignedAddress) ?? "").Trim();
                     string twantKey = (p.AddressKey ?? "").Trim();
-                    if (twantKey.Length == 0 || !string.Equals(tatKey, twantKey, StringComparison.OrdinalIgnoreCase))
+                    bool tbench = twantKey.Length == 0;
+                    if (tbench)
+                    {
+                        if (tatKey.Length != 0)
+                        { Plugin.Logger.LogWarning($"{Tag} routed bench training of '{SafeName(emp)}' by '{p.PlayerId}': they are not on my bench (they work at '{tatKey}') - ignored."); return; }
+                    }
+                    else if (!string.Equals(tatKey, twantKey, StringComparison.OrdinalIgnoreCase))
                     { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': employee is not at '{twantKey}' - ignored."); return; }
+                    // Which skill: the bench route names one (the button the player actually pressed); an empty
+                    // name keeps its old meaning on the address-keyed path - the PRIMARY skill, which is all the
+                    // bulk action can train (TrainPrimarySkillMassAction).
+                    string twantSkill = (p.SkillName ?? "").Trim();
                     BigAmbitions.Characters.Skills.Skill tskill = null;
-                    try { tskill = emp.characterData.skills[0]; } catch { }
+                    try
+                    {
+                        var tskills = emp.characterData.skills;
+                        if (twantSkill.Length == 0) tskill = tskills[0];
+                        else foreach (var s in tskills) if (s != null && string.Equals(s.name, twantSkill, StringComparison.Ordinal)) { tskill = s; break; }
+                    }
+                    catch { }
                     if (tskill == null)
-                    { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': no primary skill on my record - ignored."); return; }
+                    { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': {(twantSkill.Length == 0 ? "no primary skill" : $"no skill '{twantSkill}'")} on my record - ignored."); return; }
                     bool tcan = false; try { tcan = emp.CanTrainSkill(tskill); } catch { }
                     if (!tcan)
                     { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': they cannot be trained right now (already training, away, or at full skill) - ignored."); return; }
@@ -652,6 +676,10 @@ namespace BigAmbitionsMP
                     float tcost = 0f; try { tcost = EmployeeHelper.GetTrainingCost(emp, tskill.name, tinc); } catch { }
                     if (!(tcost > 0f))
                     { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': the game prices it at {tcost} - ignored."); return; }
+                    // The sender's figure is a bound, never the charge: a difference is worth knowing about but is
+                    // never a refusal - my record is the true one and my price is what leaves my wallet.
+                    if (Mathf.Abs(tcost - tsent) > 0.01f)
+                        Plugin.Logger.LogInfo($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': they priced it at {tsent.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}, mine is {tcost.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} - mine is charged.");
                     bool tpaid = false;
                     try
                     {
@@ -664,7 +692,7 @@ namespace BigAmbitionsMP
                     if (!tpaid)
                     { Plugin.Logger.LogWarning($"{Tag} routed training of '{SafeName(emp)}' by '{p.PlayerId}': the game refused the payment - nothing charged."); return; }
                     try { EmployeeHelper.UnassignEmployeeFromAllWorkshifts(emp); } catch (Exception uex) { Plugin.Logger.LogWarning($"{Tag} routed training unassign shifts: {uex.Message}"); }
-                    try { emp.trainingSession = new EmployeeInstance.TrainingInstance { skill = tskill.name, startDay = SaveGameManager.Current.Day }; }
+                    try { emp.trainingSession = new EmployeeInstance.TrainingInstance { skill = tskill.name, startDay = SaveGameManager.Current.Day }; }   // H-MERGERTRAIN-1: the session lives HERE and only here; RunHourly on this machine is what ends it
                     catch (Exception sex) { Plugin.Logger.LogWarning($"{Tag} routed training session: {sex.Message}"); }
                     try { SaveGameManager.MarkChange(); } catch { }
                     string tkey = AddrOf(emp.assignedAddress);
@@ -942,6 +970,117 @@ namespace BigAmbitionsMP
             catch { addrKey = ""; return false; }
         }
 
+        // ── H-MERGERTRAIN-1: the per-employee TRAIN button for a merged partner's BENCH employee ──
+        // Native draws that button from CanTrainSkill and, for an ASSIGNED employee, refuses the click with
+        // its own error before HudConfirm is ever built (MyEmployees.cs:382-385) - which is why the routed
+        // path exists only for an UNASSIGNED (bench) copy. There the click reaches HudConfirm, so there is a
+        // seam to replace, and the owner has a record that can actually hold the session.
+
+        /// <summary>Is this an injected copy of a merged CO-MEMBER's employee sitting on THEIR bench - the one
+        /// shape the per-employee train button can be routed for? Direct-grant copies are excluded (rulings 14
+        /// and 19 keep them untrainable, and IsFromGrantOwner is not widened); so is an owner the absence table
+        /// says is away, because a bench has no address and therefore no stand-in to run it. "Away" is the only
+        /// presence fact a member holds on its own; plain offline is the HOST's to refuse, and it does.</summary>
+        public static bool IsBenchTrainTarget(EmployeeInstance? e, out string ownerPid)
+        {
+            ownerPid = "";
+            try
+            {
+                if (e == null || string.IsNullOrEmpty(e.id)) return false;
+                if (!MPRegisterSync.IsInjectedStaff(e.id)) return false;
+                if (IsFromGrantOwner(e.id)) return false;                       // direct grant: still a flat no
+                if (!IsFromRoutedOwner(e.id)) return false;                     // nothing to route over
+                if ((AddrOf(e.assignedAddress) ?? "").Trim().Length != 0) return false;   // assigned: today's behaviour
+                string owner = MPRegisterSync.OwnerOfInjected(e.id);
+                if (owner.Length == 0 || owner == MPConfig.PlayerId) return false;
+                if (!MergerSync.MergedRuntime(MPConfig.PlayerId, owner)) return false;    // a co-member, not a grantee
+                if (MergerAbsence.OwnerAwayPid(owner)) return false;            // away: no stand-in holds a bench
+                ownerPid = owner;
+                return true;
+            }
+            catch { ownerPid = ""; return false; }
+        }
+
+        /// <summary>THE ARM. The click computes the price (MyEmployees.cs:389) and then builds the dialog
+        /// (:396) in the SAME frame and the same call stack, so a record laid down by a GetTrainingCost
+        /// postfix and read by the HudConfirm.Show prefix identifies exactly that one click.
+        /// GetTrainingCost has other callers - HrManagerPlan.cs:92 and :105, the bulk action, the owner-side
+        /// recompute, the rig lever - so the postfix WRITES ON EVERY CALL: it either arms (a bench copy, no
+        /// bulk run in progress, a real price) or CLEARS. The flag therefore cannot outlive the call that set
+        /// it, and the consume adds a frame test on top of that.</summary>
+        private static (string id, string owner, string skill, float cost, int frame) _benchTrainArm;
+
+        /// <summary>Public so the rig lever can drop an arm it raised itself (it prices an employee without
+        /// ever opening the dialog).</summary>
+        public static void ClearBenchTrainArm() { _benchTrainArm = ("", "", "", 0f, 0); }
+
+        [HarmonyPatch(typeof(EmployeeHelper), nameof(EmployeeHelper.GetTrainingCost))]
+        public static class Patch_EmployeeHelper_GetTrainingCost_ArmBenchTrain
+        {
+            static void Postfix(EmployeeInstance employeeInstance, string skillName, float __result)
+            {
+                try
+                {
+                    _benchTrainArm = ("", "", "", 0f, 0);                       // every other caller discards it
+                    if (_massTrainArming || _inMassTrain) return;               // the bulk route owns that window
+                    if (!(__result > 0f) || string.IsNullOrEmpty(skillName)) return;
+                    if (!IsBenchTrainTarget(employeeInstance, out string owner)) return;
+                    _benchTrainArm = (employeeInstance.id, owner, skillName, __result, Time.frameCount);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} bench train arm: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>The replacement action itself. The arm is taken, cleared and frame-tested by the
+        /// HudConfirm.Show prefix before this is ever called, so it only ever describes one real click.</summary>
+        private static Action BenchTrainAction((string id, string owner, string skill, float cost, int frame) a)
+        {
+            return () =>
+            {
+                try
+                {
+                    if (!CommitBenchTrain(a.id, a.owner, a.skill, a.cost))
+                    { Plugin.Logger.LogWarning($"[Merger] bench train NOT routed to owner '{a.owner}' ({a.id}, {a.skill}): no route out of this machine - nothing was charged here."); return; }
+                    // The line that says the route left and that nothing was written here is CommitBenchTrain's,
+                    // not this one's: the commit seam is what every caller passes through (this dialog, and the
+                    // rig lever, which never opens one). Run 2 lesson - the oracle went looking for it and a
+                    // lever-driven route had logged nothing at all.
+                    // The native lambda re-opens the panel after its writes (MyEmployees.cs:415-418). Here there
+                    // are no writes to show: the panel is refreshed only so the row is redrawn, and the session
+                    // itself appears when the owner's republish lands (ApplyPool -> RefreshMyEmployeesIfOpen).
+                    RefreshMyEmployeesIfOpen();
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} bench train confirm: {ex.Message}"); }
+            };
+        }
+
+        /// <summary>The bench leg of the routed staff op: no address, so the OWNER is named outright and the
+        /// host validates that naming. Everything else - seq/epoch, the transport choice - is the address-keyed
+        /// path's, unchanged.</summary>
+        public static bool CommitBenchTrain(string employeeId, string ownerPid, string skillName, float cost)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(employeeId) || string.IsNullOrEmpty(ownerPid) || string.IsNullOrEmpty(skillName)) return false;
+                if (!IsFromRoutedOwner(employeeId)) return false;
+                _seq.TryGetValue(employeeId, out var seq); seq++; _seq[employeeId] = seq;
+                var p = new SharedStaffEditPayload
+                {
+                    PlayerId = MPConfig.PlayerId, EmployeeId = employeeId, Seq = seq, SeqEpoch = _seqEpoch,
+                    Action = "train", AddressKey = "", FromAddressKey = "", Wage = cost,
+                    OwnerPid = ownerPid, SkillName = skillName,
+                };
+                // THE line for "it left, and nothing happened here" - at the commit seam, so the dialog route and
+                // the rig lever both produce it. Sent before the transport choice for the same reason the
+                // address-keyed CommitStaffOp logs before its send: it describes the decision, not the delivery.
+                Plugin.Logger.LogInfo($"[Merger] bench train routed to owner '{ownerPid}' for '{skillName}' ({employeeId}, {cost.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}) - nothing charged here, no session written.");
+                if (MPServer.IsRunning) { MPServer.HostRouteSharedStaffEdit(p, MPConfig.PlayerId); return true; }
+                if (MPClient.IsConnected) { MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedStaffEdit, MPConfig.PlayerId, p)); return true; }
+                return false;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} CommitBenchTrain: {ex.Message}"); return false; }
+        }
+
         /// <summary>THE MONEY FIX (phase 4b). EmployeeInstance.GiveBonus (decompile EmployeeInstance.cs:1022-1039)
         /// is the game's ONE bonus commit — the details-panel button (MyEmployees.cs:540-542,
         /// OnPayBonusButtonClick → GiveBonus) and the bulk "pay bonuses" action (PayBonusesMassAction.GiveBonuses)
@@ -1166,6 +1305,11 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    // H-MERGERTRAIN-1: take-and-CLEAR the per-click train arm FIRST - before ANY early return
+                    // (review MEDIUM) - whatever this dialog turns out to be, so no arm can ever survive a
+                    // HudConfirm and be inherited by a later one.
+                    var benchTrain = _benchTrainArm;
+                    _benchTrainArm = ("", "", "", 0f, 0);
                     if (onConfirmAction == null) return;
                     // D2: a partner's `end` / `urgent` - the game's own dialog, this machine's own write REPLACED.
                     Action routed = null;
@@ -1174,6 +1318,10 @@ namespace BigAmbitionsMP
                     // .ShutdownBusiness is itself the confirm wrapper, so the route has to be taken here or
                     // the player never sees the game's prompt.
                     if (routed == null) { try { routed = SharedShopWorkTabs.TakeShutdownConfirmRoute(); } catch { } }
+                    // H-MERGERTRAIN-1: the same REPLACE for the per-employee train of a merged partner's BENCH
+                    // employee - used only when the arm was laid down in THIS frame by THIS click's pricing.
+                    if (routed == null && benchTrain.id.Length > 0 && benchTrain.frame == Time.frameCount)
+                    { try { routed = BenchTrainAction(benchTrain); } catch { } }
                     if (routed != null) { onConfirmAction = routed; return; }
                     bool train = _massTrainArming;
                     bool purge = false;
@@ -1204,11 +1352,12 @@ namespace BigAmbitionsMP
         /// For a MERGED partner's employee phase 4b (people) P3 changes the answer - the menu may offer it, and
         /// the moment the player confirms the bulk run the per-employee effect is ROUTED to whoever runs that
         /// shop (who pays once from the shared wallet and sets the trainingSession on the REAL record) while the
-        /// local replica is left untouched: exactly the shape of the bonus fix beside it. A merger copy this
-        /// machine cannot route for (no flipped address) keeps the old refusal.
+        /// local replica is left untouched: exactly the shape of the bonus fix beside it. An unassigned (BENCH)
+        /// merger copy has no flipped address: in the BULK run it keeps the old refusal; from the details panel
+        /// its Train button is routed to the owner at the confirm dialog (H-MERGERTRAIN-1, IsBenchTrainTarget).
         /// CanTrainSkill is the ONE seam both training paths pass through (MyEmployees.cs:373-374 and
-        /// TrainPrimarySkillMassAction.cs:24), and the writes live in anonymous confirm lambdas, so it is also
-        /// the only place the effect can be intercepted PER EMPLOYEE - which is what makes a MIXED bulk
+        /// TrainPrimarySkillMassAction.cs:24), and the writes live in anonymous confirm lambdas, so for the BULK
+        /// run it is the only place the effect can be intercepted PER EMPLOYEE - which is what makes a MIXED bulk
         /// selection work: every record is decided on its own, and every refusal is logged against its id.</summary>
         [HarmonyPatch(typeof(EmployeeInstance), nameof(EmployeeInstance.CanTrainSkill))]
         public static class Patch_EmployeeInstance_CanTrainSkill_Guard
@@ -1221,17 +1370,24 @@ namespace BigAmbitionsMP
                     string id = __instance?.id ?? "";
                     if (id.Length == 0) return;
                     if (IsFromGrantOwner(id)) { __result = false; return; }                  // direct grant: unchanged
+                    // H-MERGERTRAIN-1: a merged co-member's BENCH copy is the one shape whose click CAN be
+                    // routed (see IsBenchTrainTarget), so native's yes stands and the button is drawn. The
+                    // commit is intercepted at the dialog, not here: nothing is written on this machine.
+                    // Review HIGH: ONLY outside the bulk commit. Inside it (_inMassTrain) a native yes would let
+                    // TrainPrimarySkillMassAction charge THIS machine and write a session on the copy with nothing
+                    // routed - there a bench copy falls through to the old refusal below.
+                    if (!_inMassTrain && IsBenchTrainTarget(__instance, out _)) return;
                     if (!IsRoutedMergedOp(__instance, out string addrKey))
                     { if (IsFromRoutedOwner(id)) __result = false; return; }                 // a merger copy with nowhere to route
-                    // MINOR-8 r2: the DETAILS-PANEL train button cannot be routed. Its click handler is an
-                    // anonymous onClick listener built inside MyEmployees.ShowEmployee (decompile :373-418),
-                    // and for an ASSIGNED employee - which every merger copy at a partner's shop is - it
-                    // short-circuits into Notifications.ShowError("myemployees_unassign_for_training")
-                    // before it reaches HudConfirm, so there is no seam to arm the flag from and no way to
-                    // stop the game's own error firing. The button therefore stays HIDDEN here, exactly as
-                    // it was before P3: answering the question with false is what hides it
-                    // (buttonByName.gameObject.SetActive(employeeInstance.CanTrainSkill(skill))).
-                    // The BULK train is the routed path and is unaffected.
+                    // MINOR-8 r2, narrowed by H-MERGERTRAIN-1: the details-panel train button cannot be routed
+                    // for an ASSIGNED copy. Its click handler is an anonymous onClick listener built inside
+                    // MyEmployees.ShowEmployee (decompile :373-418), and for an assigned employee it
+                    // short-circuits into Notifications.ShowError("myemployees_unassign_for_training") before
+                    // it reaches HudConfirm, so there is no seam to arm from and no way to stop the game's own
+                    // error firing. Such a copy therefore keeps its HIDDEN button here: answering the question
+                    // with false is what hides it (SetActive(employeeInstance.CanTrainSkill(skill))). An
+                    // UNASSIGNED copy is handled above and never reaches this line. The BULK train is the
+                    // routed path for the assigned ones and is unaffected.
                     if (!_inMassTrain) { __result = false; return; }                          // a question, not a commit
                     __result = false;                                                        // the replica is never trained here
                     float cost = 0f;

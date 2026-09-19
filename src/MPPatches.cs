@@ -3396,6 +3396,15 @@ namespace BigAmbitionsMP
         }
 
         // ── Round-95 (user-approved, closes the full message-pipeline audit) ─────────────────
+        // H-MERGERTRAIN-1 (2026-09-19) leans on this patch and adds nothing of its own. EmployeeInstance
+        // .RunHourly - which ends a training session and calls FinishTraining (+10 skill, a wage rise, a
+        // to-do, the 'trainingfinished' GameEvent, FinishedTrainingEmployees) - has exactly ONE caller in
+        // the whole decompile: Helpers/EmployeeHelper.cs:256, inside the roster walk below. The strip empties
+        // SaveGameManager.Current.EmployeeInstances of every injected id for the duration of that pass, so a
+        // COPY is never walked and can never finish a session. The owner's republish is what ends it on the
+        // copy. (Native also keeps a training record out of the work offers on its own: TasksUI.cs:692 and
+        // :707 skip trainingSession != null for both the assign-business and assign-shift to-dos, and
+        // BusinessHelper.cs:1002 skips them in auto-fill - so no bogus assign can be routed from one.)
         // The HOURLY employee pass was the ONE remaining pipeline that could message FROM an
         // injected mirror (quit + low-satisfaction live in EmployeeInstance.RunHourly, driven by
         // EmployeeHelper.RunHourly's full-roster walk; the daily pass and the complaint pass were

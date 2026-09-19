@@ -483,6 +483,21 @@ namespace BigAmbitionsMP
             }
             return false;
         }
+
+        /// <summary>H-MERGERTRAIN-1: the PID-keyed twin of AwayAnywhere, off the same table. AwayAnywhere asks
+        /// "is that ADDRESS being stood in for"; a bench has no address, so the question becomes "is that PLAYER
+        /// away right now" - i.e. does the host's absence table (fanned to every machine inside MergerState,
+        /// ApplyStateAbsences) name them as an absent owner. The one presence read a MEMBER can make without
+        /// asking the host. It is deliberately one-sided: a mark means away, no mark means only "nobody is
+        /// standing in", which is why the host still re-checks the owner is CONNECTED before it routes.</summary>
+        public static bool OwnerAwayPid(string ownerPid)
+        {
+            if (string.IsNullOrEmpty(ownerPid)) return false;
+            IEnumerable<AbsenceInfo> table = MPServer.IsRunning ? HostSnapshot() : _known;
+            foreach (var a in table)
+                if (a != null && string.Equals(a.OwnerPid, ownerPid, StringComparison.Ordinal)) return true;
+            return false;
+        }
         /// <summary>P3-C's removal surface: what B3(d) put into this machine's GameInstance lists (and
         /// into the one Address-keyed map, tagged as an InstalledDictEntry).</summary>
         public static IReadOnlyList<(string Owner, string List, object Item)> InstalledListItems => _installed;

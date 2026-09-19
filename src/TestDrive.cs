@@ -1434,6 +1434,7 @@ namespace BigAmbitionsMP
                     // CharacterData carries ONE name string, not a first/last pair.
                     var elist = Helpers.EmployeeHelper.GetEmployeeInstances();
                     if (elist == null) return "ERR no employee roster";
+                    string eidOnly = arg.StartsWith("id=", StringComparison.Ordinal) ? arg.Substring(3).Trim() : "";
                     var esb = new StringBuilder();
                     int eshown = 0, etotal = 0;
                     foreach (var e in elist)
@@ -1441,16 +1442,24 @@ namespace BigAmbitionsMP
                         if (e == null) continue;
                         string eaddr = "";
                         try { if (e.assignedAddress != null) eaddr = GameStateReader.AddressKey(e.assignedAddress); } catch { }
-                        if (arg.Length > 0 && !string.Equals(eaddr, arg, StringComparison.OrdinalIgnoreCase)) continue;
+                        // H-MERGERTRAIN-1: `employees id=<employeeId>` reads ONE named employee wherever they
+                        // stand - the 30-row cap below used to hide a benched record a run had just picked by id,
+                        // and a bench has no address to scope the listing with.
+                        if (eidOnly.Length > 0) { if (!string.Equals(e.id, eidOnly, StringComparison.Ordinal)) continue; }
+                        else if (arg.Length > 0 && !string.Equals(eaddr, arg, StringComparison.OrdinalIgnoreCase)) continue;
                         etotal++;
-                        if (arg.Length == 0 && eshown >= 30) continue;   // cap only the ALL-employees listing; an address-scoped list is bounded by that shop (run T-P0-6: a 51-staff shop hid the adopted hire, 2026-09-10)
+                        if (arg.Length == 0 && eshown >= 30) continue;   // cap only the ALL-employees listing; an address-scoped or id-scoped list is bounded already (run T-P0-6: a 51-staff shop hid the adopted hire, 2026-09-10)
                         string ename = ""; try { ename = e.characterData?.name?.ToString() ?? ""; } catch { }
                         bool einj = false; try { einj = MPRegisterSync.IsInjectedStaff(e.id); } catch { }
                         // Phase 4b: the bonus figures as THIS machine reads them (on a copy the cooldown is not synced, so canbonus is the satisfaction test only; the runner's own record is the real gate).
                         float ebonus = 0f; bool ecan = false; try { ebonus = e.GetBonusAmount(); ecan = e.CanGiveBonus(); } catch { }
                         // Phase 4b (people): the primary skill as this machine reads it, so a scenario can pick a trainable employee (value < 100).
                         string eskill = ""; try { var esk = e.characterData?.skills; if (esk != null && esk.Count > 0 && esk[0] != null) eskill = $"{esk[0].name}:{esk[0].value.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}"; } catch { }
-                        string eline = $"{e.id}|{ename}|assigned={eaddr}|injected={einj}|bonus={ebonus.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}|canbonus={ecan}|skill={eskill}";
+                        // H-MERGERTRAIN-1: the training session as THIS machine holds it - "" / -1 when there is
+                        // none. On a copy it is the owner's, mirrored by the roster/bench publish; a copy that
+                        // shows one it was never sent would mean this machine wrote it itself.
+                        string etrain = "|-1"; try { var ets = e.trainingSession; if (ets != null) etrain = $"{ets.skill}|{ets.startDay}"; } catch { }
+                        string eline = $"{e.id}|{ename}|assigned={eaddr}|injected={einj}|bonus={ebonus.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}|canbonus={ecan}|skill={eskill}|training={etrain}";
                         Plugin.Logger.LogWarning($"[TestDrive] employee: {eline}");
                         if (eshown++ > 0) esb.Append(" ; ");
                         esb.Append(eline);
@@ -1668,13 +1677,18 @@ namespace BigAmbitionsMP
                     // written only by hiring negotiation (CandidateSalaryNegotiation.cs:101) and by rival
                     // poaching (EmployeeInstance.cs:1087/:1159) — so this lever IS the seam for "raise".
                     var stk = arg.Split(' ');
-                    if (stk.Length < 5) return "ERR usage: staffop <num> <ba:street_x> <employeeId> raise <wage> | bonus <amount>";
+                    // H-MERGERTRAIN-1: 'unassign' joins them - the routed CommitAssign leg, which is how a
+                    // partner's employee reaches their own bench from here (the copy comes back empty-addressed,
+                    // MergerEmployeeSync :252-259), and the only way a bench train has a subject to act on.
+                    if (stk.Length < 4) return "ERR usage: staffop <num> <ba:street_x> <employeeId> raise <wage> | bonus <amount> | unassign";
                     string saddr  = stk[0] + " " + stk[1];
                     string sempId = stk[2];
                     string sop    = stk[3];
-                    if (sop != "raise" && sop != "bonus") return "ERR only 'raise' and 'bonus' are routed (training and to-do are refused on a routed record)";
-                    if (!float.TryParse(stk[4], System.Globalization.NumberStyles.Float,
-                                        System.Globalization.CultureInfo.InvariantCulture, out var swage))
+                    if (sop != "raise" && sop != "bonus" && sop != "unassign") return "ERR only 'raise', 'bonus' and 'unassign' are routed (to-do is refused on a routed record)";
+                    if (sop != "unassign" && stk.Length < 5) return "ERR usage: staffop <num> <ba:street_x> <employeeId> raise <wage> | bonus <amount> | unassign";
+                    float swage = 0f;
+                    if (sop != "unassign" && !float.TryParse(stk[4], System.Globalization.NumberStyles.Float,
+                                        System.Globalization.CultureInfo.InvariantCulture, out swage))
                         return sop == "bonus" ? "ERR amount must be a number" : "ERR wage must be a number";
                     var sreg = GameStatePatcher.FindRegistration(saddr);
                     if (sreg == null) return $"ERR no registration at '{saddr}'";
@@ -1682,6 +1696,11 @@ namespace BigAmbitionsMP
                     if (FindEmployee(sempId) == null) return $"ERR no employee '{sempId}' on this machine";
                     // Phase 4b: "bonus" carries the AMOUNT in the payload field the wage uses; the machine that
                     // runs the address re-runs the game's own GiveBonus and treats the figure only as a bound.
+                    if (sop == "unassign")
+                    {
+                        bool surouted = SharedShopStaff.CommitAssign(sempId, skey, "");
+                        return $"OK staffop addr='{skey}' employee='{sempId}' op='unassign' routed={surouted}";
+                    }
                     bool srouted = SharedShopStaff.CommitStaffOp(sempId, skey, sop, swage);
                     string sval = swage.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
                     return sop == "bonus"
@@ -2432,19 +2451,41 @@ namespace BigAmbitionsMP
                     // Phase 4b (people) P3: the routed TRAIN leg on its own, without the bulk dialog. The
                     // cost is read here exactly as the mass action reads it (skills[0], +10 capped at 100)
                     // and travels as a BOUND - the machine that runs the address recomputes and pays.
-                    if (arg.Length == 0) return "ERR employee id required";
-                    var rnemp = FindEmployee(arg);
-                    if (rnemp == null) return $"ERR no employee '{arg}' on this machine";
+                    // H-MERGERTRAIN-1: `train <employeeId> [skillName]`. A merged partner's UNASSIGNED copy takes
+                    // the BENCH route (owner named, skill named, no address); everything else keeps the
+                    // address-keyed leg, where an empty skill still means 'the primary one'.
+                    if (arg.Length == 0) return "ERR usage: train <employeeId> [skillName]";
+                    var rntk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    string rnid = rntk[0];
+                    string rnwant = rntk.Length > 1 ? rntk[1] : "";
+                    var rnemp = FindEmployee(rnid);
+                    if (rnemp == null) return $"ERR no employee '{rnid}' on this machine";
                     string rnaddr = ""; try { if (rnemp.assignedAddress != null) rnaddr = GameStateReader.AddressKey(rnemp.assignedAddress); } catch { }
-                    float rncost = 0f;
+                    var rnskills = rnemp.characterData.skills;
+                    int rnidx = -1;
                     try
                     {
-                        var rnsk = rnemp.characterData.skills[0];
-                        rncost = Helpers.EmployeeHelper.GetTrainingCost(rnemp, rnsk.name, UnityEngine.Mathf.Min(UnityEngine.Mathf.CeilToInt(100f - rnsk.value), 10));
+                        if (rnskills != null)
+                        {
+                            if (rnwant.Length == 0) rnidx = rnskills.Count > 0 ? 0 : -1;
+                            else for (int i = 0; i < rnskills.Count; i++)
+                                if (rnskills[i] != null && string.Equals(rnskills[i].name, rnwant, StringComparison.Ordinal)) { rnidx = i; break; }
+                        }
                     }
                     catch { }
-                    bool rnrouted = SharedShopStaff.CommitStaffOp(arg, rnaddr, "train", rncost);
-                    return $"OK train addr='{rnaddr}' employee='{arg}' cost={rncost.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} routed={rnrouted}";
+                    if (rnskills == null || rnidx < 0) return $"ERR no skill '{(rnwant.Length == 0 ? "(primary)" : rnwant)}' on '{rnid}'";
+                    var rnsk = rnskills[rnidx];
+                    float rncost = 0f;
+                    try { rncost = Helpers.EmployeeHelper.GetTrainingCost(rnemp, rnsk.name, UnityEngine.Mathf.Min(UnityEngine.Mathf.CeilToInt(100f - rnsk.value), 10)); }
+                    catch { }
+                    // That price call ARMS the per-click record if this is a bench copy. No dialog follows here,
+                    // so it is dropped at once rather than left for the next HudConfirm in this frame to inherit.
+                    bool rnbench = SharedShopStaff.IsBenchTrainTarget(rnemp, out string rnowner);
+                    SharedShopStaff.ClearBenchTrainArm();
+                    bool rnrouted = rnbench
+                        ? SharedShopStaff.CommitBenchTrain(rnid, rnowner, rnsk.name, rncost)
+                        : SharedShopStaff.CommitStaffOp(rnid, rnaddr, "train", rncost);
+                    return $"OK train addr='{rnaddr}' employee='{rnid}' skill='{rnsk.name}' cost={rncost.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} bench={rnbench} owner='{rnowner}' routed={rnrouted}";
                 }
 
                 case "hrtrain":
@@ -2546,7 +2587,15 @@ namespace BigAmbitionsMP
                             if (be == null || be.assignedAddress != null) continue;
                             if (!MPRegisterSync.IsInjectedStaff(be.id)) continue;
                             bn++;
-                            bsb.Append($" {be.id}:{MPRegisterSync.OwnerOfInjected(be.id)}");
+                            // H-MERGERTRAIN-1: the PRIMARY skill (name + rounded value) and the training session.
+                            // The skill is what the routed bench train has to name; the value is what makes the
+                            // record trainable at all (native refuses at 100); training= is the copy's read-back.
+                            // skill= is LAST on purpose: a skill NAME contains a colon of its own ("ba:skill_x"),
+                            // so any field after it could not be told from part of the name (run 1 lesson).
+                            string bskname = ""; int bskval = -1;
+                            try { var bsk = be.characterData?.skills; if (bsk != null && bsk.Count > 0 && bsk[0] != null) { bskname = bsk[0].name; bskval = UnityEngine.Mathf.RoundToInt(bsk[0].value); } } catch { }
+                            string btrain = "|-1"; try { var bts = be.trainingSession; if (bts != null) btrain = $"{bts.skill}|{bts.startDay}"; } catch { }
+                            bsb.Append($" {be.id}:{MPRegisterSync.OwnerOfInjected(be.id)}:training={btrain}:skillvalue={bskval}:skill={bskname}");
                         }
                     return $"OK bench {bn}" + bsb.ToString();
                 }

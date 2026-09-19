@@ -7377,8 +7377,12 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.EmployeeId) || string.IsNullOrEmpty(senderPid)) return;
+                if (p == null || string.IsNullOrEmpty(p.EmployeeId) || string.IsNullOrEmpty(senderPid)) return;
                 if (!SharedRateOk(senderPid, "staff edit")) return;
+                // H-MERGERTRAIN-1: an EMPTY AddressKey used to be dropped on the line above. It now means 'on
+                // the owner's BENCH', which no address can name - so that one op takes a route of its own and
+                // everything address-keyed below is untouched.
+                if (string.IsNullOrEmpty(p.AddressKey)) { HostRouteBenchStaffEdit(p, senderPid); return; }
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] staff edit for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
                 if (ownerPid == senderPid) return;
@@ -7391,6 +7395,33 @@ namespace BigAmbitionsMP
                 else SendToPid(ftarget, MessageEnvelope.Create(MessageType.SharedStaffEdit, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteSharedStaffEdit: {ex.Message}"); }
+        }
+
+        /// <summary>HOST (main thread): H-MERGERTRAIN-1's bench leg - a staff op on an employee who is on their
+        /// OWNER's bench, so there is no address to derive the owner from or to gate on. Three things replace
+        /// what the address did: the op must be the one bench op that exists ("train"), the sender must be a
+        /// MERGED co-member of the named owner (a direct Business grantee is NOT - a grant is per-address and a
+        /// bench has none, and rulings 14/19 keep grant staff untrainable anyway), and the owner must be
+        /// CONNECTED, because a bench has no stand-in: RouteTargetFor's absence fallback is address-keyed and
+        /// an absent owner's bench is run by nobody. The rate cap is the caller's, already spent.</summary>
+        private static void HostRouteBenchStaffEdit(SharedStaffEditPayload p, string senderPid)
+        {
+            try
+            {
+                string ownerPid = (p.OwnerPid ?? "").Trim();
+                if (p.Action != "train")
+                { Plugin.Logger.LogWarning($"[SharedShop] bench staff op '{p.Action}' from '{senderPid}' for '{p.EmployeeId}' - only 'train' has a bench form, dropped."); return; }
+                if (ownerPid.Length == 0)
+                { Plugin.Logger.LogWarning($"[SharedShop] bench train from '{senderPid}' for '{p.EmployeeId}' names no owner - dropped."); return; }
+                if (ownerPid == senderPid) return;
+                if (!MergerSync.MergedRuntime(ownerPid, senderPid))
+                { Plugin.Logger.LogWarning($"[SharedShop] bench train by '{senderPid}' on '{ownerPid}'s employee '{p.EmployeeId}' - they are not co-members of one company, dropped."); return; }
+                if (ownerPid != MPConfig.PlayerId && !IsOnlinePid(ownerPid))
+                { Plugin.Logger.LogWarning($"[SharedShop] bench train by '{senderPid}' on '{ownerPid}'s employee '{p.EmployeeId}' - that owner is not connected and a bench has no stand-in, dropped."); return; }
+                if (ownerPid == MPConfig.PlayerId) SharedShopStaff.ApplyOnOwner(p);
+                else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedStaffEdit, "host", p));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SharedShop] HostRouteBenchStaffEdit: {ex.Message}"); }
         }
 
         // ═══ MERGER PHASE 4b (PEOPLE) part 1 (D20-1): THE SHARED CANDIDATE POOL ═══

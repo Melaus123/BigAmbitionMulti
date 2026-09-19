@@ -377,6 +377,11 @@ namespace BigAmbitionsMP
         public float  Wage       { get; set; }         // wave 3 "raise": the new hourly wage, absolute and never a delta; phase 4b "bonus": the sender's amount, a bound only; ignored by assign/unassign
         public int    Seq        { get; set; }
         public int    SeqEpoch   { get; set; }
+        // H-MERGERTRAIN-1 (additive, protocol 24 - unshipped, so no version bump and no compatibility code):
+        // a "train" with an EMPTY AddressKey means 'on the OWNER's bench'. There is no address to derive the
+        // owner from then, so the sender names them; the host validates that naming (co-membership + online).
+        public string OwnerPid   { get; set; } = "";   // "" on every address-keyed op - the address names the owner there
+        public string SkillName  { get; set; } = "";   // "train" only; "" keeps its old meaning: the PRIMARY skill (the bulk route)
     }
 
     // -- Merger phase 4b (people): the shared candidate pool (MessageType.CompanyCandidates) --
@@ -1296,6 +1301,12 @@ namespace BigAmbitionsMP
         public float  Satisfaction { get; set; } = 100f;
         public int    AgeDays      { get; set; }
         public List<string> Skills { get; set; } = new();   // "name=value" pairs
+        // H-MERGERTRAIN-1 (additive): the OWNER's training session, so a copy shows 'in training' instead of
+        // 'No tasks' - and, more importantly, so the copy can never be the machine that starts or ends one.
+        // "" / -1 = not training. (Protocol :270-271 carry the same two facts for the ABSENCE hand-over record,
+        // which is a different record entirely: that one moves a REAL employee between saves.)
+        public string TrainingSkill    { get; set; } = "";
+        public int    TrainingStartDay { get; set; } = -1;
     }
 
     public class CargoNestedInfo
