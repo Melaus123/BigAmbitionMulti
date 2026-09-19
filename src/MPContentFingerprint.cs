@@ -33,27 +33,48 @@ namespace BigAmbitionsMP
         /// every off-thread caller reads this.</summary>
         public static string Cached => _cached;
 
-        /// <summary>Identity of the game BUILD: the main game assembly's module version id ("N" format).
-        /// It changes on every game compile — unlike the version folder ("1.0") and the content name hashes,
-        /// which the 2026-09-01 Steam update left untouched while changing the save schema. Pure assembly
-        /// metadata (no Unity API) — safe on any thread; computed once. "" if unreadable (gate then skips).</summary>
-        public static string GameBuildId
+        /// <summary>Identity of the game BUILD, written "b&lt;buildNumber&gt;" (e.g. "b3680") — the very number the game
+        /// shows as "Build 3680" (GameVersion.GetCurrent().buildNumber). This is the value the join gate compares.
+        ///
+        /// MACBUILD-1 (field 20260919-144115: a Mac client and a Windows host on the SAME Build 3680 refused each
+        /// other). Until now this was the game assembly's ModuleVersionId, chosen on 2026-09-01 because the version
+        /// FOLDER ("1.0") and the content name hashes both sat still across a Steam update that changed the save
+        /// schema, while the module id moves on every game compile. It moves too much: the module id is per-PLATFORM.
+        /// The build number moves on exactly the occasions the gate cares about and is identical on both platforms —
+        /// the 2026-09-01 update did move it (rig notes: Build 3670 before, 3672 after). The module id is kept as a
+        /// separate DIAGNOSTIC value, GameModuleId.
+        ///
+        /// THREAD-SAFETY: computed on the MAIN THREAD in EnsureCached, because GameVersion.GetCurrent() does
+        /// Resources.Load&lt;GameVersion&gt;("Versioning/Current") — a Unity asset load — while this value is read on the
+        /// LiteNetLib NETWORK thread at Hello time (MPClient/MPServer). Same hazard as the fingerprint itself
+        /// (crash 2026-07-27). Reading this only reads the cached string; "" until the first main-thread pass, which
+        /// the gate already treats as "skip".</summary>
+        public static string GameBuildId => _gameBuild;
+        private static volatile string _gameBuild = "";
+
+        /// <summary>DIAGNOSTIC ONLY, never a gate: the game assembly's module version id ("N" format). It changes on
+        /// every game COMPILE and differs per PLATFORM — which is why it stopped being the join identity
+        /// (MACBUILD-1) and also why it is the finer of the two values in a bug report: two machines reporting the
+        /// same "b3680" with different module ids are the same build compiled for different platforms. Pure assembly
+        /// metadata (no Unity API) — safe on any thread; computed once. "" if unreadable.</summary>
+        public static string GameModuleId
         {
             get
             {
-                if (_gameBuild != null) return _gameBuild;
-                try { _gameBuild = typeof(GameManager).Assembly.ManifestModule.ModuleVersionId.ToString("N"); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Content] game build id unreadable: {ex.Message}"); _gameBuild = ""; }
-                return _gameBuild;
+                if (_gameModule != null) return _gameModule;
+                try { _gameModule = typeof(GameManager).Assembly.ManifestModule.ModuleVersionId.ToString("N"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Content] game module id unreadable: {ex.Message}"); _gameModule = ""; }
+                return _gameModule;
             }
         }
-        private static volatile string? _gameBuild;
+        private static volatile string? _gameModule;
 
         /// <summary>MAIN THREAD ONLY. Idempotent and cheap after the first successful pass —
         /// called every frame from the UI tick so the value is ready before any connect.</summary>
         public static void EnsureCached()
         {
             if (_cachedMods.Length == 0) ComputeMods();   // round-253: mod list rides the same lifecycle
+            if (_gameBuild.Length == 0) ComputeGameBuild();  // MACBUILD-1: Unity asset load, so main thread only
             if (_cached.Length > 0) return;
             try { Compute(); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Content] fingerprint compute deferred: {ex.Message}"); }
@@ -131,6 +152,40 @@ namespace BigAmbitionsMP
                 }
             }
         }
+
+        /// <summary>MAIN THREAD ONLY (called from EnsureCached). GameVersion.GetCurrent() loads a ScriptableObject
+        /// through Resources.Load, which is main-thread-only; the value is then read off-thread at Hello time.
+        /// Leaves "" — which the join gate treats as "skip" — until a pass succeeds.</summary>
+        private static void ComputeGameBuild()
+        {
+            // Review MEDIUM-1: GameVersion.GetCurrent() caches only on success, so a failing read would re-run
+            // Resources.Load EVERY FRAME for the whole session (EnsureCached is called from the UI tick). Back off:
+            // at most one try per 5 s, and give up with one WARNING after 12 tries (the gate then falls back to the
+            // module ids - MPServer.ValidateHello, review HIGH-1).
+            if (_gameBuildGaveUp || UnityEngine.Time.unscaledTime < _gameBuildRetryAt) return;
+            _gameBuildRetryAt = UnityEngine.Time.unscaledTime + 5f;
+            try
+            {
+                var gv = GameVersion.GetCurrent();
+                int bn = gv != null ? gv.buildNumber : 0;   // Unity object: `!= null`, never `?.`
+                if (bn <= 0)
+                {
+                    if (++_gameBuildTries >= 12)
+                    {
+                        _gameBuildGaveUp = true;
+                        Plugin.Logger.LogWarning("[Content] the game's build number could not be read (12 tries) - join checks fall back to the module id.");
+                    }
+                    return;
+                }
+                _gameBuild = "b" + bn.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                Plugin.Logger.LogInfo($"[Content] game build {_gameBuild} (module {GameModuleId}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Content] game build id deferred: {ex.Message}"); }
+        }
+
+        private static float _gameBuildRetryAt;
+        private static int   _gameBuildTries;
+        private static bool  _gameBuildGaveUp;
 
         private static int FloatBits(float f)
         {

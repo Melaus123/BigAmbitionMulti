@@ -270,7 +270,8 @@ namespace BigAmbitionsMP
                 // computing this touches Unity asset loading (crash 2026-07-27).
                 Content  = MPContentFingerprint.Cached,
                 Mods     = MPContentFingerprint.CachedMods,  // round-253: host diffs + informs on mismatch
-                GameBuild = MPContentFingerprint.GameBuildId,   // 2026-09-01: game BUILD identity — host refuses a mismatch
+                GameBuild = MPContentFingerprint.GameBuildId,   // MACBUILD-1: "b<number>" — host refuses a mismatch. CACHED read (main-thread computed)
+                GameModule = MPContentFingerprint.GameModuleId,  // MACBUILD-1: diagnostic only — per-platform, so never gated
                 // Round-281: "I have the InteriorCargoSync handler."  A literal true is the whole
                 // point — the flag's meaning is "this build contains the receiver", which is a
                 // compile-time fact about the assembly being sent, not a runtime setting.
@@ -365,7 +366,13 @@ namespace BigAmbitionsMP
                     {
                         // 2026-09-01 (user-approved wording): same game version folder, different game build.
                         why = "Join refused — game build mismatch. The host's game and yours are different builds. Update Big Ambitions on both machines, then rejoin.";
-                        Plugin.Logger.LogInfo($"[Client] game build mismatch: host {tag.Substring("BAMP:build:".Length)} vs mine {MPContentFingerprint.GameBuildId}.");
+                        // MACBUILD-1: the tag carries the host's "build|module", so this log names BOTH sides' values.
+                        // Equal builds with differing modules would mean the gate is comparing the wrong thing again.
+                        string bRest = tag.StartsWith("BAMP:build:") ? tag.Substring("BAMP:build:".Length) : "";
+                        var bParts = bRest.Split('|');
+                        string hostBuild  = bParts.Length > 0 && bParts[0].Length > 0 ? bParts[0] : "?";
+                        string hostModule = bParts.Length > 1 && bParts[1].Length > 0 ? bParts[1] : "?";
+                        Plugin.Logger.LogInfo($"[Client] game build mismatch: host {hostBuild} (module {hostModule}) vs mine {MPContentFingerprint.GameBuildId} (module {MPContentFingerprint.GameModuleId}).");
                     }
                     else if (tag.StartsWith("BAMP:version"))
                     {

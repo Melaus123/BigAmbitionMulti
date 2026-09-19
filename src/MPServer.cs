@@ -3283,21 +3283,40 @@ namespace BigAmbitionsMP
         {
             string hostGame = MPSaveManager.GameVersionNameCached();
             string hostBuild = MPContentFingerprint.GameBuildId;
+            string hostModule = MPContentFingerprint.GameModuleId;   // MACBUILD-1: logged, never compared
             // Game-version check is skipped when either side is unknown (empty) so a
             // not-yet-cached host can't wrongly reject; the protocol number always gates.
             bool protocolOk = hello.Protocol == ProtocolInfo.Version;
             bool gameOk = string.IsNullOrEmpty(hello.Game) || string.IsNullOrEmpty(hostGame) || hello.Game == hostGame;
-            // 2026-09-01 (update-impact review, user-approved): `Game` is the save-folder name ("1.0") and the
-            // content fingerprint hashes item/business NAMES — the 2026-09-01 Steam update moved neither while
-            // changing the save schema. The game build id moves on every game compile; a mismatch is refused so
-            // an updated host and a not-yet-updated joiner cannot trade a save neither writes the same way.
-            bool buildOk = string.IsNullOrEmpty(hello.GameBuild) || string.IsNullOrEmpty(hostBuild) || hello.GameBuild == hostBuild;
+            // MACBUILD-1 (2026-09-19, user-approved): `Game` is the save-folder name ("1.0") and the content
+            // fingerprint hashes item/business NAMES — the 2026-09-01 Steam update moved neither while changing the
+            // save schema. GameBuild is now the game's OWN build number ("b3680"), which did move across that update
+            // (3670 → 3672) and is the same on every platform; a mismatch is refused so an updated host and a
+            // not-yet-updated joiner cannot trade a save neither writes the same way. It was the assembly module id
+            // until 2026-09-19 — per-platform, so it refused a Mac client and a Windows host on one build. The module
+            // ids are logged beside the builds (never compared) so a future refusal shows both sides of both values.
+            // Review HIGH-1: never fail OPEN. Both build numbers known -> compare them (the cross-platform rule).
+            // Otherwise fall back to the module ids, which are pure assembly metadata and always readable - the same
+            // strictness the gate had before 2026-09-19 (it refuses Mac-vs-Windows, but only when a build number could
+            // not be read at all). Only when BOTH pairs are unknown is the check skipped, and that is said out loud.
+            bool buildsKnown  = !string.IsNullOrEmpty(hello.GameBuild) && !string.IsNullOrEmpty(hostBuild);
+            bool modulesKnown = !string.IsNullOrEmpty(hello.GameModule) && !string.IsNullOrEmpty(hostModule);
+            bool buildOk = buildsKnown ? hello.GameBuild == hostBuild
+                         : modulesKnown ? hello.GameModule == hostModule
+                         : true;
+            if (!buildsKnown && !_buildGateFallbackLogged)
+            {
+                _buildGateFallbackLogged = true;
+                Plugin.Logger.LogWarning($"[Server] game BUILD NUMBER unknown (joiner '{hello.GameBuild}', host '{hostBuild}') - the join gate compared "
+                    + (modulesKnown ? "the game MODULE ids instead (same-platform strictness)." : "NOTHING: neither build numbers nor module ids were available."));
+            }
             if (protocolOk && gameOk && !buildOk)
             {
                 Plugin.Logger.LogWarning(
                     $"[Server] Hello from '{hello.PlayerId}' refused — game BUILD mismatch " +
-                    $"(joiner build {hello.GameBuild} vs host {hostBuild}; both report game '{hostGame}', mod {hello.Version}/p{hello.Protocol}).");
-                try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes($"BAMP:build:{hostBuild}")); } catch { }
+                    $"(joiner build {hello.GameBuild} [module {(string.IsNullOrEmpty(hello.GameModule) ? "?" : hello.GameModule)}] " +
+                    $"vs host {hostBuild} [module {hostModule}]; both report game '{hostGame}', mod {hello.Version}/p{hello.Protocol}).");
+                try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes($"BAMP:build:{hostBuild}|{hostModule}")); } catch { }
                 // Round-215 lesson: tell the HOST too, or they only see "friend never appeared".
                 try { MPCanvasUI.PostLobbyNotice($"{hello.PlayerId} can't join — game build mismatch. Update Big Ambitions on both machines, then rejoin."); } catch { }
                 return false;
@@ -4211,6 +4230,8 @@ namespace BigAmbitionsMP
         /// the building.  Authorization mirrors HandleBuildingInteriorDelta exactly: the sender must be the owner
         /// or hold a Housing/Business grant from them.  Deliberately narrow — this carries only floor-cell
         /// dirtiness, so unlike an interior payload it cannot bring anything else with it.</summary>
+        private static bool _buildGateFallbackLogged;   // one line per host process (review HIGH-1)
+
         public static void HandleBuildingDirtEdit(DirtEditPayload payload, string senderPid)
         {
             try

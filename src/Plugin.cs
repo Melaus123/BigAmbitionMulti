@@ -376,6 +376,18 @@ namespace BigAmbitionsMP
                 string loc = "";
                 try { loc = loaded.Location; } catch { }
                 Plugin.Logger.LogInfo($"[Plugin] Harmony provenance: loaded v{loaded.GetName().Version} from '{(string.IsNullOrEmpty(loc) ? "(in-memory)" : loc)}', compiled against v{compiledAgainst}.");
+                // HARMONYVER-1 (field 20260919-081216): an OLDER shared Harmony is not cosmetic. We compile against
+                // 2.4.x; any call the compiler resolved to a 2.4-only overload raises MissingMethodException when the
+                // method containing it is JIT-compiled — inside a type initialiser that kills every later call into
+                // that class (SharedShopVisibility lost BizMan and both building lists that way). Say it once, naming
+                // the folder the loaded copy came from, so the next bundle names the mod to update or remove.
+                // LOG ONLY — it never blocks anything.
+                var vLoaded = loaded.GetName().Version;
+                if (vLoaded != null && Version.TryParse(compiledAgainst, out var vCompiled) && vLoaded < vCompiled)
+                    Plugin.Logger.LogWarning(
+                        $"[Plugin] Harmony is OLDER than the copy this build was compiled against (loaded v{vLoaded}, compiled v{vCompiled}), " +
+                        $"from '{(string.IsNullOrEmpty(loc) ? "(in-memory)" : loc)}' — another mod's copy won the load race. " +
+                        "Anything we call that only exists in the newer Harmony would fail there; if whole panels or lists are dead, that folder's mod is the one to update or remove.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plugin] Harmony provenance probe: {ex.Message}"); }
             // ── Round-254: the Harmony BOOTSTRAP itself can die before any patching ──

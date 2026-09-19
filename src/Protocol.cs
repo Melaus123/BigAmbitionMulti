@@ -1759,12 +1759,19 @@ namespace BigAmbitionsMP
         /// report's InstalledMods line). The host diffs it against its own and INFORMS both
         /// sides on a mismatch — never refuses. Empty from older builds.</summary>
         public string Mods     { get; set; } = "";
-        /// <summary>2026-09-01 (update-impact review): identity of the game BUILD — the main game assembly's
-        /// module id. `Game` is only the version-folder name ("1.0") and `Content` hashes item/business NAMES,
-        /// so a code-only Steam patch moved neither while the 2026-09-01 update changed the save schema
-        /// (NetWorth removed, midnightBankBalances added, TodoTask.priorityOffset, TodoTaskType +2). The host
-        /// refuses a mismatch. Empty from older builds (they fail the protocol check first anyway).</summary>
+        /// <summary>MACBUILD-1 (2026-09-19): identity of the game BUILD — the game's own build number, sent as
+        /// "b3680". `Game` is only the version-folder name ("1.0") and `Content` hashes item/business NAMES, so a
+        /// code-only Steam patch moved neither while the 2026-09-01 update changed the save schema (NetWorth removed,
+        /// midnightBankBalances added, TodoTask.priorityOffset, TodoTaskType +2) — the build number did move
+        /// (3670 → 3672). Was the assembly module id until 2026-09-19, which differs per PLATFORM and so refused a
+        /// Mac client and a Windows host on the same build. The host refuses a mismatch. Empty when the sender has
+        /// not cached it yet, and the gate then skips.</summary>
         public string GameBuild { get; set; } = "";
+        /// <summary>DIAGNOSTIC ONLY, never gated (MACBUILD-1): the game assembly's module version id. It differs per
+        /// PLATFORM, so a Mac client and a Windows host on one build send the same GameBuild and a different
+        /// GameModule — the pair that made the old module-id gate refuse them (field 20260919-144115). The host logs
+        /// both sides' values whenever it refuses a build mismatch.</summary>
+        public string GameModule { get; set; } = "";
         // Phase 3 rejoin offer: set when the client holds a pending DISCONNECT save (un-uploaded progress
         // from its last leave). The host may request it (LoadDataPayload.AwaitClientDisconnectUpload) and,
         // after validating the uploaded save's ACTUAL day, restore it instead of the host's older copy.

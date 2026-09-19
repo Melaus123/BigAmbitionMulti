@@ -153,9 +153,9 @@ namespace BigAmbitionsMP
             return list;
         }
 
-        /// <summary>D9 r3: the same discriminator AllowedTabs's switch uses (:121-147) to tell an ORDINARY shop from a
+        /// <summary>D9 r3: the same discriminator AllowedTabs's switch uses (:126-152) to tell an ORDINARY shop from a
         /// warehouse / factory / headquarters / empty shell. Ordinary = the switch's `default:` arm — the only one
-        /// that grants "Deliveries" (:143) and "Marketing" (:144), which are the two things the widened NPC pickers
+        /// that grants "Deliveries" (:148) and "Marketing" (:149), which are the two things the widened NPC pickers
         /// let a helper start. Anything else is held out of those pickers.</summary>
         private static bool IsOrdinaryBusinessType(BuildingRegistration reg)
         {
@@ -173,30 +173,51 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>BuildingHelper.DefaultBuildingRegistrationSort (BuildingHelper.cs:814-817) is PRIVATE, so the
-        /// fallback the native helper installs at :745 is bound once by reflection rather than re-implemented.
-        /// Null if the method is ever renamed — the re-sort is then skipped, which is what the list did before r3.</summary>
-        private static readonly BuildingHelper.BuildingRegistrationSortDelegate _nativeSort = BindNativeSort();
+        /// <summary>BuildingHelper.DefaultBuildingRegistrationSort (BuildingHelper.cs:839-842) is a PRIVATE STATIC
+        /// method, so the fallback the native helper installs at :769-770 is bound once by reflection rather than
+        /// re-implemented. Null if the method is ever renamed — the re-sort is then skipped, which is what the list
+        /// did before r3.
+        ///
+        /// HARMONYVER-1 (field 20260919-081216: BizMan and the rent/buy lists dead for both players). This used to be
+        /// a STATIC FIELD INITIALISER calling AccessTools.MethodDelegate. Another workshop mod ships Harmony 2.3.3 and
+        /// the game loads THAT copy, while we compile against 2.4.2, where MethodDelegate has a fourth (delegateArgs)
+        /// parameter — the overload the compiler picked does not exist in 2.3.3, so this class's TYPE INITIALISER
+        /// threw MissingMethodException and every later call into the class threw TypeInitializationException.
+        /// Two changes stop that: the delegate is built with the BCL only (Delegate.CreateDelegate — the native method
+        /// is `static int (BuildingRegistration, BuildingRegistration)`, identical to the delegate), and the bind is
+        /// LAZY, inside a NON-INLINED helper whose CALLER holds the try/catch. The caller is the point: a missing
+        /// method is raised when the method CONTAINING the call is JIT-compiled, so a try/catch around the call in the
+        /// same method would never get to run.</summary>
+        private static BuildingHelper.BuildingRegistrationSortDelegate? _nativeSort;
+        private static bool _nativeSortTried;
 
-        private static BuildingHelper.BuildingRegistrationSortDelegate BindNativeSort()
+        private static BuildingHelper.BuildingRegistrationSortDelegate? NativeSort()
         {
-            try
-            {
-                var mi = AccessTools.Method(typeof(BuildingHelper), "DefaultBuildingRegistrationSort");
-                return mi == null ? null
-                                  : AccessTools.MethodDelegate<BuildingHelper.BuildingRegistrationSortDelegate>(mi);
-            }
-            catch { return null; }
+            if (_nativeSortTried) return _nativeSort;
+            _nativeSortTried = true;
+            try { _nativeSort = BindNativeSort(); }
+            catch (Exception ex) { _nativeSort = null; Plugin.Logger.LogWarning($"{Tag} native picker sort unavailable ({ex.GetType().Name}: {ex.Message}) — appended shops sort last."); }
+            return _nativeSort;
+        }
+
+        /// <summary>NoInlining is load-bearing — see NativeSort: the guard has to sit in the CALLER's frame.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static BuildingHelper.BuildingRegistrationSortDelegate? BindNativeSort()
+        {
+            var mi = AccessTools.Method(typeof(BuildingHelper), "DefaultBuildingRegistrationSort");
+            return mi == null ? null
+                              : (BuildingHelper.BuildingRegistrationSortDelegate)Delegate.CreateDelegate(
+                                    typeof(BuildingHelper.BuildingRegistrationSortDelegate), mi);
         }
 
         /// <summary>D9 r3: re-sort exactly the way BuildingHelper.GetPlayerBuildingRegistrations does
-        /// (BuildingHelper.cs:743-747) — the caller's own sortDelegate when it passed one, else the native default —
+        /// (BuildingHelper.cs:758-774) — the caller's own sortDelegate when it passed one, else the native default —
         /// so an appended shop lands in the picker's alphabetical place instead of at the bottom of the list.</summary>
         private static void SortLikeNative(List<BuildingRegistration> list, BuildingHelper.BuildingRegistrationSortDelegate sortDelegate)
         {
             try
             {
-                var cmp = sortDelegate ?? _nativeSort;
+                var cmp = sortDelegate ?? NativeSort();
                 if (cmp == null || list == null) return;
                 list.Sort((x, y) => cmp(x, y));
             }
