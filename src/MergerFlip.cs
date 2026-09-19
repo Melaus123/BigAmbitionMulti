@@ -17,6 +17,13 @@ namespace BigAmbitionsMP
     ///    native truth (flag off, rival id back), so wages/rent/taxes/marketing/summaries run
     ///    exactly as un-merged — each cost/credit fires once, on its real owner's machine. The veil
     ///    is a nesting counter; a Finalizer guarantees re-flip even when the veiled pass throws.
+    ///  • SERVE SCOPE: the veil's NARROW sibling for the LIVE serve chain (H-SALEHOLE-1 H2). Every
+    ///    owner-gated step of a native serve reads BuildingManager.IsPlayerOwnedBusiness, i.e. the same
+    ///    flag; inside each serve step ONLY the reg of the building the local player is in reverts, so a
+    ///    member in a partner's shop behaves like a permission helper — the owner-GATED steps take nothing
+    ///    from the replica and record nothing locally, and every paid NPC order is forwarded to the owner.
+    ///    NOT covered (same as the permission path): the two UNGATED native order records
+    ///    (SelfServiceEmployee ~:150, TicketKioskController ~:144) and the player-as-customer paths.
     ///  • SAVE STRIP: the whole flip reverts around PerformLocalSave (same choke point + restore-in-
     ///    finally as the synthetic cashiers, ANTIPATTERNS Class 5) so a save can never claim
     ///    ownership of a partner's business.
@@ -67,6 +74,22 @@ namespace BigAmbitionsMP
             if (!rented) return false;
             if (_flipped.Count == 0) return true;   // inert without a merger
             try { return !_flipped.ContainsKey(GameStateReader.AddressKey(reg)); } catch { return true; }
+        }
+
+        /// <summary>"THIS machine books that shop": really mine, OR I am the STAND-IN simulating it for an absent
+        /// owner (the reg stays flipped through the veil there, so TrulyMine alone answers false on the one
+        /// machine that runs the shop - batch 16 review HIGH-1). Same predicate as SharedShopStaff.CommitsHere.
+        /// Use it wherever a guard asks "is this machine the single writer for this shop's stock/sales?".</summary>
+        public static bool BooksHere(BuildingRegistration reg)
+        {
+            if (reg == null) return false;
+            if (TrulyMine(reg)) return true;
+            try
+            {
+                if (MergerAbsence.SimulatedCount == 0 || !reg.RentedByPlayer) return false;   // cheap outs before the key string
+                return MergerAbsence.SimulatesHere(GameStateReader.AddressKey(reg));
+            }
+            catch { return false; }
         }
 
         // ── Reconcile (MAIN THREAD, 1 Hz from MPCanvasUI.Update) ─────────────
@@ -270,6 +293,10 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogInfo($"[FlipProbe] veil OFF — {_flipped.Count} flip(s) restored.");
                 ApplyAll(flip: true, honourSimulated: !wasSaveStrip);
+                // Batch 16 review MEDIUM-3: a veil that went up and down INSIDE a serve scope has just re-flipped
+                // the scope's reg - put it back to native truth for the rest of that serve slice (the scope's own
+                // pop re-flips it). Unreachable today (no veiled pass is called from a serve body); cheap insurance.
+                if (_scopeDepth > 0 && _scopeReg != null) ApplyOne(_scopeReg, _scopeParked, flip: false);
             }
             // PHASE 4a: put the company-books overlay back (AFTER the re-flip, so the re-apply sees
             // the flipped world it was built against).
@@ -293,11 +320,84 @@ namespace BigAmbitionsMP
                     // wage/rent/marketing/summary passes must see it as owned. One machine only (a mark
                     // names a single simulator), and NEVER for the save strip (SaveStripPush: false).
                     if (honourSimulated && MergerAbsence.SimulatesHere(key)) continue;
-                    reg.RentedByPlayer = flip;
-                    reg.businessOwnerRivalId = flip ? "" : parkedRival;
+                    ApplyOne(reg, parkedRival, flip);
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] veil apply({flip}): {ex.Message}"); }
+        }
+
+        /// <summary>THE per-reg revert/re-flip, in ONE place — the authority veil, the save strip and the serve
+        /// scope all go through it, so a flipped reg is always restored identically (flag + parked rival id).
+        /// Both are PLAIN FIELDS on BuildingRegistration (BuildingRegistration.cs:44 RentedByPlayer, :118
+        /// businessOwnerRivalId): no property setter, so the write fires no event, marks nothing dirty and
+        /// refreshes no UI on its own.</summary>
+        private static void ApplyOne(BuildingRegistration reg, string parkedRival, bool flip)
+        {
+            reg.RentedByPlayer = flip;
+            reg.businessOwnerRivalId = flip ? "" : parkedRival;
+        }
+
+        // ── SERVE SCOPE (H-SALEHOLE-1 H2, 2026-09-19) ─────────────────────────
+        // WHAT IT FIXES: every owner-gated step of the native serve chain reads
+        // BuildingManager.IsPlayerOwnedBusiness, which IS buildingRegistration.RentedByPlayer
+        // (BuildingManager.cs:184). On a MEMBER standing in a flipped partner shop that reads TRUE, so that
+        // machine drained its own REPLICA's shelves, priced from its own table, charged paper bags and
+        // recorded orders the real owner never saw. The permission HELPER gets all of this right for exactly
+        // the opposite reason: there the flag is false, so each native step skips itself and
+        // Patch_Order_Pay_HelperForward sends the paid order to the owner, who adopts it once.
+        // WHY NOT THE FULL VEIL: Push also physically LIFTS the CompanyBooks overlay and reverts EVERY
+        // flipped reg — per frame, per serving employee that is heavy and side-effectful.
+        // WHAT THIS IS: the narrowest sibling — ONE reg (the building the local player is in, read LIVE at
+        // the moment of commitment), no books lift, nesting-counted, and a no-op when nothing is flipped,
+        // when we are not in a flipped address, or when this machine is the absent owner's STAND-IN. It is
+        // pushed and popped INSIDE each coroutine slice, so it never spans a frame; Unity is single-threaded
+        // and nothing runs between the Prefix and the Finalizer but the wrapped method itself, so no other
+        // system can observe the reg mid-revert.
+        // VEIL INTERACTION: while _veilDepth > 0 the reg is ALREADY native truth — the scope does nothing
+        // and remembers that, so its pop restores nothing. If a veil goes up and down inside the scope, the
+        // veil's own Pop re-flips everything and then RE-REVERTS this scope's reg (see Pop), so the rest of
+        // the serve slice still runs on native truth; the pop below declines to touch the reg while a veil
+        // is still up.
+        private static int _scopeDepth;
+        private static BuildingRegistration? _scopeReg;   // the ONE reg this scope reverted (null = nothing to restore)
+        private static string _scopeParked = "";
+
+        /// <summary>Serve-scoped un-flip. Balanced by <see cref="ServeScopePop"/> from a Harmony Finalizer.</summary>
+        public static void ServeScopePush()
+        {
+            if (_scopeDepth++ > 0) return;
+            _scopeReg = null;
+            try
+            {
+                if (_flipped.Count == 0) return;   // inert without a merger — one int compare and out
+                if (_veilDepth > 0) return;        // already native truth; the veil owns the flags
+                var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                if (reg == null) return;           // not inside a building
+                string key = GameStateReader.AddressKey(reg);
+                if (string.IsNullOrEmpty(key) || !_flipped.TryGetValue(key, out var parkedRival)) return;   // the local building is not flipped
+                // P3-B (B3a), the SAME exception Push honours: an address this machine simulates for an
+                // absent owner is the ONLY machine running that shop, so its serve chain must keep booking
+                // locally — leave it flipped.
+                if (MergerAbsence.SimulatesHere(key)) return;
+                _scopeReg = reg; _scopeParked = parkedRival ?? "";
+                ApplyOne(reg, _scopeParked, flip: false);
+            }
+            catch (Exception ex) { _scopeReg = null; Plugin.Logger.LogWarning($"[Merger] serve scope push: {ex.Message}"); }
+        }
+
+        /// <summary>Restore the one reg the matching push reverted.</summary>
+        public static void ServeScopePop()
+        {
+            if (--_scopeDepth > 0) return;
+            if (_scopeDepth < 0) _scopeDepth = 0;   // defensive — an unmatched pop must not wedge the scope
+            var reg = _scopeReg; _scopeReg = null;
+            if (reg == null) return;
+            try
+            {
+                if (_veilDepth > 0) return;   // a veil is up now: it owns the flags and its own Pop re-flips this reg
+                ApplyOne(reg, _scopeParked, flip: true);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] serve scope pop: {ex.Message}"); }
         }
 
         /// <summary>Scene boundary: the regs died with the scene — clear tracking WITHOUT touching

@@ -1759,13 +1759,22 @@ namespace BigAmbitionsMP
                     {
                         if (payload.Authoritative && payload.CustomerEntries != null && payload.CustomerEntries.Count > 0)
                             CustomerEntrySync.SeedFor(reg, payload.CustomerEntries);
+                        // H-SALEHOLE-1 (log-only): a FLIPPED address whose interior payload brings no shopper
+                        // schedule at all never reaches the seed — a different hole from the seed's own skip,
+                        // and indistinguishable from it in the field log until now. Same 60-line budget.
+                        else if ((payload.CustomerEntries == null || payload.CustomerEntries.Count == 0)
+                                 && MergerFlip.IsFlipped(payload.AddressKey))
+                            CustomerEntrySync.NoteEmptyInteriorPayload(payload.AddressKey, payload.Authoritative, reg.businessTypeName ?? "");   // batch 16b: the TYPE tells a genuine hole from an HQ/warehouse that never has shoppers
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] customer-entry seed: {ex.Message}"); }
                     // Round-39e — complaint parity: adopt the owner's fulfilled-demand set so the seeded
                     // customers complain about the RIGHT things (never on the owner's own machine).
                     try
                     {
-                        if (payload.Authoritative && !reg.RentedByPlayer
+                        // Batch 16b: TrulyMine, not the raw flag — under a merger flip a MEMBER read its own
+                        // name on a PARTNER's shop and refused the owner's fulfilled-demand set, so the seeded
+                        // customers there complained about the wrong things.
+                        if (payload.Authoritative && !MergerFlip.BooksHere(reg)
                             && payload.FulfilledDemands != null && payload.FulfilledDemands.Count > 0)
                             reg.cachedFulfilledCustomerDemands = new System.Collections.Generic.List<string>(payload.FulfilledDemands);
                     }

@@ -64,7 +64,13 @@ namespace BigAmbitionsMP
                     return false;
                 }
 
-                if (reg.RentedByPlayer) return true;              // own building → native is legit
+                // Batch 16b: TrulyMine, not the raw flag. In a merger-FLIPPED partner shop this line waved
+                // every deposit straight onto the local REPLICA (the owner's next cargo statement is absolute,
+                // so the goods evaporated). It now falls through to the helper route below, which sends the
+                // put to the real owner.
+                // Review HIGH-1: BooksHere, not TrulyMine alone - a STAND-IN for an absent owner is the machine that
+                // books that shop; routing its deposit to the offline owner made the shop un-restockable.
+                if (MergerFlip.BooksHere(reg)) return true;      // my own building, or the one I stand in for → native is legit
                 if (!interior) return true;
 
                 // TILL-PUT-1 (round-67 → routed): warning alone was never enough.  A helper's hand/box deposit

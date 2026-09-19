@@ -583,6 +583,21 @@ namespace BigAmbitionsMP
         internal static bool IAmSimulatorFor(string addr)
             => !string.IsNullOrEmpty(addr) && _authority.TryGetValue(addr, out var s) && s == MPConfig.PlayerId;
 
+        /// <summary>H-SALEHOLE-1 rig read-only: WHICH machine runs this address's live customers ("" = nobody
+        /// inside, or no election yet). The `salestats` lever's `sim=` field.</summary>
+        internal static string SimulatorFor(string addr)
+            => !string.IsNullOrEmpty(addr) && _authority.TryGetValue(addr, out var sf) ? (sf ?? "") : "";
+
+        /// <summary>H-SALEHOLE-1 rig read-only: is the native spawner suppressed HERE because this machine
+        /// follows someone else's simulator in the building it stands in?</summary>
+        internal static bool SpawnerSuppressedHere => _followerHere;
+
+        /// <summary>H-SALEHOLE-1 rig read-only: live native customers in the interior this machine is in.</summary>
+        internal static int LiveCustomerCount
+        {
+            get { try { return IndoorCustomerSpawner.Customers.Count; } catch { return -1; } }
+        }
+
         /// <summary>Round-119: the wire id for a live customer — the SAME id the position stream uses, so a
         /// serve beat names the body the follower already has on screen.</summary>
         internal static string RowIdForCustomer(Customer c)

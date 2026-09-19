@@ -43,6 +43,59 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, int> _lastCapacitySig = new();  // round-213: capacity recompute only on real seed changes
         private static int _idCounter;
 
+        // ── H-SALEHOLE-1 instruments (LOG-ONLY, 2026-09-19) ───────────────────────────
+        // FIXED 2026-09-19 (batch 16b, H1): the seed guard below now reads MergerFlip.TrulyMine, so a
+        // MEMBER standing in a merger-FLIPPED partner shop seeds the OWNER's shopper schedule like any
+        // other receiver. (It used to read the RAW RentedByPlayer, which the flip makes TRUE there, so the
+        // schedule was dropped on the floor and nothing that member sold could ever be forwarded.) These
+        // lines keep the verdict visible in the field log; they still decide nothing.
+        private const int SeedLogBudget = 60;                                             // INFO lines per session
+        private static int _seedLogLines;
+        private static readonly Dictionary<string, (int day, string verdict)> _seedLogState = new();
+
+        /// <summary>One INFO line per address per GAME DAY, and one more whenever the verdict changes.</summary>
+        private static void SeedVerdictLine(string addressKey, string body, string verdict)
+        {
+            try
+            {
+                if (_seedLogLines >= SeedLogBudget) return;
+                int day = -1; try { day = GameStateReader.GetGameTime().day; } catch { }
+                if (_seedLogState.TryGetValue(addressKey, out var last) && last.day == day && last.verdict == verdict) return;
+                _seedLogState[addressKey] = (day, verdict);
+                _seedLogLines++;
+                Plugin.Logger.LogInfo($"[Customers] seed {addressKey}: {body}");
+            }
+            catch { }
+        }
+
+        /// <summary>Caller-side companion (the interior apply in GameStatePatcher): a FLIPPED address whose
+        /// interior payload brought NO shopper schedule at all, so <see cref="SeedFor"/> is never even reached.
+        /// Batch 16b: the line NAMES THE BUSINESS TYPE, because a non-retail address (HQ, warehouse, empty unit)
+        /// legitimately has no shoppers at all and must not be read as a hole.</summary>
+        internal static void NoteEmptyInteriorPayload(string addressKey, bool authoritative, string businessType)
+            => SeedVerdictLine(addressKey ?? "", $"payload carried no entries (authoritative={authoritative} type={(string.IsNullOrEmpty(businessType) ? "?" : businessType)})", $"empty:{authoritative}");
+
+        /// <summary>H-SALEHOLE-1 rig read-only: how many entries in THIS machine's table for an address
+        /// carry a seeded (owner-minted) id — i.e. how many could ever forward a sale to the owner.</summary>
+        internal static int SeededIdCountFor(Address? address)
+        {
+            try
+            {
+                var table = Table();
+                if (table == null || address == null || !table.TryGetValue(address, out var entries) || entries == null) return 0;
+                int n = 0;
+                foreach (var e in entries) if (e?.order != null && _seededOrderIds.TryGetValue(e.order, out _)) n++;
+                return n;
+            }
+            catch { return 0; }
+        }
+
+        /// <summary>H-SALEHOLE-1 rig read-only: forwarded orders this session's owner side ADOPTED for an
+        /// address (never drained, unlike the econ-digest tally).</summary>
+        private static readonly Dictionary<string, int> _adoptedSession = new();
+        internal static int AdoptedCountFor(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _adoptedSession.TryGetValue(addressKey, out var n) ? n : 0;
+
         private static string IdOf(CustomerEntry e)
         {
             if (_ownerIds.TryGetValue(e, out var id)) return id;
@@ -178,7 +231,27 @@ namespace BigAmbitionsMP
             try
             {
                 if (reg == null || entries == null) return;
-                if (reg.RentedByPlayer) return;   // I own it → my table is authoritative
+                // H-SALEHOLE-1 (log-only): the verdict the guard below is about to reach, and the three
+                // flags it turns on. `rentedRaw` true + `flipped` true = a PARTNER's shop wearing my name
+                // for the native menus; the owner's schedule is dropped here and the member books nothing.
+                try
+                {
+                    bool seedRented  = reg.RentedByPlayer;
+                    string seedKey   = GameStateReader.AddressKey(reg);
+                    bool seedFlipped = MergerFlip.IsFlipped(seedKey);
+                    bool seedMine    = MergerFlip.TrulyMine(reg);
+                    // Batch 16b: the verdict follows the guard below, which is now TrulyMine — a FLIPPED
+                    // shop is SEEDED here; only a shop this machine really owns is skipped.
+                    string seedVerdict = seedMine ? "SKIPPED own" : MergerFlip.BooksHere(reg) ? "SKIPPED stand-in" : "seeded";
+                    SeedVerdictLine(seedKey,
+                        $"entries={entries.Count} rentedRaw={seedRented} flipped={seedFlipped} trulyMine={seedMine} -> {seedVerdict}",
+                        seedVerdict);
+                }
+                catch { }
+                // H-SALEHOLE-1 (H1), fixed 2026-09-19: TrulyMine, NOT the raw flag. The flip makes
+                // RentedByPlayer true on a MEMBER for a PARTNER's shop, so this line used to drop the owner's
+                // schedule there — no seeded entry, no EntryId on any checkout, nothing to forward.
+                if (MergerFlip.BooksHere(reg)) return;   // I really own it (or stand in for its absent owner) → my table is authoritative
                 // An AI shop PASSES this guard; what keeps the UpdateCustomerCapacity call below off AI replicas is the
                 // capture side (InteriorSync captures entries only for TrulyMine shops). If entries are ever captured for
                 // a non-owned shop, that call rebuilds cachedAvailableProducts from the replica's (empty) shelves and
@@ -312,7 +385,9 @@ namespace BigAmbitionsMP
                 BuildingRegistration? reg = null;
                 foreach (var r in gi.BuildingRegistrations)
                     if (r != null && GameStateReader.AddressKey(r) == p.AddressKey) { reg = r; break; }
-                if (reg == null || !reg.RentedByPlayer)
+                // Batch 16b: TrulyMine, not the raw flag — under a flip a MEMBER would otherwise accept a
+                // forward for a PARTNER's shop and book it a second time against its own replica.
+                if (reg == null || !MergerFlip.BooksHere(reg))
                 {
                     Plugin.Logger.LogWarning($"[Business] forwarded order for '{p.AddressKey}' — not my business, dropped.");
                     return;
@@ -437,6 +512,8 @@ namespace BigAmbitionsMP
                 foreach (var oe in o.entries) if (oe != null && oe.paid) orderRevenue += oe.price;
                 _adoptedTally.TryGetValue(p.AddressKey, out var tally);
                 _adoptedTally[p.AddressKey] = (tally.orders + 1, tally.revenue + orderRevenue);
+                _adoptedSession.TryGetValue(p.AddressKey, out var adoptedSoFar);   // H-SALEHOLE-1 rig counter (never drained)
+                _adoptedSession[p.AddressKey] = adoptedSoFar + 1;
                 BuildingStorageSync.OwnerBusinessTail(reg);
                 InteriorSync.PushOwnedBuildingNow(p.AddressKey);
                 Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s) ${repricedTotal:F2} (forwarded at ${forwardedTotal:F2}){(bagged ? " +bag" : "")}{(refused > 0 ? $" ({refused} refused on price)" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}."
@@ -498,7 +575,7 @@ namespace BigAmbitionsMP
             if (!MPServer.IsRunning && !MPClient.IsConnected) return;
             try
             {
-                if (registration == null || !registration.RentedByPlayer) return;
+                if (registration == null || !MergerFlip.BooksHere(registration)) return;   // batch 16b: never report a partner's FLIPPED shop as my daily revenue (a stand-in's simulated shop IS booked here - review MEDIUM-2)
                 string ak = GameStateReader.AddressKey(registration);
                 Entities.OrderHistoryEntry? h = null;
                 var hist = registration.orderHistory;
@@ -521,6 +598,90 @@ namespace BigAmbitionsMP
                     $"revenue=${(h?.totalRevenue ?? 0f):F2} deposited | forwarded helper orders since last: {fOrders} (${fRevenue:F2}) | items: {items}");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[EconProbe] daily revenue: {ex.Message}"); }
+        }
+    }
+    /// <summary>H-SALEHOLE-1 ORIGIN PROBE (log-only, 2026-09-19, budget 20 lines/session, tag [Customers]).
+    /// The rig found a 151-entry shopper table on a MEMBER for a PARTNER's shop that no line explained. Two
+    /// native generators fill a reg's entry table and both can run on a machine that does not own the shop:
+    ///   • CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness (:38) gates on the RAW RentedByPlayer,
+    ///     which a merger flip makes true on a member. It IS in the authority veil's Steps table, so it should
+    ///     see native truth and early-return — a line from it here means the veil did NOT cover that call.
+    ///   • CustomerEntriesHelper.GenerateAiEntries (:90) runs for ANY address whose table has no row and builds
+    ///     a whole day from the REPLICA's products — the likely source of the 151.
+    /// Observe-only: no decision changes. After the H1 fix, SeedFor REPLACES table[reg.Address] wholesale, so a
+    /// locally generated table cannot survive the owner's first seed, and the completed flags the seed carries
+    /// over come only from entries that already held an OWNER-minted id.</summary>
+    internal static class CustomerEntryOrigin
+    {
+        private const int Budget = 20;
+        private static int _lines;
+
+        internal static void Note(string generator, BuildingRegistration? reg, Address? address, int generated)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (_lines >= Budget) return;
+                if (reg == null && address != null)
+                    try { reg = Helpers.BuildingHelper.GetBuildingRegistration(address); } catch { }
+                if (reg == null) return;
+                if (MergerFlip.TrulyMine(reg)) return;   // my own shop generating my own shoppers — nothing to say
+                string ak = ""; try { ak = GameStateReader.AddressKey(reg); } catch { }
+                string type = ""; try { type = reg.businessTypeName ?? ""; } catch { }
+                bool flipped = false; try { flipped = MergerFlip.IsFlipped(ak); } catch { }
+                _lines++;
+                Plugin.Logger.LogInfo($"[Customers] ORIGIN {generator} '{ak}': generated={generated} type={type} veilDepth={MergerFlip.VeilDepth} flipped={flipped} trulyMine=False");
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>ORIGIN PROBE A — the PLAYER-business generator. See <see cref="CustomerEntryOrigin"/>.</summary>
+    [HarmonyPatch]
+    public static class Probe_CustomerEntryOrigin_PlayerBusiness
+    {
+        static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            System.Reflection.MethodBase? m = null;
+            try { m = AccessTools.Method(typeof(CustomerEntriesHelper), "UpdateCustomerEntriesForPlayerBusiness"); } catch { }
+            if (m == null) Plugin.Logger.LogError("[Customers] origin probe: CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness not found — that generator goes UNWATCHED.");
+            else yield return m;
+        }
+
+        static void Postfix(BuildingRegistration registration)
+        {
+            try
+            {
+                if (registration == null) return;
+                var (total, _) = CustomerEntrySync.EntryStatsFor(registration.Address);
+                if (total <= 0) return;
+                CustomerEntryOrigin.Note("UpdateCustomerEntriesForPlayerBusiness", registration, null, total);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] origin probe (player business): {ex.Message}"); }
+        }
+    }
+
+    /// <summary>ORIGIN PROBE B — the AI-shop fallback generator. See <see cref="CustomerEntryOrigin"/>.</summary>
+    [HarmonyPatch]
+    public static class Probe_CustomerEntryOrigin_AiEntries
+    {
+        static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            System.Reflection.MethodBase? m = null;
+            try { m = AccessTools.Method(typeof(CustomerEntriesHelper), "GenerateAiEntries"); } catch { }
+            if (m == null) Plugin.Logger.LogError("[Customers] origin probe: CustomerEntriesHelper.GenerateAiEntries not found — that generator goes UNWATCHED.");
+            else yield return m;
+        }
+
+        static void Postfix(Address address, List<CustomerEntry> __result)
+        {
+            try
+            {
+                int n = __result?.Count ?? 0;
+                if (n <= 0) return;
+                CustomerEntryOrigin.Note("GenerateAiEntries", null, address, n);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] origin probe (ai entries): {ex.Message}"); }
         }
     }
 }

@@ -4365,6 +4365,79 @@ namespace BigAmbitionsMP
             static Exception Finalizer(Exception __exception) { MergerFlip.VeilPop(); return __exception; }
         }
 
+        // ─────────── H-SALEHOLE-1 (H2): THE SERVE SCOPE ───────────
+        /// <summary>The LIVE SERVE CHAIN, un-flipped for the duration of each native serve step (2026-09-19).
+        /// Shaped like <see cref="Patch_MergerAuthorityVeil"/>: a name table, TargetMethods, a Prefix that
+        /// pushes and a Finalizer that always pops. What it buys: on a MEMBER standing in a merger-FLIPPED
+        /// partner shop, every owner-GATED native step below sees the shop as someone else's and skips itself
+        /// (the two ungated order records and the player-as-customer paths are outside it - MergerFlip header)
+        /// — no bag taken from the replica register, no shelf drained, no local pricing, no order recorded —
+        /// which is precisely the state the PERMISSION HELPER is already in, so Patch_Order_Pay_HelperForward
+        /// forwards each paid NPC order and the owner adopts it once. On the TRUE owner (and on a stand-in for
+        /// an absent owner) the scope is a no-op, so nothing changes there.
+        /// EVERY NAME BELOW IS DECOMPILE-VERIFIED at its owner-gate line; a name that resolves to nothing logs
+        /// LOUD at patch time (the Class-3 rule).
+        /// COROUTINES are wrapped at the compiler-generated enumerator's MoveNext, so the scope is pushed and
+        /// popped inside EACH SLICE and can never stay up across a frame.</summary>
+        [HarmonyPatch]
+        public static class Patch_MergerServeScope
+        {
+            // SYNCHRONOUS serve steps — patched directly.
+            private static readonly (string type, string method)[] Direct =
+            {
+                ("FullServiceEmployee",    "CheckConditions"),          // :179 prices + judges the order, owner-gated
+                ("BarmanEmployee",         "IsOrderEntryPurchasable"),  // :225
+                ("Customer",               "CompleteOrder"),            // :393-395 records the order on THIS machine
+                ("Customer",               "ReturnItemsToShelf"),       // :318 puts an abandoned basket back on the replica's shelves
+                ("Customer",               "GrabItem"),                 // :511 the NPC shelf/producer drain
+                ("ProcessSelfServiceOrder","OnStart"),                  // :21/:64 the self-service NPC drain + pricing
+            };
+
+            // COROUTINES — patched at MoveNext (AccessTools.EnumeratorMoveNext).
+            private static readonly (string type, string method)[] Coroutines =
+            {
+                ("FullServiceEmployee",        "ServeCustomer"),        // :66 :95 :111 :135 :154 (bag, stock, pricing, the Add)
+                ("FullServiceEmployee",        "GrabOrderEntryItems"),  // :243 shelf drain + cost basis
+                ("SelfServiceEmployee",        "ServeCustomer"),        // :64 bag subtract
+                ("BarmanEmployee",             "ServeCustomer"),        // :78 :105 :106
+                ("BarmanEmployee",             "GrabOrderEntryItems"),  // :203 :204
+                ("HairdresserStylistEmployee", "ServeCustomer"),        // :73 :100 :136 :140
+                ("CoatCheckEmployee",          "ServeCustomer"),        // :66
+                ("TicketBoothEmployee",        "ServeCustomer"),        // :23 (Order.Pay for the NPC ticket sale)
+                ("Controllers.TicketKioskController", "ServeCustomer"), // :144 the kiosk checkout
+            };
+
+            static IEnumerable<System.Reflection.MethodBase> TargetMethods()
+            {
+                const string tag = "Merger] serve scope";
+                const string why = "UNSCOPED (a member would serve a partner's shop against its own replica)";
+                foreach (var (type, method) in Direct)
+                    foreach (var m in Patch_GameTickChain_ContainThrows.ResolveAllByName(type, method, tag, why))
+                        yield return m;
+                foreach (var (type, method) in Coroutines)
+                    foreach (var m in Patch_GameTickChain_ContainThrows.ResolveAllByName(type, method, tag, why))
+                    {
+                        System.Reflection.MethodBase? mv = null;
+                        try { mv = AccessTools.EnumeratorMoveNext(m); } catch { }
+                        if (mv == null) Plugin.Logger.LogError($"[{tag}: {type}.{method} MoveNext did not resolve — that step is {why}.");
+                        else yield return mv;
+                    }
+            }
+
+            static void Prefix()
+            {
+                try { MergerFlip.ServeScopePush(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] Patch_MergerServeScope push: {ex.Message}"); }
+            }
+
+            static Exception Finalizer(Exception __exception)
+            {
+                try { MergerFlip.ServeScopePop(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] Patch_MergerServeScope pop: {ex.Message}"); }
+                return __exception;
+            }
+        }
+
         // ─────────── MERGER PHASE 2 STOP-GAPS (2026-09-11) ───────────
         // Three NATIVE writes on a merger-FLIPPED partner building spend or move REAL company value
         // against a LOCAL REPLICA: the goods land (or vanish) on the replica, the owner's next push

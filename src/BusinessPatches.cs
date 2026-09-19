@@ -188,6 +188,10 @@ namespace BigAmbitionsMP
     {
         private static readonly System.Collections.Generic.HashSet<string> _sent = new();
 
+        /// <summary>H-SALEHOLE-1 rig read-only: how many distinct orders this machine has forwarded to an
+        /// owner this session (session-wide — the dedup ledger itself is the count).</summary>
+        internal static int SentCount => _sent.Count;
+
         static void Postfix(Order __instance, bool isPlayer, bool __result)
         {
             try

@@ -48,7 +48,12 @@ namespace BigAmbitionsMP
                 foreach (var reg in gi.BuildingRegistrations)
                 {
                     if (reg == null) continue;
-                    bool mine; try { mine = reg.RentedByPlayer; } catch { continue; }
+                    // Batch 16b: TrulyMine, not the raw flag. A merger flip makes RentedByPlayer true on a
+                    // MEMBER for a PARTNER's shop, and this member would then broadcast digests built from its
+                    // REPLICA's shelves — overwriting the real owner's digest with a stale copy.
+                    // Review MEDIUM-1: BooksHere - a stand-in drains the absent owner's shelves, so it must keep
+                    // publishing that shop's digest (the host's economy floor reads it).
+                    bool mine; try { mine = MergerFlip.BooksHere(reg); } catch { continue; }
                     if (!mine) continue;
                     var items = reg.itemInstances;
                     if (items == null || items.Count == 0) continue;   // not inside / no live interior → leave the last-known digest untouched

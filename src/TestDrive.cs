@@ -2291,6 +2291,40 @@ namespace BigAmbitionsMP
                     return $"OK stockof addr='{sokey}' items=[{sosb}]";
                 }
 
+                case "salestats":
+                {
+                    // H-SALEHOLE-1 (rig oracle). READ-ONLY: every number the sale-hole question turns on,
+                    // on ONE line — who runs this shop's live customers here, what this machine believes it
+                    // owns, what its shopper table holds, and what actually crossed the wire. The address key
+                    // is two tokens, like `stockof` / `regstate`.
+                    if (arg.Length == 0) return "ERR usage: salestats <number> <ba:street_x>";
+                    var ssReg = GameStatePatcher.FindRegistration(arg);
+                    if (ssReg == null) return $"ERR no registration at '{arg}'";
+                    string ssKey = arg; try { ssKey = GameStateReader.AddressKey(ssReg); } catch { }
+                    string ssSim = "";  try { ssSim = CustomerPuppets.SimulatorFor(ssKey); } catch { }
+                    bool ssInside = false;
+                    try { ssInside = BuildingManager.IsInsideBuilding
+                                     && string.Equals(MPRegisterSync.CurrentShopAddress ?? "", ssKey, StringComparison.Ordinal); } catch { }
+                    bool ssRented = false, ssFlip = false, ssMine = false;
+                    try { ssRented = ssReg.RentedByPlayer; }        catch { }
+                    try { ssFlip   = MergerFlip.IsFlipped(ssKey); } catch { }
+                    try { ssMine   = MergerFlip.TrulyMine(ssReg); } catch { }
+                    int ssTotal = -1, ssDone = -1;
+                    try { var ssSt = CustomerEntrySync.EntryStatsFor(ssReg.Address); ssTotal = ssSt.total; ssDone = ssSt.completed; } catch { }
+                    int ssPending = ssTotal < 0 ? -1 : ssTotal - ssDone;
+                    int ssSeeded = 0;      try { ssSeeded = CustomerEntrySync.SeededIdCountFor(ssReg.Address); } catch { }
+                    int ssLive = -1;       try { if (ssInside) ssLive = CustomerPuppets.LiveCustomerCount; } catch { }
+                    bool ssSpawnOff = false; try { ssSpawnOff = CustomerPuppets.SpawnerSuppressedHere; } catch { }
+                    int ssSent = 0;        try { ssSent = Patch_Order_Pay_HelperForward.SentCount; } catch { }
+                    int ssAdopted = 0;     try { ssAdopted = CustomerEntrySync.AdoptedCountFor(ssKey); } catch { }
+                    int ssUnproc = -1;     try { ssUnproc = ssReg.unprocessedCompletedOrders?.Count ?? -1; } catch { }
+                    bool ssHelper = false; try { ssHelper = GrantSync.IsHelperBusiness(ssKey); } catch { }
+                    return $"OK salestats {ssKey} sim='{ssSim}' inside={ssInside} rentedRaw={ssRented} flipped={ssFlip} "
+                         + $"trulyMine={ssMine} entries={ssTotal} pending={ssPending} completed={ssDone} seededIds={ssSeeded} "
+                         + $"liveCustomers={ssLive} spawnDisabled={ssSpawnOff} forwardedSent={ssSent} adopted={ssAdopted} "
+                         + $"unprocessed={ssUnproc} helperHere={ssHelper}";
+                }
+
                 case "cargotest":
                 {
                     // 4c part 2b L3: DRIVER.  The game runs a logistics plan's delivery pass on its OWN
