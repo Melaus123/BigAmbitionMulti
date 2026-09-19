@@ -88,6 +88,40 @@ namespace BigAmbitionsMP
         internal static int    LastRestoreFrame = -1;
         internal static string LastStripContext = "";
 
+        /// <summary>Read-only windows for the BAMP_DEV `schedcount` lever (rig coverage for the intent
+        /// gate above, which no scenario exercises). They report the two pieces of state the gate turns
+        /// on and touch nothing.</summary>
+        internal static int  SelfChangedDays(string addr) => _selfChanged.TryGetValue(addr, out var s) ? s.Count : 0;
+        internal static bool IsTouched(string addr)       => _touched.Contains(addr);
+
+        /// <summary>DEV lever `schedcount` with no argument — the rig needs a FIXTURE that actually has
+        /// shifts, and the save is binary. Every registration this machine treats as schedule-managed for
+        /// this player AS AN EDITOR, using the one membership predicate ScanEdits uses (IsScheduleManaged —
+        /// the accessor exists so nothing duplicates it), that holds at least one work shift. Read-only;
+        /// highest total first.</summary>
+        internal static List<(string addr, int shifts)> ManagedShopsWithShifts()
+        {
+            var found = new List<(string addr, int shifts)>();
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return found;
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null || reg.scheduleDays == null) continue;
+                    string addr; try { addr = GameStateReader.AddressKey(reg); } catch { continue; }
+                    if (!IsScheduleManaged(reg, addr)) continue;
+                    int total = 0;
+                    foreach (var sd in reg.scheduleDays)
+                        if (sd?.workShifts != null) total += sd.workShifts.Count;
+                    if (total > 0) found.Add((addr, total));
+                }
+                found.Sort((a, b) => b.shifts.CompareTo(a.shifts));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} ManagedShopsWithShifts: {ex.Message}"); }
+            return found;
+        }
+
         private const int ProbeBudget = 40;                        // SELF-CHANGE lines per session; both roles share the budget
         private static int _probeLines;
         private static readonly HashSet<string> _probed = new();   // "addr|day|sig" already reported

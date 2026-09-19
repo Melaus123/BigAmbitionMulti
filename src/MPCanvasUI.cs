@@ -3431,6 +3431,7 @@ namespace BigAmbitionsMP
                 MPFreezeProbe.Reset();    // freeze-episode state dies with the scene
                 MPPatches.Patch_LoudSpeakers_FailureLatch.ResetForScene();   // the shield's latch is per-process; what it disables dies with the scene (audit 2026-08-26)
                 MPHousingMorale.Reset();  // morale-reconcile log state dies with the scene
+                HamptonsAccess.Reset();   // registration→address cache, per-address log latches and the tenancy flip die with the scene
                 PassengerSync.Reset();    // passenger seats/locks die with the scene
                 MergerSync.ResetSceneState(); // merger runtime + pending-proposal UI state (same lifecycle as grants)
                 MergerFlip.Reset();           // flip tracking dies with the scene's regs (tick re-applies from state)

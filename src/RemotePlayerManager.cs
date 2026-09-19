@@ -506,8 +506,24 @@ namespace BigAmbitionsMP
             // 13.9 m/s while hidden vs brake-to-stop at d=4.3 once shown; user: "cars stopped once the
             // host exited the building"). Outdoors → always visible; same building → visible; two
             // DIFFERENT interiors → hidden (the genuine coordinate-island ghosting case).
+            //
+            // H3 (2026-09-18, design doc stage C): a HAMPTONS HOUSE is not one of those interiors.
+            // EnterHamptonsBuilding (BuildingManager.cs:636-691) sets the camera and the nav agent type
+            // and never MOVES the player — the owner standing in their manor is at the same street
+            // coordinates the onlooker sees. They were hidden anyway, because entering the plot fills
+            // their Bldg tag while an outsider's is empty, so a house the mod now renders for everyone
+            // read as perfectly empty. A Hamptons address therefore counts as OUTDOORS on this side of
+            // the mask.
+            //
+            // Re-read both ways after G3 (fold r1), which now calls MPRegisterSync.SetCurrentShop on plot
+            // entry — so CurrentShopAddress IS the manor while the local player stands on it, and the first
+            // clause alone already matches another player on the SAME plot. The remaining cases are still
+            // right: a remote player who is outdoors (empty Bldg) stays visible by the second clause, and a
+            // remote player in a genuine interior island keeps the mask that hides them. No mirror term is
+            // needed; only this comment was wrong.
             bool visible = (p.Bldg ?? "") == (MPRegisterSync.CurrentShopAddress ?? "")
-                        || string.IsNullOrEmpty(p.Bldg);
+                        || string.IsNullOrEmpty(p.Bldg)
+                        || HamptonsAccess.IsHamptonsAddress(p.Bldg);
             if (go.activeSelf != visible)
             {
                 go.SetActive(visible);

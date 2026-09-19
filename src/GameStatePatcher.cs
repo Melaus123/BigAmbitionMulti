@@ -153,6 +153,11 @@ namespace BigAmbitionsMP
                     // Another player rented it — mark unavailable locally
                     MarkBuildingUnavailable(payload.AddressKey);
                 }
+                // Hamptons rendering (2026-09-18): a house a session player now rents must show its real
+                // renderers on THIS machine too, and _renderersEnabled is cached state that nothing else
+                // would repaint until the next native tenancy event (which only the owner's copy gets).
+                try { HamptonsAccess.RefreshAllBlockers(); }
+                catch (Exception ex) { HamptonsAccess.WarnOnce("ApplyBuildingOwnership/hamptons-refresh", ex); }
             });
         }
 
@@ -178,7 +183,14 @@ namespace BigAmbitionsMP
                         if (!reg.RentedByPlayer)
                         {
                             reg.AvailableForRent      = true;
-                            reg.buildingOwnerRivalId  = "";
+                            // H-VACATEDEED-1 (2026-09-18): a vacate ends the TENANT, never the deed. This line
+                            // used to blank buildingOwnerRivalId (the LANDLORD) and leave the tenant stamp - the
+                            // opposite of the host's MakeRegVacant ("the deed field (landlord) stays") and of native
+                            // (ShutDownAIBusiness stashes and restores the deed). Only tenant events send this
+                            // notify (HandleVacateRequest, Patch_TerminateContract). The blank was usually healed
+                            // by the next ownership apply, but not if an autosave landed first, and never for the
+                            // local player's own bought building (that apply keeps the prior value).
+                            reg.businessOwnerRivalId  = "";
                             reg.BusinessName          = null;
                             reg.businessTypeName      = "ba:businesstype_empty";
                         }
@@ -193,6 +205,9 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo(guarded
                     ? $"[Patcher] Vacate notify for {addressKey} SKIPPED — the local player actively rents this copy (guard; the native terminate owns local cleanup)."
                     : $"[Patcher] Building {addressKey} is now available.");
+                // The mirror of the rent path above: a vacated Hamptons house goes back to the closed shell.
+                try { HamptonsAccess.RefreshAllBlockers(); }
+                catch (Exception ex) { HamptonsAccess.WarnOnce("ApplyBuildingVacated/hamptons-refresh", ex); }
             });
         }
 
@@ -6809,19 +6824,23 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Needs] reconcile flag: {ex.Message}"); }
         }
 
-        /// <summary>One-shot save repair (scene-ready, every machine): the pre-split plumbing wrote
-        /// RENTERS into buildingOwnerRivalId (the deed field) and erased AI landlords on vacate —
-        /// both persisted into saves. Any session player id found in a deed field moves to the tenant
-        /// field (businessOwnerRivalId) where the display actually belongs; the landlord itself is
+        /// <summary>One-shot save repair: the pre-split plumbing wrote RENTERS into
+        /// buildingOwnerRivalId (the deed field) and erased AI landlords on vacate — both persisted
+        /// into saves. Any session player id found in a deed field moves to the tenant field
+        /// (businessOwnerRivalId) where the display actually belongs; the landlord itself is
         /// unrecoverable (worldgen never re-assigns) and stays empty — benign: the building simply
-        /// isn't listed under any rival's owned buildings.</summary>
+        /// isn't listed under any rival's owned buildings.
+        /// H-DEEDSTRIP-1 (2026-09-18): the deed half is HOST-ONLY. The purchase ledger that tells a
+        /// legitimate deed from the contamination exists only on the host, so on a client this branch
+        /// is DETECT-ONLY — it counts and reports, and writes nothing. The runner-field half below
+        /// needs no ledger and still runs on every machine.</summary>
         public static void SweepRivalFieldContamination(string reason)
         {
             try
             {
                 var gi = SaveGameManager.Current;
                 if (gi?.BuildingRegistrations == null) return;
-                int repaired = 0;
+                int repaired = 0, unjudged = 0;
                 foreach (var reg in gi.BuildingRegistrations)
                 {
                     if (reg == null) continue;
@@ -6830,13 +6849,18 @@ namespace BigAmbitionsMP
                     string addr; try { addr = GameStateReader.AddressKey(reg); } catch { continue; }
                     // LEGITIMATE deed vs the bug: the real-estate ledger is the authority. If it names
                     // this player as the BUYER of this building, the attribution is correct — keep it.
-                    // (Only the host holds the ledgers; on clients this finds nothing, and a wrongly
-                    // stripped legitimate deed self-heals on the next BusinessInfo apply, which now
-                    // carries DeedOwnerPlayerId explicitly.)
+                    //
+                    // H-DEEDSTRIP-1 (2026-09-18): that ledger lives ONLY on the host, so a CLIENT has
+                    // nothing to judge with — it used to strip every player deed it saw and MOVE the pid
+                    // into businessOwnerRivalId. That is not self-healing: the next sweep reads the
+                    // damaged value first, and MPSaveIntegrity Class 6 reads the player's OWN rented
+                    // shop as another player's business and unassigns its staff on every load (57
+                    // buildings in the field log). Without the ledger this branch WRITES NOTHING.
+                    if (!MPServer.IsRunning) { unjudged++; continue; }
                     bool legitimateDeed = false;
                     try
                     {
-                        if (MPServer.IsRunning && MPServer.BuildingRealEstateOwners.TryGetValue(addr, out var buyer))
+                        if (MPServer.BuildingRealEstateOwners.TryGetValue(addr, out var buyer))
                             legitimateDeed = (buyer == deed) || (buyer == "host" && deed == MPConfig.PlayerId);
                     }
                     catch { }
@@ -6852,6 +6876,10 @@ namespace BigAmbitionsMP
                 }
                 if (repaired > 0)
                     Plugin.Logger.LogWarning($"[Patcher] rent-vs-deed repair ({reason}): {repaired} building(s) had a PLAYER in the deed field (pre-split contamination) — repaired.");
+                // Only a real MP CLIENT is missing a ledger it should have had; in single player and in the
+                // offline fork there is no host to hold one, and the line would just be noise.
+                if (unjudged > 0 && MPClient.IsClientInWorld && !MPClient.OfflineFork)
+                    Plugin.Logger.LogInfo($"[Patcher] rent-vs-deed: {unjudged} building(s) hold a player in the deed field — not judged here (the purchase ledger lives on the host), left untouched.");
 
                 // Runner-field self-contamination (echo-loop family, 2026-07-13): MY OWN pid
                 // in MY businessOwnerRivalId is always wrong — my tenancy is RentedByPlayer.

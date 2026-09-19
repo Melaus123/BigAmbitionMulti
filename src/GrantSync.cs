@@ -273,6 +273,9 @@ namespace BigAmbitionsMP
         }
         public static bool CanEnterGranted(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _enterable.Contains(addressKey);
+        /// <summary>H-MANOR-1: a one-field early-out for the per-frame Hamptons gates — with no grants
+        /// at all they must not even build an address key.</summary>
+        public static bool AnyEnterable => _enterable.Count > 0;
 
         // ── Business-helper access (round-32): which buildings the LOCAL player may WORK IN as a granted
         // helper (addr keys, host-pushed alongside _enterable). A SEPARATE set on purpose: residence-guest

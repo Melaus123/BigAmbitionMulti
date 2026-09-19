@@ -572,6 +572,69 @@ namespace BigAmbitionsMP
                     return $"OK rows(list)={inList} dict={inDict} probeStationShifts={stationShifts} (expect 0/>=1/0 with round-263)";
                 }
 
+                // ── H-SCHEDWIPE-1 rig coverage (L2): the self-mutation the intent gate must catch ──
+                // `schedwipe <addressKey> <dayIndex>` empties one day's work shifts the way the BUG does:
+                // on the machine it runs on, directly on the list, NOT through ScheduleHelper, with no
+                // schedule tab open and no auto-fill running — so SharedShopSchedule's scan sees a changed
+                // day with no intent behind it and must refuse to send it. The day index is the LAST token
+                // (address keys contain a space).
+                case "schedwipe":
+                {
+                    var swTk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (swTk.Length < 2) return "ERR usage: schedwipe <addressKey> <day 1-7, Monday=1>";
+                    string swDayTok = swTk[swTk.Length - 1];
+                    if (!int.TryParse(swDayTok, out int swDay) || swDay < 1 || swDay > 7)   // DayOfWeekOrdered: Monday=1 .. Sunday=7
+                        return $"ERR day '{swDayTok}' is not 1-7";
+                    string swAddr = string.Join(" ", swTk, 0, swTk.Length - 1);
+                    var swReg = GameStatePatcher.FindRegistration(swAddr);
+                    if (swReg == null) return $"ERR no registration for '{swAddr}'";
+                    if (swReg.scheduleDays == null) return $"ERR '{swAddr}' has no scheduleDays";
+                    ScheduleDay? swSd = null;
+                    foreach (var sd in swReg.scheduleDays) if (sd != null && (int)sd.day == swDay) { swSd = sd; break; }
+                    if (swSd == null) return $"ERR '{swAddr}' has no schedule day {swDay}";
+                    if (swSd.workShifts == null) return $"ERR '{swAddr}' day {swDay} has no workShifts list";
+                    int swBefore = swSd.workShifts.Count;
+                    swSd.workShifts.Clear();                       // the self-mutation, deliberately raw
+                    return $"OK schedwipe {swAddr} day={swDay} shifts {swBefore}->{swSd.workShifts.Count}";
+                }
+
+                // Read-only companion: what the gate currently sees for an address.
+                case "schedcount":
+                {
+                    // No argument = FIXTURE DISCOVERY: which shared shops on this machine actually hold
+                    // shifts, so a schedwipe run has a precondition it can meet. '|' separates entries and
+                    // '=' precedes the count, because address keys contain spaces and ':'.
+                    if (arg.Length == 0)
+                    {
+                        var scShared = SharedShopSchedule.ManagedShopsWithShifts();
+                        var scLsb = new System.Text.StringBuilder("OK schedcount shared=[");
+                        for (int i = 0; i < scShared.Count; i++)
+                        {
+                            if (i > 0) scLsb.Append('|');
+                            scLsb.Append(scShared[i].addr).Append('=').Append(scShared[i].shifts);
+                        }
+                        return scLsb.Append(']').ToString();
+                    }
+                    var scReg = GameStatePatcher.FindRegistration(arg);
+                    if (scReg == null) return $"ERR no registration for '{arg}'";
+                    var scCounts = new int[8];   // index = DayOfWeekOrdered (Monday=1 .. Sunday=7); [0] unused
+                    for (int i = 0; i < 8; i++) scCounts[i] = -1;
+                    if (scReg.scheduleDays != null)
+                        foreach (var sd in scReg.scheduleDays)
+                        {
+                            if (sd == null) continue;
+                            int d = (int)sd.day;
+                            if (d < 1 || d > 7) continue;
+                            scCounts[d] = sd.workShifts != null ? sd.workShifts.Count : -1;
+                        }
+                    var scSb = new System.Text.StringBuilder();
+                    scSb.Append("OK schedcount ").Append(arg);
+                    for (int i = 1; i <= 7; i++) scSb.Append(" d").Append(i).Append('=').Append(scCounts[i]);
+                    scSb.Append(" selfChanged=").Append(SharedShopSchedule.SelfChangedDays(arg));
+                    scSb.Append(" touched=").Append(SharedShopSchedule.IsTouched(arg));
+                    return scSb.ToString();
+                }
+
                 // ── round-238 zombie-ledger synthesis ─────────────────────────
                 case "ledgerdrop":
                 {
