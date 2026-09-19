@@ -224,7 +224,7 @@ namespace BigAmbitionsMP
                 var c = comps[i];
                 if (c == null) continue;
                 string cn = c.GetType().Name;
-                if (cn == "SmartphoneAppButton") { UnityEngine.Object.Destroy(c); stripped++; }
+                if (cn == "SmartphoneAppButton") { c.enabled = false; }
             }
             foreach (var c in go.GetComponentsInChildren(typeof(Component), true))
             {
@@ -368,7 +368,7 @@ namespace BigAmbitionsMP
             foreach (var c in go.GetComponents(typeof(Component)))
             {
                 if (c == null) continue;
-                if (c.GetType().Name == "SmartphoneAppButton") UnityEngine.Object.Destroy(c);
+                if (c.GetType().Name == "SmartphoneAppButton") c.enabled = false;
             }
             foreach (var c in go.GetComponentsInChildren(typeof(Component), true))
             {
