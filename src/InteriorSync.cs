@@ -17,6 +17,14 @@ namespace BigAmbitionsMP
     /// client sends PlayerExitedBuilding{X} and the host removes them from
     /// the subscriber set.  If the set becomes empty, host stops polling X.
     ///
+    /// D1 (2026-09-18, Hamptons furniture delivery): there are now TWO kinds of subscription and a
+    /// peer can hold several at once.  An ENTRY subscription (one per peer, the peer is standing
+    /// inside) is still what a building-entry request creates.  An AMBIENT subscription
+    /// (InteriorRequest{Ambient=true}, up to 8 per peer) is a viewer NEAR a Hamptons house a session
+    /// player rents: it receives structure snapshots so the house is furnished before they enter,
+    /// and it is excluded from the dirt broadcast and the cargo-only send.  The two never clobber
+    /// each other — an entry request for an address already held ambiently PROMOTES it.
+    ///
     /// Phase 2a covers Layout / interiorDesigns / retailPrices / dirtSpots.
     /// Phase 2b will add itemInstances (the full ItemInstance graph).
     /// </summary>
@@ -24,12 +32,26 @@ namespace BigAmbitionsMP
     {
         private const float PollIntervalSeconds = 2f;
 
-        // addressKey → set of peer ids currently subscribed (i.e. inside that building).
-        // A peer can be subscribed to at most one building at a time (we drop
-        // its previous sub when a new request comes in).
+        // addressKey → set of peer ids currently subscribed: the BROADCAST AUDIENCE, holding both
+        // kinds of subscription together (D1 2026-09-18 — it was one-per-peer before that).
         private static readonly Dictionary<string, HashSet<int>> _subsByBuilding = new();
-        // Inverse map: peer id → addressKey it's currently subscribed to.
+        // Inverse map: peer id → the ONE address it holds by ENTRY (it is standing inside).  A new
+        // entry request still retires the previous entry subscription.
         private static readonly Dictionary<int, string>          _buildingByPeer  = new();
+        // D1: peer id → the addresses it holds AMBIENTLY (near a Hamptons house a session player
+        // rents, never inside it).  Independent of the entry sub in both directions: an ambient
+        // request never retires one, an entry request for an address already held ambiently PROMOTES
+        // it (one audience seat, now owned by the entry sub), and an entry exit never drops an
+        // address the peer still holds ambiently.
+        private static readonly Dictionary<int, HashSet<string>> _ambientByPeer = new();
+        // Per-peer insertion order, so the cap evicts the OLDEST ambient sub (a HashSet has no order).
+        private static readonly Dictionary<int, List<string>>    _ambientOrderByPeer = new();
+        // Hamptons houses stand shoulder to shoulder and one LOD0 sphere (~60 m) can cover several.
+        // FOLD r1 R2a: ONE definition — the client mirrors this cap (HamptonsAccess releases its own
+        // oldest before asking for a 9th), so the eviction below is a guard against a client bug.
+        internal const int MaxAmbientPerPeer = 8;
+        // FOLD r1 R5a: peers already told that ambient subscriptions are Hamptons-only (one line each).
+        private static readonly HashSet<int> _ambientNonHamptonsWarned = new();
         // addressKey → last-broadcast hash, so we only push when something changed.
         private static readonly Dictionary<string, int>          _lastHashByAddr  = new();
         private sealed class OwnerInteriorState
@@ -50,6 +72,9 @@ namespace BigAmbitionsMP
         {
             _subsByBuilding.Clear();
             _buildingByPeer.Clear();
+            _ambientByPeer.Clear();        // D1: ambient memberships die with the session, as entry subs do
+            _ambientOrderByPeer.Clear();
+            _ambientNonHamptonsWarned.Clear();
             _lastHashByAddr.Clear();
             _ownerSnapshotsByAddr.Clear();
             _lastLocalOwnerHashByAddr.Clear();
@@ -257,21 +282,73 @@ namespace BigAmbitionsMP
 
         /// <summary>
         /// Handle a client's InteriorRequest.  Adds them to the subscriber set
-        /// for that building (removing any prior subscription) and sends the
-        /// initial snapshot.
+        /// for that building and sends the initial snapshot.  An ENTRY request
+        /// (ambient=false) retires the peer's previous ENTRY subscription and
+        /// promotes this address out of its ambient set if it was held there; an
+        /// AMBIENT request (D1) adds a second, independent membership and leaves
+        /// the entry subscription untouched.
         /// </summary>
-        public static void HandleRequest(MPLink peer, string playerId, string addressKey)
+        public static void HandleRequest(MPLink peer, string playerId, string addressKey, bool ambient = false)
         {
             if (peer == null || string.IsNullOrEmpty(addressKey)) return;
             try
             {
-                // Drop any prior subscription for this peer.
-                if (_buildingByPeer.TryGetValue(peer.Id, out var oldAddr))
+                if (ambient)
                 {
-                    if (_subsByBuilding.TryGetValue(oldAddr, out var oldSet))
+                    // FOLD r1 R5a: ambient delivery exists for HAMPTONS houses, whose furniture the game
+                    // itself loads for anyone within ~60 m. Any other address is a peer asking to hold an
+                    // interior it has no business holding, so it is refused — once per peer, loudly,
+                    // because a correct client never sends it.
+                    if (!HamptonsAccess.IsHamptonsAddress(addressKey))
                     {
-                        oldSet.Remove(peer.Id);
-                        if (oldSet.Count == 0) _subsByBuilding.Remove(oldAddr);
+                        if (_ambientNonHamptonsWarned.Add(peer.Id))
+                            Plugin.Logger.LogWarning($"[InteriorSync] REFUSED an ambient request from peer={peer.Id} player='{playerId}' for '{addressKey}': ambient subscriptions are for Hamptons houses only (further refusals from this peer are silent).");
+                        return;
+                    }
+                    // Standing inside it already: the entry subscription delivers strictly more than
+                    // an ambient one, so a second membership would only be a second claim on one seat.
+                    if (_buildingByPeer.TryGetValue(peer.Id, out var entryAddr) && entryAddr == addressKey)
+                    {
+                        Plugin.Logger.LogInfo($"[InteriorSync] Sub(ambient) ignored: peer={peer.Id} player='{playerId}' is INSIDE '{addressKey}' — its entry subscription already covers it.");
+                        return;
+                    }
+                    if (!_ambientByPeer.TryGetValue(peer.Id, out var amb))
+                    {
+                        _ambientByPeer[peer.Id] = amb = new HashSet<string>(StringComparer.Ordinal);
+                        _ambientOrderByPeer[peer.Id] = new List<string>();
+                    }
+                    if (!amb.Add(addressKey)) return;   // already held ambiently — no second snapshot
+                    if (!_ambientOrderByPeer.TryGetValue(peer.Id, out var order))
+                        _ambientOrderByPeer[peer.Id] = order = new List<string>();
+                    order.Add(addressKey);
+                    while (order.Count > MaxAmbientPerPeer)
+                    {
+                        string oldest = order[0];
+                        order.RemoveAt(0);
+                        amb.Remove(oldest);
+                        DropAudienceSeat(peer.Id, oldest, forgetHash: true);
+                        Plugin.Logger.LogWarning($"[InteriorSync] ambient cap {MaxAmbientPerPeer} EXCEEDED by peer={peer.Id} player='{playerId}' — evicted the oldest ambient sub '{oldest}'. The client mirrors this cap (HamptonsAccess), so reaching it here means that client is not releasing its own oldest.");
+                    }
+                }
+                else
+                {
+                    // PROMOTION: held ambiently until now, an ENTRY subscription from here on. The
+                    // audience seat is handed over, never removed and re-added.
+                    if (_ambientByPeer.TryGetValue(peer.Id, out var ambHeld) && ambHeld.Remove(addressKey))
+                    {
+                        if (_ambientOrderByPeer.TryGetValue(peer.Id, out var ordHeld)) ordHeld.Remove(addressKey);
+                        Plugin.Logger.LogInfo($"[InteriorSync] Sub(promote): peer={peer.Id} player='{playerId}' addr='{addressKey}' — ambient → entry ({ambHeld.Count} ambient sub(s) left).");
+                    }
+                    // Drop the peer's prior ENTRY subscription. The entry record goes first so the
+                    // seat test below sees the truth; an address the peer still holds ambiently keeps
+                    // its seat.
+                    if (_buildingByPeer.TryGetValue(peer.Id, out var oldAddr))
+                    {
+                        _buildingByPeer.Remove(peer.Id);
+                        // FOLD r1 R5b: forgetHash:false — the ORIGINAL code dropped the peer from the old
+                        // building's set (and the empty set from _subsByBuilding) on a building switch but
+                        // left _lastHashByAddr alone; only HandleExit and HandlePeerDisconnected cleared it.
+                        if (oldAddr != addressKey) DropAudienceSeat(peer.Id, oldAddr, forgetHash: false);
                     }
                 }
 
@@ -281,21 +358,40 @@ namespace BigAmbitionsMP
                     _subsByBuilding[addressKey] = set;
                 }
                 set.Add(peer.Id);
-                _buildingByPeer[peer.Id] = addressKey;
+                if (!ambient) _buildingByPeer[peer.Id] = addressKey;
 
-                Plugin.Logger.LogInfo($"[InteriorSync] Sub: peer={peer.Id} player='{playerId}' addr='{addressKey}' (now {set.Count} subscriber(s) on this building, {_subsByBuilding.Count} active building(s)).");
+                if (ambient)
+                    Plugin.Logger.LogInfo($"[InteriorSync] Sub(ambient): peer={peer.Id} player='{playerId}' addr='{addressKey}' (ambient {AmbientCountFor(peer.Id)}/{MaxAmbientPerPeer}, {set.Count} subscriber(s) on this building).");
+                else
+                    Plugin.Logger.LogInfo($"[InteriorSync] Sub: peer={peer.Id} player='{playerId}' addr='{addressKey}' (now {set.Count} subscriber(s) on this building, {_subsByBuilding.Count} active building(s)).");
 
                 // Send initial snapshot to this peer only.
                 var snap = BuildSnapshotForHostSend(addressKey);
                 if (snap == null) return;
                 // Round-280 (S1): stamp ALL THREE trackers — stamping only the full hash left
                 // the Tick's 12s clock un-reset, so it could double-send moments later.
+                //
+                // FOLD r1 R1: but these five trackers are PER ADDRESS, not per peer — stamping them says
+                // "this address has spoken" for EVERYONE subscribed to it. When this serve is not the
+                // whole audience (a passer-by taking an ambient sub on a building someone is standing in,
+                // or a second enterer), stamping would silence the Tick's next send to the peers who did
+                // NOT receive this snapshot — worst for dirt, which has no recurrence (MAJOR-K). So the
+                // baseline is recorded only when the served peer IS the entire audience. The ENTRY branch
+                // takes the same rule: the hole is identical and pre-existing (a second enterer stamped
+                // the address for the first), and the cost when the gate closes is bounded at ONE extra
+                // full snapshot to everyone on the next 2 s beat — the round-280 double-send, which the
+                // Tick's own stamping then ends. Going silent has no such bound.
                 var (hsSub, hvSub, hnSub, hdSub) = ComputeHashes(snap);
-                _lastHashByAddr[addressKey] = hvSub;
-                _lastStructHashByAddr[addressKey] = hsSub;
-                _structVolHashByAddr[addressKey] = hnSub;   // round-281: the cargo-only discriminator's baseline
-                _lastDirtHashByAddr[addressKey] = hdSub;    // v10: the entry snapshot carries dirt — subscriber is current
-                _volatileSentAtByAddr[addressKey] = UnityEngine.Time.realtimeSinceStartup;
+                if (set.Count == 1)
+                {
+                    _lastHashByAddr[addressKey] = hvSub;
+                    _lastStructHashByAddr[addressKey] = hsSub;
+                    _structVolHashByAddr[addressKey] = hnSub;   // round-281: the cargo-only discriminator's baseline
+                    _lastDirtHashByAddr[addressKey] = hdSub;    // v10: this serve carries dirt, and it went to the only subscriber there is
+                    _volatileSentAtByAddr[addressKey] = UnityEngine.Time.realtimeSinceStartup;
+                }
+                else
+                    Plugin.Logger.LogInfo($"[InteriorSync] serve for '{addressKey}' left the send trackers UNSTAMPED — {set.Count - 1} other subscriber(s) share this address and may still be owed the current state; the next 2 s beat speaks to them.");
                 // Round-281: this snapshot is the receiver's BASELINE — it is what every later cargo
                 // sync for this address is measured against, so it must carry the structure's version.
                 StampStructVersion(snap, hsSub);
@@ -307,44 +403,104 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleRequest: {ex.Message}"); }
         }
 
-        /// <summary>Handle a client's PlayerExitedBuilding.  Drops them from the subscriber set.</summary>
-        public static void HandleExit(MPLink peer, string playerId, string addressKey)
+        /// <summary>Handle a client's PlayerExitedBuilding.  Drops them from the subscriber set.
+        /// ambient=true (D1) retires only the AMBIENT membership for that address — an address the
+        /// peer is also standing in keeps its seat — and an ENTRY exit never drops an address the
+        /// peer still holds ambiently.</summary>
+        public static void HandleExit(MPLink peer, string playerId, string addressKey, bool ambient = false)
         {
             if (peer == null) return;
             try
             {
+                if (ambient)
+                {
+                    if (string.IsNullOrEmpty(addressKey)) return;   // an ambient exit names its own address
+                    bool held = false;
+                    if (_ambientByPeer.TryGetValue(peer.Id, out var amb) && amb.Remove(addressKey))
+                    {
+                        held = true;
+                        if (_ambientOrderByPeer.TryGetValue(peer.Id, out var ord)) ord.Remove(addressKey);
+                        DropAudienceSeat(peer.Id, addressKey, forgetHash: true);   // an exit, as HandleExit always was
+                    }
+                    int left = _subsByBuilding.TryGetValue(addressKey, out var stillHere) ? stillHere.Count : 0;
+                    Plugin.Logger.LogInfo($"[InteriorSync] Unsub(ambient): peer={peer.Id} player='{playerId}' addr='{addressKey}' (ambient {AmbientCountFor(peer.Id)}/{MaxAmbientPerPeer}, {left} subscriber(s) on this building)" + (held ? "." : " — it was not held ambiently."));
+                    return;
+                }
                 if (_buildingByPeer.TryGetValue(peer.Id, out var cur))
                 {
                     _buildingByPeer.Remove(peer.Id);
-                    if (_subsByBuilding.TryGetValue(cur, out var set))
-                    {
-                        set.Remove(peer.Id);
-                        if (set.Count == 0)
-                        {
-                            _subsByBuilding.Remove(cur);
-                            _lastHashByAddr.Remove(cur);   // stop tracking; will reseed on next subscriber
-                        }
-                    }
+                    DropAudienceSeat(peer.Id, cur, forgetHash: true);   // the original HandleExit cleared _lastHashByAddr here
                 }
                 Plugin.Logger.LogInfo($"[InteriorSync] Unsub: peer={peer.Id} player='{playerId}' addr='{addressKey}' ({_subsByBuilding.Count} active building(s) remaining).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleExit: {ex.Message}"); }
         }
 
+        /// <summary>Retire ONE audience seat for a peer at an address, unless the peer still holds
+        /// that address by the other kind of subscription.  The caller removes its own record (the
+        /// entry map, or the ambient set) BEFORE calling — that is what makes the two tests honest.
+        /// FOLD r1 R5b: `forgetHash` keeps the two ORIGINAL behaviours exactly — an UNSUBSCRIBE (exit,
+        /// disconnect, ambient release) forgot the address's last-broadcast hash when the last
+        /// subscriber left; a building SWITCH inside HandleRequest never did.</summary>
+        private static void DropAudienceSeat(int peerId, string addressKey, bool forgetHash)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            if (_ambientByPeer.TryGetValue(peerId, out var amb) && amb.Contains(addressKey)) return;          // still an ambient viewer here
+            if (_buildingByPeer.TryGetValue(peerId, out var entryAddr) && entryAddr == addressKey) return;    // still standing inside
+            if (!_subsByBuilding.TryGetValue(addressKey, out var set)) return;
+            set.Remove(peerId);
+            if (set.Count == 0)
+            {
+                _subsByBuilding.Remove(addressKey);
+                if (forgetHash) _lastHashByAddr.Remove(addressKey);   // stop tracking; will reseed on next subscriber
+            }
+        }
+
+        /// <summary>How many ambient subscriptions this peer holds (D1 cap accounting).</summary>
+        private static int AmbientCountFor(int peerId)
+            => _ambientByPeer.TryGetValue(peerId, out var amb) ? amb.Count : 0;
+
+        /// <summary>D1: the subscribers who are INSIDE this building, as their own set — the audience
+        /// for traffic an ambient viewer outside cannot use (dirt, cargo-only).  Bounded by one
+        /// building's subscriber set.</summary>
+        private static HashSet<int> EntrySubscribersOf(string addressKey)
+        {
+            var entry = new HashSet<int>();
+            if (!_subsByBuilding.TryGetValue(addressKey, out var set)) return entry;
+            foreach (var pid in set)
+                if (_buildingByPeer.TryGetValue(pid, out var a) && a == addressKey) entry.Add(pid);
+            return entry;
+        }
+
+        /// <summary>DEV lever ('ambient', host side): 'peerId:count|peerId:count', plus the total.</summary>
+        internal static string AmbientHostSummary(out int total)
+        {
+            total = 0;
+            var sb = new System.Text.StringBuilder();
+            foreach (var kv in _ambientByPeer)
+            {
+                if (kv.Value == null || kv.Value.Count == 0) continue;
+                if (sb.Length > 0) sb.Append('|');
+                sb.Append(kv.Key).Append(':').Append(kv.Value.Count);
+                total += kv.Value.Count;
+            }
+            return sb.ToString();
+        }
+
         /// <summary>Called when a peer disconnects — clean up any lingering subscription.</summary>
         public static void HandlePeerDisconnected(int peerId)
         {
+            // D1: the ambient memberships go with the peer, exactly as the entry subscription does.
+            _ambientNonHamptonsWarned.Remove(peerId);
+            if (_ambientByPeer.TryGetValue(peerId, out var amb))
+            {
+                _ambientByPeer.Remove(peerId);
+                _ambientOrderByPeer.Remove(peerId);
+                foreach (var a in amb) DropAudienceSeat(peerId, a, forgetHash: true);
+            }
             if (!_buildingByPeer.TryGetValue(peerId, out var cur)) return;
             _buildingByPeer.Remove(peerId);
-            if (_subsByBuilding.TryGetValue(cur, out var set))
-            {
-                set.Remove(peerId);
-                if (set.Count == 0)
-                {
-                    _subsByBuilding.Remove(cur);
-                    _lastHashByAddr.Remove(cur);
-                }
-            }
+            DropAudienceSeat(peerId, cur, forgetHash: true);
         }
         // (T8's short-lived subscriber mirror was REMOVED in the review fix pass: puppet routing
         // runs on the _bldgByPeer PRESENCE map in MPServer — review B1: a building's OWNER never
@@ -385,7 +541,10 @@ namespace BigAmbitionsMP
                     if (!_lastDirtHashByAddr.TryGetValue(addr, out var pd) || pd != hd)
                     {
                         _lastDirtHashByAddr[addr] = hd;
-                        if (_subsByBuilding.TryGetValue(addr, out var dirtSubs))
+                        // D1: ENTRY subscribers only. Dirt is the floor a player walks on inside the
+                        // building; an AMBIENT viewer outside has no active building and cannot use it.
+                        var dirtSubs = EntrySubscribersOf(addr);
+                        if (dirtSubs.Count > 0)
                             MPServer.BroadcastInteriorDirtSyncTo(dirtSubs, BuildDirtSync(snap));
                     }
                     bool fullChanged = !_lastHashByAddr.TryGetValue(addr, out var pf) || pf != hv;
@@ -413,7 +572,16 @@ namespace BigAmbitionsMP
                         // WHICH message carries it.  The round-280 trackers are stamped IDENTICALLY
                         // either way — whichever goes out, this address has spoken and the coalescing
                         // clock runs the same.
-                        if (cargoOnly && TrySendCargoOnly(addr, set, snap, sv, "tick")) continue;
+                        // D1: cargo is the shop's stock as customers buy it — ENTRY subscribers only.
+                        // With nobody inside, a cargo-only beat concerns no one: the trackers above are
+                        // already stamped, and the next STRUCTURAL change still reaches the ambient
+                        // viewers through the full snapshot below.
+                        if (cargoOnly)
+                        {
+                            var entrySubs = EntrySubscribersOf(addr);
+                            if (entrySubs.Count == 0) continue;
+                            if (TrySendCargoOnly(addr, entrySubs, snap, sv, "tick")) continue;
+                        }
                         MPServer.BroadcastInteriorSnapshotTo(set, snap);
                     }
                 }

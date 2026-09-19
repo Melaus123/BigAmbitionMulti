@@ -4683,6 +4683,11 @@ namespace BigAmbitionsMP
                 // ordering).
                 MPClient.WorldSyncApplied = true;
                 MPClient.TickWorldReadyGate();   // round-205: readiness now also waits for the parked-car receipt
+                // FOLD r1 R3 (Hamptons D1): this is the event that says "this client is in a synced
+                // world" — including after a reconnect into the same scene, where the one-shot LOD0
+                // callbacks have long since fired. Re-takes the ambient subscriptions the link loss
+                // dropped; a no-op when none are owed.
+                try { HamptonsAccess.OnWorldSyncApplied(); } catch { }
                 TimeSync.NotifyWorldSyncApplied();   // fires a release the gate deferred (hot-join world-sync gate)
                 // Round-50 (approved): SECOND world-health census, event-triggered — the +30s line
                 // races slow-link snapshot delivery (field 2026-07-21-204010: "DEGRADED" printed

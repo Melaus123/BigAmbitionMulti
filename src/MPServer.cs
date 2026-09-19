@@ -2406,7 +2406,10 @@ namespace BigAmbitionsMP
                     if (p != null && SenderIs(p.PlayerId, senderPid, env.Type))
                     {
                         var pc = peer;
-                        GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleRequest(pc, p.PlayerId, p.AddressKey));
+                        // D1: Ambient=true is a viewer NEAR the building (a Hamptons house at LOD0),
+                        // not one inside it — the host keeps that membership apart from the entry sub.
+                        bool ambientReq = p.Ambient;
+                        GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleRequest(pc, p.PlayerId, p.AddressKey, ambientReq));
                     }
                     break;
                 }
@@ -2455,9 +2458,16 @@ namespace BigAmbitionsMP
                     if (p != null && SenderIs(p.PlayerId, senderPid, env.Type))
                     {
                         var pc = peer;
-                        GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleExit(pc, p.PlayerId, p.AddressKey));
-                        ParkedVehicleSync.ForgetPeer(p.PlayerId);   // door teleport — resync their parked cars now
-                        TrafficSync.ForgetPeer(p.PlayerId);         // review B1: same rule for the traffic identity map
+                        bool ambientExit = p.Ambient;
+                        GameStatePatcher.EnqueueOnMainThread(() => InteriorSync.HandleExit(pc, p.PlayerId, p.AddressKey, ambientExit));
+                        // D1: an AMBIENT exit is NOT a player leaving a building — it is a house
+                        // dropping out of their LOD0 range while they stand in the street. None of the
+                        // presence work behind a real exit may run for it.
+                        if (!ambientExit)
+                        {
+                            ParkedVehicleSync.ForgetPeer(p.PlayerId);   // door teleport — resync their parked cars now
+                            TrafficSync.ForgetPeer(p.PlayerId);         // review B1: same rule for the traffic identity map
+                        }
                     }
                     break;
                 }

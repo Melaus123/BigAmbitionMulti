@@ -1680,7 +1680,13 @@ namespace BigAmbitionsMP
         //      are now reachable in every build, and phase 5 adds two Ops on the existing shared-work-edit
         //      carrier (mergerterminate, mergershutdown — no new message type). A v22 peer would drop the
         //      merger traffic as "Unknown message type"; mixed sessions refuse at Hello per the freeze rule.
-        public const int Version = 23;
+        // v24 (2026-09-18, Hamptons furniture delivery D1): the AMBIENT interior subscription —
+        //      InteriorRequestPayload.Ambient and PlayerExitedBuildingPayload.Ambient (:2648-2670).
+        //      A v23 host reads an ambient request as an ordinary ENTRY request: it would clobber the
+        //      viewer's real subscription and run the building-exit presence teardown on the ambient
+        //      exit. No capability gate and no old-peer branch exist for it (project rule 2026-09-18),
+        //      so mixed sessions refuse at Hello per the freeze rule.
+        public const int Version = 24;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -2640,15 +2646,21 @@ namespace BigAmbitionsMP
     // ── Interior sync (Phase 2: building interior state) ─────────────────────
 
     /// <summary>
-    /// Client → Host on building entry.  Host adds the sender to the building's
-    /// subscriber set and replies with an InteriorSnapshot.  While subscribed,
-    /// the client receives further InteriorSnapshots whenever host's polling
-    /// detects state changes.
+    /// Client → Host on building ENTRY (Ambient=false), or — v24, Hamptons furniture delivery D1 —
+    /// when a Hamptons house a session player rents comes within the game's own LOD0 range while the
+    /// sender stays OUTSIDE it (Ambient=true).  Host adds the sender to the building's subscriber set
+    /// and replies with an InteriorSnapshot.  While subscribed, the client receives further
+    /// InteriorSnapshots whenever host's polling detects state changes.
     /// </summary>
     public class InteriorRequestPayload
     {
         public string PlayerId   { get; set; } = "";
         public string AddressKey { get; set; } = "";
+        /// <summary>v24: an AMBIENT subscription — near the building, never inside it.  It never
+        /// touches the sender's ENTRY subscription (the host keeps the two kinds apart), and it is
+        /// excluded from the dirt broadcast and the cargo-only send, which describe what a player
+        /// standing INSIDE the building sees.</summary>
+        public bool Ambient { get; set; }
     }
 
     /// <summary>Client → Host on building exit.  Removes the client from that building's subscriber set.</summary>
@@ -2656,6 +2668,10 @@ namespace BigAmbitionsMP
     {
         public string PlayerId   { get; set; } = "";
         public string AddressKey { get; set; } = "";
+        /// <summary>v24: retires only the AMBIENT membership for AddressKey (the house dropped to
+        /// LOD1/LOD2).  The sender's entry subscription and everything the host runs for a player who
+        /// really left a building are left alone.</summary>
+        public bool Ambient { get; set; }
     }
 
     /// <summary>

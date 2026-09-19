@@ -327,6 +327,11 @@ namespace BigAmbitionsMP
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyLists.ClearAll("the connection dropped")); } catch { }   // wave 4: no partner display copies without a session
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyCandidates.ClearAll("the connection dropped")); } catch { }   // phase 4b (people): same rule for the shared candidate copies
             try { GameStatePatcher.EnqueueOnMainThread(() => CompanyMessages.ClearAll("the connection dropped")); } catch { }     // phase 4b (people) P4: and for the relayed message copies
+            // FOLD r1 R3 (D1): the host drops every subscription this peer held when the link goes
+            // (InteriorSync.HandlePeerDisconnected), and a reconnect into the SAME scene is a real path
+            // (see the reconnect notes at :249-256), so the local ambient set must not outlive the link.
+            // Marshalled — it mutates sets the main-thread Hamptons patches own.
+            try { GameStatePatcher.EnqueueOnMainThread(HamptonsAccess.OnHostLinkLost); } catch { }
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): an involuntary drop ends the session too - Disconnect() only covers the voluntary path
             JoinStatus = "";   // JOIN-WAIT-1: the wait ends with the connection
             _helloClock.Reset();
@@ -449,9 +454,16 @@ namespace BigAmbitionsMP
         /// just-joined loser dies in this very filter (field: three runs of silent non-delivery).</summary>
         internal static bool IsJoinQuiescing => _joinQuiesce;
 
+        // D1 (2026-09-18): the size of the frame being dispatched RIGHT NOW, exactly as it arrived on
+        // the wire (deflated where the envelope deflates, reassembled by LiteNetLib). OnReceive parses
+        // and dispatches in the SAME call, so a handler reading this reads its own frame. Diagnostics
+        // only — nothing routes on it.
+        private static int _frameBytes;
+
         private static void OnReceive(byte[] bytes)
         {
             MPNetStats.NoteIn(MPNetStats.PeekType(bytes), bytes.Length);   // T0 (review M8: torn frames count in bucket 0)
+            _frameBytes = bytes.Length;
             var env = MessageEnvelope.Deserialize(bytes);
             if (env == null) return;
 
@@ -1722,6 +1734,15 @@ namespace BigAmbitionsMP
             var payload = env.GetPayload<InteriorSnapshotPayload>();
             if (payload == null) return;
             Plugin.Logger.LogInfo($"[Client] Received interior snapshot for '{payload.AddressKey}': {InteriorSync.SnapshotSummary(payload)}.");
+            // D1: if this address is one we hold AMBIENTLY, this is furniture arriving for a house we
+            // are standing OUTSIDE — the one measurement the delivery design's byte estimate needs.
+            // FOLD r1 R4: this handler runs on the NETWORK POLL thread and NoteAmbientSnapshot reads the
+            // ambient sets the main-thread LOD patches mutate, so the three values are captured HERE
+            // (the frame count is only valid during this call) and the read runs on the main thread.
+            string ambAddr = payload.AddressKey;
+            int ambItems = payload.ItemInstances != null ? payload.ItemInstances.Count : 0;
+            int ambBytes = _frameBytes;
+            GameStatePatcher.EnqueueOnMainThread(() => HamptonsAccess.NoteAmbientSnapshot(ambAddr, ambItems, ambBytes));
             GameStatePatcher.ApplyInteriorSnapshot(payload);
         }
 
@@ -1831,22 +1852,27 @@ namespace BigAmbitionsMP
 
         // ── Outbound ──────────────────────────────────────────────────────────
 
-        /// <summary>Notify the host we just entered building X — host will subscribe us and reply with InteriorSnapshot.</summary>
-        public static void SendInteriorRequest(string addressKey)
+        /// <summary>Notify the host we just entered building X — host will subscribe us and reply with
+        /// InteriorSnapshot.  ambient=true (D1) instead says we are NEAR a Hamptons house a session
+        /// player rents (the game's own LOD0 callback): the host adds a second, independent membership
+        /// and our entry subscription elsewhere is untouched.</summary>
+        public static void SendInteriorRequest(string addressKey, bool ambient = false)
         {
             if (!IsConnected || string.IsNullOrEmpty(addressKey)) return;
-            var p = new InteriorRequestPayload { PlayerId = MPConfig.PlayerId, AddressKey = addressKey };
+            var p = new InteriorRequestPayload { PlayerId = MPConfig.PlayerId, AddressKey = addressKey, Ambient = ambient };
             Send(MessageEnvelope.Create(MessageType.InteriorRequest, MPConfig.PlayerId, p));
-            Plugin.Logger.LogInfo($"[Client] Sent InteriorRequest for '{addressKey}'.");
+            Plugin.Logger.LogInfo($"[Client] Sent InteriorRequest for '{addressKey}'{(ambient ? " (ambient — near the house, not inside it)" : "")}.");
         }
 
-        /// <summary>Notify the host we left building X — host will unsubscribe us.</summary>
-        public static void SendPlayerExitedBuilding(string addressKey)
+        /// <summary>Notify the host we left building X — host will unsubscribe us.  ambient=true (D1)
+        /// retires only the ambient membership for that address (the house left LOD0 range) and runs
+        /// none of the host's 'a player left a building' work.</summary>
+        public static void SendPlayerExitedBuilding(string addressKey, bool ambient = false)
         {
             if (!IsConnected || string.IsNullOrEmpty(addressKey)) return;
-            var p = new PlayerExitedBuildingPayload { PlayerId = MPConfig.PlayerId, AddressKey = addressKey };
+            var p = new PlayerExitedBuildingPayload { PlayerId = MPConfig.PlayerId, AddressKey = addressKey, Ambient = ambient };
             Send(MessageEnvelope.Create(MessageType.PlayerExitedBuilding, MPConfig.PlayerId, p));
-            Plugin.Logger.LogInfo($"[Client] Sent PlayerExitedBuilding for '{addressKey}'.");
+            Plugin.Logger.LogInfo($"[Client] Sent PlayerExitedBuilding for '{addressKey}'{(ambient ? " (ambient)" : "")}.");
         }
 
         /// <summary>Client owner → host: authoritative interior for a business this player runs.</summary>

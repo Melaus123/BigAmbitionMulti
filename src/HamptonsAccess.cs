@@ -29,6 +29,16 @@
 //     read as the closed outdoorVersion shell on everyone else's screen. Postfix re-asserts the
 //     renderer decision from the OWNERSHIP question instead — and NEVER from the tenancy flip, which
 //     would also open LateUpdate :261 and let an ungranted player walk in (design doc, Traps).
+//
+// 2026-09-18 — STAGE D1, AMBIENT FURNITURE DELIVERY (design
+// .modding/03-systems/hamptons-furniture-delivery-design-2026-09-18.md): the house now renders for
+// everyone, but its FURNITURE only exists on a machine whose registration holds the item list. The
+// game's own culling group already calls HamptonsHouse.OnLod0 (~60 m) / OnLod1 / OnLod2, and its
+// untenanted loader instantiates whatever `itemInstances` holds at that moment — so the only missing
+// piece is DELIVERY. A connected client postfixes those three hooks and takes an AMBIENT interior
+// subscription (InteriorRequest{Ambient=true}) for a house a SESSION PLAYER rents, dropping it again
+// when the house leaves LOD0 range. Access is unchanged: an ambient subscriber is not "present"
+// anywhere, and the plot blocker, fence and entry gates above are untouched.
 using HarmonyLib;
 using Helpers;      // RealEstateHelper.IsOnSale extension
 using System;
@@ -88,6 +98,12 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { WarnOnce("RefreshAllBlockers/blocker", ex); }
                     try { c.ToggleLodMode(mapOpen); }
                     catch (Exception ex) { WarnOnce("RefreshAllBlockers/lod", ex); }
+                    // D1: a house that was ALREADY at LOD0 when the ownership answer changed never
+                    // gets another OnLod0 call — the loader is one-shot. This is the event that
+                    // changed the answer, so the deferred ambient subscribe retries here (IsHouseLoaded
+                    // is the native "this house is at LOD0" flag).
+                    try { if (c.hamptonsHouse != null && c.hamptonsHouse.IsHouseLoaded) TryAmbientSubscribe(c.hamptonsHouse, "grant/ownership refresh", mayEvict: false); }
+                    catch (Exception ex) { WarnOnce("RefreshAllBlockers/ambient", ex); }
                     done++;
                 }
                 Plugin.Logger.LogInfo($"[Hamptons] access/ownership change → {done} of {all.Length} Hamptons controller(s) re-evaluated (blocker + renderers).");
@@ -188,6 +204,28 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, CityHamptonsHouseController> _closePending = new Dictionary<string, CityHamptonsHouseController>();
         private static int _regCountAtCache = -1;
 
+        // ── D1: the AMBIENT interior subscription (client side) ──────────────────────────────────
+        // Addresses this machine currently holds AMBIENTLY: a Hamptons house a session player rents,
+        // inside the game's own LOD0 range, that we are standing OUTSIDE. Client-only — the HOST's
+        // registration already holds every client-owned interior (InteriorSync.PublishAllOwnedInteriors
+        // pushes them at world-live), so the host asks for nothing.
+        private static readonly HashSet<string> _ambient = new HashSet<string>();
+        // FOLD r1 R2a: insertion order, so this machine releases its OWN oldest before asking for a
+        // ninth house — the host's cap (InteriorSync.MaxAmbientPerPeer, the one definition) then only
+        // ever fires on a client bug, and never silently in normal play.
+        private static readonly List<string> _ambientOrder = new List<string>();
+        // Houses that were at LOD0 before the ownership ledger named their tenant: the predicate said
+        // "no session player holds this" and nothing was sent. RefreshAllBlockers — which already fires
+        // on every grant/ownership change — retries them, so the subscribe rides the event that changed
+        // the answer rather than a timer of ours.  This set IS that state: one DEFERRED line per
+        // address, cleared by the line that reports the retry landing (FOLD r1 R5c).
+        private static readonly HashSet<string> _ambientDeferLogged = new HashSet<string>();
+        private static readonly HashSet<string> _ambientGotLogged   = new HashSet<string>();
+        // FOLD r1 R3: the host clears its side of every subscription when the link drops
+        // (InteriorSync.HandlePeerDisconnected), so ours go too — and the re-evaluation waits for the
+        // event that says this client is back in a synced world (GameStatePatcher's world-sync apply).
+        private static bool _ambientResubscribePending;
+
         /// <summary>Every field above is keyed to ONE loaded world — registration objects, address keys and
         /// once-per-session log latches all die with the scene. Called from MPCanvasUI's game-load detector
         /// beside the other per-world resets.</summary>
@@ -197,6 +235,8 @@ namespace BigAmbitionsMP
             {
                 _addrOf.Clear(); _entryLogged.Clear(); _renderLogged.Clear(); _warned.Clear();
                 _isHamptonsAddr.Clear(); _closePending.Clear();
+                _ambient.Clear(); _ambientOrder.Clear(); _ambientDeferLogged.Clear(); _ambientGotLogged.Clear();
+                _ambientResubscribePending = false;
                 _regCountAtCache = -1;
                 HamptonsTenancyFlip.Reset();
             }
@@ -274,6 +314,198 @@ namespace BigAmbitionsMP
 
         /// <summary>One "real house shown" line per address per session.</summary>
         internal static bool RenderLogOnce(string addrKey) => _renderLogged.Add(addrKey);
+
+        // ── D1: ambient subscribe / unsubscribe / measurement ────────────────────────────────────
+
+        /// <summary>LOD0 on a Hamptons house (or the grant/ownership refresh finding one already at
+        /// LOD0): ask the host for its interior when a SESSION PLAYER rents it and this machine is a
+        /// connected client that does not hold the house itself. One request per address — the local
+        /// set is what the LOD1/LOD2 teardown, the plot-exit re-assert and the dev lever read.
+        /// The predicate is the render postfix's, minus the render-only terms.</summary>
+        internal static void TryAmbientSubscribe(HamptonsHouse? house, string why, bool mayEvict = true)
+        {
+            try
+            {
+                if (!MPClient.IsConnected || MPServer.IsRunning) return;   // the host serves itself; SP does nothing
+                var reg = house != null ? house!._buildingRegistration : null;
+                if (reg == null) return;
+                bool mine = false;
+                try { mine = reg.RentedByPlayer || reg.BuildingOwnedByPlayer; } catch { }
+                if (mine) return;                                          // our own house — its items are already here
+                // FOLD r1 R2b: never ambient-subscribe the plot we are STANDING ON. That house belongs to
+                // the entry path (OnPlotEntered's request, which the host promotes); an ambient request
+                // for it is at best ignored by the host and at worst confuses the two kinds. The plot-exit
+                // re-assert is the way back in.
+                if (LocalIsInsidePlot(house)) return;
+                string addr = KeyOf(reg);
+                if (addr.Length == 0 || _ambient.Contains(addr)) return;
+                if (!SessionTenantLabel(reg, addr, out var tenant))
+                {
+                    // Ownership has not been applied on this machine yet. Not an error and not a
+                    // failure: the retry rides RefreshAllBlockers, the same event that carries the
+                    // grant/ownership change which will make this predicate true.
+                    if (_ambientDeferLogged.Add(addr))
+                        Plugin.Logger.LogInfo($"[Hamptons] ambient subscribe DEFERRED at '{addr}' ({why}) — no session player holds it here yet; retried on the next grant/ownership refresh.");
+                    return;
+                }
+                // FOLD r1 R2a: this machine's own cap, mirroring the host's ONE constant. Release our
+                // oldest first so the host's eviction never fires in normal play.
+                // FOLD r2 (re-check HIGH): only a FRESH approach may make room. A bulk sweep walks every loaded
+                // house; letting it evict made it release a house it re-subscribed moments later - N requests
+                // and N full snapshots per grant/ownership event with more than the cap loaded, every time.
+                // A sweep fills free seats only.
+                if (!mayEvict && _ambientOrder.Count >= InteriorSync.MaxAmbientPerPeer) return;
+                while (_ambientOrder.Count >= InteriorSync.MaxAmbientPerPeer)
+                {
+                    string oldest = _ambientOrder[0];
+                    ReleaseAmbient(oldest, $"local cap {InteriorSync.MaxAmbientPerPeer} — making room for '{addr}'");
+                    if (_ambientOrder.Count > 0 && _ambientOrder[0] == oldest) { _ambientOrder.RemoveAt(0); break; }   // never spin
+                }
+                MPClient.SendInteriorRequest(addr, ambient: true);
+                _ambient.Add(addr);
+                _ambientOrder.Add(addr);
+                bool wasDeferred = _ambientDeferLogged.Remove(addr);
+                Plugin.Logger.LogInfo($"[Hamptons] ambient interior subscribed at '{addr}' ({why}; rented by '{tenant}', {_ambient.Count} ambient address(es) held)" + (wasDeferred ? " — the deferred subscribe at this address is resolved." : "."));
+            }
+            catch (Exception ex) { WarnOnce("TryAmbientSubscribe", ex); }
+        }
+
+        /// <summary>LOD1 / LOD2: the house left the range at which the game keeps its furniture loaded,
+        /// so the ambient subscription goes back. Silent when we never held one.</summary>
+        internal static void AmbientUnsubscribe(HamptonsHouse? house, string why)
+        {
+            try
+            {
+                var reg = house != null ? house!._buildingRegistration : null;
+                if (reg == null) return;
+                string addr = KeyOf(reg);
+                if (addr.Length == 0) return;
+                _ambientDeferLogged.Remove(addr);                 // the house is gone; a pending DEFERRED line is moot
+                if (!_ambient.Contains(addr)) { _ambientOrder.Remove(addr); return; }
+                ReleaseAmbient(addr, why);
+            }
+            catch (Exception ex) { WarnOnce("AmbientUnsubscribe", ex); }
+        }
+
+        /// <summary>Give one ambient subscription back: local records first, then the host.</summary>
+        private static void ReleaseAmbient(string addr, string why)
+        {
+            _ambient.Remove(addr);
+            _ambientOrder.Remove(addr);
+            if (MPClient.IsConnected) MPClient.SendPlayerExitedBuilding(addr, ambient: true);
+            Plugin.Logger.LogInfo($"[Hamptons] ambient interior released at '{addr}' ({why}; {_ambient.Count} ambient address(es) left).");
+        }
+
+        /// <summary>FOLD r1 R3: the link to the host dropped WITHOUT a world reload (MPClient.OnDisconnected —
+        /// a reconnect into the same scene is a real path, MPClient.cs ~:249-256). The host already dropped
+        /// every subscription this peer held (InteriorSync.HandlePeerDisconnected), so believing in ours would
+        /// leave houses that never update and an exit we would send to nobody. Cleared here; re-taken on the
+        /// world-sync event below.  Main thread (marshalled by the caller).</summary>
+        internal static void OnHostLinkLost()
+        {
+            try
+            {
+                int n = _ambient.Count;
+                _ambient.Clear(); _ambientOrder.Clear(); _ambientDeferLogged.Clear(); _ambientGotLogged.Clear();
+                _ambientResubscribePending = true;
+                if (n > 0)
+                    Plugin.Logger.LogInfo($"[Hamptons] host link lost — {n} ambient subscription(s) dropped locally (the host cleared its side); they are re-taken when this client's world sync applies again.");
+            }
+            catch (Exception ex) { WarnOnce("OnHostLinkLost", ex); }
+        }
+
+        /// <summary>FOLD r1 R3: the client has applied the bulk world sync again (GameStatePatcher's
+        /// business-snapshot apply sets MPClient.WorldSyncApplied — the same signal the world-ready gate
+        /// uses, an event, not a delay). Every Hamptons house already at LOD0 is re-evaluated exactly as the
+        /// RefreshAllBlockers retry does, because their one-shot LOD0 callback has long since fired.</summary>
+        internal static void OnWorldSyncApplied()
+        {
+            try
+            {
+                if (!_ambientResubscribePending) return;
+                _ambientResubscribePending = false;
+                if (!MPClient.IsConnected || MPServer.IsRunning) return;
+                var all = UnityEngine.Object.FindObjectsOfType<CityHamptonsHouseController>(true);
+                if (all == null) return;
+                int n = 0;
+                foreach (var c in all)
+                {
+                    if (c == null || c.buildingRegistration == null) continue;
+                    var hh = c.hamptonsHouse;
+                    if (hh == null || !hh.IsHouseLoaded) continue;
+                    TryAmbientSubscribe(hh, "reconnect — world sync applied", mayEvict: false);
+                    n++;
+                }
+                Plugin.Logger.LogInfo($"[Hamptons] reconnect: {n} loaded Hamptons house(s) re-evaluated for ambient delivery ({_ambient.Count} held).");
+            }
+            catch (Exception ex) { WarnOnce("OnWorldSyncApplied", ex); }
+        }
+
+        /// <summary>A granted guest who walks onto the plot sends an ENTRY request (OnPlotEntered) and
+        /// the host PROMOTES the ambient membership into it — one seat, now owned by the entry sub. The
+        /// plot-exit teardown (ExitBuildingNotifier → SendPlayerExitedBuilding) then retires that seat
+        /// while the house is still at LOD0 in front of the player, so the ambient subscription is
+        /// re-asserted here, after the exit, and the furniture stays.</summary>
+        internal static void ReassertAmbientAfterPlotExit(HamptonsHouse? house)
+        {
+            try
+            {
+                if (!MPClient.IsConnected || MPServer.IsRunning) return;
+                if (house == null || !house!.IsHouseLoaded) return;   // below LOD0 — the LOD1/LOD2 hook owns this
+                var reg = house!._buildingRegistration;
+                if (reg == null) return;
+                string addr = KeyOf(reg);
+                if (addr.Length == 0) return;
+                _ambient.Remove(addr); _ambientOrder.Remove(addr);    // the host promoted it away; ask again
+                TryAmbientSubscribe(house, "plot exit — the house is still at LOD0");
+            }
+            catch (Exception ex) { WarnOnce("ReassertAmbientAfterPlotExit", ex); }
+        }
+
+        /// <summary>D1 measurement: a snapshot arriving for an address held AMBIENTLY is furniture for a
+        /// house we are standing OUTSIDE. One line per address per session; the byte count is the frame
+        /// as it arrived on the wire (deflated), the first real number against the design's 80-110 KB
+        /// estimate.</summary>
+        internal static void NoteAmbientSnapshot(string addressKey, int items, int wireBytes)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || !_ambient.Contains(addressKey)) return;
+                if (!_ambientGotLogged.Add(addressKey)) return;
+                Plugin.Logger.LogInfo($"[Hamptons] '{addressKey}' furniture received while outside ({items} items, {wireBytes} B on the wire).");
+            }
+            catch { }
+        }
+
+        /// <summary>DEV lever ('ambient'): the addresses this machine holds ambiently.</summary>
+        internal static string AmbientLocalSummary()
+        {
+            try { return string.Join("|", _ambientOrder.ToArray()); }   // oldest first: the release order
+            catch { return ""; }
+        }
+
+        /// <summary>DEV lever ('hamptonslod &lt;addressKey&gt; &lt;0|1|2&gt;'): drive one named house's own
+        /// LOD callback so the rig can test the delivery trigger without walking. The house comes from the
+        /// game's own controller registry (CityManager.FindCityBuildingController), never a scene sweep.</summary>
+        internal static string DevDriveLod(string addressKey, int level)
+        {
+            try
+            {
+                var reg = GameStatePatcher.FindRegistration(addressKey);
+                if (reg == null) return $"ERR no registration for '{addressKey}'";
+                if (reg.BuildingCached == null || !reg.BuildingCached.IsHamptonsHouse()) return $"ERR '{addressKey}' is not a Hamptons house";
+                var cc = InstanceBehavior<CityManager>.Instance?.FindCityBuildingController(reg.BuildingCached.Address) as CityHamptonsHouseController;
+                var hh = cc?.hamptonsHouse;
+                if (hh == null) return $"ERR no HamptonsHouse for '{addressKey}' in the city controller registry";
+                if (level == 0) hh.OnLod0();
+                else if (level == 1) hh.OnLod1();
+                else hh.OnLod2();
+                int regItems = 0; try { regItems = reg.itemInstances?.Count ?? 0; } catch { }
+                int live = 0;     try { live = hh.allItemControllers?.Count ?? 0; } catch { }
+                return $"OK hamptonslod '{addressKey}' OnLod{level}: loaded={hh.IsHouseLoaded} regItems={regItems} liveItems={live} ambient={_ambient.Contains(addressKey)}";
+            }
+            catch (Exception ex) { return $"ERR hamptonslod '{addressKey}': {ex.GetType().Name}: {ex.Message}"; }
+        }
 
         /// <summary>H3 presence mask: is this address key a HAMPTONS house? Resolved from the game's own
         /// registration (BuildingCached.IsHamptonsHouse) and cached per address — no scene search, no
@@ -461,10 +693,15 @@ namespace BigAmbitionsMP
     }
 
     /// <summary>G1 — the PLOT EXIT body, same suspension: ExitFromHamptonsBuilding raises
-    /// GlobalEvents.onExitBuilding (BuildingManager.cs:1611) from inside here. No Postfix is needed: that
-    /// event is exactly what ExitBuildingNotifier (MPPatches.cs:941-974) already listens to, so the shop
-    /// context clear, InteriorSync.NotifyLocalBuildingExit and SendPlayerExitedBuilding all fire on the
-    /// Hamptons path today — the teardown half was never missing, only the entry half.</summary>
+    /// GlobalEvents.onExitBuilding (BuildingManager.cs:1611) from inside here. That event is exactly what
+    /// ExitBuildingNotifier (MPPatches.cs:941-974) already listens to, so the shop context clear,
+    /// InteriorSync.NotifyLocalBuildingExit and SendPlayerExitedBuilding all fire on the Hamptons path
+    /// today — the teardown half was never missing, only the entry half.
+    ///
+    /// D1 adds a Postfix, because that same teardown now retires ONE MEMBERSHIP TOO MANY: the host
+    /// promoted this house's ambient subscription into the entry subscription when the guest walked in,
+    /// so the exit leaves a house that is still at LOD0 in front of the player with no subscription at
+    /// all. The Postfix re-asserts the ambient one, after the exit message has gone.</summary>
     [HarmonyPatch(typeof(HamptonsHouse), "OnExitPlot")]
     public static class Patch_HamptonsHouse_OnExitPlot_NarrowFlip
     {
@@ -472,6 +709,11 @@ namespace BigAmbitionsMP
         {
             try { HamptonsTenancyFlip.Suspend(); }
             catch (Exception ex) { HamptonsAccess.WarnOnce("Patch_HamptonsHouse_OnExitPlot_NarrowFlip", ex); }
+        }
+        static void Postfix(HamptonsHouse __instance)
+        {
+            try { HamptonsAccess.ReassertAmbientAfterPlotExit(__instance); }
+            catch (Exception ex) { HamptonsAccess.WarnOnce("Patch_HamptonsHouse_OnExitPlot_NarrowFlip/post", ex); }
         }
         static void Finalizer()
         {
@@ -515,6 +757,67 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Hamptons] real house shown at '{addr}' (rented by '{tenant}').");
             }
             catch (Exception ex) { HamptonsAccess.WarnOnce("Patch_HamptonsLod_SessionTenantShowsHouse", ex); }
+        }
+    }
+
+    /// <summary>D1 (2026-09-18) — THE AMBIENT DELIVERY TRIGGER. The game's own culling group calls these
+    /// three ICullable hooks (decompile HamptonsHouse.cs :334-347): OnLod0 when the house comes within
+    /// ~60 m and its untenanted loader instantiates `itemInstances`, OnLod1 / OnLod2 when it leaves and
+    /// they are cleared. They ARE the event — the mod polls no distances of its own. OnLod0 takes an
+    /// ambient interior subscription for a house a session player rents; OnLod1 / OnLod2 give it back.
+    /// One patch class per method so each reports its own binding; TargetMethods (plural), never
+    /// TargetMethod, because a null from the singular form makes Harmony THROW.</summary>
+    [HarmonyPatch]
+    public static class Patch_HamptonsHouse_OnLod0_AmbientSubscribe
+    {
+        static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            var m = AccessTools.Method(typeof(HamptonsHouse), "OnLod0", Type.EmptyTypes);
+            Plugin.Logger.LogInfo($"[Hamptons] HamptonsHouse.OnLod0(): {(m != null ? "patched" : "NOT FOUND")}");
+            if (m != null) yield return m;
+        }
+
+        static void Postfix(HamptonsHouse __instance)
+        {
+            try { HamptonsAccess.TryAmbientSubscribe(__instance, "LOD0"); }
+            catch (Exception ex) { HamptonsAccess.WarnOnce("Patch_HamptonsHouse_OnLod0_AmbientSubscribe", ex); }
+        }
+    }
+
+    /// <summary>D1: the house dropped to LOD1 — its items are unloaded, so the ambient subscription has
+    /// nothing left to feed and goes back.</summary>
+    [HarmonyPatch]
+    public static class Patch_HamptonsHouse_OnLod1_AmbientRelease
+    {
+        static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            var m = AccessTools.Method(typeof(HamptonsHouse), "OnLod1", Type.EmptyTypes);
+            Plugin.Logger.LogInfo($"[Hamptons] HamptonsHouse.OnLod1(): {(m != null ? "patched" : "NOT FOUND")}");
+            if (m != null) yield return m;
+        }
+
+        static void Postfix(HamptonsHouse __instance)
+        {
+            try { HamptonsAccess.AmbientUnsubscribe(__instance, "LOD1"); }
+            catch (Exception ex) { HamptonsAccess.WarnOnce("Patch_HamptonsHouse_OnLod1_AmbientRelease", ex); }
+        }
+    }
+
+    /// <summary>D1: same as LOD1, at the outer culling band.</summary>
+    [HarmonyPatch]
+    public static class Patch_HamptonsHouse_OnLod2_AmbientRelease
+    {
+        static System.Collections.Generic.IEnumerable<System.Reflection.MethodBase> TargetMethods()
+        {
+            var m = AccessTools.Method(typeof(HamptonsHouse), "OnLod2", Type.EmptyTypes);
+            Plugin.Logger.LogInfo($"[Hamptons] HamptonsHouse.OnLod2(): {(m != null ? "patched" : "NOT FOUND")}");
+            if (m != null) yield return m;
+        }
+
+        static void Postfix(HamptonsHouse __instance)
+        {
+            try { HamptonsAccess.AmbientUnsubscribe(__instance, "LOD2"); }
+            catch (Exception ex) { HamptonsAccess.WarnOnce("Patch_HamptonsHouse_OnLod2_AmbientRelease", ex); }
         }
     }
 

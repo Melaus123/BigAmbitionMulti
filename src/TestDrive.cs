@@ -265,6 +265,32 @@ namespace BigAmbitionsMP
                     return $"OK '{arg}': deliveryspot={cspots} handtruckspawner={cspawners} avail={availv} rented={rentedv} name='{bn}' type='{bt}'";
                 }
 
+                case "ambient":
+                {
+                    // D1 (2026-09-18): the ambient interior subscription. On a CLIENT, the addresses
+                    // this machine holds; on the HOST, what it serves, per peer.
+                    if (MPServer.IsRunning)
+                    {
+                        string apeers = InteriorSync.AmbientHostSummary(out int atotal);
+                        return $"OK ambient peers=[{apeers}] total={atotal}";
+                    }
+                    return $"OK ambient local=[{HamptonsAccess.AmbientLocalSummary()}]";
+                }
+
+                case "hamptonslod":
+                {
+                    // 'hamptonslod <addressKey> <0|1|2>' — invoke that house's own OnLod0/OnLod1/OnLod2
+                    // so the delivery trigger can be driven without walking to it. The address key may
+                    // contain spaces, so the LEVEL is the last token.
+                    int lsp = arg.LastIndexOf(' ');
+                    if (lsp <= 0) return "ERR hamptonslod <addressKey> <0|1|2>";
+                    string laddr = arg.Substring(0, lsp).Trim();
+                    if (!int.TryParse(arg.Substring(lsp + 1).Trim(), out int llvl) || llvl < 0 || llvl > 2)
+                        return "ERR hamptonslod <addressKey> <0|1|2>";
+                    if (laddr.Length == 0) return "ERR hamptonslod <addressKey> <0|1|2>";
+                    return HamptonsAccess.DevDriveLod(laddr, llvl);
+                }
+
                 case "warnicons":
                 {
                     // I-lever (2026-09-12): recompute GetWarningIconType over BuildingManager.allItemControllers
