@@ -4428,6 +4428,135 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>H-MERGERHIRE-1 — RECRUITMENT CAMPAIGN BOOKING FOR A MERGED COMPANY (2026-09-19,
+        /// user-approved). RecruitmentAgencyDialog.cs:145 `private DialogEntry OnRecruitmentSettingsSet()` is
+        /// the game's only booking point: it charges the price and adds the campaign to
+        /// SaveGameManager.Current.RecruitmentCampaigns (:199), whose hourly tick then lands the candidates
+        /// (RecruitmentHelper.RunHourly). On a member's machine both halves would be wrong - the money is real
+        /// but the campaign would tick against a replica the owner never hears of - so the booking is ROUTED to
+        /// the shop's real owner (op "mergercampaign") and NOTHING is charged or added here. The shop only
+        /// reaches the picker at all when that owner can take it (AccessGates.RecruitmentRoutable).
+        /// The member's screen is the game's own: the three native validations are re-run here with the game's
+        /// OWN error keys and the method's own `null` answer, and on a successful route the native conversation
+        /// tail is produced exactly (the two TextMessages and the same follow-up entry). NO NEW ON-SCREEN TEXT.
+        /// The FIRST validation (no business picked, :148-152) is left to native: this prefix bows out before it.
+        /// INERT without a merger, and on a shop that is truly mine (MergerFlip.TrulyMine) - the same test the
+        /// wholesale contract gate above uses.</summary>
+        [HarmonyPatch(typeof(Dialogs.RecruitmentAgencyDialog), "OnRecruitmentSettingsSet")]
+        public static class Patch_RecruitmentCampaignCreate_MergerGate
+        {
+            static bool Prefix(Dialogs.RecruitmentAgencyDialog __instance, ref Entities.DialogEntry? __result)
+            {
+                bool sent = false;   // review HIGH-1: true once the routed leg may be on the wire
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;   // inert without a merger
+                    var ctrl = DialogController.current;
+                    var settings = ctrl?.GetInputComponent<UI.Dialog.RecruitmentSettings>();
+                    var reg = settings?.selectedBusiness;
+                    if (ctrl == null || settings == null || reg == null) return true;   // native raises its own "select a business" (:148-152)
+                    bool rented; try { rented = reg.RentedByPlayer; } catch { return true; }
+                    if (!rented || MergerFlip.TrulyMine(reg)) return true;
+
+                    // The remaining two native validations, with the game's own keys and its own null answer.
+                    if (!settings.hasSelectedSkill)
+                    { UI.Notification.Notifications.ShowError("recruitmentagencydialog_notification_select_skill"); __result = null; return false; }
+                    string skill = settings.selectedSkill ?? "";
+                    bool full = false, part = false;
+                    try { full = settings.fullTimeToggle.isOn; part = settings.partTimeToggle.isOn; } catch { }
+                    bool wantsSchedule = false;
+                    try
+                    {
+                        wantsSchedule = skill.Length > 0
+                            && BigAmbitions.Characters.Skills.SkillHelper.GetData(skill).HasTag(BigAmbitions.Tags.TagRef.Skilltag.hashoursperweekdemand);
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] recruitment schedule test for '{skill}': {ex.Message}"); }
+                    if (wantsSchedule && !part && !full)
+                    { UI.Notification.Notifications.ShowError("recruitmentagencydialog_notification_select_schedule"); __result = null; return false; }
+
+                    string bizKey = GameStateReader.AddressKey(reg);
+                    string agencyKey = ""; try { agencyKey = GameStateReader.AddressKey(ctrl.contact.Address); } catch { }
+                    if (agencyKey.Length == 0)
+                    { Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{bizKey}': the dialog's agency contact has no address."); __result = null; return false; }
+                    if (!MPServer.IsRunning && !MPClient.IsConnected)
+                    { Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{bizKey}': no session to route it over."); __result = null; return false; }
+
+                    int candidates = 0, days = 0; float quote = 0f;
+                    try
+                    {
+                        candidates = (int)settings.candidatesAmountSlider.value;          // native cast (:174)
+                        days = UnityEngine.Mathf.RoundToInt(settings.deadlineSlider.value);   // native rounding (:192)
+                        quote = settings.totalPrice;
+                    }
+                    catch (Exception ex)
+                    { Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{bizKey}': the dialog's sliders could not be read ({ex.Message})."); __result = null; return false; }
+
+                    sent = true;   // review HIGH-1: from here on native must NEVER run (see the catch below)
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    {
+                        PlayerId = MPConfig.PlayerId, AddressKey = bizKey, Op = "mergercampaign", AgencyKey = agencyKey,
+                        SkillName = skill, IntValue = candidates, BoolValue = full, PartTime = part, Days = days, Estimate = quote,
+                    });
+                    Plugin.Logger.LogInfo($"[Merger] recruitment campaign routed for '{bizKey}' ({skill}, {candidates} candidates, {days} days, quote {quote})");
+
+                    // The native conversation tail (:201-231), unchanged. `text` comes from a THROWAWAY campaign
+                    // carrying this booking's two toggles, so the wording is the game's own GetScheduleTypesInfo().
+                    try
+                    {
+                        var shape = new Entities.RecruitmentCampaign { fullTime = full, partTime = part };
+                        var messageData = new Dictionary<string, string>
+                        {
+                            { "businessName", reg.BusinessName ?? "" },
+                            { "amountOfCandidates", candidates.ToString() },
+                            { "skillKey", skill },
+                            { "days", days.ToString() },
+                            { "text", shape.GetScheduleTypesInfo() },
+                        };
+                        ctrl.contact.ReceivePlayerMessage(
+                            new Entities.TextMessage("ba:messagetype_dialog_recruitment_agency_on_recruitment_settings_set_player", messageData, read: true));
+                        ctrl.contact.SendMessage(
+                            new Entities.TextMessage("ba:messagetype_dialog_recruitment_agency_on_recruitment_settings_set_recruiter", read: true));
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] recruitment conversation tail: {ex.Message}"); }
+
+                    // The native follow-up entry. AlreadyHasCampaignActive is private, so it is called by
+                    // reflection on the dialog instance. It is kept because it reads NOTHING about the local
+                    // campaign list - it is the "anything else?" entry, and it is also the ONLY thing that gives
+                    // this last entry any buttons at all (DialogController.SetCurrentEntryButtons:102-131 draws
+                    // buttons only for OnCancel/OnConfirm/OnSecondOption, and this entry has none); dropping it
+                    // would leave the member in a dialog with no way out. Its "manage campaigns" option lists the
+                    // LOCAL save, which holds no copy of a routed campaign - see the build report.
+                    var dlg = __instance;
+                    __result = new Entities.DialogEntry
+                    {
+                        messageData = "dialog_recruitment_agency_on_recruitment_settings_set_recruiter".Localize(),
+                        InputTemplate = Entities.DialogEntry.InputTemplateName.None,
+                        OnVisible = delegate
+                        {
+                            try
+                            {
+                                var mi = AccessTools.Method(typeof(Dialogs.RecruitmentAgencyDialog), "AlreadyHasCampaignActive", new[] { typeof(bool) });
+                                if (mi == null)
+                                { Plugin.Logger.LogWarning("[Merger] recruitment tail: AlreadyHasCampaignActive not found — the conversation ends on the recruiter's line."); return; }
+                                (mi.Invoke(dlg, new object[] { true }) as Entities.DialogEntry)?.ShowEntry();
+                            }
+                            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] recruitment tail: {ex.Message}"); }
+                        },
+                    };
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[Merger] campaign-booking gate: {ex.Message}");
+                    // Review HIGH-1: once the routed leg may be on the wire, falling back to the native method would
+                    // charge THIS machine and add a local campaign on top of the owner's - a double booking. The
+                    // dialog simply does not advance (the method's own invalid-input answer).
+                    if (sent) { __result = null; return false; }
+                    return true;
+                }
+            }
+        }
+
         /// <summary>THE CROSS-MEMBER DELIVERY ENTRY (4c part 2, D20-7) — was STOP-GAP S3, HQ LOGISTICS PLAN LEG.
         /// LogisticsManagerPlan.cs:74 `public void DeliverDestination(LogisticsManagerPlanDestination
         /// destination)` moves the goods for ONE leg. It checks only RAW RentedByPlayer on the plan's own

@@ -9095,7 +9095,9 @@ namespace BigAmbitionsMP
                     // else its absence simulator) — the ledger owner alone dropped the simulator's echo and the
                     // REVERT a rejected edit depends on with it.
                     string wrunner = RouteTargetFor(p.AddressKey, ownerPid);
-                    if (senderPid != wrunner)
+                    // Batch 15 (review MEDIUM-3): the HOST itself answers a routed op it refuses at the route (the
+                    // campaign 'away' refusal) - it is not the runner, and that answer must still reach the member.
+                    if (senderPid != wrunner && !(senderPid == MPConfig.PlayerId && p.Tab == "mergerack"))
                     { Plugin.Logger.LogWarning($"[SharedShop] work snapshot for '{p.AddressKey}' from '{senderPid}', which is not the machine running it ('{(wrunner.Length > 0 ? wrunner : "nobody")}'; ledger owner '{ownerPid}') — dropped."); return; }
                     if (string.IsNullOrEmpty(p.ToPid)) return;
                     if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, p.ToPid)) return;   // wave 2: UNION
@@ -9156,7 +9158,8 @@ namespace BigAmbitionsMP
                 // and the same MEMBERSHIP-ONLY gate — a permission helper never terminates a rental or shuts
                 // a shop down (ruling 34), whatever grant they hold.
                 bool w4 = p.Op == "mergercontract" || p.Op == "mergersellall" || p.Op == "mergerplan"
-                       || p.Op == "mergerplanedit" || p.Op == "mergerterminate" || p.Op == "mergershutdown";
+                       || p.Op == "mergerplanedit" || p.Op == "mergerterminate" || p.Op == "mergershutdown"
+                       || p.Op == "mergercampaign";   // H-MERGERHIRE-1: the recruitment booking rides the same gate
                 if (w4 && !MergerSync.MergedRuntime(ownerPid, senderPid))
                 { Plugin.Logger.LogWarning($"[Merger] {p.Op} by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
                 // 4c part 2a (E4): the host SERIALISES plan edits per plan id. A second leg carrying a
@@ -9203,6 +9206,17 @@ namespace BigAmbitionsMP
                     if (w4) Plugin.Logger.LogWarning($"[Merger] {p.Op} REFUSED for '{p.AddressKey}': nobody is running that building (RouteTargetFor).");
                     return;
                 }
+                // H-MERGERHIRE-1: a recruitment campaign is charged to the shop's owner and ticks in that owner's
+                // own save (RecruitmentHelper.RunHourly reads SaveGameManager.Current.RecruitmentCampaigns), and no
+                // absence hand-over list carries one - so a STAND-IN must not take the booking: it would strand on
+                // that machine at the owner's return. The member's picker already hides an absent owner's shop;
+                // this is the same rule at the moment of commitment, where the live answer is the host's.
+                if (p.Op == "mergercampaign" && wtarget != ownerPid)
+                {
+                    Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{p.AddressKey}': '{wtarget}' only stands in for the absent owner '{ownerPid}'.");
+                    SharedShopWorkTabs.SendRoutedRefusalTo(senderPid, p.AddressKey, "away");
+                    return;
+                }
                 if (wtarget == senderPid) return;
                 if (w4)
                 {
@@ -9210,6 +9224,7 @@ namespace BigAmbitionsMP
                     else if (p.Op == "mergershutdown") Plugin.Logger.LogInfo($"[Merger] shutdown routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergercontract") Plugin.Logger.LogInfo($"[Merger] contract create routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergersellall")  Plugin.Logger.LogInfo($"[Merger] sell-all routed to '{wtarget}' for '{p.AddressKey}'");
+                    else if (p.Op == "mergercampaign") Plugin.Logger.LogInfo($"[Merger] campaign booking routed to '{wtarget}' for '{p.AddressKey}' ({p.SkillName}, {p.IntValue} candidates, {p.Days} days)");
                     else if (p.Op == "mergerplanedit") Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' ({p.Family} {p.PlanOp}, plan {p.PlanId}, seq {p.EditSeq})");
                     else                               Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' (plan {p.Plan?.Id})");
                 }

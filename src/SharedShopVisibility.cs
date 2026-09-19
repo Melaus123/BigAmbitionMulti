@@ -32,8 +32,11 @@ namespace BigAmbitionsMP
     ///    actions, logistics and purchasing — so the player's own employees can never be pointed at a shared shop and
     ///    no out-of-access contract can be opened on one. Every appended entry also has to pass the caller's own
     ///    filter delegate, and the list is re-sorted the way the native helper sorts it (D9 r3).
-    ///  • TINT: the list card and the page's business-type label are coloured the mod's "shared with me" teal
-    ///    (HousingMapCues.SharedColor — the same colour the city map and building hover already use) so the player
+    ///  • TINT: the list card and the page's business-type label are coloured with the SHOP OWNER'S OWN PLAYER
+    ///    COLOUR (PlayerColours.TryColourFor, and TryColourForOwnerOf for a merger-flipped shop, whose registration
+    ///    no longer names its owner). The teal HousingMapCues.SharedColor is only the FALLBACK, for a surface that
+    ///    cannot name the owner (the list card and the warehouse row); the page's business-type label falls back to
+    ///    its own default colour instead, because a wrong player colour reads as somebody else's shop. So the player
     ///    can see it is someone else's. No text is added (ruling 17).
     ///  • TAB SET (allow-list): a shared shop's page shows Presentation + Schedule (factories too); warehouses and
     ///    headquarters show Presentation only in this slice. Any OTHER player's shop that is NOT shared (e.g. the
@@ -98,11 +101,13 @@ namespace BigAmbitionsMP
             try { return reg != null ? GameStateReader.AddressKey(reg) : ""; } catch { return ""; }
         }
 
-        /// <summary>The same teal the mod already uses for "shared with me" on the city map and the building hover
-        /// (HousingMapCues.SharedColor) — one colour means "someone else's, shared with you" everywhere.</summary>
+        /// <summary>The FALLBACK colour only: the teal the mod uses for "shared with me" on the city map and the
+        /// building hover (HousingMapCues.SharedColor). A shared or merger-flipped shop is normally coloured with
+        /// its OWNER'S PLAYER COLOUR (PlayerColours.TryColourFor / TryColourForOwnerOf); this is what a surface
+        /// uses when the owner cannot be named at all.</summary>
         private static Color Tint => HousingMapCues.SharedColor;
 
-        /// <summary>The same teal, for the other shared-shop surfaces that need it (7c colours the agency
+        /// <summary>The same fallback, for the other shared-shop surfaces that need it (7c colours the agency
         /// call's business dropdown with it).</summary>
         internal static Color SharedTint => HousingMapCues.SharedColor;
 
@@ -612,8 +617,9 @@ namespace BigAmbitionsMP
             return raised;
         }
 
-        /// <summary>Teal the entry the game has just appended. These are plain instantiated rows, not recycled table
-        /// cells, so the colour is written directly and needs no restore path.</summary>
+        /// <summary>Colour the entry the game has just appended with its OWNER'S PLAYER COLOUR (the teal below is
+        /// only the fallback for an owner this machine cannot name). These are plain instantiated rows, not recycled
+        /// table cells, so the colour is written directly and needs no restore path.</summary>
         [HarmonyPatch(typeof(WarehouseList), "SetUpEntry")]
         public static class Patch_WarehouseList_SetUpEntry_Tint
         {
@@ -644,7 +650,7 @@ namespace BigAmbitionsMP
                     if (tinted == 0 && !_warehouseLabelWarned)
                     {
                         _warehouseLabelWarned = true;
-                        Plugin.Logger.LogWarning($"{Tag} could not find the name label on a shared warehouse row — it is listed, but not teal.");
+                        Plugin.Logger.LogWarning($"{Tag} could not find the name label on a shared warehouse row — it is listed, but not coloured.");
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} warehouse tint: {ex.Message}"); }

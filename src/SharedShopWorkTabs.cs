@@ -502,11 +502,16 @@ namespace BigAmbitionsMP
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkInfo, MPConfig.PlayerId, reply));
         }
 
+        /// <summary>H-MERGERHIRE-1: the HOST's own refusal of a routed commitment it could not deliver (a campaign
+        /// booking whose owner turned out to be away). Same wire shape, same code table.</summary>
+        internal static void SendRoutedRefusalTo(string toPid, string addr, string code) => SendRoutedRefusal(toPid, addr, code);
+
         /// <summary>MEMBER (r2 minor f): a routed contract creation was refused on the runner for a reason the
         /// game itself has a notification for. The dialog's own null return is silent, so the member saw
         /// nothing at all; the game's OWN notification for that exact reason is raised here
         /// (WholesaleStoreManagerDialog.cs:72 and :85). Only a refusal for a creation THIS machine routed in
-        /// the last few seconds is shown, and only the two codes below exist.</summary>
+        /// the last few seconds is shown. Codes: "dupe"/"shelf" (contract), "funds" (campaign) raise the game's own
+        /// notice; "away"/"ranges" (campaign) have none and are log-only.</summary>
         private static void OnRoutedRefusal(SharedWorkInfoPayload p)
         {
             try
@@ -530,8 +535,26 @@ namespace BigAmbitionsMP
                     UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error,
                         "wholesalestoremanagerdialog_notification_require_shelf_in_business", data);
                 }
+                // H-MERGERHIRE-1 (campaign booking). "funds" raises the very notice ChangeMoneySafe itself raises
+                // when it refuses a purchase (GameManager.cs:1085-1088, Notifications.ShowInsufficientMoney) - the
+                // owner's charge runs with showNotification:false, so this is that notice, on the player who asked.
+                else if (p.AckCode == "funds") UI.Notification.Notifications.ShowInsufficientMoney();
+                // "away" has NO native notification: nothing in the game refuses a booking because somebody else is
+                // running the shop. Nothing is shown rather than inventing text (rule 4); the log carries it.
+                else if (p.AckCode == "ranges")
+                {
+                    Plugin.Logger.LogWarning($"[Merger] campaign booking for '{p.AddressKey}' was refused: the owner's machine could not read "
+                                           + "the recruitment sliders' ranges, so it could not price the booking. Nothing was charged; nothing is shown.");
+                    return;
+                }
+                else if (p.AckCode == "away")
+                {
+                    Plugin.Logger.LogWarning($"[Merger] campaign booking for '{p.AddressKey}' was refused: its owner is away and a stand-in "
+                                           + "cannot hold a campaign. The game has no notice for this, so nothing is shown.");
+                    return;
+                }
                 else { Plugin.Logger.LogWarning($"[Merger] routed refusal for '{p.AddressKey}': unknown code '{p.AckCode}' - nothing shown."); return; }
-                Plugin.Logger.LogInfo($"[Merger] routed contract creation for '{p.AddressKey}' was refused on its runner ('{p.AckCode}') - the game's own notice raised here.");
+                Plugin.Logger.LogInfo($"[Merger] routed creation for '{p.AddressKey}' was refused on its runner ('{p.AckCode}') - the game's own notice raised here.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed refusal: {ex.Message}"); }
         }
@@ -2120,7 +2143,10 @@ namespace BigAmbitionsMP
             catch { }
             // r2 minor (f): a routed CONTRACT CREATION can be refused on the runner for a reason the game
             // itself notifies about. Remember which one we sent, so only a refusal of OUR request shows.
-            if (p != null && p.Op == "mergercontract") { _contractRouteAddr = p.AddressKey ?? ""; _contractRouteAt = Time.unscaledTime; }
+            // H-MERGERHIRE-1: a routed CAMPAIGN BOOKING can be refused the same way (no funds on the owner, or
+            // the owner turned out to be away), so it arms the same one-shot window.
+            if (p != null && (p.Op == "mergercontract" || p.Op == "mergercampaign"))
+            { _contractRouteAddr = p.AddressKey ?? ""; _contractRouteAt = Time.unscaledTime; }
             if (MPServer.IsRunning) MPServer.HostRouteSharedWorkEdit(p, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkEdit, MPConfig.PlayerId, p));
         }
@@ -4499,6 +4525,138 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] contract create REFUSED for '{p.AddressKey}': {ex.Message}"); }
         }
 
+        private static float _candMin, _candMax, _dayMin, _dayMax;   // the native sliders' own ranges, once found
+        private static bool  _sliderRangesRead;
+
+        /// <summary>H-MERGERHIRE-1: the recruitment dialog's two SLIDER RANGES, read off the game's own (inactive)
+        /// input template. RecruitmentSettings.cs holds the price formula (:87-94) but the ranges themselves are
+        /// prefab data, so the component is found in the loaded UI instead (Resources.FindObjectsOfTypeAll sees
+        /// inactive objects; the dialog is not open on this machine). Read once and kept.</summary>
+        private static bool TryRecruitmentSliderRanges()
+        {
+            if (_sliderRangesRead) return true;
+            try
+            {
+                foreach (var s in Resources.FindObjectsOfTypeAll<UI.Dialog.RecruitmentSettings>())
+                {
+                    if (s == null || s.candidatesAmountSlider == null || s.deadlineSlider == null) continue;
+                    if (s.candidatesAmountSlider.maxValue <= s.candidatesAmountSlider.minValue) continue;
+                    if (s.deadlineSlider.maxValue <= s.deadlineSlider.minValue) continue;
+                    _candMin = s.candidatesAmountSlider.minValue; _candMax = s.candidatesAmountSlider.maxValue;
+                    _dayMin  = s.deadlineSlider.minValue;         _dayMax  = s.deadlineSlider.maxValue;
+                    _sliderRangesRead = true;
+                    Plugin.Logger.LogInfo($"[Merger] recruitment sliders read from the game's own template: "
+                                        + $"candidates {_candMin}-{_candMax}, days {_dayMin}-{_dayMax}.");
+                    return true;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] recruitment slider ranges: {ex.Message}"); }
+            return false;
+        }
+
+        /// <summary>OWNER, MAIN THREAD (H-MERGERHIRE-1). A merged co-member booked a recruitment campaign on a
+        /// shop of MINE. Their machine charged nothing and added nothing; this is the whole commitment, run the
+        /// way RecruitmentAgencyDialog.cs:163-200 runs it, with MY money, MY day and MY save.
+        /// TRULY MINE ONLY: a stand-in cannot hold a campaign (the hourly tick reads this save's list and no
+        /// hand-over list carries one), so a leg that reached a stand-in is refused back to the member.
+        /// The two numbers are CLAMPED to the native sliders' own ranges and the price is RECOMPUTED here with
+        /// the native formula (50 x (maxDays - days + 1) x candidates): the member's quote is only logged when it
+        /// differs, never charged and never a refusal - a campaign price depends on nothing that can move between
+        /// the two machines. showNotification is FALSE: the "not enough money" notice belongs on the player who
+        /// asked, and it is raised there from the refusal code instead.
+        /// A RESEND is not de-duplicated, and must not be: the game itself lets a player run several campaigns at
+        /// once (RecruitmentAgencyDialog.cs:103-119 offers exactly that), so two identical legs are two bookings -
+        /// the same answer the wholesale contract route gives for anything its duplicate test does not catch.</summary>
+        private static void ApplyRoutedCampaignCreate(BuildingRegistration? reg, SharedWorkEditPayload p)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || reg == null)
+                { Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{p.AddressKey}': no business registration here."); return; }
+                if (!MergerFlip.TrulyMine(reg))
+                {
+                    Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{p.AddressKey}': this machine only stands in for its owner - "
+                                           + "a campaign ticks in the owner's own save.");
+                    SendRoutedRefusal(p.PlayerId, p.AddressKey, "away");
+                    return;
+                }
+                var agencyAddr = MergerAbsence.AddressOfKey(p.AgencyKey ?? "");
+                if (agencyAddr == null)
+                { Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{p.AddressKey}': unknown recruitment agency '{p.AgencyKey}'."); return; }
+                string skill = p.SkillName ?? "";
+                if (skill.Length == 0)
+                { Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{p.AddressKey}': the leg named no skill."); return; }
+
+                int candidates = p.IntValue, days = p.Days;
+                float price;
+                if (TryRecruitmentSliderRanges())
+                {
+                    candidates = Mathf.Clamp(candidates, Mathf.RoundToInt(_candMin), Mathf.RoundToInt(_candMax));
+                    days       = Mathf.Clamp(days,       Mathf.RoundToInt(_dayMin),  Mathf.RoundToInt(_dayMax));
+                    price      = 50f * (_dayMax - days + 1f) * candidates;          // RecruitmentSettings.cs:87-94
+                }
+                else
+                {
+                    // Review MEDIUM-2: never charge a member-supplied figure for member-supplied, unclamped amounts.
+                    // Without the game's own ranges the owner cannot recompute, so the booking is refused: nothing
+                    // is charged, nothing is added. 'ranges' has no native notice - log-only on the member.
+                    Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{p.AddressKey}': the game's own recruitment template is not "
+                                           + "loaded here, so the sliders' ranges are unknown and the price cannot be recomputed.");
+                    SendRoutedRefusal(p.PlayerId, p.AddressKey, "ranges");
+                    return;
+                }
+                if (candidates != p.IntValue || days != p.Days)
+                    Plugin.Logger.LogInfo($"[Merger] campaign booking for '{p.AddressKey}' clamped to the native sliders: "
+                                        + $"{p.IntValue}->{candidates} candidates, {p.Days}->{days} days.");
+                if (p.Estimate > 0.005f && Math.Abs(price - p.Estimate) > 0.005f)
+                    Plugin.Logger.LogInfo($"[Merger] campaign booking for '{p.AddressKey}': the member was shown {p.Estimate}, "
+                                        + $"my own recompute is {price} - mine is charged.");
+
+                string agencyName = "";
+                bool taxDeductible = false;
+                try
+                {
+                    var abreg = BuildingHelper.GetBuildingRegistration(agencyAddr);
+                    agencyName = abreg?.BusinessName ?? "";
+                    taxDeductible = abreg?.BuildingCached?.SpecialService?.hasTaxDeductiblePurchases ?? false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] campaign booking agency read '{p.AgencyKey}': {ex.Message}"); }
+                var ti = new TransactionInfo("ba:transaction_recruitmentcampaign",
+                                             new Dictionary<string, string> { { "businessName", agencyName } });
+                if (taxDeductible) ti.SetTaxDeductibleName(agencyName);
+                if (!GameManager.ChangeMoneySafe(0f - price, ti, null, reg.Address, force: false, showNotification: false))
+                {
+                    Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{p.AddressKey}': {price} is more than this company has.");
+                    SendRoutedRefusal(p.PlayerId, p.AddressKey, "funds");
+                    return;
+                }
+
+                var campaign = new Entities.RecruitmentCampaign
+                {
+                    agencyAddress   = agencyAddr,
+                    businessAddress = reg.Address,
+                    skillRequirement = new Entities.RecruitmentCampaign.SkillRequirement { skillName = skill, percentage = 20f },
+                    fullTime = p.BoolValue,
+                    partTime = p.PartTime,
+                    amountOfCandidates = candidates,
+                    price = price,
+                };
+                var times = new List<BigAmbitions.DayNightCycle.Timestamp>();
+                for (int i = 0; i < candidates; i++)                                   // native find-times (:193-198), MY Day
+                    times.Add(new BigAmbitions.DayNightCycle.Timestamp(
+                        UnityEngine.Random.Range(gi.Day + 1, gi.Day + days + 1), UnityEngine.Random.Range(8, 18), 0f));
+                campaign.candidateFindTimes = times;
+                gi.RecruitmentCampaigns.Add(campaign);
+                GameEvent.Invoke("ba:gameevent_startedrecruitmentcampaign");
+                SaveGameManager.MarkChange();
+                Plugin.Logger.LogInfo($"[Merger] campaign booking applied for '{p.AddressKey}' from '{p.PlayerId}' "
+                                    + $"(agency '{p.AgencyKey}', {skill}, {candidates} candidates, {days} days, {price} charged); "
+                                    + "the two phone messages were not replayed - they belong to the caller's own dialog contact.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{p.AddressKey}': {ex.Message}"); }
+        }
+
         /// <summary>OPERATOR, MAIN THREAD (V2b + D21). The member is confirming a figure THIS machine
         /// quoted, so the sale is ACCURATE BY CONSTRUCTION: recompute the total here and sell ONLY if it
         /// still equals the quote (float tolerance 0.005). A total that moved between the quote and the
@@ -4808,6 +4966,7 @@ namespace BigAmbitionsMP
                 // the interior push. ──
                 if (p.Op == "mergercontract") { ApplyRoutedContractCreate(reg, p); return; }
                 if (p.Op == "mergersellall")  { ApplyRoutedSellAll(reg, p); return; }
+                if (p.Op == "mergercampaign") { ApplyRoutedCampaignCreate(reg, p); return; }   // H-MERGERHIRE-1
                 if (p.Op == "mergerplan")     { ApplyRoutedPlanEdit(reg, p); return; }
                 // 4c part 2a: the four NON-logistics HQ families. Unlike "mergerplan" this is not a
                 // replace-by-id install - the runner applies ONE op onto its own real plan with the game's

@@ -462,6 +462,27 @@ namespace BigAmbitionsMP
 
         public static int SimulatedCount => _simHere.Count;
         public static IReadOnlyList<AbsenceInfo> Known => _known;
+
+        /// <summary>H-MERGERHIRE-1: is that address one SOMEBODY is standing in for right now - i.e. does the
+        /// host's absence table (fanned to every machine inside MergerState, ApplyStateAbsences above) name it?
+        /// True on the ABSENT OWNER's own machines too, which is harmless: they cannot see a partner's picker
+        /// while they are not in the session. The one read that answers "can this booking reach its real owner
+        /// right now?" without asking the host - a marked address means the owner is away, so a commitment that
+        /// only their own save can hold (a recruitment campaign) must not be offered here.</summary>
+        public static bool AwayAnywhere(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return false;
+            // Review MEDIUM-4: _known is filled from the MergerState broadcast, which only CLIENTS apply; the host
+            // holds the authoritative table itself.
+            IEnumerable<AbsenceInfo> table = MPServer.IsRunning ? HostSnapshot() : _known;
+            foreach (var a in table)
+            {
+                if (a?.Addresses == null) continue;
+                foreach (var ad in a.Addresses)
+                    if (string.Equals(ad, addressKey, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
         /// <summary>P3-C's removal surface: what B3(d) put into this machine's GameInstance lists (and
         /// into the one Address-keyed map, tagged as an InstalledDictEntry).</summary>
         public static IReadOnlyList<(string Owner, string List, object Item)> InstalledListItems => _installed;

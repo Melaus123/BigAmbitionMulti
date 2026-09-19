@@ -191,15 +191,21 @@ namespace BigAmbitionsMP
         // machine that merely runs the absent owner's world (MergerAbsence.SimulatesHere):
         //   MovingServiceContractSettings           origin picker + destination picker
         //   InteriorInstallationFirmDesignSettings  design-target picker
-        //   RecruitmentSettings                     campaign-target picker
+        //   RecruitmentSettings                     campaign-target picker - ONLY PARTLY since H-MERGERHIRE-1
+        //                                           (2026-09-19): a merger-FLIPPED partner shop whose owner is
+        //                                           in the session is offered again and the booking is ROUTED
         //   FurnitureDeliveryContractSettings       delivery destination (calls the base method)
         //   FoodDeliveryContractSettings            delivery destination (inherits the base method)
         // Each books a PER-MACHINE contract: written on the booking machine, paid from the shared wallet and
         // executed there against that machine's replica of the shop - the owner never hears of it, and these
         // bookings are not in the absence hand-over lists, so a stand-in's booking would strand on its own
-        // machine at the owner's return. Patched in the G5 region at the foot of this file. The WHOLESALE
-        // dialog's DeliveryContractSettings is a SEPARATE class and is deliberately NOT among them: its
-        // deliveries are already routed (mergercontract).
+        // machine at the owner's return. Patched in the G5 region at the foot of this file. TWO service dialogs
+        // are ROUTED instead of narrowed: the WHOLESALE dialog's DeliveryContractSettings is a SEPARATE class
+        // and was never among them (its deliveries route as "mergercontract"), and RECRUITMENT joined it
+        // (H-MERGERHIRE-1, op "mergercampaign"). Recruitment's picker still hides a partner shop whenever the
+        // booking could not reach the shop's REAL OWNER: an ABSENT owner's shop (someone is standing in for
+        // them, MergerAbsence.AwayAnywhere) stays hidden, because the campaign's hourly tick reads the owner's
+        // own RecruitmentCampaigns list and a booking is in no absence hand-over list.
 
         /// <summary>The name of the dialog the game currently has open, when it is one of the TWO whose picker may
         /// be widened (the table above); else null. R3: the cheap MP gates run first, so single-player and a
@@ -331,6 +337,14 @@ namespace BigAmbitionsMP
         // not on the menu": the five service dialogs listed in the header book per-machine contracts that
         // execute on the BOOKING machine, so a partner's shop is never bookable in them, on any machine.
         //
+        // ONE EXCEPTION (H-MERGERHIRE-1, 2026-09-19): RECRUITMENT. A campaign is no longer booked here at all -
+        // the member's confirmation is ROUTED to the shop's real owner, who pays for it and whose own hourly
+        // tick finds the candidates (RecruitmentHelper.RunHourly), and the mod already shares those candidates
+        // back to every co-member (CompanyCandidates.cs:13-45). So that picker offers a partner shop again -
+        // but only a merger-FLIPPED one whose owner can actually take the booking: not while THIS machine
+        // stands in for them (SimulatesHere), not while any machine does (MergerAbsence.AwayAnywhere), and
+        // never a plain foreign business, which no route exists for.
+        //
         // NO NEW ON-SCREEN TEXT: the shops are simply not offered, and when nothing remains the dialogs' own
         // native empty branches disable the controls (MovingServiceContractSettings.cs:93-97,
         // InteriorInstallationFirmDesignSettings.cs:114-117).
@@ -417,6 +431,26 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>H-MERGERHIRE-1: may a recruitment campaign be booked on this partner shop from HERE? Only a
+        /// merger-FLIPPED co-member shop qualifies (a plain foreign business has no route), and only while the
+        /// shop's real owner can take the booking themselves: the campaign is charged to that owner and ticks in
+        /// that owner's save, and no absence hand-over list carries one, so a stand-in must never be offered it.
+        /// The two absence reads are the whole test - this machine standing in, and any machine standing in.</summary>
+        private static bool RecruitmentRoutable(BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg == null || MergerFlip.FlippedCount == 0) return false;
+                string key = GameStateReader.AddressKey(reg);
+                if (string.IsNullOrEmpty(key)) return false;
+                if (!MergerFlip.IsFlipped(key)) return false;            // a plain foreign business stays hidden
+                if (MergerAbsence.SimulatesHere(key)) return false;      // I am the stand-in: the booking would strand here
+                if (MergerAbsence.AwayAnywhere(key)) return false;       // someone else stands in: the owner is away
+                return true;
+            }
+            catch { return false; }
+        }
+
         [HarmonyPatch(typeof(global::UI.Dialog.RecruitmentSettings), "PlayerBuildingFilter")]
         public static class Patch_RecruitmentSettings_Filter
         {
@@ -425,11 +459,26 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!__result || !PartnerShop(buildingRegistration)) return;   // M6: the flip parks the stamp
+                    if (RecruitmentRoutable(buildingRegistration))                 // H-MERGERHIRE-1: routed, so it stays listed
+                    { LogRecruitmentRouteOnce(GameStateReader.AddressKey(buildingRegistration)); return; }
                     __result = false;
                     LogPickerOnce("RecruitmentAgency");
                 }
                 catch { }
             }
+        }
+
+        private static readonly HashSet<string> _recruitRouteLogged = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>One INFO line per partner shop per session, the first time the recruitment picker offers it.</summary>
+        private static void LogRecruitmentRouteOnce(string key)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(key) || !_recruitRouteLogged.Add(key)) return;
+                Plugin.Logger.LogInfo($"[Merger] recruitment: '{key}' is offered here - a campaign booked on it is routed to its owner.");
+            }
+            catch { }
         }
 
         /// <summary>Furniture delivery overrides this and calls base (FurnitureDeliveryContractSettings.cs:25-27),

@@ -1064,6 +1064,50 @@ namespace BigAmbitionsMP
                     return $"OK contract create routed for '{cargs[0]}' (wholesale '{cargs[1]}')";
                 }
 
+                case "mergercampaign":
+                {
+                    // H-MERGERHIRE-1 - TEST LEVER. `mergercampaign <shopNum> <ba:street_x> <agencyNum>
+                    // <ba:street_y> <ba:skill_z> <candidates> <days>` sends exactly the leg the recruitment
+                    // dialog sends for a merger-flipped partner shop. Address keys are TWO tokens each, like
+                    // every other lever. Nothing is charged or added here: the OWNER clamps the numbers to its
+                    // own sliders, recomputes the price and pays. Full-time is sent on, part-time off, and no
+                    // quote is sent (Estimate 0), so the owner's own figure stands unremarked.
+                    var kargs = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (kargs.Length < 7)
+                        return "ERR usage: mergercampaign <num> <ba:street_x> <num> <ba:street_y> <ba:skill_z> <candidates> <days>";
+                    string kshop = kargs[0] + " " + kargs[1], kagency = kargs[2] + " " + kargs[3];
+                    if (!int.TryParse(kargs[5], out var kcand) || !int.TryParse(kargs[6], out var kdays))
+                        return "ERR usage: mergercampaign <num> <ba:street_x> <num> <ba:street_y> <ba:skill_z> <candidates> <days>";
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (!MergerFlip.IsFlipped(kshop)) return $"ERR '{kshop}' is not a merger-flipped company building here";
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    {
+                        PlayerId = MPConfig.PlayerId, AddressKey = kshop, Op = "mergercampaign", AgencyKey = kagency,
+                        SkillName = kargs[4], IntValue = kcand, BoolValue = true, PartTime = false, Days = kdays,
+                    });
+                    return $"OK campaign booking routed for '{kshop}' (agency '{kagency}', {kargs[4]}, {kcand} candidates, {kdays} days)";
+                }
+
+                case "campaigns":
+                {
+                    // H-MERGERHIRE-1 - TEST LEVER. Read-only: this machine's own recruitment campaigns, the list
+                    // the hourly tick works through (SaveGameManager.Current.RecruitmentCampaigns). The rig reads
+                    // it on the OWNER to see a routed booking land.
+                    var kgi = SaveGameManager.Current;
+                    if (kgi == null) return "ERR no save loaded";
+                    var klist = kgi.RecruitmentCampaigns;
+                    if (klist == null) return "campaigns=0 []";
+                    var krows = new System.Collections.Generic.List<string>();
+                    foreach (var c in klist)
+                    {
+                        if (c == null) continue;
+                        string kbiz = "";
+                        try { kbiz = Helpers.BuildingHelper.GetBuildingRegistration(c.businessAddress)?.BusinessName ?? ""; } catch { }
+                        krows.Add($"{kbiz}|{c.skillRequirement?.skillName ?? ""}|{c.amountOfCandidates}|{c.finished}");
+                    }
+                    return $"campaigns={krows.Count} [{string.Join(";", krows)}]";
+                }
+
                 case "sellall":
                 {
                     // MERGER PHASE 2 WAVE 4 (V4, r2 D21) - TEST LEVER. Sell-All is ACCURATE BY CONSTRUCTION:
