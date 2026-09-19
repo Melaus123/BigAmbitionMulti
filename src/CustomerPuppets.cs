@@ -100,6 +100,7 @@ namespace BigAmbitionsMP
                 DestroyAllPuppets();
                 _authority.Clear();
                 _arrival.Clear();
+                _outOnce.Clear();
                 _looksById.Clear();
                 _looksSent.Clear();
                 _myBldg = "";
@@ -139,10 +140,20 @@ namespace BigAmbitionsMP
 
             // Presence: every session player's current building (host clock stamps arrivals).
             var inside = new Dictionary<string, List<(string pid, float since)>>();
+            var seenPids = new HashSet<string>();
             foreach (var pid in MPRestSync.AllPlayers())
             {
+                seenPids.Add(pid);
                 string b = pid == MPConfig.PlayerId ? (MPRegisterSync.CurrentShopAddress ?? "")
                                                     : RemotePlayerManager.BuildingOf(pid);
+                // Review HIGH-1 (batch 16c): a read of "" is PROVISIONAL for one pass. The booking-player rule
+                // un-sticks the incumbent, so an owner whose building blips to "" and back would otherwise cost two
+                // full transfers per blip. He keeps his previous building until "" has been read on two passes
+                // in a row; a move straight into another building is immediate; a player who left the session is
+                // not visited by this loop at all.
+                if (string.IsNullOrEmpty(b) && _arrival.TryGetValue(pid, out var was) && !string.IsNullOrEmpty(was.bldg))
+                { if (_outOnce.Add(pid)) b = was.bldg; }
+                else _outOnce.Remove(pid);
                 if (!_arrival.TryGetValue(pid, out var a) || a.bldg != b)
                     _arrival[pid] = (b, Time.unscaledTime);
                 if (string.IsNullOrEmpty(b)) continue;
@@ -150,9 +161,14 @@ namespace BigAmbitionsMP
                 if (!inside.TryGetValue(b, out var list)) inside[b] = list = new List<(string, float)>();
                 list.Add((pid, _arrival[pid].since));
             }
+            // Re-check MEDIUM (batch 16c): a player who LEFT the session must not keep an arrival row - on rejoin
+            // the one-pass grace above would count him inside the building he disconnected in.
+            if (_arrival.Count > seenPids.Count)
+                foreach (var gone in new List<string>(_arrival.Keys))
+                    if (!seenPids.Contains(gone)) { _arrival.Remove(gone); _outOnce.Remove(gone); }
 
-            // Elect per occupied building: INCUMBENT FIRST (round-118), else register-duty holder, else
-            // earliest arrival.
+            // Elect per occupied building: the BOOKING PLAYER when he is inside (2026-09-19 ruling, at the
+            // foreach below), else INCUMBENT (round-118), else register-duty holder, else earliest arrival.
             //
             // ROUND-118 STICKY AUTHORITY — field report bamp-bug-20260727-204640 ('Misterxk9x'): the host
             // could not work his own restaurant while his partner was in it.  Cause: she arrived first so she
@@ -168,14 +184,57 @@ namespace BigAmbitionsMP
             // check out there on the simulator's machine, and those customers stream back as puppets — the
             // second player sees the queue form at their own counter.  So authority only has to move when the
             // current simulator genuinely CANNOT do the job any more, i.e. they are no longer in the building
-            // (leaving/disconnecting drops them from `inside`, and an emptied building is cleared below).
+            // (leaving/disconnecting drops them from `inside`, and an emptied building is cleared below) — or,
+            // since the 2026-09-19 ruling below, when the player whose BOOKS the shop is walks into it.
             //
             // Duty-first still decides the FIRST election for a building — when nobody is simulating yet, the
             // person working the register is the right choice, because serving does require simulating.
+            // 2026-09-19 RULING ('Option 2') — THE MACHINE THAT BOOKS A SHOP RUNS ITS LIVE CUSTOMERS
+            // WHENEVER ITS PLAYER IS INSIDE.  Native skips the abstract hourly simulation for the building
+            // the local player is standing in (BusinessSimulatorHelper.cs:32) and a follower's spawner is
+            // disabled, so an OWNER standing in his own shop as a FOLLOWER books NOTHING for shop types
+            // whose NPC sales never pass Order.Pay (a gym completes through Customer.CompleteOrder), and for
+            // till shops only by way of the forward.  With the booking machine simulating, every sale of
+            // every shop type books natively where the books are.
+            //
+            // The booking player is the LEDGER owner (MPServer.BuildingOwners, pid space: the host's own
+            // entries read "host" or its own pid, and an ABSENT owner's entry is still a stableId, which
+            // simply matches nobody inside) — or, when that owner is absent and a merged STAND-IN simulates
+            // his addresses, the stand-in.  The stand-in lookup is built ONCE per election pass from the
+            // live mark table (never HostSnapshot(), which deep-copies), and only when a mark exists at all;
+            // a session with no absent owner pays one int comparison for it.
+            Dictionary<string, string>? standIn = null;
+            if (MergerAbsence.MarkCount > 0)
+            {
+                standIn = new Dictionary<string, string>();
+                try
+                {
+                    foreach (var mk in MergerAbsence.Marks)
+                    {
+                        var m = mk.Value;
+                        if (m == null || string.IsNullOrEmpty(m.SimulatorPid) || m.Addresses == null) continue;
+                        foreach (var a in m.Addresses) if (!string.IsNullOrEmpty(a)) standIn[a] = m.SimulatorPid;
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] stand-in read: {ex.Message}"); }
+            }
             foreach (var kv in inside)
             {
                 string sim = "";
-                if (_authority.TryGetValue(kv.Key, out var incumbent) && !string.IsNullOrEmpty(incumbent))
+                // THE BOOKING PLAYER FIRST — ahead of the incumbent.  Owner-presence is a STABLE fact: it
+                // changes only when he walks in or out of the building, never on a per-action basis the way
+                // register duty does, so this cannot re-create the round-118 flip-flop.  While he is inside,
+                // nothing below can move authority off him; when he leaves he drops out of `inside` like any
+                // other simulator and the ordinary rules resume.
+                string booker = "";
+                bool bookerIsStandIn = false;
+                string ledger = MPServer.BuildingOwners.TryGetValue(kv.Key, out var led) ? (led ?? "") : "";
+                if (GameStatePatcher.IsHostLedgerId(ledger)) ledger = MPConfig.PlayerId;
+                if (ledger.Length > 0 && InList(kv.Value, ledger)) booker = ledger;
+                else if (standIn != null && standIn.TryGetValue(kv.Key, out var sp)
+                         && !string.IsNullOrEmpty(sp) && InList(kv.Value, sp ?? "")) { booker = sp ?? ""; bookerIsStandIn = true; }
+                if (booker.Length > 0) sim = booker;
+                if (sim.Length == 0 && _authority.TryGetValue(kv.Key, out var incumbent) && !string.IsNullOrEmpty(incumbent))
                     foreach (var (pid, _) in kv.Value) if (pid == incumbent) { sim = incumbent; break; }
                 if (sim.Length == 0)
                 {
@@ -196,11 +255,19 @@ namespace BigAmbitionsMP
                     MPServer.BroadcastCustomerAuthority(new CustomerSimAuthorityPayload { AddressKey = kv.Key, SimulatorPid = sim });
                     if (changed)
                     {
-                        // Round-118: transfers are now RARE by construction (incumbent keeps it while inside),
+                        // Round-118: transfers are still RARE by construction (the incumbent keeps it while
+                        // inside unless the booking player walks in, which happens at most twice per visit),
                         // so say WHY one happened — a run of these in a field log means the occupancy reading
                         // is flickering, which is a different bug from the one this stickiness fixed.
-                        Plugin.Logger.LogInfo($"[Customers] simulator for '{kv.Key}' → '{sim}' ({kv.Value.Count} inside) — "
-                            + (string.IsNullOrEmpty(cur) ? "first election for this building." : $"'{cur}' is no longer inside."));
+                        // The reason must be TRUE: an incumbent who is STILL inside can only have been
+                        // displaced by the booking-player rule above, so say that instead of the old
+                        // "no longer inside" line, which would now be a lie.  Every other reason keeps
+                        // its wording.
+                        bool curStillInside = !string.IsNullOrEmpty(cur) && InList(kv.Value, cur ?? "");
+                        string why = string.IsNullOrEmpty(cur) ? "first election for this building."
+                                   : curStillInside ? (bookerIsStandIn ? "its stand-in is inside and books it." : "the shop's owner is inside and books it.")
+                                   : $"'{cur}' is no longer inside.";
+                        Plugin.Logger.LogInfo($"[Customers] simulator for '{kv.Key}' \u2192 '{sim}' ({kv.Value.Count} inside) \u2014 " + why);
                         if (kv.Key == _myBldg) ReactToAuthority();
                     }
                 }
@@ -215,6 +282,13 @@ namespace BigAmbitionsMP
                 _authority.Remove(k);
                 MPServer.BroadcastCustomerAuthority(new CustomerSimAuthorityPayload { AddressKey = k, SimulatorPid = "" });
             }
+        }
+
+        /// <summary>Host election helper: is this player id among one building's occupants?</summary>
+        private static bool InList(List<(string pid, float since)> occupants, string pid)
+        {
+            for (int i = 0; i < occupants.Count; i++) if (occupants[i].pid == pid) return true;
+            return false;
         }
 
         // ── All machines: react to authority + my own movement ──────────────────────────────────────
@@ -327,6 +401,8 @@ namespace BigAmbitionsMP
 
         /// <summary>Round-43: spawn the puppet's schedule entry as a real customer and move the body to
         /// the puppet's spot. Uses the game's own (private) SpawnCustomer(CustomerEntry).</summary>
+        private static readonly HashSet<string> _outOnce = new();   // pids whose building read "" on the last election pass (HIGH-1)
+
         private static bool AdoptPuppetAsNative(BuildingRegistration? reg, string entryId, Puppet pup)
         {
             try
@@ -334,6 +410,10 @@ namespace BigAmbitionsMP
                 if (pup.go == null || entryId.StartsWith("i", StringComparison.Ordinal)) return false;
                 var entry = CustomerEntrySync.TryFindEntry(reg, entryId);
                 if (entry == null) return false;
+                // NOT guarded on entry.completed, deliberately: that flag means 'consumed by the spawner on this
+                // machine' (native sets it at spawn, paid or not), so it is true for every live shopper this machine
+                // ever spawned. A sale this machine already BOOKED cannot reach here: the owner's forward-adopt
+                // removes the claimed entry from the table, so TryFindEntry above returns null.
                 int before = IndoorCustomerSpawner.Customers.Count;
                 _spawnCustomerM ??= HarmonyLib.AccessTools.Method(typeof(IndoorCustomerSpawner), "SpawnCustomer",
                     new[] { typeof(AI.Customers.CustomerEntries.CustomerEntry) });

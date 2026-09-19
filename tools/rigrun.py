@@ -710,6 +710,31 @@ class Run:
                     verdict, evidence = "FAIL", derr
                 else:
                     evidence = (evidence + "; " if evidence else "") + "derived " + ", ".join("%s=%s" % kv for kv in dgot.items())
+            if verdict == "PASS" and step.get("expect_gt"):
+                # H-SALEHOLE-1 part 2: "this number ROSE since an earlier checkpoint". A regex cannot express
+                # greater-than, so the check is spelled out: {"field-regex": "...", ...} -> the regex's first
+                # group is compared numerically against the (substituted) baseline value.
+                from decimal import Decimal
+                for gpat, gthan in (step["expect_gt"] or {}).items():
+                    try:
+                        gp = subst(gpat, self.vars, escape=True)   # a regex field: substituted values are escaped, like every other one
+                        gt_base = subst(str(gthan), self.vars)
+                    except Unresolved as u:
+                        verdict, evidence = "FAIL", "expect_gt has unresolved ${%s}" % u
+                        break
+                    gm = re.search(gp, res, re.S)
+                    if not gm:
+                        verdict, evidence = "FAIL", "expect_gt: /%s/ did not match the result" % gp
+                        break
+                    try:
+                        gnow, gbase = Decimal(gm.group(1)), Decimal(gt_base)
+                    except Exception as e:
+                        verdict, evidence = "FAIL", "expect_gt: not a number (%s)" % e
+                        break
+                    if not gnow > gbase:
+                        verdict, evidence = "FAIL", "expect_gt: %s is not greater than %s" % (gnow, gbase)
+                        break
+                    evidence = (evidence + "; " if evidence else "") + "%s > %s" % (gnow, gbase)
             if verdict == "PASS":
                 for el in step.get("expect_log") or []:
                     lrole = el.get("role", role)
@@ -804,6 +829,7 @@ def dry_run(sc, args):
     names = sorted({m.group(1) for s in sc["steps"]
                     for txt in [s.get("cmd") or "", s.get("expect_result") or "", s.get("refute_result") or ""]
                     + [e["regex"] for e in (s.get("expect_log") or [])]
+                    + list((s.get("expect_gt") or {}).keys()) + [str(v) for v in (s.get("expect_gt") or {}).values()]
                     for m in VAR_RE.finditer(txt)})
     captured = sorted({k for s in sc["steps"] for k in (s.get("capture") or {})})
     supplied = sorted(set(sc.get("vars") or {}) | {kv.partition("=")[0].strip() for kv in (args.var or [])}
