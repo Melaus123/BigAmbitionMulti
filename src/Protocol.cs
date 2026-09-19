@@ -2120,6 +2120,11 @@ namespace BigAmbitionsMP
         /// <summary>Owner's current fuel (liters). Synced so a granted DRIVABLE proxy isn't stuck at 0%
         /// (its local instance spawns empty) — applied to the proxy's FuelModule when not driven locally.</summary>
         public float  Fuel      { get; set; }
+        /// <summary>H-CARCOND-1: the owner's current vehicle CONDITION (DamageHandler.Damage; 0 = pristine).
+        /// Sourced exactly like Fuel (the live handler when the car is spawned, else VehicleInstance.damage)
+        /// and seeded onto a borrower's ghost, so the drive stream's damage back-prop can only ever carry
+        /// real driving instead of the 0 a freshly built ghost was born with.</summary>
+        public float  Damage    { get; set; }
         public float  X { get; set; }
         public float  Y { get; set; }
         public float  Z { get; set; }

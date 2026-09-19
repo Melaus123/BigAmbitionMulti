@@ -1441,6 +1441,7 @@ namespace BigAmbitionsMP
                                                         // (HostLoadSession / first save re-set it)
             _peerNames.Clear();
             _peerBuild.Clear();       // round-281: per-peer build records die with the session, like _peerNames
+            lock (_lastAccessSig) { _lastAccessSig.Clear(); _accessRebuiltLogged = 0; }   // batch 14: the [Access] line's signatures + its log budget are per session (never suppresses a push)
             StableIdByPlayer.Clear();
             StableIdByPlayer[MPConfig.PlayerId] = MPConfig.StableId; // host's own
             PlayerColours.Learn(MPConfig.PlayerId, PlayerColours.HostAssign(MPConfig.StableId));   // 2026-09-05 colours: the host holds a permanent slot too
@@ -1523,6 +1524,7 @@ namespace BigAmbitionsMP
             try { MPCanvasUI.ClearLobbyNotice(); } catch { }
             _peerNames.Clear();
             _peerBuild.Clear();       // round-281
+            lock (_lastAccessSig) { _lastAccessSig.Clear(); _accessRebuiltLogged = 0; }   // batch 14: the [Access] line's signatures + its log budget are per session (never suppresses a push)
             _clients.Clear();
             MPSaveCoordinator.ConsumeDevHostLoadAs("session stop");   // round-285: the impersonation override dies with the session
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
@@ -1843,6 +1845,7 @@ namespace BigAmbitionsMP
                 ModMismatchByPlayer.TryRemove(leftPlayer, out _);
                 LobbyRemove(leftPlayer);
                 try { _sharedPoolByOwner.Remove(leftPlayer); } catch { }   // shared-shop slice 3: an absent owner's bench is not replayed to anyone
+                ForgetAccessCache(leftPlayer);   // batch 14: the record of what THIS connection was sent dies with it
                 _peerNames.TryRemove(peer.Id, out _);
                 BroadcastLobbyUpdate();   // keep everyone's roster (incl. the in-game F9 list) current
                 if (!IsInLobby)
@@ -5831,7 +5834,17 @@ namespace BigAmbitionsMP
                     if (kv.Value == stable) { BuildingOwners[kv.Key] = pid; rekeyed++; }
                 foreach (var kv in BuildingRealEstateOwners)   // symmetric: bought real estate reserved under the absent owner's stableId must also re-key to their live pid
                     if (kv.Value == stable) { BuildingRealEstateOwners[kv.Key] = pid; rekeyed++; }
-                if (rekeyed > 0) Plugin.Logger.LogInfo($"[Server] Re-keyed {rekeyed} reserved building(s) to '{pid}'.");
+                if (rekeyed > 0)
+                {
+                    Plugin.Logger.LogInfo($"[Server] Re-keyed {rekeyed} reserved building(s) to '{pid}'.");
+                    // H-MERGERMOP-1 (batch 14): the re-key repairs input (i) of the helper set - the partner's
+                    // address was filed under their raw STABLE id, so BuildBuildingAccessFor attributed it to
+                    // nobody. Nothing used to re-run the sets here, and a merged partner's helper set stayed
+                    // empty until an unrelated rent. This path is reached from the poll thread and the set build
+                    // walks the building registrations (main thread only, see SendJoinReplayTo) - marshalled
+                    // (review MEDIUM-3).
+                    GameStatePatcher.EnqueueOnMainThread(() => RefreshBuildingAccess("join re-key"));
+                }
                 var m = MPSaveManager.ReadManifest(servedFrom);
                 var midEnv = MessageEnvelope.Create(MessageType.LoadData, "host", new LoadDataPayload
                 {
@@ -6052,6 +6065,52 @@ namespace BigAmbitionsMP
             MPSaveCoordinator.PersistGrantsNow();   // durably save grants the instant they change (a late grant was lost on load — manifest Grants=[], 2026-06-30)
         }
 
+        // -- Access-set change NOTE (H-MERGERMOP-1 / H-MERGERSTOCK-1, batch 14) ----------------------
+        // The access sets now rebuild on LATE inputs too (a business type arriving through
+        // GameStatePatcher, the join ledger re-key). The last payload computed per player id is kept,
+        // compared order-insensitively across every list it carries, ONLY so the [Access] line can say
+        // when such a trigger really changed someone's sets. It NEVER suppresses a push (review HIGH-1:
+        // a scene load empties every machine's GrantSync caches and the heal that follows recomputes an
+        // identical payload - a suppressed push left the sets empty for the session). Cleared per peer
+        // on disconnect (keyed by PLAYER id) and wholly at lobby arm and session stop.
+        private static readonly Dictionary<string, string> _lastAccessSig = new();
+        private static int _accessRebuiltLogged;   // [Access] budget, 40 per session
+
+        /// <summary>Order-insensitive signature over every list a PermissionBuildingAccessPayload carries.</summary>
+        private static string AccessSig(PermissionBuildingAccessPayload p)
+        {
+            var sb = new System.Text.StringBuilder(256);
+            void Band(List<string> xs)
+            {
+                var l = new List<string>(xs);
+                l.Sort(StringComparer.Ordinal);
+                foreach (var x in l) { sb.Append(x ?? ""); sb.Append('\u001f'); }
+                sb.Append('\u001e');
+            }
+            Band(p.AddressKeys); Band(p.HelperAddressKeys); Band(p.SharedManageKeys); Band(p.OtherOwnedKeys);
+            var ow = new List<string>();
+            foreach (var kv in p.Owners) ow.Add(kv.Key + "=" + kv.Value);
+            Band(ow);
+            return sb.ToString();
+        }
+
+        /// <summary>Drop one player's remembered access signature (disconnect). Log bookkeeping only.</summary>
+        private static void ForgetAccessCache(string pid)
+        {
+            if (string.IsNullOrEmpty(pid)) return;
+            lock (_lastAccessSig) _lastAccessSig.Remove(pid);
+        }
+
+        /// <summary>One INFO line when a TRIGGER-driven refresh actually changed someone's sets (a plain
+        /// grant/rent refresh passes no trigger and stays silent). Budget 40 per session.</summary>
+        private static void NoteAccessRebuilt(string trigger, string pid, int enter, int helper, int manage)
+        {
+            if (string.IsNullOrEmpty(trigger)) return;
+            if (_accessRebuiltLogged >= 40) return;
+            _accessRebuiltLogged++;
+            Plugin.Logger.LogInfo($"[Access] sets rebuilt ({trigger}): {pid} enter={enter} helper={helper} manage={manage}");
+        }
+
         /// <summary>HOST: the building addressKeys <paramref name="clientPid"/> may ENTER as a granted housing
         /// guest (AddressKeys) or WORK IN as a granted business helper (HelperAddressKeys). Clients can't
         /// compute this (no building→owner map), so the host pushes it. Round-32: each address is classified
@@ -6133,9 +6192,11 @@ namespace BigAmbitionsMP
             return pay;
         }
 
-        private static void SendBuildingAccessTo(MPLink peer, string clientPid)
+        /// <summary>Always pushes. Returns the payload when it DIFFERS from the last one pushed to this player
+        /// (for the [Access] line), null when it is identical or the send failed.</summary>
+        private static PermissionBuildingAccessPayload? SendBuildingAccessTo(MPLink peer, string clientPid)
         {
-            if (peer == null) return;
+            if (peer == null) return null;
             try
             {
                 var pay = BuildBuildingAccessFor(clientPid);
@@ -6143,13 +6204,27 @@ namespace BigAmbitionsMP
                 // Shared-shop slice 3: the benches of the owners whose shops this player may manage — deliberately AFTER
                 // the access push and inside its try: if the push fails, no bench is shipped that the client could not scope.
                 try { ReplaySharedPoolsTo(clientPid, pay.SharedManageKeys); } catch { }
+                // Batch 14: remember what was pushed - AFTER the send (review MEDIUM-2) - so the caller can tell a
+                // trigger that changed this player's sets from one that did not. Never a reason to skip the push.
+                string sig = AccessSig(pay);
+                bool changed;
+                lock (_lastAccessSig)
+                {
+                    changed = !(_lastAccessSig.TryGetValue(clientPid, out var prev) && prev == sig);
+                    _lastAccessSig[clientPid] = sig;
+                }
+                return changed ? pay : null;
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendBuildingAccessTo: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendBuildingAccessTo: {ex.Message}"); return null; }
         }
 
         /// <summary>HOST: push every connected client (and set the host's own) which buildings they may enter
-        /// as a granted guest. Call after any grant or building-ownership change.</summary>
-        public static void RefreshBuildingAccess()
+        /// as a granted guest. Call after any grant or building-ownership change - and (batch 14) after any LATE
+        /// input to the sets themselves: the business TYPE arriving from a client, the join ledger re-key.
+        /// <paramref name="trigger"/> names such a late input for the [Access] line; the plain
+        /// grant/rent/vacate/buy/takeover callers pass nothing and stay silent. Every call pushes to everyone;
+        /// the late-input triggers fire only on a real type/tenant change or a join re-key.</summary>
+        public static void RefreshBuildingAccess(string trigger = "")
         {
             if (!_running) return;
             try
@@ -6157,9 +6232,21 @@ namespace BigAmbitionsMP
                 foreach (var pid in new List<string>(_peerNames.Values))
                 {
                     var pr = PeerForPlayer(pid);
-                    if (pr != null) SendBuildingAccessTo(pr, pid);
+                    if (pr == null) continue;
+                    var sent = SendBuildingAccessTo(pr, pid);
+                    if (sent != null) NoteAccessRebuilt(trigger, pid, sent.AddressKeys.Count, sent.HelperAddressKeys.Count, sent.SharedManageKeys.Count);
                 }
                 var own = BuildBuildingAccessFor(MPConfig.PlayerId);
+                // The host's OWN copy is always re-set too (a scene load empties it - review HIGH-1); the signature
+                // only decides whether the [Access] line is written.
+                string ownSig = AccessSig(own);
+                bool ownChanged;
+                lock (_lastAccessSig)
+                {
+                    ownChanged = !(_lastAccessSig.TryGetValue(MPConfig.PlayerId, out var ownPrev) && ownPrev == ownSig);
+                    _lastAccessSig[MPConfig.PlayerId] = ownSig;
+                }
+                if (ownChanged) NoteAccessRebuilt(trigger, MPConfig.PlayerId, own.AddressKeys.Count, own.HelperAddressKeys.Count, own.SharedManageKeys.Count);
                 PlayerColours.LearnOwners(own.Owners);   // colours r2 (review r1 MAJOR-1): the host learns the owner map too
                 GrantSync.SetEnterableBuildings(own.AddressKeys);
                 GrantSync.SetHelperBusinesses(own.HelperAddressKeys);

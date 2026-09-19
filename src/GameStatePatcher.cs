@@ -3750,6 +3750,9 @@ namespace BigAmbitionsMP
             OwnerWarningRefreshNow(bm, addressKey, changed, moved);
         }
 
+        // H-DELIVDUPE-1 (batch 14): budget for the adopted-item listing below, 40 lines per session.
+        private static int _adoptedTailLogged;
+
         private static void OwnerWarningRefreshNow(
             BuildingManager bm, string addressKey,
             System.Collections.Generic.HashSet<string>? changed, System.Collections.Generic.HashSet<string>? moved)
@@ -3791,7 +3794,55 @@ namespace BigAmbitionsMP
                     if (anySecurity) try { reg.UpdateSecurityLevel(); } catch { }
                 }
                 catch { }
-                Plugin.Logger.LogInfo($"[Patcher] owner edit-tail refresh for '{addressKey}': {ids.Count} adopted item(s).");
+                // H-DELIVDUPE-1 (batch 14): NAME the adopted items instead of only counting them. A duplicated
+                // delivery arrives here as a SECOND id holding the same item at the same spot as one the
+                // registration already carries - invisible in a bare count.
+                string adoptedList = "";
+                bool anyDup = false, dupBeyondCap = false;
+                if (_adoptedTailLogged < 40)   // review LOW-6: no scan once the line's budget is spent
+                try
+                {
+                    var parts = new System.Collections.Generic.List<string>();
+                    int shown = 0;
+                    foreach (var id in ids)
+                    {
+                        string nm = "?"; float px = 0f, py = 0f, pz = 0f; bool have = false;
+                        if (reg.itemInstances != null && reg.itemInstances.TryGetValue(id, out var ai) && ai != null)
+                        { nm = ai.itemName ?? "?"; px = ai.position.x; py = ai.position.y; pz = ai.position.z; have = true; }
+                        string dup = "";
+                        if (have && reg.itemInstances != null)
+                            foreach (var kv in reg.itemInstances)
+                            {
+                                var other = kv.Value;
+                                if (kv.Key == id || other == null) continue;
+                                if ((other.itemName ?? "?") != nm) continue;
+                                if (System.Math.Abs(other.position.x - px) <= 0.05f
+                                    && System.Math.Abs(other.position.y - py) <= 0.05f
+                                    && System.Math.Abs(other.position.z - pz) <= 0.05f)
+                                { dup = kv.Key; break; }
+                            }
+                        if (dup.Length > 0) anyDup = true;
+                        if (shown < 6)
+                        {
+                            shown++;
+                            parts.Add(have
+                                ? $"{id} '{nm}' ({px:F2},{py:F2},{pz:F2}){(dup.Length > 0 ? $" POSSIBLE DUPLICATE of {dup}" : "")}"
+                                : $"{id} (no instance)");
+                        }
+                        else if (dup.Length > 0) dupBeyondCap = true;
+                    }
+                    if (ids.Count > shown) parts.Add($"+{ids.Count - shown} more");
+                    if (dupBeyondCap) parts.Add("POSSIBLE DUPLICATE(s) beyond the listed 6");
+                    adoptedList = string.Join(", ", parts);
+                }
+                catch (Exception ex) { adoptedList = $"(listing failed: {ex.Message})"; }
+                if (_adoptedTailLogged < 40)
+                {
+                    _adoptedTailLogged++;
+                    string adoptedMsg = $"[Patcher] owner edit-tail refresh for '{addressKey}': {ids.Count} adopted item(s): {adoptedList}";
+                    if (anyDup) Plugin.Logger.LogWarning(adoptedMsg);
+                    else        Plugin.Logger.LogInfo(adoptedMsg);
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] owner warning refresh: {ex.Message}"); }
         }
@@ -5611,6 +5662,11 @@ namespace BigAmbitionsMP
             {
                 var reg = FindRegistration(info.AddressKey);
                 if (reg == null) return false;
+                // H-MERGERMOP-1 / H-MERGERSTOCK-1 (batch 14): the business TYPE as it stands BEFORE this apply.
+                // On the host it is a late input to the per-player access sets (BuildBuildingAccessFor's IsBiz
+                // reads it) and this method used to notify nobody - see the tail below.
+                string priorTypeName = "";
+                try { priorTypeName = reg.businessTypeName ?? ""; } catch { }
 
                 // Is this the RECEIVER'S OWN business?  The owner is the authority for their own shop's
                 // name / description / sign / logo / hours — the host holds only a (possibly stale or blank)
@@ -6042,6 +6098,22 @@ namespace BigAmbitionsMP
                 {
                     Plugin.Logger.LogInfo($"[Patcher] Ownership for {info.AddressKey}: applied[bldg='{reg.buildingOwnerRivalId}' biz='{reg.businessOwnerRivalId}' rented={reg.RentedByPlayer}] was[bldg='{priorBuildingOwner}' biz='{priorBusinessOwner}' rented={priorRented}] host-raw[bldg='{info.BuildingOwnerRivalId}' biz='{info.BusinessOwnerRivalId}' rented={info.RentedByPlayer} owner='{info.OwnerPlayerId}'].");
                 }
+
+                // H-MERGERMOP-1 / H-MERGERSTOCK-1 (batch 14): a client's shop gets its business TYPE on the HOST
+                // only through this method, and its runner/tenancy stamp is written just above. Both are inputs
+                // the host's per-player access sets are computed from, and nothing used to re-run them - a merged
+                // partner's shop stayed "not a business" to BuildBuildingAccessFor, so the helper set stayed empty
+                // and every mop/stock gate reading GrantSync.IsHelperBusiness was shut until an unrelated rent.
+                // Fires only on a REAL change (never on a bare name/sign/hours push); the refresh is change-detected.
+                try
+                {
+                    if (MPServer.IsRunning
+                        && (!string.Equals(reg.businessTypeName ?? "", priorTypeName, StringComparison.Ordinal)
+                            || (reg.businessOwnerRivalId?.ToString() ?? "") != priorBusinessOwner
+                            || reg.RentedByPlayer != priorRented))
+                        MPServer.RefreshBuildingAccess("business-info");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] access refresh for {info.AddressKey}: {ex.Message}"); }
 
                 // HQ DIAGNOSTIC (2026-06-19, release-safe): a client's own HQ can be bricked if a host delta
                 // clears its RentedByPlayer (→ receiverOwnsThis false → schedule overwritten → "never open" +

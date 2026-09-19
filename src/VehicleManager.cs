@@ -622,8 +622,11 @@ namespace BigAmbitionsMP
                     }
 
                     // Live fuel (CarController.fuelModule) if it's a car, else the persisted instance value.
+                    // H-CARCOND-1: condition is sourced the SAME way - the live DamageHandler when the car is
+                    // spawned, else the persisted instance value - so a borrower's ghost can start from it.
                     float fuel = inst.fuel;
-                    try { var cc = vc as CarController; if (cc != null && cc.fuelModule != null) fuel = cc.fuelModule.amount; } catch { }
+                    float dmg  = 0f; try { dmg = inst.damage; } catch { }
+                    try { var cc = vc as CarController; if (cc != null) { if (cc.fuelModule != null) fuel = cc.fuelModule.amount; if (cc.damageHandler != null) dmg = cc.damageHandler.Damage; } } catch { }
 
                     fleet.Vehicles.Add(new VehicleEntry
                     {
@@ -632,6 +635,7 @@ namespace BigAmbitionsMP
                         ColorName = inst.vehicleColorName ?? "",
                         Driving   = vc.controlledByPlayer,
                         Fuel      = fuel,
+                        Damage    = dmg,   // H-CARCOND-1: condition travels like fuel
                         X = t.position.x, Y = t.position.y, Z = t.position.z,
                         Qx = t.rotation.x, Qy = t.rotation.y, Qz = t.rotation.z, Qw = t.rotation.w,
                         Cargo = cargo,
@@ -681,6 +685,7 @@ namespace BigAmbitionsMP
                                     ColorName = inst.vehicleColorName ?? "",
                                     Driving   = false,
                                     Fuel      = inst.fuel,
+                                    Damage    = inst.damage,   // H-CARCOND-1: the dormant pass has only the persisted value, exactly as for fuel
                                     X = inst.position.x, Y = inst.position.y, Z = inst.position.z,
                                     Qx = inst.rotation.x, Qy = inst.rotation.y, Qz = inst.rotation.z, Qw = inst.rotation.w,
                                     Cargo = dCargo, CargoNested = dNested, CarriedItems = dCarried,
@@ -800,6 +805,9 @@ namespace BigAmbitionsMP
                   // every tick, silently reverting the split. ColorName added (repaint reaches ≤1 beat).
                   .Append('|').Append(Mathf.RoundToInt(e.X)).Append(',').Append(Mathf.RoundToInt(e.Y)).Append(',').Append(Mathf.RoundToInt(e.Z))
                   .Append('|').Append((int)(e.Fuel * 20f))
+                  // H-CARCOND-1: condition is non-volatile fleet state like fuel - a repair or a prang on a
+                  // PARKED car must re-ship the entry, or a borrower's ghost would keep the stale value.
+                  .Append('|').Append((int)(e.Damage * 100f))
                   // CARTBAG-1: a CONTENTS-only change (same bag, different goods) must count as a
                   // fleet change, or a parked cart's bag would never re-send until the heartbeat.
                   .Append('|').Append(NestedBandSig(e.CargoNested)).Append(';');
@@ -915,6 +923,9 @@ namespace BigAmbitionsMP
                     // Keep a drivable (granted) proxy fueled from the owner's car so it isn't stuck at 0%.
                     // Skipped while WE drive it (controlledByPlayer) so local consumption isn't clobbered.
                     if (rv.Go != null) ApplyFuelToGhost(rv.Go, e.Fuel);
+                    // H-CARCOND-1: and CONDITIONED from the owner's car, same gating - a ghost born at 0 damage
+                    // was the value the drive stream then pushed back over the owner's real save.
+                    if (rv.Go != null) ApplyDamageToGhost(rv.Go, e.Damage);
 
                     // Cross-interior mask v2 (per-vehicle building tag — fixes the
                     // vehicle-LEFT-inside case): show the ghost only when its tag
@@ -1280,6 +1291,7 @@ namespace BigAmbitionsMP
             {
                 inst.id               = "BAMP_" + e.VehicleId;
                 inst.vehicleColorName = e.ColorName;
+                inst.damage           = e.Damage;   // H-CARCOND-1: CarController.SetVehicleInstance (:215) seeds the handler from this
             }
             catch (Exception ex)
             {
@@ -1443,6 +1455,9 @@ namespace BigAmbitionsMP
             // REBUILT (a grant change respawns them) gets its proxy back with it. Teardown is already covered: both
             // destroy paths below call TrafficSync.NotifyCollidersRemoved, which walks triggers carrying the tag.
             TrafficSync.AttachTrafficSenseProxy(go);
+            // H-CARCOND-1: the common tail of EVERY ghost spawn (a grant change rebuilds them), so a rebuilt
+            // ghost gets the owner's condition back with it instead of restarting at pristine 0.
+            ApplyDamageToGhost(go, e.Damage);
 #if BAMP_DEV
             VehicleHierarchyProbe.DumpOnce(go, e.TypeName);   // DIAG:DEVTOOL — passenger door/seat discovery (once per type)
 #endif
@@ -2119,12 +2134,38 @@ namespace BigAmbitionsMP
             catch { }
         }
 
+        /// <summary>H-CARCOND-1: write the owner's synced CONDITION onto a drivable proxy's live DamageHandler
+        /// and its VehicleInstance, so a borrower always STARTS from the owner's value. Twin of ApplyFuelToGhost
+        /// with the same gating: no-op for a stripped ghost (no controller) or while the local player drives it
+        /// (don't clobber the damage they are accumulating right now).</summary>
+        private static void ApplyDamageToGhost(GameObject go, float damage)
+        {
+            try
+            {
+                var vc = go.GetComponentInChildren<VehicleController>();
+                if (vc == null || vc.controlledByPlayer) return;
+                var cc = vc as CarController;
+                // CarController.SetDamage writes vehicleInstance.damage AND the live handler (native :751-754);
+                // it dereferences vehicleInstance unchecked, so only call it when there is one.
+                // Review LOW-5: this runs per fleet packet per ghost - leave a handler that already agrees alone.
+                if (cc != null && cc.damageHandler != null && cc.vehicleInstance != null
+                    && System.Math.Abs(cc.damageHandler.Damage - damage) < 0.001f
+                    && System.Math.Abs(cc.vehicleInstance.damage - damage) < 0.001f) return;
+                if (cc != null && cc.vehicleInstance != null) cc.SetDamage(damage);
+                else if (vc.vehicleInstance != null) vc.vehicleInstance.damage = damage;
+            }
+            catch { }
+        }
+
         // ── Driving handoff (Phase 2 B) ───────────────────────────────────────
         // While a granted borrower drives owner O's car, the BORROWER broadcasts its pose; the OWNER's real
         // car becomes a kinematic follower of that (the owner's own fleet broadcast then carries the position
         // to everyone else). Reverts on exit (Released) or a ~1.5 s timeout (driver disconnect).
         private static string _drivingRealVid = "";   // REAL id of the proxy I'm currently driving ("" = none)
         private static string _drivingOwner   = "";
+        // H-CARCOND-1 trace [VehCond]: 40 lines per session, shared by the sender and receiver halves.
+        private static int   _vehCondLogged      = 0;
+        private static float _lastStreamedDamage = -1f;
         private sealed class DrivenFollow { public Vector3 Pos; public Quaternion Rot = Quaternion.identity; public float Until; public float LastDamage = -1f; public string Driver = ""; public bool Hide; public Vector3 RideOff; public string Bldg = ""; }
         private static readonly Dictionary<string, DrivenFollow> _ownedFollowing = new();   // MY cars driven remotely
         // Round-74: cars a borrower RELEASED inside an interior WE haven't loaded stay kinematic
@@ -2157,7 +2198,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                string realVid = "", owner = ""; Transform pose = null; float fuel = 0f, dmg = 0f;
+                string realVid = "", owner = ""; Transform pose = null; float fuel = 0f, dmg = 0f, instDmg = 0f;
                 var list = VehicleHelper.AllPlayerVehicles;
                 if (list != null)
                     for (int i = 0; i < list.Count; i++)
@@ -2167,6 +2208,9 @@ namespace BigAmbitionsMP
                         if (vc.controlledByPlayer && inst.id.StartsWith("BAMP_"))
                         {
                             realVid = inst.id.Substring(5); owner = OwnerIdFor(realVid); pose = vc.transform;
+                            // H-CARCOND-1: the instance value first (seeded from the owner at spawn) - a proxy with
+                            // no live handler yet must never stream the 0 default back over the owner's condition.
+                            try { instDmg = inst.damage; dmg = inst.damage; } catch { }
                             try { var cc = vc as CarController; if (cc != null) { if (cc.fuelModule != null) fuel = cc.fuelModule.amount; if (cc.damageHandler != null) dmg = cc.damageHandler.Damage; } } catch { }
                             break;
                         }
@@ -2185,6 +2229,9 @@ namespace BigAmbitionsMP
                             var inst = vc?.vehicleInstance;
                             if (inst == null || string.IsNullOrEmpty(inst.id) || !inst.id.StartsWith("BAMP_")) continue;
                             realVid = inst.id.Substring(5); owner = OwnerIdFor(realVid); pose = vc.transform;
+                            // H-CARCOND-1: a pushed cart has no damage handler - stream its instance value (seeded
+                            // from the owner at spawn), never the 0 default, which would overwrite the owner's.
+                            try { dmg = inst.damage; instDmg = inst.damage; } catch { }
                             break;
                         }
                 }
@@ -2192,6 +2239,16 @@ namespace BigAmbitionsMP
                 if (!string.IsNullOrEmpty(realVid) && pose != null && !string.IsNullOrEmpty(owner))
                 {
                     _drivingRealVid = realVid; _drivingOwner = owner;
+                    // H-CARCOND-1 trace: what this borrower is about to push back at the owner.
+                    if (System.Math.Abs(dmg - _lastStreamedDamage) >= 0.01f)
+                    {
+                        _lastStreamedDamage = dmg;
+                        if (_vehCondLogged < 40)
+                        {
+                            _vehCondLogged++;
+                            Plugin.Logger.LogInfo($"[VehCond] send '{realVid}' handler={dmg:F3} instance={instDmg:F3} role=borrower (owner '{owner}').");
+                        }
+                    }
                     SendDrive(new VehicleDrivePayload {
                         VehicleId = realVid, OwnerId = owner, DriverId = MPConfig.PlayerId,
                         X = pose.position.x, Y = pose.position.y, Z = pose.position.z,
@@ -2317,6 +2374,18 @@ namespace BigAmbitionsMP
                     // 20260723-221447; the CartTrace 2026-07-07 "lerped to 951" reads as this same
                     // hole caught mid-flight and misdiagnosed as an interior-coordinates problem).
                     f.Pos = ownedGo.transform.position; f.Rot = ownedGo.transform.rotation;
+                    // H-CARCOND-1: seed the damage change gate from MY car's CURRENT condition. LastDamage was
+                    // born -1, so the borrower's FIRST packet always passed the gate and overwrote my condition
+                    // with whatever their ghost started at (0 before the entry carried it). The ghost now starts
+                    // from my value, so only a real change during the borrow moves it.
+                    try
+                    {
+                        var ccSeed = ownedGo.GetComponentInChildren<VehicleController>() as CarController;
+                        if (ccSeed != null)
+                            f.LastDamage = ccSeed.damageHandler != null ? ccSeed.damageHandler.Damage
+                                         : (ccSeed.vehicleInstance != null ? ccSeed.vehicleInstance.damage : -1f);
+                    }
+                    catch { }
                     // Bug #1: depict the borrower in the seat the same way the fleet path depicts any remote driver
                     // (560-585) — enclosed car → hide the walk model; open vehicle (borrowed flatbed/cart) → keep it
                     // visible + pinned. The owner's own fleet broadcast never runs on the owner's machine, so the
@@ -2346,7 +2415,20 @@ namespace BigAmbitionsMP
                     {
                         if (cc.fuelModule != null) cc.fuelModule.amount = p.Fuel;
                         if (cc.vehicleInstance != null) cc.vehicleInstance.fuel = p.Fuel;
-                        if (System.Math.Abs(p.Damage - f.LastDamage) > 0.001f) { cc.SetDamage(p.Damage); f.LastDamage = p.Damage; }
+                        if (System.Math.Abs(p.Damage - f.LastDamage) > 0.001f)
+                        {
+                            // H-CARCOND-1 trace: before/after on the OWNER's real car.
+                            float beforeD = -1f;
+                            try { beforeD = cc.damageHandler != null ? cc.damageHandler.Damage : (cc.vehicleInstance != null ? cc.vehicleInstance.damage : -1f); } catch { }
+                            cc.SetDamage(p.Damage); f.LastDamage = p.Damage;
+                            if (_vehCondLogged < 40)
+                            {
+                                _vehCondLogged++;
+                                float afterD = -1f;
+                                try { afterD = cc.damageHandler != null ? cc.damageHandler.Damage : p.Damage; } catch { }
+                                Plugin.Logger.LogInfo($"[VehCond] recv '{p.VehicleId}' from '{p.DriverId}': before={beforeD:F3} after={afterD:F3} role=owner.");
+                            }
+                        }
                     }
                 }
                 catch { }
@@ -2439,6 +2521,9 @@ namespace BigAmbitionsMP
                 inst.rotation = new SerializableQuaternion { x = p.Qx, y = p.Qy, z = p.Qz, w = p.Qw };
                 ApplyStreetData(inst, f.Bldg);
                 try { inst.fuel = p.Fuel; } catch { }
+                // H-CARCOND-1 (review MEDIUM-4): and the condition - with no live object here the instance is the
+                // only copy, and the dormant fleet entry re-broadcasts it to the borrower's ghost.
+                try { inst.damage = p.Damage; } catch { }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] data-follow: {ex.Message}"); }
         }
