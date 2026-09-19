@@ -5112,10 +5112,13 @@ namespace BigAmbitionsMP
             }
 
             Plugin.Logger.LogInfo($"[Server] VacateRequest: {req.AddressKey} by {senderPid} — releasing.");
+            // Read BEFORE the removal: did the ledger itself name the sender as this address's tenant? An
+            // unknown-owner vacate is still honoured (flags), but it may not DELETE a Hamptons interior.
+            bool ledgerNamedSender = BuildingOwners.TryGetValue(req.AddressKey, out var namedTenant) && namedTenant == senderPid;
             BuildingOwners.TryRemove(req.AddressKey, out _);
 
             string addr = req.AddressKey;
-            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectPlayerVacate(addr));
+            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectPlayerVacate(addr, ledgerNamedSender));
             BroadcastVacate(req.AddressKey);   // tell every client it's available again
             RefreshBuildingAccess();           // housing: drop guests' access to this now-vacated building
         }
@@ -5271,6 +5274,11 @@ namespace BigAmbitionsMP
             BuildingRealEstateOwners.TryRemove(req.AddressKey, out _);
             string addr = req.AddressKey;
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
+            // D3b (fold V1c): a completed sale is a DEED END that names this address — the one positive
+            // statement on the host that the seller no longer holds the house, so a Hamptons manor's
+            // furniture is cleared from the host's copy here. HandleCancelSale is deliberately NOT a
+            // caller: a cancelled listing ends nothing.
+            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.ClearHamptonsInteriorOnTenancyEnd(addr, "sale completed"));
         }
 
         // ── Message handlers (cont.) ──────────────────────────────────────────

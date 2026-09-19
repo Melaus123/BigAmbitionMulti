@@ -129,6 +129,10 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] rent-time enroll: {ex.Message}"); }
                 }
 
+                // D4 (fold V6): this machine just RENTED something — its own access answer changed, and
+                // no grant/ownership refresh is coming to say so. Drop the cached icon verdicts.
+                try { HamptonsAccess.InvalidateIconVerdicts(); } catch { }
+
                 if (!MPServer.IsRunning) return;
                 if (SuppressNextRentRequest) return;   // already handled
 
@@ -162,6 +166,9 @@ namespace BigAmbitionsMP
                     var reg = RegOf(__instance);
                     if (reg == null) { Plugin.Logger.LogWarning("[Patch] Unrent: could not resolve the building registration."); return; }
                     string key = GameStateReader.AddressKey(reg);
+                    // D4 (fold V6): the mirror of the rent site — a local terminate changes our own
+                    // access answer, on either role, before any ledger event reaches us.
+                    try { HamptonsAccess.InvalidateIconVerdicts(); } catch { }
 
                     if (MPClient.IsConnected)
                     {

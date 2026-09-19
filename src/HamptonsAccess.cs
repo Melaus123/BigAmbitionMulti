@@ -84,6 +84,8 @@ namespace BigAmbitionsMP
                 var all = UnityEngine.Object.FindObjectsOfType<CityHamptonsHouseController>(true);
                 if (all == null || all.Length == 0) return;
                 bool mapOpen = false; try { mapOpen = CityMap.IsOpen; } catch { }
+                // D4: this is the grant/ownership event, so every cached icon verdict is now stale.
+                _iconSuppress.Clear();
                 int done = 0;
                 foreach (var c in all)
                 {
@@ -226,6 +228,22 @@ namespace BigAmbitionsMP
         // event that says this client is back in a synced world (GameStatePatcher's world-sync apply).
         private static bool _ambientResubscribePending;
 
+        // ── D3b: a house that stops being rented must EMPTY for viewers ──────────────────────────
+        // An emptied interior cannot travel as a snapshot — the owner path refuses an empty item list
+        // (round-103, InteriorSync :583-645), which is left alone. FOLD V1 (manager, 2026-09-19): the
+        // clear is driven ONLY by an explicit, address-naming tenancy-END apply from the authority
+        // (GameStatePatcher.ClearHamptonsInteriorOnTenancyEnd). It is NEVER inferred from a predicate:
+        // SessionTenantLabel reads the LIVE roster on its deed arm and only the rent ledger on the host,
+        // so an owner who merely disconnects, a momentarily empty player list, or a house that was BOUGHT
+        // rather than rented would each read as a vacate and delete real copies — on the host, the
+        // authoritative one. A routine that DELETES acts on positive evidence only.
+
+        // ── D4: per-address "the local player has no access here" verdict ────────────────────────
+        // Answered once per address and held until the next grant/ownership refresh clears it, because
+        // the question is asked per VISIBLE ITEM (ItemController.OnBecameVisible :444).
+        private static readonly Dictionary<string, bool> _iconSuppress = new Dictionary<string, bool>(StringComparer.Ordinal);
+        private static readonly HashSet<string> _iconLogged = new HashSet<string>();
+
         /// <summary>Every field above is keyed to ONE loaded world — registration objects, address keys and
         /// once-per-session log latches all die with the scene. Called from MPCanvasUI's game-load detector
         /// beside the other per-world resets.</summary>
@@ -236,6 +254,7 @@ namespace BigAmbitionsMP
                 _addrOf.Clear(); _entryLogged.Clear(); _renderLogged.Clear(); _warned.Clear();
                 _isHamptonsAddr.Clear(); _closePending.Clear();
                 _ambient.Clear(); _ambientOrder.Clear(); _ambientDeferLogged.Clear(); _ambientGotLogged.Clear();
+                _iconSuppress.Clear(); _iconLogged.Clear();
                 _ambientResubscribePending = false;
                 _regCountAtCache = -1;
                 HamptonsTenancyFlip.Reset();
@@ -300,10 +319,26 @@ namespace BigAmbitionsMP
                     label = (ledger == "host" && MPConfig.PlayerId.Length > 0) ? MPConfig.PlayerId : ledger;
                     return true;
                 }
+                // FOLD V2 (2026-09-19): the host's SECOND ledger. BuildingOwners is rents/operates only;
+                // a house a player BOUGHT is filed in BuildingRealEstateOwners (MPServer.cs:30, :5142),
+                // so without this arm an owner-occupied bought manor read as AI on the host and dropped
+                // to the closed outdoor shell for everyone.
+                if (MPServer.IsRunning && addrKey.Length > 0
+                    && MPServer.BuildingRealEstateOwners.TryGetValue(addrKey, out var deedLedger)
+                    && !string.IsNullOrEmpty(deedLedger))
+                {
+                    label = (deedLedger == "host" && MPConfig.PlayerId.Length > 0) ? MPConfig.PlayerId : deedLedger;
+                    return true;
+                }
                 string runner = ""; try { runner = reg.businessOwnerRivalId ?? ""; } catch { }
                 if (GameStatePatcher.IsSessionPlayerRivalId(runner)) { label = runner; return true; }
                 string deed = ""; try { deed = reg.buildingOwnerRivalId ?? ""; } catch { }
-                if (GameStatePatcher.IsSessionPlayerId(deed)) { label = deed; return true; }
+                // FOLD V2: roster-INCLUSIVE, the same test the runner arm above uses.
+                // IsSessionPlayerId (GameStatePatcher :6821-6827) is self + the LIVE player list only, so
+                // an owner who logged off stopped being a session player and their house closed up on
+                // every other machine; IsSessionPlayerRivalId (:2869-2879) adds ClientPlayerRoster, which
+                // holds a disconnected member for reconnect. Rendering must not blink with presence.
+                if (GameStatePatcher.IsSessionPlayerRivalId(deed)) { label = deed; return true; }
                 // A grant is proof a session player holds the address, but it does not carry WHICH one on
                 // this machine — hence the out-parameter: this is a display label, never an id to key on.
                 if (GrantSync.CanEnterGranted(addrKey)) { label = "(a session player — id not known here)"; return true; }
@@ -314,6 +349,156 @@ namespace BigAmbitionsMP
 
         /// <summary>One "real house shown" line per address per session.</summary>
         internal static bool RenderLogOnce(string addrKey) => _renderLogged.Add(addrKey);
+
+        /// <summary>D3b (design Q5 GAP): the house is no longer held by any session player, so the
+        /// furniture this machine is holding for it belongs to nobody. What is cleared and why:
+        ///   * <c>itemInstances</c> — the furniture itself; this IS the stage.
+        ///   * <c>dirtSpots</c> — the former tenant's mess, written by the same interior apply.
+        ///   * this machine's interior BASELINES (GameStatePatcher.ForgetInteriorBaselines) — otherwise
+        ///     an identical re-serve after a re-rent would be skipped as "already applied".
+        /// What is deliberately KEPT: <c>Layout</c> and <c>interiorDesigns</c> — the paint and the
+        /// structure are the property's, not the tenant's, and native leaves both standing across a
+        /// tenancy change; clearing them would drop the house to an unpainted shell for every viewer.
+        /// <c>retailPrices</c> and <c>cachedFulfilledCustomerDemands</c> are business bands that a
+        /// Hamptons residence never carries.
+        /// NEVER on a machine that rents or owns the house (the owner is the truth), and never in single
+        /// player. FOLD V1: reached ONLY from GameStatePatcher.ClearHamptonsInteriorOnTenancyEnd, i.e.
+        /// from an explicit tenancy-END apply that NAMES this address — never from a predicate.</summary>
+        internal static void ClearVacatedInterior(BuildingRegistration reg, string addr, string why)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;      // single player — nothing replicated here
+                bool mine = false;
+                try { mine = reg.RentedByPlayer || reg.BuildingOwnedByPlayer; } catch { }
+                if (mine) return;                                                  // our own house — native owns its emptying
+                var b = reg.BuildingCached;
+                if (b == null || !b.IsHamptonsHouse()) return;
+                var c = InstanceBehavior<CityManager>.Instance?.FindCityBuildingController(b.Address) as CityHamptonsHouseController;
+                var hh = c != null ? c!.hamptonsHouse : null;
+
+                // FOLD V5: a granted guest can be standing INSIDE when this lands, and the barrier is
+                // about to close around them. Run the same forced exit the access-lapse path runs — the
+                // native OnExitPlot, through its own patch, so the tenancy flip is suspended for it —
+                // BEFORE anything is destroyed under their feet.
+                if (hh != null && hh._isPlayerInsidePlot)
+                {
+                    try
+                    {
+                        if (c != null) _closePending[addr] = c;   // hold the barrier open until they are off the plot
+                        hh.OnExitPlot();
+                        Plugin.Logger.LogInfo($"[Hamptons] '{addr}' ended its tenancy while the local player was on the plot — exited the house first.");
+                    }
+                    catch (Exception ex) { WarnOnce("ClearVacatedInterior/forced-exit", ex); }
+                }
+
+                int n = 0;
+                try { n = reg.itemInstances?.Count ?? 0; } catch { }
+                try { reg.itemInstances?.Clear(); } catch (Exception ex) { WarnOnce("ClearVacatedInterior/items", ex); }
+                try { reg.dirtSpots?.Clear(); }     catch (Exception ex) { WarnOnce("ClearVacatedInterior/dirt", ex); }
+                try { GameStatePatcher.ForgetInteriorBaselines(addr); } catch (Exception ex) { WarnOnce("ClearVacatedInterior/baselines", ex); }
+
+                // The live objects. IsHouseLoaded is deliberately left TRUE: the house is still at LOD0
+                // in front of the viewer, and a later re-rent then redraws into it incrementally instead
+                // of waiting for the player to walk out of range and back.
+                // FOLD V8: the DIRT objects are NOT the house's — a Hamptons house owns no DirtSpotObject;
+                // they are BuildingManager._cachedDirtSpotObjects, rebuilt per ENTRY from the ACTIVE
+                // building (FillBuildingDirtSpotObjects, BuildingManager.cs:910-911, :960-986), so there is
+                // nothing under this house to destroy and the data clear above is the whole job.
+                if (hh != null && hh.IsHouseLoaded)
+                {
+                    // FOLD V4: the native one-shot loader may be MID-FLIGHT (IsHouseLoaded is set at the
+                    // start of the load and the instantiate coroutine yields every 0.5 ms while the player
+                    // is outside). Stop it the way native's own reload does (HamptonsHouse.cs:68-72),
+                    // otherwise it keeps instantiating from its copied list into a house we just emptied.
+                    try
+                    {
+                        bool inFlight = GameStatePatcher.HamptonsLoadInFlight(hh);
+                        if (hh._itemsLoadCoroutine != null)
+                        {
+                            hh.StopCoroutine(hh._itemsLoadCoroutine);   // harmless on a finished coroutine (native never nulls the field)
+                            hh._itemsLoadCoroutine = null;
+                        }
+                        hh._itemsToInstantiate.Clear();
+                        if (inFlight)
+                            Plugin.Logger.LogInfo($"[Hamptons] '{addr}' — the native item load was still running; stopped it before clearing (fold V4).");
+                    }
+                    catch (Exception ex) { WarnOnce("ClearVacatedInterior/load-coroutine", ex); }
+                    // SALE-DETACH-1, as the sibling pass does: these controllers go while their
+                    // ItemInstances stay alive, so their native cargo callbacks are detached first.
+                    try
+                    {
+                        if (hh.allItemControllers != null)
+                            foreach (var ic in hh.allItemControllers)
+                                if (ic != null) { try { GameStatePatcher.DetachCargoCallbacks(ic); } catch { } }
+                    }
+                    catch (Exception ex) { WarnOnce("ClearVacatedInterior/detach", ex); }
+                    try
+                    {
+                        var cont = hh.itemsContainer;
+                        if (cont != null)
+                            for (int i = cont.childCount - 1; i >= 0; i--)
+                                UnityEngine.Object.Destroy(cont.GetChild(i).gameObject);
+                    }
+                    catch (Exception ex) { WarnOnce("ClearVacatedInterior/objects", ex); }
+                    try { hh.allItemControllers?.Clear(); } catch { }
+                    try { hh._itemsVisible.Clear(); } catch { }
+                }
+
+                // The ambient subscription is for a house a session player rents. Nobody does.
+                if (_ambient.Contains(addr)) ReleaseAmbient(addr, "no longer rented by a session player");
+                else _ambientOrder.Remove(addr);
+                // Suppress the redundant "ambient subscribe DEFERRED" line the ambient retry further down
+                // this same refresh would otherwise print for an address we have just emptied on purpose.
+                _ambientDeferLogged.Add(addr);
+                _iconSuppress.Remove(addr);
+
+                Plugin.Logger.LogInfo($"[Hamptons] '{addr}' is no longer rented by a session player - its furniture was cleared here ({n} items; {why}).");
+            }
+            catch (Exception ex) { WarnOnce("ClearVacatedInterior", ex); }
+        }
+
+        // ── D4: no warning icons over a stranger's furniture (user rule 2026-09-18) ──────────────
+
+        /// <summary>Does the local player hold NO access to the Hamptons house this item belongs to?
+        /// The address is the ITEM's own, not the active building's — native resolves it the same way
+        /// (BuildingManager.CreateBuildingContextFromItemInstance :349-367 reads ItemInstance.AddressCached,
+        /// which is what the GetBuildingRegistration extension looks up), because for a Hamptons item
+        /// there IS no active manager to ask (ItemController.cs:423).
+        /// "Access" = rents it, owns it, or holds a housing grant for it — the same three terms every
+        /// other shared-home surface uses. One log line per address per session; the verdict is cached
+        /// and dropped on the grant/ownership refresh, because this is asked per visible item.</summary>
+        /// <summary>FOLD V6: a LOCAL native rent or terminate changes this machine's own answer without
+        /// going through RefreshAllBlockers, so those two sites drop the cache here. One call, no sweep:
+        /// the next visible item re-asks and re-caches.</summary>
+        internal static void InvalidateIconVerdicts()
+        {
+            try { _iconSuppress.Clear(); } catch { }
+        }
+
+        internal static bool IconsSuppressedHere(ItemController ic, out string addr)
+        {
+            addr = "";
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return false;   // single player — native
+                var ii = ic.ItemInstance;
+                if (ii == null) return false;
+                var reg = ItemHelper.GetBuildingRegistration(ii);
+                if (reg == null) return false;
+                addr = KeyOf(reg);
+                if (addr.Length == 0) return false;
+                if (_iconSuppress.TryGetValue(addr, out var cached)) return cached;
+                bool mine = false;
+                try { mine = reg.RentedByPlayer || reg.BuildingOwnedByPlayer; } catch { }
+                bool suppress = !mine && !GrantSync.CanEnterGranted(addr);
+                _iconSuppress[addr] = suppress;
+                if (suppress && _iconLogged.Add(addr))
+                    Plugin.Logger.LogInfo($"[Hamptons] warning icons suppressed at '{addr}' (no access).");
+                return suppress;
+            }
+            catch (Exception ex) { WarnOnce("IconsSuppressedHere", ex); return false; }
+        }
 
         // ── D1: ambient subscribe / unsubscribe / measurement ────────────────────────────────────
 

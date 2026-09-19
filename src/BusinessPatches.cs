@@ -402,7 +402,14 @@ namespace BigAmbitionsMP
     /// Its requirement (Furniture.Requirements.HasActiveLicensingFee :13-30) early-returns "met" while
     /// <c>!RentedByPlayer</c> and otherwise reads the OWNER's local fee schedule, which a visitor does not
     /// hold — under the flip it would fabricate a red exclamation off our own save. Read-only: the icon
-    /// itself is inert (no button, no tooltip) and nothing here mutates the replica.</summary>
+    /// itself is inert (no button, no tooltip) and nothing here mutates the replica.
+    ///
+    /// D4 (user rule 2026-09-18) rides this SAME prefix — one patch on one method, never two competing
+    /// ones. Its subject is the opposite case: a HAMPTONS item in a house the local player has no access
+    /// to. Native's IsPlayerOwnedBusiness term is the ACTIVE building's RentedByPlayer, so a player
+    /// standing on their OWN Hamptons plot lit up every icon over the NEIGHBOUR's furniture, item by item
+    /// as it came on screen (ItemController.OnBecameVisible :444). That item is hidden the way native
+    /// hides one and the original is skipped.</summary>
     [HarmonyPatch(typeof(Player.HUD.ItemWarningIcons.ItemWarningIconManager),
                   nameof(Player.HUD.ItemWarningIcons.ItemWarningIconManager.UpdateWarningIcon), typeof(ItemController))]
     public static class Patch_WarningIcons_VisitorParity
@@ -417,11 +424,24 @@ namespace BigAmbitionsMP
         // Harmony's `__instance` is the manager, not the item - the item is the method's argument and
         // is injected by its parameter NAME (`itemController`). The first build declared
         // `ItemController __instance` and would have read the manager through an item-typed reference.
-        static bool Prefix(ItemController itemController)
+        static bool Prefix(Player.HUD.ItemWarningIcons.ItemWarningIconManager __instance, ItemController itemController)
         {
             _flipped = false;
             try
             {
+                // D4: a stranger's Hamptons furniture shows no icon. First, because it is about a
+                // RESIDENCE and the helper rule below is about a business the local player works in; a
+                // granted guest is not suppressed here and keeps exactly what that rule gives them.
+                // HideWarningIcon(ItemController) is native's own public overload onto the private
+                // hash-keyed remover (GetHashCode of the controller) — the same key UpdateWarningIcon
+                // would have used, so any icon already pooled for this item is released.
+                if (itemController != null && itemController.loadedInHamptonsHouse
+                    && HamptonsAccess.IconsSuppressedHere(itemController, out _))
+                {
+                    try { __instance?.HideWarningIcon(itemController); }
+                    catch (Exception hx) { Plugin.Logger.LogWarning($"[Hamptons] hide warning icon: {hx.Message}"); }
+                    return false;
+                }
                 if (!BusinessHelperRoute.HelperHere(out var addr)) { _notedAddr = ""; return true; }
                 if (itemController == null) return true;
                 if (itemController.CanInteractInAnyBusiness) return true;   // native already shows this one to everyone

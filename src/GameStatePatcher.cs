@@ -193,6 +193,12 @@ namespace BigAmbitionsMP
                             reg.businessOwnerRivalId  = "";
                             reg.BusinessName          = null;
                             reg.businessTypeName      = "ba:businesstype_empty";
+                            // D3b (fold V1): THE tenancy-end statement for this address. A routine that
+                            // DELETES acts only on positive evidence from the authority — this notify
+                            // names the address and says the tenancy ended; the old tenant-predicate edge
+                            // could read true→false from a mere disconnect or an empty roster and wipe a
+                            // live copy. Inside the !RentedByPlayer branch, so never our own house.
+                            ClearHamptonsInteriorOnTenancyEnd(addressKey, "vacate notify");
                         }
                         else guarded = true;
                     }
@@ -225,7 +231,7 @@ namespace BigAmbitionsMP
         // detach every cargo-callback delegate that belongs to its own object tree (and any
         // whose target is an already-destroyed Unity object, which can never unsubscribe
         // itself).  Returns how many were detached.
-        private static int DetachCargoCallbacks(ItemController ic)
+        internal static int DetachCargoCallbacks(ItemController ic)
         {
             int n = 0;
             try
@@ -1826,10 +1832,14 @@ namespace BigAmbitionsMP
                     // H2 (2026-09-12): a Hamptons house does not rebuild from an interior write. Its
                     // loader is one-shot — HamptonsHouse.LoadItemsIfNeeded (decompile :349) is
                     // IsHouseLoaded-gated — so a visitor already standing at LOD0 keeps the empty house
-                    // it loaded before the owner's snapshot arrived. ReloadHouseCoroutine(true)
-                    // (decompile :64-86) clears the container and re-instantiates from the registration
-                    // we just wrote.
-                    TryReloadHamptonsHouseAfterApply(payload.AddressKey, reg);
+                    // it loaded before the owner's snapshot arrived.
+                    // D3a (2026-09-19): this apply KNOWS which ids it touched, so the redraw is now
+                    // incremental; the whole-house ReloadHouseCoroutine(true) (decompile :64-86, ~1500
+                    // objects destroyed and re-instantiated in one frame) is kept as the fallback for an
+                    // apply that carries no diff information, and for one that repainted or re-laid-out
+                    // the house — the paint lives in ApplyInteriorDesign, which only that coroutine runs.
+                    TryReloadHamptonsHouseAfterApply(payload.AddressKey, reg, changedIds, removedIds,
+                        movedIds, "snapshot", changedDesignUuids.Count > 0 || _layoutChanged);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}"); }
             });
@@ -3172,6 +3182,13 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Patcher] interior delta applied for '{payload.AddressKey}': upserts={upserts} removes={removes} dragSkips={dragSkips} designs={changedDesignUuids.Count} sv={payload.StructVersion} (changed={ctx.ChangedIds.Count} moved={ctx.MovedIds.Count} cargoOnly={ctx.CargoOnlyIds.Count}).");
                 TryRefreshActiveInteriorIfMatches(payload.AddressKey, ctx.ChangedIds, removedIds,
                     changedDesignUuids: changedDesignUuids, layoutChanged: false, movedIds: ctx.MovedIds);
+                // D3a (2026-09-19, design Q5 GAP): the refresh above only reaches a building whose ACTIVE
+                // BuildingManager matches this address, which an OUTSIDE viewer of a Hamptons house has
+                // not got — so until now a delta moved the data and nothing on screen. (A granted guest
+                // ON the plot does have one, EnterHamptonsBuilding sets it; fold V3 sends that case here
+                // too, so the house's own object set is rebuilt by exactly one refresher.)
+                TryReloadHamptonsHouseAfterApply(payload.AddressKey, reg, ctx.ChangedIds, removedIds,
+                    ctx.MovedIds, "delta", changedDesignUuids.Count > 0);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorEditDelta: {ex.Message}"); }
         }
@@ -3190,11 +3207,20 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] NoteLocalItemState: {ex.Message}"); }
         }
 
-        /// <summary>H2: rebuild a REPLICATED Hamptons house after its interior apply.
+        /// <summary>H2: redraw a REPLICATED Hamptons house after its interior apply.
         /// Owner gate: we skip any registration this machine holds by tenancy or by deed — an owner
         /// never applies a snapshot of its own house (the interior/cargo authority shield refuses the
-        /// host's relay of our own push), and this guard states that rather than relying on it.</summary>
-        private static void TryReloadHamptonsHouseAfterApply(string addressKey, BuildingRegistration reg)
+        /// host's relay of our own push), and this guard states that rather than relying on it.
+        /// D3a (2026-09-19): an apply that knows WHICH ids it touched gets the INCREMENTAL redraw
+        /// (RefreshHamptonsItems). The whole-house ReloadHouseCoroutine stays the fallback for exactly
+        /// two cases: an apply with no diff sets at all (a legacy caller), and an apply that changed the
+        /// PAINT or the LAYOUT — BuildingManager.ApplyInteriorDesign runs inside that coroutine and
+        /// nowhere else on this path, so a repaint must still take the whole-house route.
+        /// A house that is not loaded needs nothing: the native one-shot loader reads itemInstances
+        /// itself at the next LOD0.</summary>
+        private static void TryReloadHamptonsHouseAfterApply(string addressKey, BuildingRegistration reg,
+            HashSet<string>? changedIds = null, HashSet<string>? removedIds = null,
+            HashSet<string>? movedIds = null, string source = "snapshot", bool designOrLayoutChanged = false)
         {
             try
             {
@@ -3206,11 +3232,348 @@ namespace BigAmbitionsMP
                          as CityHamptonsHouseController;
                 var hh = cc?.hamptonsHouse;
                 if (hh == null || !hh.IsHouseLoaded) return;   // not at LOD0 — the one-shot loader will read the fresh data itself
-                int n = 0; try { n = reg.itemInstances?.Count ?? 0; } catch { }
-                hh.StartCoroutine(hh.ReloadHouseCoroutine(true));
-                Plugin.Logger.LogInfo($"[Hamptons] '{addressKey}' interior reloaded after apply ({n} items).");
+                int nulls = (changedIds == null ? 1 : 0) + (removedIds == null ? 1 : 0) + (movedIds == null ? 1 : 0);
+                bool noDiff = nulls == 3;
+                // FOLD V8: MIXED nullity is a caller bug, not a diff — "null means no information" is a
+                // whole-set statement, so a partly-null call would silently treat a missing set as empty
+                // and skip real work. Say so and take the safe route.
+                bool mixedNull = nulls > 0 && nulls < 3;
+                if (mixedNull)
+                    Plugin.Logger.LogWarning($"[Hamptons] '{addressKey}' redraw got {nulls} of 3 id sets null — a partly-null diff is a CALLER BUG; taking the whole-house route. Report this.");
+                // FOLD V4: the native loader sets IsHouseLoaded at the START of its load and its
+                // instantiate coroutine yields every 0.5 ms while the player is outside the plot
+                // (HamptonsHouse.cs:351-355, :384-388), so an apply landing inside that window would spawn
+                // ids the coroutine then instantiates AGAIN from its own copied list. The whole-house
+                // route is safe there because ReloadHouseCoroutine stops that coroutine natively (:68-72).
+                bool loadInFlight = HamptonsLoadInFlight(hh);
+                if (noDiff || mixedNull || designOrLayoutChanged || loadInFlight)
+                {
+                    int n = 0; try { n = reg.itemInstances?.Count ?? 0; } catch { }
+                    hh.StartCoroutine(hh.ReloadHouseCoroutine(true));
+                    Plugin.Logger.LogInfo($"[Hamptons] '{addressKey}' interior reloaded after apply ({n} items) — whole-house route: "
+                        + (loadInFlight ? "the native item load is still running, and only the reload stops it."
+                        : noDiff        ? "this apply carried no diff sets."
+                        : mixedNull     ? "this apply carried a partly-null diff."
+                                        : "the paint/layout changed, and only the reload applies those."));
+                    return;
+                }
+                RefreshHamptonsItems(hh, reg, changedIds, removedIds, movedIds,
+                    out int destroyed, out int spawned, out int moved);
+                // The loader's copied list is only read DURING a load; after an incremental redraw it no longer
+                // describes the house, and HamptonsLoadInFlight compares against it - so drop it.
+                try { hh._itemsToInstantiate.Clear(); } catch { }
+                if ((destroyed > 0 || spawned > 0 || moved > 0) && _hamptonsIncrementalLines++ < 30)
+                    Plugin.Logger.LogInfo($"[Hamptons] '{addressKey}' incremental: destroyed={destroyed} spawned={spawned} moved={moved} ({source}).");
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] reload after apply '{addressKey}': {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] redraw after apply '{addressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>D3a log budget: 30 lines per session, then silent (this can fire per edit).</summary>
+        private static int _hamptonsIncrementalLines;
+        /// <summary>Fold V3 log budget: 10 lines per session, then silent (fires per apply).</summary>
+        private static int _hamptonsDeclineLines;
+
+        /// <summary>D3a (2026-09-19, design Q5): the INCREMENTAL redraw of a Hamptons house, modelled on
+        /// RefreshItemsForActiveBuilding (child rescue → destroy changed/removed → InstantiateSingleInstance
+        /// for changed + missing → re-link stacked children → move pass) with the substitutions the design
+        /// names: the container is the house's own <c>itemsContainer</c>, the controller list is the house's
+        /// own <c>allItemControllers</c>, every spawn is stamped <c>loadedInHamptonsHouse</c> exactly as
+        /// native does (HamptonsHouse.cs:373), and the pass closes with
+        /// <c>SetUpItemControllersParents(hh.allItemControllers)</c> (:363). The second-floor visibility rule
+        /// is native's own: ToggleSecondFloorItem runs only while the player is inside the plot (:380), and
+        /// an item spawned while the city map is open is hidden and recorded (:375-379) so the map's close
+        /// shows it again.
+        /// Two deliberate differences from the active-building version: NO live-placement cancel (that
+        /// guard exists for a stranded outline in the local player's OWN building, which this path never
+        /// touches — the per-item "in the hands" and "being placed" rules are kept), and no
+        /// ScheduleUpdateAvailableProducers (a residence has no producers and no waiting lines).
+        /// The house's controller list is this house's whole population, so no registration filter is
+        /// needed on the destroy pass.</summary>
+        private static void RefreshHamptonsItems(HamptonsHouse hh, BuildingRegistration reg,
+            HashSet<string>? changedIds, HashSet<string>? removedIds, HashSet<string>? movedIds,
+            out int destroyed, out int spawned, out int moved)
+        {
+            destroyed = 0; spawned = 0; moved = 0;
+            try
+            {
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || hh.itemsContainer == null || hh.allItemControllers == null)
+                {
+                    Plugin.Logger.LogWarning($"[Hamptons] incremental redraw of '{GameStateReader.AddressKey(reg)}' skipped — no BuildingManager / itemsContainer yet.");
+                    return;
+                }
+                bool fullRebuild = changedIds == null;
+                float roofY = 0f;
+                try { roofY = BuildingSizeHelper.GetBuildingRoofPosition(hh.buildingSize, 0); } catch { }
+                bool insidePlot = false; try { insidePlot = hh._isPlayerInsidePlot; } catch { }
+                bool mapOpen = false;    try { mapOpen = CityMap.IsOpen; } catch { }
+                var liveById = new Dictionary<string, ItemController>();
+                var killedControllers = new HashSet<ItemController>();
+
+                // FOLD V3: a granted guest can be INSIDE this house and in placement mode, so this path
+                // carries the same live-placement teardown the active-building refresh does — round-37i
+                // (destroy+respawn skips StopPlacingItem, the only pairing of Outline/RemoveOutline, and
+                // strands the parent's disableHighlightInteraction) and round-279 (a bare StopPlacingItem
+                // leaves the PlacementMode navigation blocker held = total interaction wedge). Only when
+                // the local player is inside THIS house: an outside viewer's placement is elsewhere.
+                try
+                {
+                    if (insidePlot && BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode)
+                    {
+                        string placedId = "", parentId = "";
+                        try { placedId = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced?.GetItemInstance()?.id?.ToString() ?? ""; } catch { }
+                        try { parentId = BigAmbitions.PlacementSystem.PlacementSystem.lastParentItem?.GetItemInstance()?.id?.ToString() ?? ""; } catch { }
+                        // Round-48b: the redraw never touches the actively-placed item (the destroy pass
+                        // defers it), so abort only for the PARENT changing or a full rebuild.
+                        bool touched = fullRebuild
+                            || (!string.IsNullOrEmpty(parentId) && (changedIds!.Contains(parentId) || (removedIds?.Contains(parentId) ?? false)));
+                        if (touched)
+                        {
+                            Plugin.Logger.LogWarning($"[Hamptons] incremental redraw intersects a LIVE placement (placed={placedId} parent={parentId}) — running the FULL native cancel so nothing strands (round-279).");
+                            try
+                            {
+                                Buildings.Indoors.InteriorDesign.PlacementHelper.CancelPlacementMode(true);
+                            }
+                            catch (Exception cex)
+                            {
+                                Plugin.Logger.LogWarning($"[Hamptons] CancelPlacementMode threw ({cex.Message}) — fallback: StopPlacingItem + explicit blocker/time-control/autosave release (round-279).");
+                                try { BigAmbitions.PlacementSystem.PlacementSystem.StopPlacingItem(); } catch { }
+                                try { InstanceBehavior<GameManager>.Instance.playerController.UnsetNavigationBlocker(NavigationBlocker.PlacementMode); } catch { }
+                                try { InstanceBehavior<UI.UIs>.Instance.gameSpeed.DisableTimeControl(false); } catch { }
+                                try { GameManager.preventAutoSave = false; } catch { }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] placement-intersect guard: {ex.Message}"); }
+
+                // ── destroy pass (over a copy: the list is mutated below) ────────────────────────
+                int failed = 0;
+                try
+                {
+                    var current = new List<ItemController>(hh.allItemControllers);
+                    foreach (var ic in current)
+                    {
+                        if (ic == null) continue;
+                        // Stage 0 hands rule (F-2026-08-25-A): never destroy the object that IS the item
+                        // in the local player's hands — REFERENCE identity, not id or address.
+                        try
+                        {
+                            if (ic.ItemInstance != null
+                                && object.ReferenceEquals(ic.ItemInstance, PlayerHelper.ItemInstanceInHands))
+                                continue;
+                        }
+                        catch { }
+                        string id = "";
+                        try { id = ic.ItemInstance?.id ?? ""; } catch { }
+                        bool isChanged = changedIds != null && changedIds.Contains(id);
+                        bool isRemoved = removedIds != null && removedIds.Contains(id);
+                        // Round-48b: NEVER destroy the item actively being placed — changed OR removed.
+                        if ((isChanged || isRemoved) && !fullRebuild && !string.IsNullOrEmpty(id))
+                        {
+                            try
+                            {
+                                if (BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode
+                                    && (BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced?.GetItemInstance()?.id?.ToString() ?? "") == id)
+                                {
+                                    liveById[id] = ic;   // counts as a survivor → the spawn pass skips it
+                                    continue;
+                                }
+                            }
+                            catch { }
+                        }
+                        if (!(fullRebuild || string.IsNullOrEmpty(id) || isChanged || isRemoved))
+                        {
+                            if (!liveById.ContainsKey(id)) liveById[id] = ic;
+                            continue;
+                        }
+                        // Round-278: attached children are Unity transform children and would die with
+                        // the parent AFTER the spawn pass recorded them as survivors. Detach SCENE-side
+                        // only (the native RemoveFromParentPlaceableItem would also erase the parent's
+                        // stackedItems DATA record, which the apply just wrote authoritatively); the
+                        // re-link pass below re-attaches them to the respawned parent.
+                        try
+                        {
+                            if (ic.childItemControllers != null && ic.childItemControllers.Count > 0)
+                            {
+                                var rescue = new List<ItemController>(ic.childItemControllers);
+                                foreach (var kid in rescue)
+                                {
+                                    if (kid == null) continue;
+                                    try
+                                    {
+                                        kid.parentItemController = null;
+                                        kid.parentAttachmentPoint = null;
+                                        kid.transform.SetParent(hh.itemsContainer, true);
+                                    }
+                                    catch { }
+                                }
+                                ic.childItemControllers.Clear();
+                            }
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] child rescue for '{id}': {ex.Message}"); }
+                        killedControllers.Add(ic);
+                        try { hh.allItemControllers.Remove(ic); } catch { }
+                        try { hh._itemsVisible.Remove(ic); } catch { }   // native's city-map hidden set: a destroyed entry would be re-Shown on map close
+                        // SALE-DETACH-1: the in-place policy KEEPS this controller's ItemInstance alive —
+                        // detach its cargo subscriptions before the object goes.
+                        try { DetachCargoCallbacks(ic); } catch { }
+                        UnityEngine.Object.Destroy(ic.gameObject);
+                        destroyed++;
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] item destroy pass: {ex.Message}"); }
+
+                // ── spawn pass: changed ids + any id with no surviving controller ────────────────
+                try
+                {
+                    if (reg.itemInstances != null)
+                    {
+                        foreach (var kv in reg.itemInstances)
+                        {
+                            var ii = kv.Value;
+                            if (ii == null) continue;
+                            if (!fullRebuild && liveById.ContainsKey(kv.Key)) continue;   // untouched
+                            try
+                            {
+                                var ic = bm.InstantiateSingleInstance(ii, hh.itemsContainer, false);
+                                if (ic == null) { failed++; continue; }
+                                ic.loadedInHamptonsHouse = true;             // native HamptonsHouse.cs:373
+                                hh.allItemControllers.Add(ic);
+                                if (mapOpen) { try { ic.Hide(); hh._itemsVisible.Add(ic); } catch { } }
+                                if (insidePlot) { try { hh.ToggleSecondFloorItem(hh.currentHeightIndex == 1, ic, roofY); } catch { } }
+                                spawned++;
+                            }
+                            catch (Exception ex)
+                            {
+                                failed++;
+                                if (failed <= 3) Plugin.Logger.LogWarning($"[Hamptons] InstantiateSingleInstance id={ii.id}: {ex.Message}");
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] item spawn pass: {ex.Message}"); }
+
+                // ── re-link stacked children to their (possibly just respawned) parents ──────────
+                try
+                {
+                    bool anyStacked = false;
+                    if (reg.itemInstances != null)
+                        foreach (var kv in reg.itemInstances)
+                            if (kv.Value?.stackedItems != null && kv.Value.stackedItems.Count > 0) { anyStacked = true; break; }
+                    if (anyStacked && reg.itemInstances != null && (spawned > 0 || destroyed > 0))
+                    {
+                        var nowById = new Dictionary<string, ItemController>();
+                        foreach (var c in hh.allItemControllers)
+                        {
+                            if (c == null || killedControllers.Contains(c)) continue;
+                            string cid = ""; try { cid = c.ItemInstance?.id ?? ""; } catch { }
+                            if (!string.IsNullOrEmpty(cid)) nowById[cid] = c;
+                        }
+                        int reattached = 0;
+                        foreach (var kv in reg.itemInstances)
+                        {
+                            var pi = kv.Value;
+                            if (pi?.stackedItems == null || pi.stackedItems.Count == 0) continue;
+                            if (!nowById.TryGetValue(kv.Key, out var pic) || pic == null) continue;
+                            foreach (var st in pi.stackedItems)
+                            {
+                                if (st == null || string.IsNullOrEmpty(st.childId)) continue;
+                                if (!nowById.TryGetValue(st.childId, out var kidIc) || kidIc == null) continue;
+                                try
+                                {
+                                    if (kidIc.parentItemController != null) continue;   // already attached
+                                    var pts = pic.AttachmentPoints;
+                                    if (pts == null || st.attachmentIndex < 0 || st.attachmentIndex >= pts.Length) continue;
+                                    kidIc.SetToParentPlaceableItem(pic, pts[st.attachmentIndex]);
+                                    reattached++;
+                                }
+                                catch { }
+                            }
+                        }
+                        // Tripwire: a data id with NO live controller after the spawn pass is an ORPHAN.
+                        int orphans = 0;
+                        foreach (var kv in reg.itemInstances)
+                            if (kv.Value != null && !nowById.ContainsKey(kv.Key)) orphans++;
+                        if (orphans > 0)
+                            Plugin.Logger.LogWarning($"[Hamptons] incremental redraw left {orphans} ORPHAN id(s) (data present, no live object) in '{GameStateReader.AddressKey(reg)}' — report this (reattached={reattached}).");
+                        else if (reattached > 0)
+                            Plugin.Logger.LogInfo($"[Hamptons] re-link pass: {reattached} child(ren) re-attached.");
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] re-link pass: {ex.Message}"); }
+
+                // ── move pass (round-22): a transform-only delta keeps its live GameObject ───────
+                try
+                {
+                    if (movedIds != null && reg.itemInstances != null)
+                        foreach (var id in movedIds)
+                        {
+                            if (!liveById.TryGetValue(id, out var ic) || ic == null) continue;   // no survivor → the spawn pass covered it
+                            if (!reg.itemInstances.TryGetValue(id, out var ni) || ni == null) continue;
+                            try
+                            {
+                                ic.ItemInstance = ni;
+                                ic.transform.position = ni.position;
+                                ic.transform.rotation = ni.Rotation;
+                                // FOLD V7: the pose just changed, so the floor this item belongs to may have
+                                // changed with it — re-run native's own visibility rule, exactly as the spawn
+                                // pass does and only while the player is inside the plot (HamptonsHouse.cs:380).
+                                if (insidePlot) { try { hh.ToggleSecondFloorItem(hh.currentHeightIndex == 1, ic, roofY); } catch { } }
+                                moved++;
+                            }
+                            catch { }
+                        }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] item move pass: {ex.Message}"); }
+
+                // Native closes every load with this (HamptonsHouse.cs:363) — it is what re-parents the
+                // controllers the spawn pass just made.
+                if (destroyed > 0 || spawned > 0 || moved > 0)
+                    try { bm.SetUpItemControllersParents(hh.allItemControllers); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] SetUpItemControllersParents: {ex.Message}"); }
+                if (failed > 0)
+                    Plugin.Logger.LogWarning($"[Hamptons] incremental redraw of '{GameStateReader.AddressKey(reg)}': {failed} item(s) failed to spawn.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] RefreshHamptonsItems: {ex.Message}"); }
+        }
+
+        /// <summary>D3b: this machine's interior BASELINES for an address are statements about a copy we
+        /// have just discarded — the S4-lite duplicate test, the per-id and per-UUID diff baselines and the
+        /// struct version would all measure a future serve against furniture that is no longer here (an
+        /// identical re-serve would be skipped as "already applied" and the house would stay empty).
+        /// Forgetting them makes the next serve for this address land as news, in full.</summary>
+        /// <summary>D3b (fold V1) — the ONLY way into the vacated-house clear. Callers must be explicit,
+        /// address-naming tenancy-END events from the authority: the client's vacate notify
+        /// (ApplyBuildingVacated), and the host's SaleCompleted reflection (MPServer.HandleSaleCompleted —
+        /// a deed END; CancelSale is NOT one, so HostRemoveFromForSale is deliberately not the hook).
+        /// Never a predicate, never an inference. Read 2026-09-19: neither MakeRegVacant (:6809-6816) nor
+        /// HostReflectPlayerVacate (:6790-6800) nor the client's own vacate writes touch itemInstances, so
+        /// the house is NOT emptied for anyone today — this is what does it.</summary>
+        internal static void ClearHamptonsInteriorOnTenancyEnd(string addressKey, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey)) return;
+                var reg = FindRegistration(addressKey);
+                if (reg?.BuildingCached == null || !reg.BuildingCached.IsHamptonsHouse()) return;
+                HamptonsAccess.ClearVacatedInterior(reg, addressKey, why);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Hamptons] tenancy-end clear '{addressKey}': {ex.Message}"); }
+        }
+
+        internal static void ForgetInteriorBaselines(string addressKey)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey)) return;
+                _lastItemSer.Remove(addressKey);
+                _lastDesignSer.Remove(addressKey);
+                _lastAppliedSig.Remove(addressKey);
+                _lastAppliedLocalTag.Remove(addressKey);
+                _lastAppliedStructVersion.Remove(addressKey);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ForgetInteriorBaselines '{addressKey}': {ex.Message}"); }
         }
 
         private static void TryRefreshActiveInteriorIfMatches(string addressKey,
@@ -3248,6 +3611,28 @@ namespace BigAmbitionsMP
                 if (matched == null) return;
                 var reg = matched.buildingRegistration;
                 if (reg == null || reg.interiorDesigns == null) return;
+
+                // FOLD V3 (2026-09-19): EnterHamptonsBuilding sets BOTH `building` and
+                // `buildingRegistration` (BuildingManager.cs:647 / :659), so this refresh DOES match for a
+                // granted guest standing on a Hamptons plot — and it respawns through IndoorItemContainer
+                // (which redirects to the house's own itemsContainer, :189-199) WITHOUT adding to
+                // hh.allItemControllers and WITHOUT stamping loadedInHamptonsHouse, after which
+                // RefreshHamptonsItems spawns the very same ids a second time. RULE: for a Hamptons
+                // address exactly ONE refresher runs, and it is the house-correct one.
+                // The LOCAL TENANT/OWNER is the exception and keeps this path: their own house is built by
+                // native EnterHamptonsBuilding → LoadBuilding → LoadItems, this refresh is what keeps that
+                // build current, and the Hamptons redraw declines them by its owner gate.
+                try
+                {
+                    var hampt = reg.BuildingCached;
+                    if (hampt != null && hampt.IsHamptonsHouse() && !(reg.RentedByPlayer || reg.BuildingOwnedByPlayer))
+                    {
+                        if (_hamptonsDeclineLines++ < 10)
+                            Plugin.Logger.LogInfo($"[Hamptons] active-building refresh declined for '{addressKey}' — a Hamptons house this machine does not hold is redrawn by RefreshHamptonsItems alone (fold V3).");
+                        return;
+                    }
+                }
+                catch { }
 
                 // For AI businesses (CoffeeShop, FastFoodRestaurant, etc.),
                 // the items come from the BusinessLayoutSet template named by
@@ -6511,7 +6896,22 @@ namespace BigAmbitionsMP
         /// <summary>HOST: reverse HostReflectPlayerRent — a player vacated their
         /// building, so clear the tenant mark and put it back in the for-rent pool in
         /// the host's OWN game. The deed field (landlord) stays.  MAIN THREAD.</summary>
-        public static void HostReflectPlayerVacate(string addressKey)
+        /// <summary>Is the native one-shot item load of this Hamptons house still running? NOT
+        /// `_itemsLoadCoroutine != null`: native never nulls that field after an ordinary LOD load
+        /// (HamptonsHouse.cs:349-356), so it stays non-null for the house's life. The load copies the registration's
+        /// items into `_itemsToInstantiate` and its coroutine adds exactly ONE controller to `allItemControllers` per
+        /// entry (:372-376), so 'fewer controllers than copied entries' is the in-flight window.</summary>
+        internal static bool HamptonsLoadInFlight(HamptonsHouse? hh)
+        {
+            try
+            {
+                if (hh == null || hh._itemsLoadCoroutine == null) return false;
+                return hh.allItemControllers.Count < hh._itemsToInstantiate.Count;
+            }
+            catch { return false; }
+        }
+
+        public static void HostReflectPlayerVacate(string addressKey, bool ledgerNamedSender = false)
         {
             try
             {
@@ -6519,6 +6919,15 @@ namespace BigAmbitionsMP
                 if (reg == null) { Plugin.Logger.LogWarning($"[Patcher/Host] vacate reflect: no reg for '{addressKey}'."); return; }
                 MakeRegVacant(reg);
                 Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey} vacated — back on the for-rent market (name/type cleared, round-260).");
+                // D3b (fold V1b): the host's reflection of a player's terminate is an explicit, address-naming tenancy
+                // END - the same positive evidence the client vacate apply acts on. MakeRegVacant leaves itemInstances
+                // alone, and the host's copy is the one every viewer is served from, so a Hamptons house is emptied
+                // here too (the entry point gates on Hamptons / not-mine / multiplayer itself).
+                // Re-check HIGH (2026-09-19): HandleVacateRequest honours a vacate whose owner the ledger does not
+                // know. Flipping flags on that was harmless; DELETING the authoritative furniture is not - so the
+                // clear needs the ledger to have named the sender as this address's tenant.
+                if (ledgerNamedSender) ClearHamptonsInteriorOnTenancyEnd(addressKey, "vacate (host reflect)");
+                else Plugin.Logger.LogInfo($"[Patcher/Host] {addressKey}: the rent ledger did not name the vacating player - flags reflected, interior left untouched.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectPlayerVacate: {ex.Message}"); }
         }
