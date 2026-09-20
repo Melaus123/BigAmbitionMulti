@@ -881,6 +881,49 @@ namespace BigAmbitionsMP
                     return scSb.ToString();
                 }
 
+                // ── H-SCHEDNULL-1 census (READ-ONLY) ────────────────────────
+                // `schednull <addressKey>` counts shifts with NO employee id: in the registration's own
+                // schedule days, and — only when the BizMan schedule page is on THIS business — inside
+                // ScheduleHelper's two private cache dictionaries (reflection; a ghost cached before it was
+                // nulled sits in BOTH, so one ghost counts twice).  cacheNull=-1 means "not this business's
+                // page, nothing read".  The rig never opens the page, so it always reads -1 there.
+                case "schednull":
+                {
+                    if (arg.Length == 0) return "ERR usage: schednull <addressKey>";
+                    var snReg = GameStatePatcher.FindRegistration(arg);
+                    if (snReg == null) return $"ERR no registration for '{arg}'";
+                    int snDay = 0;
+                    if (snReg.scheduleDays != null)
+                        foreach (var sd in snReg.scheduleDays)
+                        {
+                            if (sd?.workShifts == null) continue;
+                            foreach (var w in sd.workShifts) if (w != null && w.employeeId == null) snDay++;
+                        }
+                    int snCache = -1;
+                    bool snOpen = false;
+                    try
+                    {
+                        var snBiz = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.Business;
+                        if (snBiz != null && ReferenceEquals(snBiz.buildingRegistration, snReg))
+                        {
+                            try { snOpen = SharedShopSchedule.IsScheduleTabOpenFor(snReg); } catch { }
+                            snCache = 0;
+                            var snT = typeof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper);
+                            foreach (var snName in new[] { "WorkShiftsByWorkstationId", "WorkShiftsByEmployeeId" })
+                            {
+                                var snProp = HarmonyLib.AccessTools.Property(snT, snName);
+                                if (snProp?.GetValue(null) is not System.Collections.IDictionary snDict) continue;
+                                foreach (System.Collections.DictionaryEntry snEntry in snDict)
+                                    if (snEntry.Value is System.Collections.IEnumerable snList)
+                                        foreach (var snItem in snList)
+                                            if (snItem is WorkShift snWs && snWs.employeeId == null) snCache++;
+                            }
+                        }
+                    }
+                    catch { snCache = -1; }
+                    return $"OK schednull {arg} dayNull={snDay} cacheNull={snCache} pageOpen={snOpen}";
+                }
+
                 // ── round-238 zombie-ledger synthesis ─────────────────────────
                 case "ledgerdrop":
                 {

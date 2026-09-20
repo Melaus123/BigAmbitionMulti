@@ -4076,12 +4076,34 @@ namespace BigAmbitionsMP
         // absent for a while — a partner's staff not yet delivered), so the shift is
         // not ours to delete or rewrite.  The colour is the last statement in SetUp:
         // swallowing ONLY the missing-key case loses nothing but the tint.
+        // H-SCHEDNULL-1 (2026-09-21): a second, different failure reaches the same
+        // statement.  A shift whose employeeId is NULL makes the dictionary lookup
+        // throw ArgumentNullException instead (bundle 20260920-154253, 15x).  Native
+        // ScheduleDay.RemoveAllWorkShiftsThatMatchPredicate is the only writer of a
+        // null id, and it removes the shift from the day right after nulling it, so
+        // the only place such a shift can still be DRAWN from is ScheduleHelper's
+        // stale cache.  MPRegisterSync + SharedShopSchedule.NoteShiftsRemoved stop it
+        // being cached; this arm is the last line of defence, and it too loses only
+        // the tint.
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider), "SetUp")]
         public static class Patch_WorkShiftSlider_SetUp_OrphanColourGuard
         {
             private static readonly System.Collections.Generic.HashSet<string> _loggedIds = new();
             static Exception? Finalizer(Exception __exception, WorkShift __2)
             {
+                if (__exception is System.ArgumentNullException)
+                {   // H-SCHEDNULL-1: only the NO-ID case is ours; any other null argument is a real fault
+                    bool nullId = false;
+                    try { nullId = __2 != null && __2.employeeId == null; } catch { }
+                    if (!nullId) return __exception;
+                    try
+                    {
+                        if (_loggedIds.Add($"{__2?.itemInstanceId}|<null-id>"))
+                            Plugin.Logger.LogWarning($"[ScheduleDiag] SetUp: shift with NO employee id at station '{__2?.itemInstanceId}' h{__2?.startingHour}-{__2?.endingHour} — colour skipped (H-SCHEDNULL-1).");
+                    }
+                    catch { }
+                    return null;
+                }
                 if (__exception is not System.Collections.Generic.KeyNotFoundException) return __exception;
                 try
                 {
@@ -4104,6 +4126,11 @@ namespace BigAmbitionsMP
         // "New Text".  Swallow ONLY that case: label the slider "(missing
         // staff)", hide the warning icon, and log (throttled per id).  Any
         // exception with a RESOLVABLE employee is rethrown — not our case.
+        // H-SCHEDNULL-1 (2026-09-21) re-read: a NULL employeeId is already safe here.
+        // `__0?.employeeId ?? ""` turns it into the empty string, the GetEmployeeById
+        // call is itself try/caught, and an empty id resolves to no employee — so a
+        // null-id shift takes the same path as an unknown one and ends at the existing
+        // "(missing staff)" label.  Nothing added; the throttle set keys on "" once.
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider), "UpdateState")]
         public static class Patch_WorkShiftSlider_UpdateState_OrphanGuard
         {

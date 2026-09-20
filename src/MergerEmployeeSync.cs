@@ -541,6 +541,10 @@ namespace BigAmbitionsMP
                 Note("shift", shifts);
                 Note("vehicle-slot", slots);
                 Note("schedule-cache", ScrubScheduleCaches(id));
+                // H-SCHEDNULL-1 (review M-2): the removal above ran native's nulling predicate over EVERY registration,
+                // and ScrubScheduleCaches matches cached shifts by employeeId == id - which native had already nulled.
+                // Rebuild whichever schedule page is open (null = 'the business on screen'), whatever building it shows.
+                SharedShopSchedule.NoteShiftsRemoved(null, "reference-scrub");
 
                 int todos = 0;
                 try { if (gi.TodoTasks != null) todos = gi.TodoTasks.RemoveAll(t => t != null && t.employeeId == id); } catch { }

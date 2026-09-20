@@ -1435,15 +1435,23 @@ namespace BigAmbitionsMP
                     if (fillReg != null) UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule.AbortAutoFillForBusiness(fillReg);
                 }
                 catch { }
-                try { Helpers.EmployeeHelper.UnassignEmployeeFromAllWorkshifts(s.inst); }
-                catch (Exception ux) { Plugin.Logger.LogWarning($"[SynthStaff] unassign: {ux.Message}"); }
                 var gi = SaveGameManager.Current;
+                // H-SCHEDNULL-1 (2026-09-21): THE ORDER OF THE NEXT TWO BLOCKS MATTERS.  Our own strip runs
+                // FIRST, the native unassign second.  Native RemoveAllWorkShiftsThatMatchPredicate
+                // (ScheduleDay.cs:40-59) sets employeeId = null on every matching shift BEFORE dropping it
+                // from the day; an OPEN schedule page still holds that very WorkShift object in
+                // ScheduleHelper's cache, and a null id makes GetEmployeeColor throw ArgumentNullException
+                // inside WorkShiftSlider.SetUp (field bundle 20260920-154253, 15x).  Stripping first with
+                // day.RemoveWorkShift (which never nulls) leaves the native pass nothing to match, so it
+                // nulls nothing; the rest of its housekeeping (UnAssignWork, to-dos) still runs after it.
+                BuildingRegistration? strippedReg = null;
                 try
                 {
                     if (gi?.BuildingRegistrations != null)
                         foreach (var r in gi.BuildingRegistrations)
                         {
                             if (r == null || GameStateReader.AddressKey(r) != addressKey) continue;
+                            strippedReg = r;   // H-SCHEDNULL-1: captured BEFORE the unassign, which clears assignedAddress
                             if (r.scheduleDays != null)
                                 for (int i = 0; i < r.scheduleDays.Count; i++)
                                 {
@@ -1461,6 +1469,9 @@ namespace BigAmbitionsMP
                         }
                 }
                 catch (Exception sx) { Plugin.Logger.LogWarning($"[SynthStaff] shift strip: {sx.Message}"); }
+                try { Helpers.EmployeeHelper.UnassignEmployeeFromAllWorkshifts(s.inst); }
+                catch (Exception ux) { Plugin.Logger.LogWarning($"[SynthStaff] unassign: {ux.Message}"); }
+                SharedShopSchedule.NoteShiftsRemoved(strippedReg, "synthetic-retire");   // H-SCHEDNULL-1: an open page draws from the CACHE, not the day list
                 if (gi?.EmployeeInstances != null) gi.EmployeeInstances.Remove(s.inst);
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.inst.id); } catch { }
                 try { var ev = MergerEmployeeSync.CountShiftsNaming(gi, s.inst.id); MergerEmployeeSync.LogStaffRemoval("synthetic-retire", s.inst.id, MergerEmployeeSync.StaffNameOf(s.inst), ev.shifts, ev.regs); } catch { }   // STAFF-EVIDENCE-1

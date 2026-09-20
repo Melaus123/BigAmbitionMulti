@@ -3521,6 +3521,7 @@ namespace BigAmbitionsMP
                 if (MPServer.IsRunning || MPClient.IsConnected)
                 {
                     MPClient.InMpGame = true;   // sticky: entering an MP game world (survives transient drops)
+                    MPLifecycle.NoteLocalSceneLoaded();   // M1: the stuck-load clock restarts HERE, not at the lobby transition
                     _sceneLoadedPendingFreeze = true;
                     _pendingFreezeElapsed = 0f;
                     _freezeGateDiagNext = 0f;   // heartbeat restarts with the gate
@@ -3737,7 +3738,17 @@ namespace BigAmbitionsMP
                 // while time runs so the world can still populate; released at the
                 // group release.  CasinoEntrySequence: never legitimately active at
                 // session start, untouched by the rounds-195/198 blocker heals.
-                if (!HostSoftHoldActive)
+                //
+                // M2 (2026-09-21, bundle 20260919-232628, 2/2 worlds): the engage used to run while the
+                // game's own loading overlay was still up, and native PlayerController.SetNavigationBlocker
+                // (PlayerController.cs:501-517) ADDS the blocker and THEN throws in that window — the hold
+                // was really on, HostSoftHoldActive was not, and only the next tick's "already set"
+                // early-return healed it.  Little is lost by waiting for overlayGone: the gate ticks every
+                // frame (IsLoadingOverlayUp caches its answer for 0.25 s, so the hold lands at most that long
+                // after the overlay really clears), and this still sits ABOVE the
+                // world-ready branch, so even when overlayGone && carsReady are true on the very first tick
+                // the hold is engaged before the release that has to release it.
+                if (!HostSoftHoldActive && overlayGone)
                 {
                     try
                     {
@@ -3749,7 +3760,16 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogInfo("[FreezeGate] host soft-hold ENGAGED — movement locked while the world populates (round-205).");
                         }
                     }
-                    catch (Exception ex) { Plugin.Logger.LogWarning($"[FreezeGate] soft-hold engage: {ex.Message}"); }
+                    catch (Exception ex)
+                    {   // Review M-4: native ADDS the blocker before the statement that can throw, so after a throw
+                        // the hold is really ON. Own it, or - when this is also the release tick - the gate stops
+                        // ticking, ReleaseHostSoftHold early-returns on the false flag and the blocker is never
+                        // unset. Unsetting a blocker that is not set only logs (PlayerController.cs:519-525).
+                        HostSoftHoldActive = true;
+                        // M2: the type and the throwing frame, or the field log cannot tell WHERE native died
+                        string frame0 = ""; try { frame0 = (ex.StackTrace ?? "").Split('\n')[0].Trim(); } catch { }
+                        Plugin.Logger.LogWarning($"[FreezeGate] soft-hold engage: {ex.GetType().Name}: {ex.Message} — at {frame0}");
+                    }
                 }
                 bool carsReady = HostWorldHasVehicles();
                 DiagHostReadiness(overlayGone, carsReady);

@@ -1,0 +1,122 @@
+{
+  "id": "T-SCHEDNULL",
+  "title": "H-SCHEDNULL-1: retiring a duty stand-in never leaves a shift with NO employee id behind. The mod's own strip now runs BEFORE the native unassign, so native's RemoveAllWorkShiftsThatMatchPredicate (which nulls employeeId before dropping the shift) finds nothing to match and nulls nothing. The host injects a duty synthetic at one of its own rented buildings and retires it through the real RemoveSynthetic path (DEV lever `schedfilter`), then the read-only `schednull` census must report dayNull=0. Also carries the M2 freeze-gate evidence for the host's load. NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1). Dev build with the levers settype / schedfilter / schednull (BAMP_DEV). The host must rent at least one registration with a business type - the `settype` discovery step fails loudly if none does. FIXTURE HYGIENE: nothing is saved.",
+  "note": "SCOPE LIMIT: the rig cannot open the BizMan Schedule page, so `schednull` always reports cacheNull=-1 and pageOpen=False here. What this run proves is the DAY side - that no null-id shift is ever created - which is the half that feeds the cache. The open-page half (SharedShopSchedule.NoteShiftsRemoved re-caching the page, and the WorkShiftSlider.SetUp ArgumentNullException guard) stays review-verified.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "\\[FreezeGate\\] soft-hold engage:",
+    "STUCK IN"
+  ],
+  "oracles_report": [
+    "\\[ScheduleDiag\\]",
+    "\\[SynthStaff\\] "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[FreezeGate\\] host soft-hold ENGAGED",
+          "within_s": 240
+        },
+        {
+          "role": "h",
+          "regex": "\\[FreezeGate\\] host soft-hold RELEASED",
+          "within_s": 300
+        }
+      ],
+      "note": "M2 rig evidence: the engage now waits for the loading overlay to clear, so it must still happen (and still be released at the group release); oracles_absent proves it no longer throws, and that no stuck-load warning fires on a normal load (M1)"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST SCHEDNULL START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "the worlds settle before anything is injected"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "settype",
+      "expect_result": "^OK settype rented=\\[[^\\]]+=",
+      "capture": {
+        "shop": "rented=\\[([^|=\\]]+)="
+      },
+      "note": "PRECONDITION: the host rents at least one typed building; the first one is where the stand-in is injected"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "schednull ${shop}",
+      "expect_result": "^OK schednull .* dayNull=0 cacheNull=-1 pageOpen=False$",
+      "note": "BASELINE: the fixture holds no null-id shift, so anything the run finds afterwards was made by the retire"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "schedfilter ${shop}",
+      "expect_result": "^OK rows\\(list\\)=0 dict=[1-9]",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[SynthStaff\\] staff NPC removed",
+          "within_s": 30
+        }
+      ],
+      "note": "THE PREMISE: dict>=1 proves a duty synthetic really was injected, and the log line proves it was retired through RemoveSynthetic - the exact path whose block order this effort changed"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "schednull ${shop}",
+      "expect_result": "^OK schednull .* dayNull=0 cacheNull=-1 pageOpen=False$",
+      "note": "THE ASSERTION: the retire left no shift with a null employee id in any of the building's schedule days - the state that made the open schedule page throw in bundle 20260920-154253"
+    },
+    {
+      "seq": 12,
+      "role": "both",
+      "cmd": "mark TEST SCHEDNULL END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

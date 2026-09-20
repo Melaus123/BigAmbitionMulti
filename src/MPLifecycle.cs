@@ -37,6 +37,7 @@ namespace BigAmbitionsMP
         private static float _nextCheckAt;
         private static float _loadingSince;
         private static bool  _stuckWarned;
+        private static bool  _localSceneLoaded;   // M1: has THIS machine's game scene finished loading yet?
         private static float _lastHour = -1f;
         private static float _lastHourChangeAt;
         private static float _readyStableSince;
@@ -44,7 +45,7 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             Set(MPPhase.None, "reset");
-            _loadingSince = 0f; _stuckWarned = false;
+            _loadingSince = 0f; _stuckWarned = false; _localSceneLoaded = false;
             _lastHour = -1f; _lastHourChangeAt = 0f; _readyStableSince = 0f;
         }
 
@@ -117,10 +118,19 @@ namespace BigAmbitionsMP
                 if (!ready)
                 {
                     Set(MPPhase.Loading, $"clock={clockAlive} overlay={overlayUp} manual={TimeSync.ManualPaused} startup={TimeSync.IsStartupHeld} ahead={TimeSync.AheadHeld} hourAge={hourAge:F1}s");
-                    if (_loadingSince > 0f && !_stuckWarned && Time.unscaledTime - _loadingSince > 60f)
+                    // M1 (2026-09-21): this used to be one 60 s test stamped at the Lobby→Loading
+                    // transition, so LOBBY DWELL and BOTH players' scene loads counted against it — it fired
+                    // on a perfectly normal load 1 s after the host's scene came in (bundle 20260919-232628).
+                    // Two windows now: until the LOCAL scene has loaded (NoteLocalSceneLoaded re-stamps) a
+                    // generous 300 s, and only after that the 60 s "load-finish never completed" test.
+                    float stuckLimit = _localSceneLoaded ? 60f : 300f;
+                    if (_loadingSince > 0f && !_stuckWarned && Time.unscaledTime - _loadingSince > stuckLimit)
                     {
                         _stuckWarned = true;
-                        Plugin.Logger.LogWarning($"[Lifecycle] STUCK IN LOADING >60s (clock={clockAlive} overlay={overlayUp}) — load-finish never completed.");
+                        if (_localSceneLoaded)
+                            Plugin.Logger.LogWarning($"[Lifecycle] STUCK IN LOADING >60s (clock={clockAlive} overlay={overlayUp}) — load-finish never completed.");
+                        else
+                            Plugin.Logger.LogWarning($"[Lifecycle] STUCK IN SCENE LOAD >300s (clock={clockAlive} overlay={overlayUp}) — the local game scene never finished loading.");
                     }
                     return;
                 }
@@ -165,6 +175,16 @@ namespace BigAmbitionsMP
         /// leaving the demotion cause unprovable).</summary>
         public static string LastSetReason { get; private set; } = "";
 
+        /// <summary>M1: the LOCAL game scene has finished loading (called where MPCanvasUI arms the freeze
+        /// gate).  Re-stamps the loading clock so the stuck test measures the wait THIS machine is actually
+        /// in — world populate + the other players — and not the lobby dwell and our own scene load.</summary>
+        internal static void NoteLocalSceneLoaded()
+        {
+            _localSceneLoaded = true;
+            _loadingSince = Time.unscaledTime;
+            _stuckWarned = false;
+        }
+
         private static void Set(MPPhase next, string why)
         {
             if (next == Phase) return;
@@ -172,7 +192,7 @@ namespace BigAmbitionsMP
             Phase = next;
             LastSetReason = why;
             if (next == MPPhase.Loading) { _loadingSince = Time.unscaledTime; _stuckWarned = false; }
-            else _loadingSince = 0f;
+            else { _loadingSince = 0f; _localSceneLoaded = false; }   // M1: leaving Loading also drops the scene-load flag
             Plugin.Logger.LogInfo($"[Lifecycle] {prev} → {next} ({why})");
             try { PhaseChanged?.Invoke(prev, next); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Lifecycle] subscriber: {ex.Message}"); }
         }

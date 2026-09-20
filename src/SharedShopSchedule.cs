@@ -1175,6 +1175,63 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} redraw: {ex.InnerException?.Message ?? ex.Message}"); }   // reflection wraps the real exception
         }
 
+        // ── H-SCHEDNULL-1: re-cache an OPEN schedule page after a MOD shift removal ──────
+        // The page does NOT draw from the day list.  BizManSchedule.OnDaySelected caches the selected day's
+        // shifts into ScheduleHelper's two private dictionaries (ScheduleHelper.cs:262-270) and the sliders
+        // read those, so a mod removal that touches only the day list leaves a GHOST WorkShift on screen.
+        // If native RemoveAllWorkShiftsThatMatchPredicate got there first it also nulled that object's
+        // employeeId, and drawing it throws ArgumentNullException in WorkShiftSlider.SetUp (H-SCHEDNULL-1,
+        // bundle 20260920-154253); right-clicking it then NREs in RemoveShiftFromCache, because the day no
+        // longer holds the shift native's RemoveWorkShift looks for.  RedrawScheduleTab above is the heavy
+        // cousin (re-fetch staff + stations + day buttons) for when the DAYS THEMSELVES were replaced; this
+        // is the cheap one — rebuild the cache from the day on screen and redraw the rows in place, keeping
+        // the player's scroll position and the station list.
+        private const int RecacheLogBudget = 20;
+        private static int _recacheLogged;
+        internal static void NoteShiftsRemoved(BuildingRegistration? reg, string site)
+        {
+            try
+            {
+                // reg == null means 'a removal that may have touched ANY building' (the merger scrub walks every
+                // registration): the subject is then whichever business the page is showing.
+                if (reg == null) { try { reg = ScheduleHelper.Business?.buildingRegistration; } catch { } }
+                if (reg == null || !IsScheduleTabOpenFor(reg)) return;   // the game's own state: same business object, tab active
+                var cur = ScheduleHelper.CurrentScheduleDay;
+                var days = reg.scheduleDays;
+                if (cur == null || days == null) return;
+                bool present = false;
+                foreach (var d in days) if (ReferenceEquals(d, cur)) { present = true; break; }
+                if (!present)
+                {   // the day OBJECT was swapped under the page (owner truth / a rebuild): re-point at the
+                    // element for the same weekday, or there is nothing safe to re-cache from
+                    ScheduleDay? repl = null;
+                    foreach (var d in days) if (d != null && d.day == cur.day) { repl = d; break; }
+                    if (repl == null) return;
+                    ScheduleHelper.CurrentScheduleDay = repl;
+                }
+                // Review L-1: native CacheWorkShifts CLEARS both tables and then indexes a dictionary by each shift's
+                // employeeId - one null id would leave the page with a half-built cache. A day list never holds one
+                // by construction (native nulls and removes in the same step); if it ever does, leave the page alone
+                // and say so - the SetUp guard keeps it drawable.
+                var curDay = ScheduleHelper.CurrentScheduleDay;
+                if (curDay?.workShifts != null)
+                    foreach (var w in curDay.workShifts)
+                        if (w != null && w.employeeId == null)
+                        { Plugin.Logger.LogWarning($"[ScheduleDiag] re-cache skipped ({site}): the day list itself holds a shift with no employee id at station '{w.itemInstanceId}' (H-SCHEDNULL-1)."); return; }
+                ScheduleHelper.CacheWorkShifts();
+                // Review M-3: never recycle the cells under the player's hand - the drop's own EditWorkShift reloads.
+                if (!IsDragging())
+                ScheduleHelper.RequestScheduleScrollerReload.Invoke(false);   // false = do NOT rebuild the station rows, just ReloadData at the current scroll (ScheduleScrollerController.cs:78-91)
+                if (_recacheLogged < RecacheLogBudget)
+                {
+                    _recacheLogged++;
+                    string addr = ""; try { addr = GameStateReader.AddressKey(reg); } catch { }
+                    Plugin.Logger.LogInfo($"[ScheduleDiag] open schedule page of '{addr}' re-cached after a mod shift removal ({site}) (H-SCHEDNULL-1)");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[ScheduleDiag] re-cache after a mod shift removal ({site}): {ex.Message}"); }
+        }
+
         // ── H-SCHEDWIPE-1: the three OFF-TAB player mutators ──────────────────
         // The design read of 2026-09-18 found exactly three native routes that rewrite a day's shifts with no
         // Schedule tab open and without raising OnWorkShiftChanged. Each prefix resolves the affected address LIVE
@@ -1198,10 +1255,27 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(EmployeeHelper), nameof(EmployeeHelper.UnassignEmployeeFromAllWorkshifts))]
         public static class Patch_Unassign_ScheduleIntent
         {
-            static void Prefix(EmployeeInstance employeeInstance)
+            static void Prefix(EmployeeInstance employeeInstance, out BuildingRegistration? __state)
             {
-                try { if (employeeInstance != null && employeeInstance.assignedAddress != null) Touch(GameStateReader.AddressKey(employeeInstance.assignedAddress)); }
+                __state = null;
+                try
+                {
+                    if (employeeInstance != null && employeeInstance.assignedAddress != null)
+                    {
+                        Touch(GameStateReader.AddressKey(employeeInstance.assignedAddress));
+                        __state = BuildingHelper.GetBuildingRegistration(employeeInstance.assignedAddress);   // H-SCHEDNULL-1: native clears the address, so the building is captured here
+                    }
+                }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} WARNING Patch_Unassign_ScheduleIntent: {ex.Message}"); }
+            }
+
+            /// <summary>H-SCHEDNULL-1 (review M-1): native nulls each removed shift's employeeId and takes it out of the
+            /// DAY, but an OPEN schedule page draws from a cache nothing rebuilds - whoever called this (the mod's
+            /// routes, HR firing, RunDaily retirement). ONE re-cache here covers them all. Not routed through
+            /// Touch(): its simulation-pass guard would suppress exactly the retirement case.</summary>
+            static void Postfix(BuildingRegistration? __state)
+            {
+                if (__state != null) NoteShiftsRemoved(__state, "unassign-all-shifts");
             }
         }
 
