@@ -556,12 +556,55 @@ namespace BigAmbitionsMP
         }
     }
 
+    /// <summary>H-SKIPDOUBLE-1 (2026-09-20) - THE ONE till-duplicate arithmetic, shared by the DEV
+    /// lever `tilldupes` (TestDrive.cs) and by the corrective tripwire on ProcessDailyOrders below, so
+    /// the number a measurement reports and the number a removal reports can never drift apart.
+    /// WHAT AN EXTRA REFERENCE IS WORTH: at the day roll BusinessHelper.CreateDailyOrderHistory
+    /// (:234-261) walks reg.unprocessedCompletedOrders per LIST ELEMENT (filter: order.completed &amp;&amp;
+    /// any entry paid) and hands each to AddOrderSales (:280-296), which sums OrderEntry.price for
+    /// every entry that is available &amp;&amp; priceAccceptable &amp;&amp; paid into the day's totalRevenue -
+    /// the figure ProcessDailyOrders (:223-232) pays out with ChangeMoneySafe. So a SECOND reference
+    /// to the same Order is paid a second time, and ExtraReferenceValue reproduces exactly that sum.</summary>
+    internal static class TillDupes
+    {
+        /// <summary>net48 has no ReferenceEqualityComparer, and the question here is precisely whether the
+        /// SAME object sits in a list twice - value equality would answer a different question.
+        /// RuntimeHelpers.GetHashCode is the identity hash, unaffected by any Equals/GetHashCode the type
+        /// may define. Used for Order (the till list) and for CustomerEntry (the skip sim's set-aside).</summary>
+        internal sealed class RefEq<T> : IEqualityComparer<T> where T : class
+        {
+            public bool Equals(T a, T b) => ReferenceEquals(a, b);
+            public int GetHashCode(T o) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(o);
+        }
+
+        /// <summary>What ONE extra (duplicate) reference to this Order would be paid at the day roll.
+        /// Zero when the day roll would ignore it anyway (not completed, or nothing in it paid).</summary>
+        internal static double ExtraReferenceValue(Order? o)
+        {
+            if (o == null || !o.completed) return 0;        // the day roll skips it entirely
+            bool paid = false; double sum = 0;
+            if (o.entries != null)
+                foreach (var e in o.entries)
+                {
+                    if (e == null) continue;
+                    if (e.paid) paid = true;
+                    if (e.available && e.priceAccceptable && e.paid) sum += e.price;
+                }
+            return paid ? sum : 0;
+        }
+    }
+
     // DIAG:FIELD (promoted 2026-08-26) — the user cannot see the books; this names the money
     // truth at the exact moment it becomes money. BusinessHelper.ProcessDailyOrders is where a player
     // business's completed orders (live, forwarded, and simulated alike) turn into an order-history
     // entry + a ChangeMoneySafe revenue deposit, then clear. One line per business per daily processing:
     // customers, revenue, what portion arrived via forwarded helper-hosted orders, and the item tally.
-    // Observe-only. PERMANENT (user ruling 2026-08-26): the economic loop is the newest and least-tested
+    // The POSTFIX is observe-only. The PREFIX below is NOT: it is the H-SKIPDOUBLE-1 tripwire, the last
+    // gate before money moves, and it REMOVES duplicate references from the till list rather than only
+    // naming them - a duplicate that survives to here is paid out and cannot be taken back afterwards,
+    // so reporting alone would leave the user's books wrong. It lives on this patch because this is
+    // already the ProcessDailyOrders seam and both halves must see the same list.
+    // PERMANENT (user ruling 2026-08-26): the economic loop is the newest and least-tested
     // system in the mod, and without these lines a "my money is wrong" report arrives with nothing to
     // explain it. They are change-gated, so they cost a line only when something actually moves.
     [HarmonyPatch]
@@ -569,6 +612,39 @@ namespace BigAmbitionsMP
     {
         static System.Reflection.MethodBase? TargetMethod()
             => AccessTools.Method(typeof(BusinessHelper), "ProcessDailyOrders");
+
+        /// <summary>H-SKIPDOUBLE-1 TRIPWIRE (2026-09-20) - CORRECTIVE. Reference-de-duplicates the till
+        /// list immediately before the day roll reads it, keeping the FIRST occurrence of each Order.
+        /// Multiplayer only, and only on the machine that BOOKS this shop (my own, or an absent owner's shop
+        /// I stand in for) - never on a replica, whose list is not the one that pays.
+        /// It is a backstop, not the fix: the fix is Patch_RunHourly_SimulateOccupiedShopDuringSkip setting
+        /// walked-in shoppers aside from the skip's hourly sim (MPPatches.cs). A WARNING here means some
+        /// path still doubles an order, and the amount says what that would have cost.</summary>
+        static void Prefix(BuildingRegistration registration)
+        {
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            try
+            {
+                if (registration == null || !MergerFlip.BooksHere(registration)) return;
+                var till = registration.unprocessedCompletedOrders;
+                if (till == null || till.Count < 2) return;
+                var seen = new HashSet<Order>(new TillDupes.RefEq<Order>());
+                int removed = 0; double amount = 0;
+                for (int i = 0; i < till.Count; i++)
+                {
+                    var o = till[i];
+                    if (o == null) continue;
+                    if (seen.Add(o)) continue;                       // the first reference is the legitimate one
+                    amount += TillDupes.ExtraReferenceValue(o);      // THE shared formula - never a second one
+                    till.RemoveAt(i); i--; removed++;
+                }
+                if (removed > 0)
+                    Plugin.Logger.LogWarning(
+                        $"[EconProbe] TRIPWIRE duplicate till entries removed before payout '{registration.BusinessName}' " +
+                        $"@'{GameStateReader.AddressKey(registration)}': removed={removed} amount=${amount:F2}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[EconProbe] tripwire: {ex.Message}"); }
+        }
 
         static void Postfix(BuildingRegistration registration)
         {

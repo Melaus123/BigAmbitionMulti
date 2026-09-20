@@ -1,0 +1,384 @@
+{
+  "id": "T-SKIPSTANDIN",
+  "title": "The STAND-IN skip gap (batch 22, 2026-09-20): host and Client1 merge, Client1 disconnects, so the HOST becomes the stand-in that simulates Client1's gym. The host then walks into that gym and skips 3 game-hours alone. Before this build nobody simulated the shop during the skip - native RunHourly exempts the shop the local player stands in, and the round-60 postfix that covers that exemption stood down because MergerFlip.TrulyMine is false on a merger-flipped stand-in shop. The gate is now MergerFlip.BooksHere, so the machine that holds the books is the machine that sims. Asserts: the host really is the stand-in for that gym, the occupied-shop hourly sim names the gym during the skip, and the gym's completed visits and till queue both rise across the skip. Ends dissolved; NO save.",
+  "preconditions": "Fixture save1 (host melaus, client Client1). Dev build with merge / mergestatus / absence / regstate / enterbuilding / exitbuilding / skipvote / skipstate / salestats / clock / pause (BAMP_DEV) on both machines. THE SHOP is Client1's gym at vars.gym - step 14 checks at runtime, on the host, that the address is rented, is a gym (a customer-SPAWNING type, which the occupied-shop sim requires) and is merger-FLIPPED there, which is exactly the state that made TrulyMine answer false on the only machine running it. The client is DROPPED mid-run and relaunched at the end so the merger can be dissolved. NOTHING is ever saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "gym": "21 ba:street_fourthstreet"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Rest\\] occupied-shop sim: ",
+    "\\[Rest\\] occupied-shop set-aside",
+    "\\[EconProbe\\] tripwire: "
+  ],
+  "oracles_report": [
+    "\\[Rest\\] CONSENSUS",
+    "\\[Rest\\] skip GOAL reached",
+    "\\[Rest\\] occupied-shop hourly sim",
+    "\\[Absence\\] simulating ",
+    "\\[Customers\\] simulator for ",
+    "\\[EconProbe\\] TRIPWIRE duplicate till entries"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST SKIPSTANDIN START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "sleep_s": 30,
+      "note": "the worlds settle and the first interior/paperwork bundles cross"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "regstate ${gym}",
+      "expect_result": "^OK rented=True .*type=ba:businesstype_gym .*flipped=True",
+      "capture": {
+        "gymName": "name='([^']*)'"
+      },
+      "note": "THE GAP'S PRECONDITION, on the machine that will stand in: the merger flip makes the partner's gym read rented=True here while the sync layer knows it is not ours, so MergerFlip.TrulyMine answers False - the old gate - although this is the only machine that will run the shop. It is also a customer-SPAWNING type, which the occupied-shop sim requires (data.spawnCustomers)."
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "regstate ${gym}",
+      "expect_result": "^OK rented=True .*type=ba:businesstype_gym .*flipped=False",
+      "note": "and on the OWNER the same address is genuinely theirs, before they drop"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[\\] simulating_here=\\[\\]",
+      "note": "nobody is absent yet"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "mark pre-drop baseline",
+      "expect_result": "OK MARK",
+      "note": "sets the host's log search baseline before the disconnect"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "drop": true,
+      "note": "the owner drops out; the host designates itself and starts simulating the absent member's businesses",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] simulating '${gym}' for '${clientPid}'",
+          "within_s": 90
+        }
+      ]
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "mark client dropped",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[${clientPid}->${hostPid}( ownerBack=\\d)?: .*${gym}.*\\] simulating_here=\\[.*${gym}",
+      "note": "THE STAND-IN PREMISE, asserted: this machine is the designated stand-in for the absent owner AND this gym is in the set it simulates here. Without this the rest of the run would be vacuous - a shop nobody stands in for is simulated by nobody, correctly."
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK",
+      "note": "time must RUN - absolute semantics, a no-op when already running"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "clock 13:00",
+      "expect_result": "^OK",
+      "abort_on_fail": false,
+      "note": "OPENING HOURS: the fixture loads day 133 12:00, so 13:00 is forward and the 13:00->16:00 skip stays inside ordinary hours (IsBusinessOpen gates the occupied-shop sim). The lever only moves the clock FORWARD; an ERR means live time already passed 13:00 and the run continues."
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "enterbuilding ${gym}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] enterbuilding '${gym}'",
+          "within_s": 40
+        }
+      ],
+      "note": "THE STAND-IN STANDS IN THE SHOP HE BOOKS. Native BusinessSimulatorHelper.RunHourly (:32) exempts the customer-spawning shop the LOCAL player occupies, so from here on only our postfix can pay this gym during a skip."
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the interior settles and the hour's shoppers start arriving"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "salestats ${gym}",
+      "expect_result": "^OK salestats",
+      "capture": {
+        "s0done": "completed=(-?[0-9]+)",
+        "s0unproc": "unprocessed=(-?[0-9]+)",
+        "s0live": "liveCustomers=(-?[0-9]+)",
+        "s0entries": "entries=(-?[0-9]+)",
+        "s0sim": "sim='([^']*)'"
+      },
+      "note": "BASELINE immediately before the vote, on the stand-in. Captures only, so the whole skip is counted against this line."
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "mark TEST SKIPSTANDIN SKIP",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "skipvote +3h",
+      "expect_result": "^OK skipvote goal=",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] occupied-shop hourly sim during skip: '${gymName}'",
+          "within_s": 120
+        }
+      ],
+      "note": "THE HOST VOTES ALONE - the only connected player, so his own vote makes consensus and the skip starts on this step. THE ASSERTION OF THIS SCENARIO is the second line: the occupied-shop hourly sim names THIS gym during the skip. Before batch 22 that line could never appear here, because the postfix's TrulyMine gate stood down on a merger-flipped stand-in shop and native had already exempted it - the shop earned nothing for the whole skip."
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "skipstate",
+      "note": "report-only sample during the skip"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "sleep_s": 9
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "skipstate",
+      "note": "report-only poll: has it finished?"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "sleep_s": 6
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "capture": {
+        "sGoal": "lastGoalMin=([0-9.\\-]+)",
+        "sEnd": "lastEndMin=([0-9.\\-]+)",
+        "sRealS": "lastRealS=([0-9.\\-]+)",
+        "sRate": "rate=([0-9.]+)"
+      },
+      "derive": {
+        "sGoalLo": [
+          "sGoal",
+          -0.01
+        ]
+      },
+      "expect_gt": {
+        "lastEndMin=([0-9.\\-]+)": "${sGoalLo}"
+      },
+      "note": "the skip has stopped, at or after the goal it was racing to"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "salestats ${gym}",
+      "expect_result": "^OK salestats",
+      "capture": {
+        "s1done": "completed=(-?[0-9]+)",
+        "s1unproc": "unprocessed=(-?[0-9]+)",
+        "s1live": "liveCustomers=(-?[0-9]+)"
+      },
+      "expect_gt": {
+        "completed=(-?[0-9]+)": "${s0done}",
+        "unprocessed=(-?[0-9]+)": "${s0unproc}"
+      },
+      "note": "THE MONEY ASSERTION: across the skip the absent owner's gym gained completed visits AND gained entries in its till queue (unprocessedCompletedOrders - `salestats` has no field literally called 'orders'; this count IS the orders waiting for the day roll). Both rising is the shop being simulated and booked on the stand-in's machine, which is what the whole scenario is about."
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding",
+      "note": "fixture hygiene: the stand-in leaves the gym"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "relaunch": true,
+      "note": "the absent owner returns so the merger can be dissolved"
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] owner '${clientPid}' returned",
+          "within_s": 120
+        }
+      ],
+      "note": "the host drops the stand-in simulator the moment the owner is back"
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "sleep_s": 10
+    },
+    {
+      "seq": 40,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True"
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: every merger scenario ENDS DISSOLVED; NO save"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 43,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 44,
+      "role": "c",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0"
+    },
+    {
+      "seq": 45,
+      "role": "h",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0"
+    },
+    {
+      "seq": 46,
+      "role": "both",
+      "cmd": "mark TEST SKIPSTANDIN END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

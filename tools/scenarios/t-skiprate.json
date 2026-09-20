@@ -1,6 +1,6 @@
 {
   "id": "T-SKIPRATE",
-  "title": "Consensus time skip at 50 game-minutes per real second (user ruling 2026-09-20, was 25), measured in a shop that really has customers in it. Two identical 3-game-hour legs - LEG A at rate 25 on both machines, LEG B at 50 - with the CLIENT standing inside his OWN gym (the owner, so his machine both runs the live customers and holds the books) and the HOST voting from outside. Asserts: at least 3 live bodies on the floor before EACH leg (no vacuous pass), each leg ends at or after the goal, the two clocks end each leg within 2 game-minutes, leg B is really faster than leg A, the occupied-shop hourly sim really ran during leg A, and at 50 the shop is not flooded (live bodies at most the shop's own customer capacity). Measures H-SKIPDOUBLE-1 (till duplication) at both rates - measurement only, nothing is fixed. NO merger, NO save.",
+  "title": "Consensus time skip at 50 game-minutes per real second (user ruling 2026-09-20, was 25), measured in a shop that really has customers in it. Two identical 3-game-hour legs - LEG A at rate 25 on both machines, LEG B at 50 - with the CLIENT standing inside his OWN gym (the owner, so his machine both runs the live customers and holds the books) and the HOST voting from outside. Asserts: at least 3 live bodies on the floor before EACH leg (no vacuous pass), each leg ends at or after the goal, the two clocks end each leg within 2 game-minutes, leg B is really faster than leg A, the occupied-shop hourly sim really ran during leg A, and at 50 the shop is not flooded (live bodies at most the shop's own customer capacity). ASSERTS H-SKIPDOUBLE-1 (till duplication) is gone at both rates: every tilldupes read in the run must say dupes=0 dupeRevenue=0.00, and the owner's log REPORTS (does not assert - see step 27's note) how many walked-in shoppers the skip sim set aside. NO merger, NO save.",
   "preconditions": "Fixture save1 (host melaus, Client1). Dev build with the levers skiprate / skipvote / skipstate / perf / tilldupes / salestats / regstate / clock / enterbuilding / exitbuilding (BAMP_DEV). THE SHOP IS THE CLIENT'S OWN GYM named in vars.ownerShop: step 8 checks at runtime, on the client, that he still rents it, that it is still a gym (a customer-SPAWNING business type - the previous fixture shop, the host's event-planning agency, spawns none, which made the previous run measure an empty floor) and that no merger flip is in play. No merger is formed, so nothing has to be dissolved; NOTHING is ever saved.",
   "instances": 2,
   "vars": {
@@ -13,7 +13,10 @@
     "\\[TickIso\\]",
     "\\[Guard\\]",
     "NullReferenceException",
-    "\\[Rest\\] occupied-shop sim: "
+    "\\[Rest\\] occupied-shop sim: ",
+    "\\[Rest\\] occupied-shop set-aside",
+    "\\[EconProbe\\] tripwire: ",
+    "\\[EconProbe\\] TRIPWIRE duplicate till entries"
   ],
   "oracles_report": [
     "\\[Perf/",
@@ -21,6 +24,7 @@
     "\\[Rest\\] CONSENSUS",
     "\\[Rest\\] skip GOAL reached",
     "\\[Rest\\] occupied-shop hourly sim during skip",
+    "\\[Rest\\] occupied-shop hourly sim set aside",
     "\\[Customers\\] simulator for "
   ],
   "steps": [
@@ -210,7 +214,7 @@
       "seq": 25,
       "role": "c",
       "cmd": "tilldupes ${ownerShop}",
-      "expect_result": "^OK tilldupes .* live=[0-9]",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
       "capture": {
         "a0orders": "orders=([0-9]+)",
         "a0dupes": "dupes=(-?[0-9]+)",
@@ -219,7 +223,7 @@
         "a0live": "live=(-?[0-9]+)",
         "a0cap": "cap=(-?[0-9]+)"
       },
-      "note": "H-SKIPDOUBLE-1 START of leg A, read on the OWNER inside his own shop. `live=[0-9]` in the expectation is the non-vacuity guard: tilldupes only reports live bodies (and therefore only means anything for the flood question) when THIS machine is inside THIS shop; outside it prints live=-1. REPORT-ONLY measurement otherwise - dupes gained over the leg is a1 minus a0."
+      "note": "H-SKIPDOUBLE-1 START of leg A, read on the OWNER inside his own shop. `live=[0-9]` in the expectation is the non-vacuity guard: tilldupes only reports live bodies (and therefore only means anything for the flood question) when THIS machine is inside THIS shop; outside it prints live=-1. ASSERTION since 2026-09-20 (H-SKIPDOUBLE-1 fixed): dupes=0 and dupeRevenue=0.00 HERE and at the end of the leg, which is stronger than 'gained over the leg = 0' and needs no arithmetic - a duplicate that existed before the leg would fail here instead of hiding in the difference. The captures are kept so a failure still reports the numbers."
     },
     {
       "seq": 26,
@@ -245,7 +249,7 @@
           "within_s": 90
         }
       ],
-      "note": "the SECOND vote is what makes consensus, so the host's CONSENSUS line belongs on this step - and so does the client's occupied-shop line, because the same vote starts the skip that makes the owner's machine simulate the shop he is standing in. That line is the proof this run is NOT vacuous: the native hourly sim really ran on the shop with live customers in it. abort_on_fail is false so a missing line still leaves leg B (and the flood measurement at 50) to run."
+      "note": "the SECOND vote is what makes consensus, so the host's CONSENSUS line belongs on this step - and so does the client's occupied-shop line, because the same vote starts the skip that makes the owner's machine simulate the shop he is standing in. That line is the proof this run is NOT vacuous: the native hourly sim really ran on the shop with live customers in it. THE SET-ASIDE LINE IS REPORT-ONLY, NOT ASSERTED, AND HERE IS WHY (measured, run T-SKIPRATE-20260920-053641): the fix only sets an entry aside when a shopper is on the floor, or finished live, whose entry belongs to THE HOUR BEING SIMULATED at the instant that hour rolls. Bodies linger across hours, so most rolls find only entries from earlier hours - that run set aside 0 in all three of leg A's hours and 1 in leg B's h20. Asserting it per leg would be a coin flip, so it lives in oracles_report and every run prints what it did. The dupes=0 assertions are the real claim and they are not vacuous: the FLOW gate above proves shoppers really are arriving and finishing throughout, which is the situation that used to double-bill. T-SKIPSTANDIN asserts the occupied-shop sim itself. abort_on_fail is false so a missing line still leaves leg B (and the flood measurement at 50) to run."
     },
     {
       "seq": 28,
@@ -348,7 +352,7 @@
       "seq": 37,
       "role": "c",
       "cmd": "tilldupes ${ownerShop}",
-      "expect_result": "^OK tilldupes .* live=[0-9]",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
       "capture": {
         "a1orders": "orders=([0-9]+)",
         "a1dupes": "dupes=(-?[0-9]+)",
@@ -357,7 +361,7 @@
         "a1live": "live=(-?[0-9]+)",
         "a1cap": "cap=(-?[0-9]+)"
       },
-      "note": "H-SKIPDOUBLE-1 END of leg A - dupes/dupeRevenue GAINED over the leg are a1 minus a0, and liveCompleted gained says whether live checkouts happened inside the skipped hours at all"
+      "note": "H-SKIPDOUBLE-1 END of leg A - dupes/dupeRevenue GAINED over the leg are a1 minus a0, and liveCompleted gained says whether live checkouts happened inside the skipped hours at all. THE ASSERTION is dupes=0 dupeRevenue=0.00: leg A skipped 3 hours with shoppers on the floor, which is exactly the shape that used to bill a walked-in shopper twice (the sim and the live checkout both added their Order to the till list)."
     },
     {
       "seq": 38,
@@ -473,7 +477,7 @@
       "seq": 52,
       "role": "c",
       "cmd": "tilldupes ${ownerShop}",
-      "expect_result": "^OK tilldupes .* live=[0-9]",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
       "capture": {
         "b0orders": "orders=([0-9]+)",
         "b0dupes": "dupes=(-?[0-9]+)",
@@ -481,7 +485,7 @@
         "b0done": "liveCompleted=(-?[0-9]+)",
         "b0live": "live=(-?[0-9]+)"
       },
-      "note": "H-SKIPDOUBLE-1 START of leg B, on the OWNER"
+      "note": "H-SKIPDOUBLE-1 START of leg B, on the OWNER - and the same dupes=0 assertion, which also proves leg A left no duplicate behind"
     },
     {
       "seq": 53,
@@ -605,7 +609,7 @@
       "seq": 64,
       "role": "c",
       "cmd": "tilldupes ${ownerShop}",
-      "expect_result": "^OK tilldupes .* live=[0-9]",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
       "capture": {
         "b1orders": "orders=([0-9]+)",
         "b1dupes": "dupes=(-?[0-9]+)",
@@ -623,7 +627,7 @@
       "expect_gt": {
         "cap=(-?[0-9]+)": "${b1liveLo}"
       },
-      "note": "THE NO-FLOOD ASSERTION at 50 min/s, on the OWNER inside the shop: the gym's own customer capacity (BuildingSizeHelper - the same number the native simulator caps an hour with) is at least the number of live bodies standing in it when the skip ended. expect_gt is strictly greater, so the comparison is made against live-1: cap > live-1 is exactly cap >= live, which is the '<= capacity' rule. Both numbers come from this one line, capture first, so no baseline is hard-coded; and `live=[0-9]` in the expectation forbids the -1 (outside) reading that would make the assertion vacuous. Also the H-SKIPDOUBLE-1 END of leg B."
+      "note": "THE NO-FLOOD ASSERTION at 50 min/s, on the OWNER inside the shop: the gym's own customer capacity (BuildingSizeHelper - the same number the native simulator caps an hour with) is at least the number of live bodies standing in it when the skip ended. expect_gt is strictly greater, so the comparison is made against live-1: cap > live-1 is exactly cap >= live, which is the '<= capacity' rule. Both numbers come from this one line, capture first, so no baseline is hard-coded; and `live=[0-9]` in the expectation forbids the -1 (outside) reading that would make the assertion vacuous. Also the H-SKIPDOUBLE-1 END of leg B, asserting dupes=0 dupeRevenue=0.00 after the faster leg as well."
     },
     {
       "seq": 65,

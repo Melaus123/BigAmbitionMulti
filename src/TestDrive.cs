@@ -51,16 +51,6 @@ namespace BigAmbitionsMP
             return "h";
         }
 
-        /// <summary>H-SKIPDOUBLE-1 (`tilldupes`): net48 has no ReferenceEqualityComparer, and the
-        /// question is precisely whether the SAME Order object sits in the till list twice - value
-        /// equality would answer a different question. RuntimeHelpers.GetHashCode is the identity
-        /// hash, unaffected by any Equals/GetHashCode the type may define.</summary>
-        private sealed class OrderRefEq : System.Collections.Generic.IEqualityComparer<Order>
-        {
-            public bool Equals(Order a, Order b) => ReferenceEquals(a, b);
-            public int GetHashCode(Order o) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(o);
-        }
-
         /// <summary>"blocksave" verb state — MPSaveCoordinator.SaveBlockedBy honors it (dev builds)
         /// so the round-237 deferral machinery can be exercised end-to-end (defer → heartbeat →
         /// resume → upload) without a human sitting in the Interior Designer.  The NATIVE gate
@@ -604,7 +594,11 @@ namespace BigAmbitionsMP
 
                 case "tilldupes":
                 {
-                    // H-SKIPDOUBLE-1 MEASUREMENT (user-approved 2026-09-20 - measure only, no fix).
+                    // H-SKIPDOUBLE-1 MEASUREMENT (2026-09-20). This lever still only MEASURES; the FIX
+                    // shipped the same day - Patch_RunHourly_SimulateOccupiedShopDuringSkip sets walked-in
+                    // shoppers aside from the skip's hourly sim, and a tripwire prefix on ProcessDailyOrders
+                    // removes any duplicate that still reaches the till. This stays the independent reader
+                    // that tells a rig leg whether a dupe formed at all.
                     // During a skip Patch_RunHourly_SimulateOccupiedShopDuringSkip runs the OCCUPIED shop's
                     // full native hourly sim while live customers are still being served. That native pass
                     // builds the hour's list from every CustomerEntry whose spawnTime matches the hour with NO
@@ -618,7 +612,9 @@ namespace BigAmbitionsMP
                     // each to AddOrderSales (:280-296), which sums OrderEntry.price for every entry that is
                     // available && priceAccceptable && paid into ItemReport.totalPrice; the sum of those is
                     // orderHistoryEntry.totalRevenue, which ProcessDailyOrders (:221-231) pays out with
-                    // ChangeMoneySafe. dupeRevenue below reproduces exactly that sum for each EXTRA reference.
+                    // ChangeMoneySafe. dupeRevenue below reproduces exactly that sum for each EXTRA
+                    // reference - through TillDupes.ExtraReferenceValue, the single copy of that arithmetic,
+                    // shared with the corrective tripwire so a measurement and a removal can never disagree.
                     // READ-ONLY: it counts references and never touches the list.
                     if (arg.Length == 0) return "ERR usage: tilldupes <num> <ba:street_x>";
                     var tdReg = GameStatePatcher.FindRegistration(arg);
@@ -629,7 +625,7 @@ namespace BigAmbitionsMP
                     try
                     {
                         var tdList = tdReg.unprocessedCompletedOrders;
-                        var tdSeen = new System.Collections.Generic.HashSet<Order>(new OrderRefEq());
+                        var tdSeen = new System.Collections.Generic.HashSet<Order>(new TillDupes.RefEq<Order>());
                         if (tdList != null)
                         {
                             for (int tdI = 0; tdI < tdList.Count; tdI++)
@@ -638,16 +634,7 @@ namespace BigAmbitionsMP
                                 if (tdO == null) continue;
                                 tdOrders++;
                                 if (tdSeen.Add(tdO)) continue;          // first reference - the legitimate one
-                                if (!tdO.completed) continue;           // the day roll would ignore it entirely
-                                bool tdPaid = false; double tdSum = 0;
-                                if (tdO.entries != null)
-                                    foreach (var tdE in tdO.entries)
-                                    {
-                                        if (tdE == null) continue;
-                                        if (tdE.paid) tdPaid = true;
-                                        if (tdE.available && tdE.priceAccceptable && tdE.paid) tdSum += tdE.price;
-                                    }
-                                if (tdPaid) tdDupeRev += tdSum;
+                                tdDupeRev += TillDupes.ExtraReferenceValue(tdO);   // THE shared formula (TillDupes, CustomerEntrySync.cs) - the tripwire bills a removed duplicate with this same code
                             }
                         }
                         tdDistinct = tdSeen.Count;

@@ -469,9 +469,16 @@ namespace BigAmbitionsMP
         // so this postfix simulates exactly the shop native exempted, per machine for
         // its own player, while OUR skip is active. Staffing is native-correct (ad-hoc
         // register worker via IsPlayerWorkingInEmployeeStation; a remote helper's
-        // register via the synthetic duty employee's blanket 0-24 shift). No double
-        // income: the sim and the live spawner share the CustomerEntry list and
-        // per-order-entry processed flags. The real-machine gate reads the isRunning
+        // register via the synthetic duty employee's blanket 0-24 shift). NO DOUBLE
+        // INCOME (corrected 2026-09-20, H-SKIPDOUBLE-1): the shared CustomerEntry
+        // 'completed' flags protect ITEMS only - they stop an entry being consumed
+        // twice; they do NOT stop the same Order object reaching the shop's till list
+        // twice, and until that date every shopper served LIVE inside a skipped hour
+        // was billed by this sim as well as by their own checkout (the simulator's
+        // CacheCustomersForCurrentHour takes every entry of the hour with no filter).
+        // The fix is in the postfix below: entries held by a shopper on the floor, or
+        // already finished live this hour, are SET ASIDE for the length of the sim, so
+        // each order reaches the till exactly once. The real-machine gate reads the isRunning
         // BACKING FIELD, never the getter — patching or reading a trivial getter is
         // unreliable on Mono (inlining), the exact trap that broke the original.
         [HarmonyPatch(typeof(BusinessSimulatorHelper), nameof(BusinessSimulatorHelper.RunHourly))]
@@ -492,6 +499,8 @@ namespace BigAmbitionsMP
             }
 
             private static int _simmed;
+            private const int SetAsideBudget = 10;               // set-aside lines per session
+            private static int _setAsideLogged;
             static void Postfix()
             {
                 try
@@ -500,16 +509,88 @@ namespace BigAmbitionsMP
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                     var current = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                     if (current == null || !current.RentedByPlayer) return;
-                    if (!MergerFlip.TrulyMine(current)) return;          // only MY shop — replicas sim on their owner's machine
+                    if (!MergerFlip.BooksHere(current)) return;          // my own shop, OR the absent owner's shop I stand in for: the machine that holds the books is the one that must sim it. TrulyMine alone stood down on a STAND-IN (the reg stays flipped through the veil), so nobody simulated that shop at all.
                     var data = BusinessTypeHelper.GetData(current);
                     if (data?.simulator == null || !data.spawnCustomers) return;   // !spawnCustomers shops already simulated natively
                     if (TimeMachineReallyRunning()) return;              // a GENUINE machine covers it natively
                     if (!BusinessHelper.IsBusinessOpen(current)) return;
-                    data.simulator.SetUp(current, SaveGameManager.Current.Hour);
-                    data.simulator.SimulateCurrentHour();
+
+                    // H-SKIPDOUBLE-1 (2026-09-20). RetailBusinessSimulator.CacheCustomersForCurrentHour
+                    // (:200-212) takes EVERY entry of this hour out of the LIVE per-address list with no
+                    // 'completed' filter, and adds each entry's Order to unprocessedCompletedOrders - the
+                    // same Order object the live checkout adds (Customer.CompleteOrder :385-397, the employee
+                    // stations, the ticket kiosk). The day roll bills per LIST ELEMENT, so a shopper who
+                    // walked in and paid inside a skipped hour was paid for twice. Set those entries aside
+                    // for the length of the sim and put them back where they were: the sim bills only the
+                    // body-less entries it is here for, and live shoppers keep their own checkout.
+                    int hour = SaveGameManager.Current.Hour;
+                    System.Collections.Generic.List<AI.Customers.CustomerEntries.CustomerEntry>? entries = null;
+                    var heldBack = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<int, AI.Customers.CustomerEntries.CustomerEntry>>();
+                    try
+                    {
+                        var onFloor = new System.Collections.Generic.HashSet<AI.Customers.CustomerEntries.CustomerEntry>(
+                                          new TillDupes.RefEq<AI.Customers.CustomerEntries.CustomerEntry>());
+                        var bodies = IndoorCustomerSpawner.Customers;      // the shoppers standing in THIS interior
+                        if (bodies != null)
+                            for (int i = 0; i < bodies.Count; i++)
+                            {
+                                var ce = bodies[i]?.customerEntry;
+                                if (ce != null) onFloor.Add(ce);
+                            }
+                        entries = AI.Customers.CustomerEntries.CustomerEntriesHelper.GetEntriesByAddress(current.Address);
+                        if (entries != null)
+                            for (int i = entries.Count - 1; i >= 0; i--)   // backwards: removal leaves the lower indices valid
+                            {
+                                var e = entries[i];
+                                if (e == null || e.spawnTime.Hour != hour) continue;
+                                // on the floor now, or already finished live this hour: the LIVE outcome stands.
+                                // A shopper who PAID is in the till already (Customer.CompleteOrder :385-397); one who
+                                // WALKED OUT (Customer.cs :309-313: items back on the shelf, order.completed, NO till
+                                // add) is a lost sale natively and must stay one - the sim would otherwise sell that
+                                // shopper's unprocessed items behind their back. Reference identity only.
+                                // ACCEPTED DEVIATION (review MEDIUM-1, disclosed to the user 2026-09-20): the native
+                                // hourly cap (ProcessAllCustomersFromThisHour :176-192, `i < cap`) now counts only
+                                // the entries left in the list, so an OVER-capacity shop can serve up to
+                                // <walked-in shoppers this hour> more than its cap - one or two an hour under
+                                // round-60b's pacing. The cap is private to the simulator and derived inside SetUp.
+                                if (!onFloor.Contains(e) && !(e.order != null && e.order.completed)) continue;
+                                heldBack.Add(new System.Collections.Generic.KeyValuePair<int, AI.Customers.CustomerEntries.CustomerEntry>(i, e));
+                                entries.RemoveAt(i);
+                            }
+                        heldBack.Reverse();                                // descending index order -> ascending, for the re-insert
+                    }
+                    catch (Exception exS) { Plugin.Logger.LogWarning($"[Rest] occupied-shop set-aside: {exS.Message}"); }
+
+                    try
+                    {
+                        data.simulator.SetUp(current, hour);
+                        data.simulator.SimulateCurrentHour();
+                    }
+                    finally
+                    {
+                        // ALWAYS put them back, even if the native sim threw - a shopper table missing this
+                        // hour's live entries would leave the spawner and every later sim out of step with the save.
+                        try
+                        {
+                            if (entries != null)
+                                for (int i = 0; i < heldBack.Count; i++)
+                                {
+                                    int at = heldBack[i].Key;
+                                    if (at > entries.Count) at = entries.Count;   // defensive only: the native sim never adds to or removes from this list
+                                    entries.Insert(at, heldBack[i].Value);
+                                }
+                        }
+                        catch (Exception exR) { Plugin.Logger.LogWarning($"[Rest] occupied-shop set-aside restore: {exR.Message}"); }
+                    }
+
                     _simmed++;
                     if (_simmed == 1 || _simmed % 12 == 0)
-                        Plugin.Logger.LogInfo($"[Rest] occupied-shop hourly sim during skip: '{current.BusinessName}' h{SaveGameManager.Current.Hour} (#{_simmed}) — SP time-machine parity (round-60).");
+                        Plugin.Logger.LogInfo($"[Rest] occupied-shop hourly sim during skip: '{current.BusinessName}' h{hour} (#{_simmed}) setAside={heldBack.Count} — SP time-machine parity (round-60).");
+                    if (heldBack.Count > 0 && _setAsideLogged < SetAsideBudget)
+                    {
+                        _setAsideLogged++;
+                        Plugin.Logger.LogInfo($"[Rest] occupied-shop hourly sim set aside {heldBack.Count} walked-in shopper entr{(heldBack.Count == 1 ? "y" : "ies")} in '{current.BusinessName}' h{hour} — left to their live checkout, not billed by the sim (H-SKIPDOUBLE-1).");
+                    }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Rest] occupied-shop sim: {ex.Message}"); }
             }
@@ -753,9 +834,16 @@ namespace BigAmbitionsMP
         // this shop, this hour, would produce at the NORMAL clock — the hour's
         // demand spread over the hour, converted through the game's own
         // MinutesMultiplier. Busy hours look busy, dead hours look dead. The
-        // economy is unaffected: entries denied a body are still consumed by the
-        // native loop and billed by the round-60 hourly sim (per-order-entry flags
-        // dedup the two paths) — income identical, visuals consistent.
+        // economy is unaffected: an entry denied a body has no live shopper at all, so
+        // the round-60 hourly sim is the ONLY path that bills it. (Corrected 2026-09-20,
+        // H-SKIPDOUBLE-1: the per-order-entry flags do NOT dedup the two paths - they
+        // guard items, not the till list. An entry that DID get a body was billed by the
+        // sim AND by the live checkout until that date; round-60 now sets exactly those
+        // entries aside while it sims.) Income matches the away-from-shop sim, visuals consistent.
+        // KNOWN GAP (review 2026-09-21, pre-existing, not fixed here): the round-60 sim runs only
+        // when SkipActive is true AT the hour roll. A skip that ends MID-hour with the player still
+        // inside leaves that hour's body-less entries billed by nobody (native exempts the occupied
+        // shop, BusinessSimulatorHelper.cs:32). Whole-hour goals are unaffected.
         [HarmonyPatch(typeof(IndoorCustomerSpawner), "CanSpawnCustomer")]
         public static class Patch_IndoorSpawner_SkipVisualPace
         {
