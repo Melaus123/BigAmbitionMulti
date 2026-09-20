@@ -285,6 +285,7 @@ namespace BigAmbitionsMP
             Votes.Clear(); RequiredVotes = 0; SkipActive = false;
             _hostVotes.Clear(); _skipGoalMinutes = 0;
             TimeSync.AheadHeld = false;   // drop any stale ahead-hold so it can't freeze the clock
+            try { MPPatches.Patch_IndoorSpawner_SkipVisualPace.ClearDenialStamp(); } catch { }   // H-SKIPTAIL-1: the skip-pacing denial stamp is skip state too
         }
 
         /// <summary>On RECONNECT, clear ONLY the consensus/skip state — the host's vote tally and any

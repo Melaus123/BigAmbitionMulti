@@ -1,0 +1,457 @@
+{
+  "id": "T-SKIPTAIL",
+  "title": "H-SKIPTAIL-1 (2026-09-21): a consensus skip that ends MID-hour with the owner still standing in his own shop. Until this fix the round-60 occupied-shop hourly sim ran only when SkipActive was true AT the hour roll, so the rest of that partial hour's body-less entries - entries the skip pacing denied a body and native TrySpawnCustomer still marked completed - were billed by NOBODY (native RunHourly exempts the shop the local player occupies). ONE leg: Client1, the OWNER, stands inside his own gym with customer FLOW asserted; the host votes from outside; both vote a goal 2 game hours ahead from a MID-hour clock at a DELIBERATELY SLOW skip rate (10 game-min per real second - see step 21), so the skip stops around HH:35 after a partial hour long enough in real time for the visual pacing to refuse a body. The run then plays at NORMAL speed across the next full hour and asserts, on the owner's log, the H-SKIPTAIL-1 line naming the gym - that line can only exist if a body really was denied inside the partial hour, so it is the premise check as well as the result: no line means FAIL, never a quiet pass. Also asserts the owner's unprocessed order count ROSE across that roll, and that H-SKIPDOUBLE-1 stays fixed (dupes=0 dupeRevenue=0.00 before and after, i.e. zero gained). NO merger, NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1). Dev build with the levers skiprate / skipvote / skipstate / perf / tilldupes / salestats / regstate / clock / enterbuilding / exitbuilding (BAMP_DEV). THE SHOP IS THE CLIENT'S OWN GYM named in vars.ownerShop: step 8 checks at runtime, on the client, that he still rents it, that it is still a gym (a customer-SPAWNING type - the occupied-shop sim and the live spawner both need data.spawnCustomers) and that no merger flip is in play. The waiting steps run at the game's NORMAL clock (GameManager.MinutesMultiplier, 1 game-minute per real second) and use NO clock lever, because the hour roll must happen on the OWNER's machine through its own RunMainGameTick - the `clock` lever is host-only and the client would merely follow the time sync without running its own hourly pass. Nothing is ever saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "ownerShop": "21 ba:street_fourthstreet"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "NullReferenceException",
+    "\\[Rest\\] occupied-shop sim: ",
+    "\\[Rest\\] occupied-shop set-aside",
+    "\\[EconProbe\\] tripwire: ",
+    "\\[EconProbe\\] TRIPWIRE duplicate till entries"
+  ],
+  "oracles_report": [
+    "\\[Perf/",
+    "\\[PatchCost\\] SPIKE",
+    "\\[Rest\\] CONSENSUS",
+    "\\[Rest\\] skip GOAL reached",
+    "\\[Rest\\] occupied-shop hourly sim during skip",
+    "\\[Rest\\] occupied-shop hourly sim after a skip that ended mid-hour",
+    "\\[Rest\\] occupied-shop hourly sim set aside",
+    "\\[Customers\\] simulator for "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST SKIPTAIL START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 35,
+      "note": "both worlds settle before anything is measured"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "regstate ${ownerShop}",
+      "expect_result": "^OK rented=True .*type=ba:businesstype_gym .*flipped=False",
+      "capture": {
+        "shopName": "name='([^']*)'"
+      },
+      "note": "RUNTIME CHECK of the fixture on the OWNER, and the capture of the shop's display NAME - the H-SKIPTAIL-1 assertion later demands that exact name in the log line, so the line cannot be satisfied by some other shop's sim."
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK",
+      "note": "time must RUN on both machines"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "clock 13:10",
+      "expect_result": "^OK",
+      "abort_on_fail": false,
+      "note": "HOST ONLY by design. MID-HOUR START, and that is the whole point: the goal is +2 game hours, which preserves the minute offset, so the skip STOPS mid-hour too. EARLY in the hour on purpose (measured, run T-SKIPTAIL-20260920-120152, which started at 13:30): the ~85 s of live play below carries the clock to about 14:35, so the skip ends about 16:35 and the 17:00 roll is still ~25 game-minutes (~25 real seconds) away when the skip stops. At 13:30 the skip ended at 16:55 and the roll fired within 5 s, before the captures below could take their 'before' readings. An ERR means live time already passed 13:10; the run continues and the offset is still mid-hour."
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "enterbuilding ${ownerShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${ownerShop}'",
+          "within_s": 40
+        }
+      ],
+      "note": "THE OWNER STANDS IN HIS OWN SHOP: his machine runs the live spawner (so it is the one that DENIES bodies during the skip) and holds the books (so it is the one that must sim the hour). The host stays outside - skipvote raises its own Loitering session and needs no interior."
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the interior settles and the hour's customers start arriving (flow wait 1/3)"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "abort_on_fail": false,
+      "capture": {
+        "wait1done": "completed=(-?[0-9]+)",
+        "wait1live": "liveCustomers=(-?[0-9]+)"
+      },
+      "note": "report-only baseline for the FLOW gate two steps below"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "flow wait 2/3"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "abort_on_fail": false,
+      "capture": {
+        "wait2live": "liveCustomers=(-?[0-9]+)"
+      }
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "flow wait 3/3 - 65 s of live play in total"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "liveCustomers=[1-9]",
+      "capture": {
+        "preLive": "liveCustomers=(-?[0-9]+)",
+        "preDone": "completed=(-?[0-9]+)",
+        "preEntries": "entries=(-?[0-9]+)",
+        "preSim": "sim='([^']*)'"
+      },
+      "expect_gt": {
+        "completed=(-?[0-9]+)": "${wait1done}"
+      },
+      "note": "ANTI-VACUITY FLOW GATE (same shape as T-SKIPRATE): at least one body on the floor right now AND `completed` has risen since ~40 s earlier. Without real arrivals the skip would deny nothing, and H-SKIPTAIL-1 could not be exercised at all."
+    },
+    {
+      "seq": 20,
+      "role": "both",
+      "cmd": "mark TEST SKIPTAIL LEG",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "skiprate 10",
+      "expect_result": "^OK skiprate .*rate=10 ",
+      "note": "10 game-minutes per real second, NOT the shipping 50, and the reason is the whole mechanism under test (measured, run T-SKIPTAIL-20260920-121005). The partial hour left over when the skip stops is the only hour in which a body can be DENIED for the tail sim to pick up, and at 50 min/s those 25-35 game-minutes pass in well under a second of real time - fewer spawner checks than the pacing throttle needs to refuse anything, so the run failed with no denial stamped at all. At 10 min/s the same 35 game-minutes take ~3.5 real seconds, with this hour's entries coming due 10x faster than the pacing lets bodies in, so refusals are certain. The rate is not what H-SKIPTAIL-1 is about - T-SKIPRATE covers the rates."
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "skiprate 10",
+      "expect_result": "^OK skiprate .*rate=10 "
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "perf reset",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "perf reset",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
+      "capture": {
+        "t0orders": "orders=([0-9]+)",
+        "t0dupes": "dupes=(-?[0-9]+)",
+        "t0rev": "dupeRevenue=([0-9.]+)",
+        "t0done": "liveCompleted=(-?[0-9]+)",
+        "t0live": "live=(-?[0-9]+)"
+      },
+      "note": "H-SKIPDOUBLE-1 START, read on the OWNER inside his own shop. `live=[0-9]` forbids the -1 (outside) reading that would make the till check vacuous. dupes=0 here and dupes=0 at the end is 'zero gained' without arithmetic."
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "skipvote +2h",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "skipvote +2h",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        },
+        {
+          "role": "c",
+          "regex": "\\[Rest\\] occupied-shop hourly sim during skip",
+          "within_s": 90
+        }
+      ],
+      "note": "the SECOND vote makes consensus, so the host's CONSENSUS line and the owner's DURING-skip sim line both belong on this step. The during-skip line proves the ordinary round-60 path is still alive and untouched by this change - the whole hours inside the goal are still simmed while SkipActive is true."
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "skipstate",
+      "note": "report-only sample during the skip - 2 game-hours at 10 min/s is ~12 s, so this one really is taken mid-skip"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "sleep_s": 18,
+      "note": "~12 s of skip plus margin"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "capture": {
+        "sGoal": "lastGoalMin=([0-9.\\-]+)",
+        "sEndH": "lastEndMin=([0-9.\\-]+)",
+        "sRealS": "lastRealS=([0-9.\\-]+)",
+        "sRate": "rate=([0-9.]+)"
+      },
+      "derive": {
+        "sGoalLo": [
+          "sGoal",
+          -0.01
+        ]
+      },
+      "expect_gt": {
+        "lastEndMin=([0-9.\\-]+)": "${sGoalLo}"
+      },
+      "note": "the skip stopped AT OR AFTER its goal, on the host"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "capture": {
+        "uBefore": "unprocessed=(-?[0-9]+)",
+        "doneBefore": "completed=(-?[0-9]+)",
+        "liveBefore": "liveCustomers=(-?[0-9]+)"
+      },
+      "note": "THE FIRST CLIENT COMMAND AFTER THE SKIP STOPS, deliberately: unprocessed = BuildingRegistration.unprocessedCompletedOrders.Count, the till list the day roll bills from, and this reading has to be taken BEFORE the hour roll the tail sim adds to. Only ~25 game-seconds of the partial hour are spent on this step and the two below. The list is not drained until the day roll and the scenario never reaches 23:00."
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "^OK ",
+      "capture": {
+        "tailHour0": "hour=([0-9.]+)",
+        "tailDay0": "day=([0-9]+)"
+      },
+      "derive": {
+        "tailHourGate": [
+          "tailHour0",
+          1.0
+        ]
+      },
+      "note": "the owner's clock just after the skip ended (about HH:35). The gate is that clock PLUS a whole game-hour, which can only be reached by crossing a full-hour boundary no matter where in the hour the skip stopped - that boundary is the roll under test. NOTE there is deliberately NO mark between the skip and the assertion at step 40: the rig searches each role's log from its LAST mark, the tail line is produced by an hour roll that owns no command of its own, and a mark placed here raced that roll and lost (run T-SKIPTAIL-20260920-120152). The window is step 20's LEG mark, which is safe because the tail line is emitted only with SkipActive FALSE and so cannot be confused with anything logged during the skip."
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "capture": {
+        "sEndC": "lastEndMin=([0-9.\\-]+)"
+      },
+      "note": "and it is over on the OWNER too - from here the world runs at normal speed with the owner still inside the shop, which is the H-SKIPTAIL-1 situation | THE H-SKIPTAIL-1 ASSERTION LIVES HERE: the tail line is caused by the passive hour roll (about 25 game-minutes after this command), and rigrun searches a role's log from that step's own mark, so the assertion must sit on the LAST client command BEFORE the roll and wait for it (run 3 failed only because it sat on a step whose mark came after the roll; the line itself was in the log).",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Rest\\] occupied-shop hourly sim after a skip that ended mid-hour: '${shopName}' h",
+          "within_s": 150
+        }
+      ]
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "normal speed, ~45 game-minutes: tail wait 1/3"
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "capture": {
+        "tailHour1": "hour=([0-9.]+)"
+      },
+      "note": "report-only clock poll - if the gate below fails, this says how far the clock actually got"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "tail wait 2/3"
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "capture": {
+        "tailHour2": "hour=([0-9.]+)"
+      },
+      "note": "report-only clock poll"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "tail wait 3/3 - 135 s of normal play, comfortably more than the one game-hour the gate needs"
+    },
+    {
+      "seq": 39,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "^OK ",
+      "capture": {
+        "tailHour3": "hour=([0-9.]+)"
+      },
+      "expect_gt": {
+        "hour=([0-9.]+)": "${tailHourGate}"
+      },
+      "note": "clock gate only: the owner's clock passed a whole game-hour at normal speed (the tail line is asserted on step 33). THE ASSERTION. First the clock really did cross a full-hour boundary while the owner stood inside at normal speed. Then the owner's log must carry the H-SKIPTAIL-1 line NAMING THIS GYM. That line is e"
+    },
+    {
+      "seq": 40,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "capture": {
+        "uAfter": "unprocessed=(-?[0-9]+)",
+        "doneAfter": "completed=(-?[0-9]+)",
+        "liveAfter": "liveCustomers=(-?[0-9]+)"
+      },
+      "expect_gt": {
+        "unprocessed=(-?[0-9]+)": "${uBefore}"
+      },
+      "note": "the money side of the same roll: the till list GREW across it. Before the fix the partial hour's body-less entries reached no till at all."
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
+      "capture": {
+        "t1orders": "orders=([0-9]+)",
+        "t1dupes": "dupes=(-?[0-9]+)",
+        "t1rev": "dupeRevenue=([0-9.]+)",
+        "t1done": "liveCompleted=(-?[0-9]+)",
+        "t1live": "live=(-?[0-9]+)"
+      },
+      "note": "H-SKIPDOUBLE-1 END: dupes=0 dupeRevenue=0.00 after an extra sim ran in an hour that ALSO had live checkouts in it - the exact shape that used to double-bill. Zero here and zero at step 25 means zero gained across the whole scenario."
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "perf",
+      "expect_result": "^OK perf",
+      "capture": {
+        "perfWorstH": "worstMs=([0-9]+)",
+        "perfFpsH": "fps=([0-9]+)"
+      }
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "perf",
+      "expect_result": "^OK perf",
+      "capture": {
+        "perfWorstC": "worstMs=([0-9]+)",
+        "perfFpsC": "fps=([0-9]+)"
+      }
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 46,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding",
+      "note": "fixture hygiene: the owner leaves. The host never entered a building. NO save."
+    },
+    {
+      "seq": 47,
+      "role": "both",
+      "cmd": "mark TEST SKIPTAIL END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

@@ -467,7 +467,9 @@ namespace BigAmbitionsMP
         // native time machine runs — that bypass is how SP register fast-forward pays.
         // Our consensus skip drives RunMainGameTick directly with the machine stopped,
         // so this postfix simulates exactly the shop native exempted, per machine for
-        // its own player, while OUR skip is active. Staffing is native-correct (ad-hoc
+        // its own player, while OUR skip is active AND for the one further hour roll that
+        // closes a partial hour in which this shop had bodies denied (H-SKIPTAIL-1,
+        // 2026-09-21 - a skip that ends MID-hour, see Patch_IndoorSpawner_SkipVisualPace). Staffing is native-correct (ad-hoc
         // register worker via IsPlayerWorkingInEmployeeStation; a remote helper's
         // register via the synthetic duty employee's blanket 0-24 shift). NO DOUBLE
         // INCOME (corrected 2026-09-20, H-SKIPDOUBLE-1): the shared CustomerEntry
@@ -501,14 +503,25 @@ namespace BigAmbitionsMP
             private static int _simmed;
             private const int SetAsideBudget = 10;               // set-aside lines per session
             private static int _setAsideLogged;
+            private const int TailBudget = 10;                   // H-SKIPTAIL-1 lines per session
+            private static int _tailLogged;
             static void Postfix()
             {
                 try
                 {
-                    if (!MPRestSync.SkipActive) return;
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                     var current = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                     if (current == null || !current.RentedByPlayer) return;
+                    // H-SKIPTAIL-1 (2026-09-21). The SkipActive test USED to be the first line here, so
+                    // the sim ran only when a skip was active AT the hour roll. A skip that ends MID-hour
+                    // with the player still inside left the rest of that hour's body-less entries billed by
+                    // NOBODY (native RunHourly exempts the occupied shop, BusinessSimulatorHelper.cs:32).
+                    // The gate is now 'skip active OR this shop had a body denied in the hour now closing' -
+                    // the stamp Patch_IndoorSpawner_SkipVisualPace writes at its one denial line. This
+                    // postfix runs inside native RunHourly BEFORE Hour++ (GameManager.RunMainGameTick), so
+                    // at the roll the CURRENT hour is still the hour the denial happened in.
+                    bool skipTail = !MPRestSync.SkipActive;
+                    if (skipTail && !Patch_IndoorSpawner_SkipVisualPace.DeniedThisHour(current)) return;
                     if (!MergerFlip.BooksHere(current)) return;          // my own shop, OR the absent owner's shop I stand in for: the machine that holds the books is the one that must sim it. TrulyMine alone stood down on a STAND-IN (the reg stays flipped through the veil), so nobody simulated that shop at all.
                     var data = BusinessTypeHelper.GetData(current);
                     if (data?.simulator == null || !data.spawnCustomers) return;   // !spawnCustomers shops already simulated natively
@@ -584,8 +597,13 @@ namespace BigAmbitionsMP
                     }
 
                     _simmed++;
-                    if (_simmed == 1 || _simmed % 12 == 0)
+                    if (!skipTail && (_simmed == 1 || _simmed % 12 == 0))   // a tail roll has its own line below - no skip is active there
                         Plugin.Logger.LogInfo($"[Rest] occupied-shop hourly sim during skip: '{current.BusinessName}' h{hour} (#{_simmed}) setAside={heldBack.Count} — SP time-machine parity (round-60).");
+                    if (skipTail && _tailLogged < TailBudget)
+                    {
+                        _tailLogged++;
+                        Plugin.Logger.LogInfo($"[Rest] occupied-shop hourly sim after a skip that ended mid-hour: '{current.BusinessName}' h{hour} setAside={heldBack.Count} (H-SKIPTAIL-1)");
+                    }
                     if (heldBack.Count > 0 && _setAsideLogged < SetAsideBudget)
                     {
                         _setAsideLogged++;
@@ -840,10 +858,13 @@ namespace BigAmbitionsMP
         // guard items, not the till list. An entry that DID get a body was billed by the
         // sim AND by the live checkout until that date; round-60 now sets exactly those
         // entries aside while it sims.) Income matches the away-from-shop sim, visuals consistent.
-        // KNOWN GAP (review 2026-09-21, pre-existing, not fixed here): the round-60 sim runs only
-        // when SkipActive is true AT the hour roll. A skip that ends MID-hour with the player still
-        // inside leaves that hour's body-less entries billed by nobody (native exempts the occupied
-        // shop, BusinessSimulatorHelper.cs:32). Whole-hour goals are unaffected.
+        // THAT GAP IS FIXED (H-SKIPTAIL-1, 2026-09-21; it read 'KNOWN GAP ... not fixed here' until
+        // then): the round-60 sim used to run only when SkipActive was true AT the hour roll, so a
+        // skip that ended MID-hour with the player still inside left the rest of that hour's
+        // body-less entries billed by nobody (native exempts the occupied shop,
+        // BusinessSimulatorHelper.cs:32). The denial line below now STAMPS shop+day+hour, and the
+        // round-60 postfix also runs for the single roll whose day/hour that stamp matches - exactly
+        // the partial hours in which this pacing took a body away. Whole-hour goals never had the gap.
         [HarmonyPatch(typeof(IndoorCustomerSpawner), "CanSpawnCustomer")]
         public static class Patch_IndoorSpawner_SkipVisualPace
         {
@@ -851,6 +872,14 @@ namespace BigAmbitionsMP
             private const float MaxSecondsBetween = 90f;    // dead-hour ceiling
 
             private static float _nextAllowed;
+
+            // H-SKIPTAIL-1 (2026-09-21): the exact state 'a body was denied for THIS shop in THIS
+            // game hour', stamped at the one denial line below. A registration REFERENCE plus two
+            // ints - no strings, no allocation, nothing per frame beyond three field writes on a
+            // call that was already happening.
+            private static BuildingRegistration? _deniedReg;
+            private static int _deniedDay = -1;
+            private static int _deniedHour = -1;
             private static int _cachedHour = -1;
             private static string _cachedAddr = "";
             private static float _cachedInterval = 8f;
@@ -899,6 +928,29 @@ namespace BigAmbitionsMP
                 catch { return 8f; }
             }
 
+            /// <summary>True only when the stamp above names THIS registration (same reference) and
+            /// the CURRENT game day and hour. Read by Patch_RunHourly_SimulateOccupiedShopDuringSkip,
+            /// which runs inside native RunHourly BEFORE Hour++, so 'current' there is still the hour
+            /// the denial happened in - and false on every later roll, so the sim runs once.</summary>
+            internal static bool DeniedThisHour(BuildingRegistration reg)
+            {
+                try
+                {
+                    if (reg == null || !ReferenceEquals(reg, _deniedReg)) return false;
+                    return _deniedDay == SaveGameManager.Current.Day
+                        && _deniedHour == SaveGameManager.Current.Hour;
+                }
+                catch { return false; }
+            }
+
+            /// <summary>Session boundary only (MPRestSync.Reset): drop the stamp so a registration
+            /// from a previous session can never be compared against, or kept alive by, this class.</summary>
+            internal static void ClearDenialStamp()
+            {
+                try { _deniedReg = null; _deniedDay = -1; _deniedHour = -1; }
+                catch { }
+            }
+
             static void Postfix(ref bool __result)
             {
                 try
@@ -910,7 +962,28 @@ namespace BigAmbitionsMP
                     // whenever we're NOT skipping so the next skip starts with a clean slate.
                     if (!MPRestSync.SkipActive) { _nextAllowed = 0f; return; }
                     if (!MPServer.IsRunning && !MPClient.IsConnected) { _nextAllowed = 0f; return; }
-                    if (UnityEngine.Time.unscaledTime < _nextAllowed) { __result = false; return; }
+                    if (UnityEngine.Time.unscaledTime < _nextAllowed)
+                    {
+                        // H-SKIPTAIL-1: this entry gets NO body and native TrySpawnCustomer still marks
+                        // it completed (IndoorCustomerSpawner.cs:191-210), so only the round-60 hourly sim
+                        // can ever bill it. Stamp the shop and the game hour so that sim still runs at the
+                        // coming roll even if the skip ends before the hour does.
+                        try
+                        {
+                            // Review MEDIUM-1: ONE slot, so only a shop THIS machine books may write it - the
+                            // same predicate the consuming postfix gates on. A denial in anybody else's interior
+                            // must not take the slot away from (or claim it for) a shop that sim would refuse.
+                            var deniedIn = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                            if (deniedIn != null && MergerFlip.BooksHere(deniedIn))
+                            {
+                                _deniedReg  = deniedIn;
+                                _deniedDay  = SaveGameManager.Current.Day;
+                                _deniedHour = SaveGameManager.Current.Hour;
+                            }
+                        }
+                        catch { }
+                        __result = false; return;
+                    }
                     _nextAllowed = UnityEngine.Time.unscaledTime + CurrentNormalPaceInterval();
                 }
                 catch { }
