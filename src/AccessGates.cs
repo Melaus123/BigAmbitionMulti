@@ -286,8 +286,25 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(RecruitmentAgencyDialog), MethodType.Constructor, new Type[0])]
         public static class Patch_RecruitmentAgencyDialog_Ctor
         {
-            static void Prefix(out List<BuildingRegistration> __state) { __state = OpenGate("RecruitmentAgencyDialog"); }
-            static void Finalizer(List<BuildingRegistration> __state) { CloseGate(__state); }
+            /// <summary>H-MERGERCAMPAIGN-1 (2026-09-19, reworked after review).  A merged member can book a
+            /// campaign for a partner's shop, but it is created only in the OWNER's save - so this machine's own
+            /// list is empty and the native constructor would take its plain start branch (:37-41), which has no
+            /// way in to the campaign list.  AFTER the tenancy gate is open, CampaignMirror.BeginCtorSentinel
+            /// makes the constructor take its OWN 'start new / manage campaigns' branch (:21-25) - see there for
+            /// why an entry shown after the constructor cannot work.  The Finalizer removes the sentinel FIRST,
+            /// always, then closes the gate.</summary>
+            static void Prefix(out List<BuildingRegistration> __state)
+            {
+                __state = OpenGate("RecruitmentAgencyDialog");
+                try { CampaignMirror.BeginCtorSentinel(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Campaigns] agency ctor prefix: {ex.Message}"); }
+            }
+            static void Finalizer(List<BuildingRegistration> __state)
+            {
+                try { CampaignMirror.EndCtorSentinel(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Campaigns] agency ctor finalizer: {ex.Message}"); }
+                CloseGate(__state);
+            }
         }
 
         /// <summary>WholesaleStoreManagerDialog.cs:21 — tenancy AND a non-blank BusinessName.</summary>

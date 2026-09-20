@@ -4650,6 +4650,11 @@ namespace BigAmbitionsMP
                 gi.RecruitmentCampaigns.Add(campaign);
                 GameEvent.Invoke("ba:gameevent_startedrecruitmentcampaign");
                 SaveGameManager.MarkChange();
+                // H-MERGERCAMPAIGN-1: the member who booked this is watching for it to appear on the
+                // agency screen, so the company-lists bundle goes out on the URGENT cadence, not in
+                // thirty seconds.  The native confirm, the cancel and the hourly pass have their own
+                // seams in CampaignMirror; this one is the routed leg's.
+                CampaignMirror.MarkOwnChange("a routed booking landed");
                 Plugin.Logger.LogInfo($"[Merger] campaign booking applied for '{p.AddressKey}' from '{p.PlayerId}' "
                                     + $"(agency '{p.AgencyKey}', {skill}, {candidates} candidates, {days} days, {price} charged); "
                                     + "the two phone messages were not replayed - they belong to the caller's own dialog contact.");

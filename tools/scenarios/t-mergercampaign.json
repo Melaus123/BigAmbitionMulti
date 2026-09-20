@@ -1,0 +1,269 @@
+{
+  "id": "T-MERGERCAMPAIGN",
+  "title": "H-MERGERCAMPAIGN-1, two players: a merged MEMBER books a recruitment campaign for a partner's shop, the campaign is created ONLY in the OWNER's save, and the member then SEES it - read-only - through the mirrored campaign registry; the mirror is empty again the moment the company dissolves. Ends dissolved, NO save",
+  "preconditions": "Fixture save1 (host melaus, client Client1). Build with H-MERGERCAMPAIGN-1 deployed on BOTH machines. THE CLIENT IS THE MEMBER and the HOST IS THE OWNER: after the merger forms, the CLIENT's `mergestatus` keys[0] is a building the HOST owns that the flip has made look like the client's own - that is the shop the member books for. The recruitment agency is discovered at runtime with the new read-only `campaigns agencies` sub-verb (no existing lever could name one). FIXTURE REQUIREMENT: neither machine may already be running a campaign for the skill ba:skill_hrmanager - steps 15/16 record the starting lists and refuse if that skill is already there. The rig draws no screen: the `mergercampaign` lever drives the same routed leg the recruitment dialog sends, and `campaigns mirror <agency>` materialises the member's rows through the same DTO -> transient conversion the screen layer uses. NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "campaign booking REFUSED",
+    "\\[Campaigns\\] a partner's campaign row could not be drawn",
+    "\\[Campaigns\\] RecruitmentCampaignsList.contractEntry / SetUpContract are not where they were",
+    "\\[Campaigns\\] AlreadyHasCampaignActive is not where it was",
+    "\\[Campaigns\\] .* has no business registration here",
+    "\\[Merger\\] accept .* REFUSED"
+  ],
+  "oracles_report": [
+    "campaign booking applied for",
+    "\\[Campaigns\\] my campaign list changed",
+    "\\[Campaigns\\] mirrored .* running campaign",
+    "\\[Campaigns\\] cleared the mirrored campaigns"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST MERGERCAMPAIGN START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "sleep_s": 30,
+      "note": "the worlds settle and the first paperwork / company-lists bundles cross"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "ownerShop": "keys=\\['([^']+)'"
+      },
+      "note": "RUNTIME DISCOVERY: on the CLIENT the flipped keys are the HOST's buildings, so keys[0] is a shop the member does NOT own - exactly the case this feature is about. The same discovery T-SALEHOLE uses, with the roles the other way round"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "campaigns agencies",
+      "expect_result": "^OK campaigns agencies=[1-9]\\d* \\[",
+      "capture": {
+        "agency": "agencies=\\d+ \\[([^;\\]]+)"
+      },
+      "note": "THE SMALLEST NEW READ this scenario needed: no existing lever could name a recruitment agency, and the booking leg takes one as an address key. It reads businessTypeName exactly as the game's own debug helper does (Helpers/RecruitmentCommands.cs:109-116)"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "campaigns",
+      "expect_result": "^campaigns=\\d+ \\[",
+      "refute_result": "ba:skill_hrmanager",
+      "note": "the OWNER's starting list. The count is recorded rather than required, but the skill this run books must NOT already be there - otherwise step 20 could not tell the new campaign from an old one"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "campaigns",
+      "expect_result": "^campaigns=\\d+ \\[",
+      "refute_result": "ba:skill_hrmanager",
+      "capture": {
+        "memberOwn": "^campaigns=(\\d+)"
+      },
+      "note": "and the MEMBER's own list, which must be exactly this again at step 21: a routed booking adds NOTHING here"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "campaigns mirror",
+      "expect_result": "^OK campaigns mirror owners=0 \\[\\] rows=0",
+      "note": "and the mirror is empty before the booking - so anything it shows later came from this run"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "mergercampaign ${ownerShop} ${agency} ba:skill_hrmanager 3 5",
+      "expect_result": "^OK campaign booking routed for '${ownerShop}' \\(agency '${agency}', ba:skill_hrmanager, 3 candidates, 5 days\\)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "campaign booking applied for '${ownerShop}' from '${clientPid}' \\(agency '${agency}', ba:skill_hrmanager, \\d+ candidates, \\d+ days, [0-9.]+ charged\\)",
+          "within_s": 20
+        },
+        {
+          "role": "h",
+          "regex": "\\[Campaigns\\] my campaign list changed \\(a routed booking landed\\) - the company-lists bundle is urgent",
+          "within_s": 20
+        }
+      ],
+      "note": "THE BOOKING. The member charges nothing and adds nothing; the OWNER clamps the two numbers to its own sliders, recomputes the price, pays from its own company and adds the campaign to its own save. The second log line is the new MarkDirty seam: the owner's bundle goes on the URGENT cadence because a member is waiting to see this"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "campaigns",
+      "expect_result": "^campaigns=[1-9]\\d* \\[.*\\|ba:skill_hrmanager\\|[0-9]+\\|False",
+      "note": "+1 ON THE OWNER: the list that step 15 had without this skill now carries it, unfinished. This is the list RecruitmentHelper.RunHourly ticks - and it is the ONLY save in the session that holds this campaign"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "campaigns",
+      "expect_result": "^campaigns=${memberOwn} \\[",
+      "refute_result": "ba:skill_hrmanager",
+      "note": "UNCHANGED ON THE MEMBER, to the row: nothing was installed into SaveGameManager.Current.RecruitmentCampaigns here, so the member's own hourly pass has nothing new to tick and no finish message to send"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "sleep_s": 30,
+      "note": "the owner's urgent company-lists bundle crosses (2 s cadence + the host's store and fan-out); 30 s is the whole dirty cadence, so this passes even if the urgent path were to be lost"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "campaigns mirror ${agency}",
+      "expect_result": "^OK campaigns mirror owners=1 \\[${hostPid}:${ownerShop}\\|ba:skill_hrmanager\\|0/[0-9]+\\|${agency}\\] rows=1",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Campaigns\\] mirrored [1-9]\\d* running campaign\\(s\\) of '${hostPid}' \\(view only - nothing installed\\)",
+          "within_s": 40
+        }
+      ],
+      "note": "THE FEATURE. The member can now see the partner's running campaign: whose it is, which shop, which skill, how many found of how many, and at which agency. rows=1 is the conversion the screen layer does - the DTO became a transient Entities.RecruitmentCampaign with both addresses and a business registration resolved on THIS machine, which is what the game's own row builder dereferences"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved; NO save. The owner's campaign is left in the session this run started, in memory only"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 27,
+      "role": "both",
+      "cmd": "mark TEST MERGERCAMPAIGN DISSOLVE-LEAVES-NOTHING",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "campaigns mirror ${agency}",
+      "expect_result": "^OK campaigns mirror owners=0 \\[\\] rows=0",
+      "note": "off the merger the member holds no view of the partner's campaigns at all - the registry is emptied on the membership edge, so the agency screen has nothing of theirs to draw"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "campaigns",
+      "expect_result": "^campaigns=${memberOwn} \\[",
+      "refute_result": "ba:skill_hrmanager",
+      "note": "and the member's own save is exactly what it was before the run: the mirror never touched it"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "dissolvecheck",
+      "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "campaigns",
+      "expect_result": "^campaigns=[1-9]\\d* \\[.*\\|ba:skill_hrmanager\\|[0-9]+\\|False",
+      "note": "and the campaign the member booked is still the OWNER's, after the company it was booked under is gone: it was always their record, in their save, ticked by their hourly pass"
+    },
+    {
+      "seq": 33,
+      "role": "both",
+      "cmd": "mark TEST MERGERCAMPAIGN END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

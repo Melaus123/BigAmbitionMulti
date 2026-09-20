@@ -67,8 +67,13 @@ namespace BigAmbitionsMP
 
         public static void Run(string when, IReadOnlyCollection<string> exPartners)
         {
+            // Remembered for the DEV levers only (H-DISSOLVE-LINGER-1): once an ex-partner's injected copies are
+            // gone, LeverPartners() has nobody left to name, and an EMPTY set means 'anyone who is not me'.
+            try { _lastRunPartners = new List<string>(exPartners); } catch { }
             Sweep(when, exPartners, apply: true);
         }
+
+        private static List<string> _lastRunPartners = new List<string>();
 
         /// <summary>MAIN THREAD (TestDrive `dissolverun`): as Run, and says what it changed.</summary>
         internal static Counts RunCounted(string when, IReadOnlyCollection<string> exPartners)
@@ -141,7 +146,18 @@ namespace BigAmbitionsMP
                             // ex-partner's shop for ever. The native cancel resets every destination row in
                             // every plan that names the address, which is exactly the whole of the leak.
                             dests++;
-                            if (!apply) Plugin.Logger.LogInfo($"[Dissolve] check names: destination '{dk}' on plan {pl.id} (an ex-partner's building).");   // DIAG-1
+                            if (!apply)   // DIAG-1, with the predicate's inputs (H-DISSOLVE-LINGER-1)
+                            {
+                                string diag = "";
+                                try
+                                {
+                                    var dreg = MergerAbsence.RegOfKey(dk);
+                                    diag = $" ex=[{string.Join(",", ex)}] rented={(dreg != null && dreg.RentedByPlayer)} flipped={MergerFlip.IsFlipped(dk)} "
+                                         + $"parked='{MergerFlip.ParkedRunner(dk)}' rival='{dreg?.businessOwnerRivalId}'";
+                                }
+                                catch { }
+                                Plugin.Logger.LogInfo($"[Dissolve] check names: destination '{dk}' on plan {pl.id} (not mine{(ex.Count == 0 ? ", NO partner named - 'anyone who is not me'" : ", owned by a named ex-partner")}).{diag}");
+                            }
                             if (apply)
                                 try { Buildings.Office.Headquarters.LogisticsManagerHelper.CancelAllDeliveriesForAddress(d.deliveryTargetAddress); }
                                 catch { }
@@ -439,6 +455,10 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
+            // H-DISSOLVE-LINGER-1: nobody left to name -> ask about the partners the LAST real teardown ran for,
+            // never the empty 'anyone who is not me' question (it counted a delivery to an NPC business as a leak).
+            if (set.Count == 0)
+                try { foreach (var p in _lastRunPartners) if (!string.IsNullOrEmpty(p) && !set.Contains(p)) set.Add(p); } catch { }
             return set;
         }
 

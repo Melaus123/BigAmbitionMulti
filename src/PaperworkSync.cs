@@ -201,6 +201,12 @@ namespace BigAmbitionsMP
             // would double the rows - the design's Absence paragraph.
             try { p.Lists.BusinessTasks.AddRange(TaskMirror.BuildRows()); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Tasks] bundle rows: {ex.Message}"); }
+            // H-MERGERCAMPAIGN-1 (2026-09-19): and my own RUNNING RECRUITMENT CAMPAIGNS, for a merged
+            // co-member's agency screen.  Owner-only for the same reason the tasks above are: a campaign
+            // lives in its real owner's save and no absence hand-over list carries one, so a machine that
+            // merely simulates an address has nothing of that owner's to publish here.
+            try { p.Lists.RecruitmentCampaigns.AddRange(CampaignMirror.BuildRows()); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Campaigns] bundle rows: {ex.Message}"); }
             return p;
         }
 
@@ -1025,6 +1031,13 @@ namespace BigAmbitionsMP
             try { TaskMirror.InstallUnaddressed(p); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Tasks] unaddressed install '{p.OwnerPid}': {ex.Message}"); }
 
+            // H-MERGERCAMPAIGN-1 (2026-09-19): the owner's running campaigns.  NO address filter and NO
+            // install: the rows go into CampaignMirror's own in-memory registry and are only ever drawn
+            // as transient rows on the recruitment agency's own screen.  The address that matters there
+            // is the AGENCY's (a public building both machines hold), not a flipped one.
+            try { CampaignMirror.Install(p); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Campaigns] install '{p.OwnerPid}': {ex.Message}"); }
+
             _byOwner[p.OwnerPid] = p;
             // fold b H2: does this owner still have work waiting on a flip?  The answer is exactly the skip
             // counter above, and it is re-decided on every Apply - a later bundle that installs clean takes
@@ -1065,6 +1078,7 @@ namespace BigAmbitionsMP
                 _pendingFlip.Remove(ownerPid);   // fold b H2: nothing of theirs is waiting on a flip any more
                 try { CompanyPlans.ClearOwner(ownerPid, why); } catch { }   // 4c part 1: the HQ plan overlay goes with them
                 try { TaskMirror.Lift(ownerPid); } catch { }                 // MIRROR-1: and so does their objective panel
+                try { CampaignMirror.ClearOwner(ownerPid, why); } catch { }  // H-MERGERCAMPAIGN-1: and their campaign rows
                 RebuildOwnerMap("");   // fold d: a departure is nobody's publish - no pending wait advances
                 if (n > 0 || had)
                 {
@@ -1159,6 +1173,7 @@ namespace BigAmbitionsMP
         {
             try { CompanyPlans.ClearAll(why); } catch { }   // 4c part 1
             try { TaskMirror.Lift(""); } catch { }           // MIRROR-1: every mirrored alert, whoever owned it
+            try { CampaignMirror.ClearAll(why); } catch { }  // H-MERGERCAMPAIGN-1: and every mirrored campaign
             _pendingFlip.Clear();   // fold b H2: both exits below leave no owner behind, so the wait list goes too
             if (_byOwner.Count == 0) { _ownerOfAddr.Clear(); _planById.Clear(); _lastSentPlan.Clear(); _pendingPlan.Clear(); return; }   // fold d: no owners left - nothing pending can echo
             foreach (var pid in new List<string>(_byOwner.Keys)) ClearOwner(pid, why);
@@ -1847,6 +1862,8 @@ namespace BigAmbitionsMP
                 // MIRROR-1: the owner's alerts travel on, untouched. The host neither reads nor judges
                 // them - what is in this owner's stored bundle belongs to this owner.
                 if (l.BusinessTasks != null) p.BusinessTasks.AddRange(l.BusinessTasks);
+                // H-MERGERCAMPAIGN-1: the owner's running campaigns travel on, untouched and unjudged.
+                if (l.RecruitmentCampaigns != null) p.RecruitmentCampaigns.AddRange(l.RecruitmentCampaigns);
             }
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var b in bundle?.Businesses ?? new List<BusinessPaperwork>())

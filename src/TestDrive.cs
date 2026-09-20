@@ -1093,6 +1093,19 @@ namespace BigAmbitionsMP
                     // H-MERGERHIRE-1 - TEST LEVER. Read-only: this machine's own recruitment campaigns, the list
                     // the hourly tick works through (SaveGameManager.Current.RecruitmentCampaigns). The rig reads
                     // it on the OWNER to see a routed booking land.
+                    // H-MERGERCAMPAIGN-1 - TWO MORE READ-ONLY SUB-VERBS.
+                    //   `campaigns mirror [<agency key>]` - the MEMBER's view of a merged partner's
+                    //     running campaigns (CampaignMirror's in-memory registry, never a save list).
+                    //     With an agency key it also materialises that agency's rows through the real
+                    //     DTO -> transient path, which is everything the screen layer does short of the
+                    //     draw itself, so the rig exercises the conversion without a dialog.
+                    //   `campaigns agencies` - this machine's recruitment-agency address keys.  Added
+                    //     because no existing lever can name an agency, and the rig has to discover one
+                    //     at runtime to book against it.
+                    if (arg.StartsWith("mirror", StringComparison.OrdinalIgnoreCase))
+                        return CampaignMirror.TestDriveLine(arg.Substring(6).Trim());
+                    if (string.Equals(arg, "agencies", StringComparison.OrdinalIgnoreCase))
+                        return CampaignMirror.AgenciesLine();
                     var kgi = SaveGameManager.Current;
                     if (kgi == null) return "ERR no save loaded";
                     var klist = kgi.RecruitmentCampaigns;

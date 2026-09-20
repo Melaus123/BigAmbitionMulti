@@ -4044,6 +4044,12 @@ namespace BigAmbitionsMP
         // which copies them onto the CompanyLists payload it fans out. Owner-only: a machine standing in
         // for an absent owner publishes nothing here, so the per-address bundle surgery never moves them.
         public List<PwBusinessTask>      BusinessTasks          { get; set; } = new();
+
+        // H-MERGERCAMPAIGN-1 (2026-09-19): the owner's RUNNING recruitment campaigns, for a merged
+        // co-member to SEE.  Filled on the OWNER's machine from its own SaveGameManager.Current
+        // .RecruitmentCampaigns, TrulyMine shops only - a machine standing in for an absent owner holds
+        // none of that owner's campaigns at all, so it publishes none here.
+        public List<PwRecruitmentCampaign> RecruitmentCampaigns { get; set; } = new();
     }
 
     /// <summary>One business's own books (the BuildingRegistration half of the paperwork).</summary>
@@ -4294,6 +4300,11 @@ namespace BigAmbitionsMP
         // copies for a co-member. Additive on Version 23, like every family above it. The receiver draws
         // them through the game's own row builder and never completes one by local state - see TaskMirror.
         public List<PwBusinessTask>      BusinessTasks       { get; set; } = new();
+
+        // H-MERGERCAMPAIGN-1 (2026-09-19): the owner's running recruitment campaigns as display copies.
+        // Additive on Version 23 (unshipped protocol 24), like every family above it.  SCREEN-LAYER ONLY
+        // on the receiver - CampaignMirror holds them in memory and never puts one in a save list.
+        public List<PwRecruitmentCampaign> RecruitmentCampaigns { get; set; } = new();
     }
 
     /// <summary>MIRROR-1: ONE of the owner's TodoTasks on the wire (Entities/TodoTask.cs). The id is the
@@ -4319,6 +4330,29 @@ namespace BigAmbitionsMP
         public int    PriorityOffset      { get; set; }
         public int    RemainingDays       { get; set; }
         public string OwnerPid            { get; set; } = "";
+    }
+
+    /// <summary>H-MERGERCAMPAIGN-1: ONE of an owner's RUNNING recruitment campaigns, as a DISPLAY copy
+    /// for a merged co-member (Entities/RecruitmentCampaign.cs).  Only what the agency screen's row
+    /// builder reads is on the wire (UI.Dialog/RecruitmentCampaignsList.cs:29-50).  The find times are a
+    /// list natively, but the row uses only the LATEST one (its "days left"), so exactly that one
+    /// timestamp travels - which also means the transient the receiver builds can never hold the EMPTY
+    /// list the builder's `.Last()` would throw on.  Never installed anywhere on the receiver: a copy in
+    /// SaveGameManager.Current.RecruitmentCampaigns would be ticked by the native hourly pass, which
+    /// generates real candidates and sends the finish message on the wrong machine.</summary>
+    public class PwRecruitmentCampaign
+    {
+        public string OwnerPid           { get; set; } = "";
+        public string AgencyKey          { get; set; } = "";   // the recruitment agency's address key
+        public string BusinessAddressKey { get; set; } = "";   // the shop the candidates are for
+        public string SkillName          { get; set; } = "";
+        public bool   FullTime           { get; set; }
+        public bool   PartTime           { get; set; }
+        public int    AmountOfCandidates { get; set; }
+        public int    CandidatesFound    { get; set; }
+        public int    LastFindDay        { get; set; }         // the LATEST candidateFindTimes entry
+        public int    LastFindHour       { get; set; }
+        public float  Price              { get; set; }
     }
 
     // -- Merger phase 4c part 2 (cross-member deliveries): the routed cargo transfer (MessageType.CargoTransfer) --

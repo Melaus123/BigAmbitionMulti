@@ -102,6 +102,7 @@ namespace BigAmbitionsMP
             try { MergerAbsence.Tick(); } catch { }   // P3-B: the host's PACED hand-over snapshots, one per tick
             try { CompanyBooks.Tick(); } catch { }    // P4a M0: the MEMBERSHIP EDGE - publish/apply on join, clear on the way out (nothing else fires on formation)
             try { CompanyFeed.Tick(); } catch { }     // P4b: the same edge for the shared transaction feed - a departed owner's rows go from the registry
+            try { CampaignMirror.Tick(); } catch { }  // H-MERGERCAMPAIGN-1: and for the mirrored recruitment campaigns
             if (_veilDepth > 0)
             {
                 // DIAG [FlipProbe] (2026-07-07, host stuck-flip: no 'flip OFF' after dissolve): a
