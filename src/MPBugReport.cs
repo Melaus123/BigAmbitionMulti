@@ -475,6 +475,11 @@ namespace BigAmbitionsMP
             sb.AppendLine($"Scene: {ActiveSceneName()}");
             sb.AppendLine($"GameRoot: {Blank(MPConfig.GameRootPath)}");
             sb.AppendLine($"InstalledMods: {Blank(ListInstalledMods())}");
+            // H-MODSDIFFER-1 step 2 (2026-09-20): the FOLDER line above stays — a leftover or a
+            // switched-off folder is still worth seeing when two reports are compared — but the
+            // list the join-time comparison actually uses is this one: what the game LOADED.
+            // Cached string, so this is safe wherever the report is assembled.
+            sb.AppendLine($"LoadedMods: {Blank(MPContentFingerprint.CachedMods)}");
             sb.AppendLine($"PersistentDataPath: {Blank(Application.persistentDataPath)}");
             sb.AppendLine($"OS: {Environment.OSVersion}");
             sb.AppendLine($"64BitProcess: {Environment.Is64BitProcess}");
@@ -583,7 +588,7 @@ namespace BigAmbitionsMP
         /// <summary>Round-57: enumerate installed mod folders — Workshop items (with the inner mod
         /// folder named when present) + ModsLocal — so a report answers "what else is running?"
         /// without exception archaeology. Best-effort: any failure yields a partial/empty list.</summary>
-        internal static string ListInstalledMods()   // round-253: also feeds the join-time mod-mismatch info (MPContentFingerprint.CachedMods)
+        internal static string ListInstalledMods()   // round-253 fed the join-time mod diff from here; since H-MODSDIFFER-1 step 2 that comes from MPContentFingerprint.ListLoadedMods() and this is only its pre-discovery FALLBACK
         {
             var parts = new System.Collections.Generic.List<string>();
             try

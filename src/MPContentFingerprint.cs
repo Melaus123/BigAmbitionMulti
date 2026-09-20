@@ -73,7 +73,24 @@ namespace BigAmbitionsMP
         /// called every frame from the UI tick so the value is ready before any connect.</summary>
         public static void EnsureCached()
         {
-            if (_cachedMods.Length == 0) ComputeMods();   // round-253: mod list rides the same lifecycle
+            // Round-253: the mod list rides the same main-thread lifecycle as the fingerprint.
+            // H-MODSDIFFER-1 step 2 (2026-09-20): REFRESH, no longer compute-once. The set of
+            // loaded mods changes while the game runs (closing the mods panel re-discovers, and
+            // so does window focus after a folder edit), and a stale list is a WRONG list — the
+            // one-shot cache was itself one of the false-mismatch causes.
+            // Why polling and not ModDiscoveryRegistry.OnDiscoveryUpdated: the game sets that
+            // event to null in ResetStaticState (ModDiscoveryRegistry.cs ~:80, a
+            // [RuntimeInitializeOnLoadMethod(SubsystemRegistration)] that fires during Unity
+            // start-up, i.e. around the time our plugin is chainloaded). A subscription made on
+            // the wrong side of that call is dropped SILENTLY — the list would simply freeze,
+            // with no error to notice. Polling a tick we already own cannot lose its trigger.
+            // Cost: one file stat per mod every 2 s (the per-DLL assembly name is cached by
+            // path + write time + length), so the value any Hello reads is at most 2 s old.
+            if (_cachedMods.Length == 0 || UnityEngine.Time.unscaledTime >= _modsRefreshAt)
+            {
+                _modsRefreshAt = UnityEngine.Time.unscaledTime + 2f;
+                ComputeMods();
+            }
             if (_gameBuild.Length == 0) ComputeGameBuild();  // MACBUILD-1: Unity asset load, so main thread only
             if (_cached.Length > 0) return;
             try { Compute(); }
@@ -229,22 +246,203 @@ namespace BigAmbitionsMP
             catch { }
         }
 
-        // ── Round-253: installed-mod list, cached at startup beside the fingerprint ──
-        // (Hello is built on the NETWORK thread; the directory scan touches
-        // Application.persistentDataPath — main-thread-only by contract, same hazard the
-        // fingerprint compute hit on 2026-07-27. EnsureCached runs on the UI tick.)
+        // ── Round-253 / H-MODSDIFFER-1: the mod list that rides Hello ──
+        // (Hello is built on the NETWORK thread; computing this touches the game's mod
+        // registry — which async discovery mutates — and, in the fallback,
+        // Application.persistentDataPath. Both are main-thread-only by contract, the same
+        // hazard the fingerprint compute hit on 2026-07-27. EnsureCached runs on the UI tick
+        // and refreshes this every 2 s; every off-thread caller reads the cached string.)
         private static volatile string _cachedMods = "";
         public static string CachedMods => _cachedMods;
+        private static float _modsRefreshAt;
+        private static bool  _modsCountSaid;
+        private static bool  _modsFallbackSaid;
+        private static bool  _hadRegistryList;   // a registry-built list has been cached at least once this session (review HIGH)
+#if BAMP_DEV
+        private static readonly System.Collections.Generic.List<string> _fakeMods = new System.Collections.Generic.List<string>();
+#endif
 
         /// <summary>MAIN THREAD ONLY (called from EnsureCached).</summary>
         private static void ComputeMods()
         {
             try
             {
-                string m = MPBugReport.ListInstalledMods();
+                string m = ListLoadedMods();
+                // Review HIGH: the game CLEARS its registry and repopulates it across awaits whenever it
+                // re-discovers (window focus after a file change, a mod toggled). A refresh landing in that window
+                // must NOT swap the good `mod:` list for folder tokens - a HELLO built then would make every mod
+                // differ on both sides, and the host keeps that verdict for the whole lobby. The folder fallback is
+                // only right BEFORE a registry list has ever been seen; afterwards the last good value stands.
+                if (m.Length == 0 && _hadRegistryList) return;
+                if (m.Length > 0) _hadRegistryList = true;
+                if (m.Length == 0)
+                {
+                    // Nothing discovered yet, or the registry could not be read. HasDiscoveredEntries
+                    // is false for BOTH "no mods installed" and "the scan has not run", so the two
+                    // cannot be told apart — fall back to the installed-FOLDER listing for this pass
+                    // and ask the registry again on the next one (2 s), which self-heals as soon as
+                    // discovery lands. One line, once per session.
+                    if (!_modsFallbackSaid)
+                    {
+                        _modsFallbackSaid = true;
+                        Plugin.Logger.LogInfo("[Mods] the game's mod registry has discovered nothing yet - falling back to the installed-FOLDER list until it does.");
+                    }
+                    m = MPBugReport.ListInstalledMods();
+                }
+#if BAMP_DEV
+                lock (_fakeMods)
+                    foreach (var f in _fakeMods)
+                        m = (m.Length == 0 || m == "(none)") ? ("test:" + f) : (m + ", test:" + f);
+#endif
                 _cachedMods = string.IsNullOrEmpty(m) ? "(none)" : m;   // "(none)" ≠ "" so an empty list still reads as "computed"
             }
             catch { }
+        }
+
+        /// <summary>H-MODSDIFFER-1 step 2 (user-approved 2026-09-20). MAIN THREAD ONLY.
+        /// The mods the GAME ACTUALLY LOADED, as an ordinal-sorted, comma-separated token list —
+        /// which is what the join-time comparison should have been reading all along.
+        ///
+        /// Why this replaces the folder walk (MPBugReport.ListInstalledMods): a folder on disk is
+        /// not a loaded mod, and every one of the known FALSE mismatches came from that gap — a
+        /// Steam mod subscribed but switched OFF still has its folder; the same mod installed from
+        /// the Workshop on one machine and into ModsLocal on the other yielded two different
+        /// tokens; leftover folders never disappear; on a Mac the walk lands inside the .app
+        /// bundle and finds nothing. It was also BLIND to a version drift of the same workshop id.
+        /// The game's registry answers all five: it lists ENABLED Steam mods (steam_mod_manifest)
+        /// plus ALL ModsLocal mods (local mods have no toggle), and nothing that failed to load.
+        ///
+        /// Token: "mod:&lt;AssemblySimpleName&gt;@&lt;AssemblyVersion&gt;", both read from the mod folder's
+        /// single root DLL as pure METADATA (System.Reflection.AssemblyName.GetAssemblyName opens
+        /// the file and reads its manifest; it NEVER loads or runs the assembly). That is the same
+        /// identity the game's own loader keys on, and it is install-location independent. It shows a
+        /// version drift ONLY for mods that actually bump their AssemblyVersion - most (ours included:
+        /// no <Version> in the csproj) ship the SDK default 1.0.0.0, so expect little from it. ACCEPTED
+        /// RISK: two DIFFERENT mods built from one template name (MyMod@1.0.0.0) compare as equal
+        /// across machines; adding the display name or steam id to the token would re-break the
+        /// workshop-vs-local equality this exists for. Fallbacks, in order, when the DLL cannot be
+        /// read: "ws:&lt;steamid&gt;" for a numeric ModId, else "name:&lt;display name&gt;".
+        ///
+        /// PRIVACY: a LOCAL mod's ModId is its FULL PATH on disk (ModDiscoveryRegistry). It never
+        /// leaves this method — only an assembly name, a workshop id or a display name does.
+        ///
+        /// Returns "" when the registry has discovered nothing (or threw), so the caller can fall
+        /// back for that pass; "(none)" when it has discovered entries that yield no token.</summary>
+        public static string ListLoadedMods()
+        {
+            var tokens = new System.Collections.Generic.List<string>();
+            int byAsm = 0, byWs = 0, byName = 0, failed = 0;
+            try
+            {
+                if (!global::BigAmbitions.ModsInternal.ModDiscoveryRegistry.HasDiscoveredEntries) return "";
+                var entries = global::BigAmbitions.ModsInternal.ModDiscoveryRegistry.Entries;
+                if (entries == null) return "";
+                // One mod is listed once per ACTIVATION SCOPE it registers in, so dedupe by ModId
+                // (the registry's own key). GetActiveMods() would have been the tempting shortcut,
+                // but it is scope-limited and would under-report.
+                var seen = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var kv in entries)
+                {
+                    var list = kv.Value;
+                    if (list == null) continue;
+                    foreach (var e in list)
+                    {
+                        if (e == null) continue;
+                        string id = e.ModId ?? "";
+                        if (id.Length > 0 && !seen.Add(id)) continue;
+                        string tok = AssemblyToken(e.ModFolder);
+                        if (tok.Length > 0) byAsm++;
+                        else if (IsAllDigits(id)) { tok = "ws:" + id; byWs++; }   // numeric ModId == the steam id; a LOCAL ModId is a path, so it can never reach here
+                        else { tok = "name:" + Clean(e.ModDisplayName); byName++; }
+                        tokens.Add(tok);
+                    }
+                }
+                try
+                {
+                    var f = global::BigAmbitions.ModsInternal.ModDiscoveryRegistry.FailedModReasons;
+                    failed = f != null ? f.Count : 0;   // failed mods are NOT in Entries — counted only so the log line says why a count looks short
+                }
+                catch { }
+            }
+            catch (Exception ex)
+            {
+                // No message text: a TypeLoad/FileNotFound message can carry a full disk path, and logs ship in bug reports.
+                if (!_modsFallbackSaid)
+                {
+                    _modsFallbackSaid = true;
+                    Plugin.Logger.LogWarning($"[Mods] the game's mod registry could not be read ({ex.GetType().Name}) - the last good list stands, or the installed-FOLDER list if there is none yet.");
+                }
+                return "";
+            }
+            tokens.Sort(StringComparer.Ordinal);
+            if (!_modsCountSaid)
+            {
+                _modsCountSaid = true;
+                Plugin.Logger.LogInfo($"[Mods] loaded list from the game's registry: {tokens.Count} mod(s) ({byAsm} by assembly, {byWs} by workshop id, {byName} by display name); failed to load: {failed}");
+            }
+            return tokens.Count == 0 ? "(none)" : string.Join(", ", tokens);
+        }
+
+        // Keyed by "<dll path>|<last write ticks>|<length>": a rescan that finds the same file
+        // unchanged costs one stat and a dictionary hit, so the 2 s refresh is effectively free
+        // and only a DLL that actually changed is re-read.
+        private static readonly System.Collections.Generic.Dictionary<string, string> _asmTokenCache =
+            new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>"mod:&lt;name&gt;@&lt;version&gt;" from the mod folder's single root DLL, or "" when it
+        /// cannot be read. The game guarantees EXACTLY ONE root DLL per mod folder and refuses a
+        /// folder with none or several (ModDiscoveryRegistry.TryGetRootDllPath / IsModFolder), so
+        /// "not exactly one" here means "not something we should be naming" — fall through.</summary>
+        private static string AssemblyToken(string? modFolder)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(modFolder) || !System.IO.Directory.Exists(modFolder)) return "";
+                var dlls = System.IO.Directory.GetFiles(modFolder, "*.dll", System.IO.SearchOption.TopDirectoryOnly);
+                if (dlls.Length != 1) return "";
+                var fi = new System.IO.FileInfo(dlls[0]);
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                string key = dlls[0] + "|" + fi.LastWriteTimeUtc.Ticks.ToString(inv) + "|" + fi.Length.ToString(inv);
+                lock (_asmTokenCache)
+                {
+                    if (_asmTokenCache.TryGetValue(key, out var hit)) return hit;
+                    if (_asmTokenCache.Count > 256) _asmTokenCache.Clear();   // only grows when a DLL changes; a hard cap keeps a pathological edit loop bounded
+                }
+                string tok = "";
+                try
+                {
+                    var an = System.Reflection.AssemblyName.GetAssemblyName(dlls[0]);
+                    if (an != null && !string.IsNullOrEmpty(an.Name))
+                        tok = "mod:" + Clean(an.Name) + "@" + (an.Version != null ? an.Version.ToString() : "?");
+                }
+                catch { tok = ""; }
+                lock (_asmTokenCache) _asmTokenCache[key] = tok;
+                return tok;
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>The list is COMMA-separated, so a comma inside a token would arrive on the other
+        /// side as two phantom mods: swap commas (and control characters) out. Parentheses go too —
+        /// ParseModList strips everything from the first "(" onwards, because the FALLBACK folder
+        /// format spells the inner folder that way ("workshop:123(inner)"), and a display name such
+        /// as "My Mod (Beta)" would otherwise be silently cut short in the comparison and in the
+        /// full-list log block.</summary>
+        private static string Clean(string? s)
+        {
+            if (string.IsNullOrEmpty(s)) return "?";
+            var sb = new System.Text.StringBuilder(s!.Length);
+            foreach (char c in s!)
+                sb.Append(c == ',' ? ';' : c == '(' ? '[' : c == ')' ? ']' : (char.IsControl(c) ? ' ' : c));
+            string outp = sb.ToString().Trim();
+            return outp.Length == 0 ? "?" : outp;
+        }
+
+        private static bool IsAllDigits(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            foreach (char c in s) if (c < '0' || c > '9') return false;
+            return true;
         }
 
 #if BAMP_DEV
@@ -252,10 +450,14 @@ namespace BigAmbitionsMP
         /// list the Hello handshake sends. Dev builds only; see the 'fakemod' verb.</summary>
         internal static void TestAddFakeMod(string name)
         {
+            // H-MODSDIFFER-1 step 2: the list is now RECOMPUTED every 2 s, so a fake appended
+            // straight onto the cached string would vanish two seconds later. Keep the fakes in a
+            // list that every recompute re-applies.
             if (string.IsNullOrEmpty(name)) return;
-            _cachedMods = (_cachedMods.Length == 0 || _cachedMods == "(none)") ? $"test:{name}" : $"{_cachedMods}, test:{name}";
+            lock (_fakeMods) _fakeMods.Add(name);
+            ComputeMods();
         }
-        internal static void TestClearFakeMods() { _cachedMods = ""; ComputeMods(); }
+        internal static void TestClearFakeMods() { lock (_fakeMods) _fakeMods.Clear(); ComputeMods(); }
 #endif
 
         /// <summary>Diff two comma-separated mod lists (the report.md InstalledMods format).
@@ -263,7 +465,12 @@ namespace BigAmbitionsMP
         /// Round-258: entries tagged "layout:" (shared building-layout blueprints, pure
         /// save-side templates) are excluded from the comparison — they cannot desync
         /// gameplay, and comparing them made every layout subscriber trip mismatch
-        /// warnings against non-subscribers (rig 2026-08-15, workshop:3428251077).</summary>
+        /// warnings against non-subscribers (rig 2026-08-15, workshop:3428251077).
+        /// H-MODSDIFFER-1 step 2 (2026-09-20): that drop is now dead weight for the NORMAL list —
+        /// the tokens are "mod:/ws:/name:" from the game's own registry, and a blueprint never
+        /// enters that registry (the workshop tags it "Blueprint", not "mod"). It is kept because
+        /// it still does its job on the installed-FOLDER list, which is the fallback used before
+        /// discovery has run; against the new tokens it simply matches nothing.</summary>
         public static bool DiffMods(string mine, string theirs, out string onlyMine, out string onlyTheirs, out int onlyMineCount, out int onlyTheirsCount)
         {
             onlyMine = onlyTheirs = ""; onlyMineCount = onlyTheirsCount = 0;
