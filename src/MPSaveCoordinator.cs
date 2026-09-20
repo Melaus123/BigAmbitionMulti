@@ -3582,6 +3582,10 @@ namespace BigAmbitionsMP
                 {
                     Closed  = CargoTransfer.SnapshotClosed(),
                     Applied = CargoTransfer.SnapshotApplied(),
+                    // H-MERGERIMPORT-1: the routed import family rides the same file, in sections of its own.
+                    ImportPending = ImportTransfer.SnapshotPending(),
+                    ImportApplied = ImportTransfer.SnapshotApplied(),
+                    ImportClosed  = ImportTransfer.SnapshotClosed(),
                 });
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] the idempotence marks could not be persisted: {ex.Message}"); }
@@ -3595,11 +3599,19 @@ namespace BigAmbitionsMP
             try
             {
                 CargoTransfer.ResetSession();
+                ImportTransfer.ResetSession();          // H-MERGERIMPORT-1: per-WORLD, exactly like the cargo statics
                 string session;
                 lock (_lock) session = _activeSessionName;
                 CargoTransfer.RestoreLocalState(m?.CargoClosed, m?.CargoApplied);
                 var local = string.IsNullOrEmpty(session) ? null : MPSaveManager.ReadCargoLocal(session);
                 if (local != null) CargoTransfer.RestoreLocalState(local.Closed, local.Applied);
+                // The import sections live only in this per-machine file (the manifest is a MIRROR of the
+                // host's on a member, so a member's own rows would be erased by the next store push).
+                // M4 (fold 2): the restored rows are NOT time-checked here. On the client path this runs in
+                // ProceedWithLoadData before the .hsg is written, so SaveGameManager.Current is still the old
+                // world and its day/hour would prune against the wrong clock. ImportTransfer.Tick does it on
+                // the first MPWorldReady settled edge instead, where the clock is the loaded save's.
+                if (local != null) ImportTransfer.RestoreLocalState(local.ImportPending, local.ImportApplied, local.ImportClosed);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] the idempotence marks could not be read back: {ex.Message}"); }
         }

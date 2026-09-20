@@ -2642,6 +2642,122 @@ namespace BigAmbitionsMP
                          + $" dests={ctp.destinations.Count}";
                 }
 
+                case "importtest":
+                {
+                    // H-MERGERIMPORT-1 L1: DRIVER + FIXTURE DISCOVERY.  No argument = every import partnership
+                    // on THIS machine, because the whole feature needs one that the fixture must already
+                    // provide: a plan is minted natively out of an HQ purchasing agent plus an import/export
+                    // contact, and fabricating one here would be inventing the very state under test.
+                    // With arguments it APPENDS a real ImportProduct aimed at <address> and arms the plan for
+                    // today, which is exactly what the game's own Business Purchasing page writes.  In memory
+                    // only - the scenario that uses this lever never saves.
+                    if (arg.Length == 0)
+                    {
+                        var ipgi = SaveGameManager.Current;
+                        if (ipgi?.importPartnerships == null) return "OK importtest plans=[] (this machine holds no import partnership list)";
+                        var ipsb = new StringBuilder("OK importtest plans=[");
+                        int ipn = 0;
+                        foreach (var ipp in ipgi.importPartnerships)
+                        {
+                            if (ipp == null) continue;
+                            string ipimp = ""; try { ipimp = GameStateReader.AddressKey(ipp.importAddress); } catch { }
+                            bool ipagent = false; try { ipagent = ipp.PurchasingAgentInstance != null && !ipp.PurchasingAgentInstance.isBeingReplaced; } catch { }
+                            if (ipn++ > 0) ipsb.Append(" | ");
+                            ipsb.Append($"id={ipp.id} importer='{ipimp}' agent='{ipp.employeeInstanceId}' agentOk={ipagent}")
+                                .Append($" active={ipp.isActive} repeating={ipp.isRepeatingOrder} urgent={ipp.isUrgentOrder}")
+                                .Append($" nextDay={ipp.nextDeliveryDay} today={TimeHelper.CurrentDay} isTarget={ipp.isTarget}")
+                                .Append($" products={(ipp.products != null ? ipp.products.Count : 0)}");
+                            if (ipn >= 8) break;
+                        }
+                        return ipsb.Append(']').ToString();
+                    }
+                    var iptk = arg.Split(' ');
+                    if (iptk.Length < 4)
+                        return "ERR usage: importtest <num> <ba:street_x> <itemName> <amount> [target]  (no argument lists this machine's import partnerships)";
+                    string ipaddr = iptk[0] + " " + iptk[1];
+                    string ipitem = iptk[2];
+                    int ipamt;
+                    if (!int.TryParse(iptk[3], out ipamt) || ipamt < 1 || ipamt > 99999)
+                        return $"ERR amount '{iptk[3]}' is not 1..99999";
+                    bool iptarget = iptk.Length > 4 && iptk[4] == "target";
+                    bool ipknown = false;
+                    try { ipknown = BigAmbitions.Items.ItemsGetter.GetByName(ipitem) != null; } catch { }
+                    if (!ipknown) return $"ERR no item '{ipitem}'";
+                    var ipgi2 = SaveGameManager.Current;
+                    if (ipgi2?.importPartnerships == null || ipgi2.importPartnerships.Count == 0)
+                        return "ERR this machine holds NO import partnership - the fixture must provide one (an HQ purchasing agent plus an import/export contract); nothing is faked here";
+                    Entities.ImportPartnership? ipplan = null;
+                    foreach (var ipp2 in ipgi2.importPartnerships) { if (ipp2 != null) { ipplan = ipp2; break; } }
+                    if (ipplan == null) return "ERR this machine holds no usable import partnership";
+                    var ipreg = GameStatePatcher.FindRegistration(ipaddr);
+                    if (ipreg == null) return $"ERR no registration at '{ipaddr}'";
+                    if (!(ipreg is Entities.Warehouse)) return $"ERR '{ipaddr}' is not a warehouse - an import product can only be assigned to one";
+                    string ipkey = ipaddr; try { ipkey = GameStateReader.AddressKey(ipreg); } catch { }
+                    if (ipplan.products == null) ipplan.products = new System.Collections.Generic.List<Entities.ImportProduct>();
+                    Entities.ImportProduct? iprod = null;
+                    foreach (var ipx in ipplan.products)
+                    {
+                        if (ipx == null || ipx.itemName != ipitem || ipx.assignedWarehouse == null) continue;
+                        string ipk2 = ""; try { ipk2 = GameStateReader.AddressKey(ipx.assignedWarehouse); } catch { }
+                        if (ipk2 == ipkey) { iprod = ipx; break; }
+                    }
+                    bool ipnew = iprod == null;
+                    if (iprod == null) { iprod = new Entities.ImportProduct { itemName = ipitem }; ipplan.products.Add(iprod); }
+                    iprod.assignedWarehouse = ipreg.Address;
+                    iprod.amount = ipamt;
+                    ipplan.isTarget = iptarget;
+                    ipplan.isActive = true;
+                    ipplan.nextDeliveryDay = TimeHelper.CurrentDay;
+                    bool ipagent2 = false; try { ipagent2 = ipplan.PurchasingAgentInstance != null && !ipplan.PurchasingAgentInstance.isBeingReplaced; } catch { }
+                    string ipimp2 = ""; try { ipimp2 = GameStateReader.AddressKey(ipplan.importAddress); } catch { }
+                    bool ipflip = false; try { ipflip = MergerFlip.IsFlipped(ipkey); } catch { }
+                    bool ipbooks = false; try { ipbooks = MergerFlip.BooksHere(ipreg); } catch { }
+                    float ipprice = 0f; try { ipprice = iprod.Price; } catch { }
+                    float ipdisc = 1f;  try { ipdisc = ipplan.GetDiscount; } catch { }
+                    return $"OK importtest plan={ipplan.id} importer='{ipimp2}' agentOk={ipagent2} dest='{ipkey}'"
+                         + $" item='{ipitem}' amount={ipamt} isTarget={iptarget} added={ipnew}"
+                         + $" flipped={ipflip} booksHere={ipbooks} price={ipprice:0.##} discount={ipdisc:0.###}"
+                         + $" expected={(ipprice * ipamt * ipdisc):0.##} products={ipplan.products.Count}";
+                }
+
+                case "importrun":
+                {
+                    // H-MERGERIMPORT-1 L2: the NATIVE entry point, so the authority veil and the detach are
+                    // exercised for real - not a mod-side shortcut into the routed path.
+                    try { Entities.ImportPartnership.DoAllDeliveries(); }
+                    catch (Exception ipx2) { return $"ERR importrun: {ipx2.GetType().Name}: {ipx2.Message}"; }
+                    return $"OK importrun pending={ImportTransfer.PendingCount} applied={ImportTransfer.AppliedCount} closed={ImportTransfer.ClosedCount}";
+                }
+
+                case "importstate":
+                {
+                    // H-MERGERIMPORT-1 L3: READ-ONLY.
+                    return $"OK importstate pending={ImportTransfer.PendingCount} applied={ImportTransfer.AppliedCount}"
+                         + $" closed={ImportTransfer.ClosedCount} last='{ImportTransfer.LastLine}'";
+                }
+
+                case "importloss":
+                {
+                    // H-MERGERIMPORT-1 F3 L4: HOST ONLY, DEV ONLY. Silently drop the next n inbound deliver
+                    // legs AND forget their bindings - the shape a host restart (or a lost need) between the
+                    // charge and the ack leaves behind, which nothing else can produce on demand.
+                    if (!MPServer.IsRunning) return "ERR importloss is a host verb - the host holds the import bindings";
+                    int iln;
+                    if (!int.TryParse(arg.Trim(), out iln) || iln < 0 || iln > 99) return "ERR usage: importloss <n>  (0..99)";
+                    MPServer.ImportLossCountdown = iln;
+                    return $"OK importloss next={iln}";
+                }
+
+                case "importresend":
+                {
+                    // H-MERGERIMPORT-1 F3 L5: the plan owner's re-offer on demand - the very same call the
+                    // session-settled edge and the hourly sweep make, so the lever proves the real path.
+                    int ilp = ImportTransfer.PendingCount;
+                    try { ImportTransfer.ResendUnacked("lever"); }
+                    catch (Exception ipx3) { return $"ERR importresend: {ipx3.GetType().Name}: {ipx3.Message}"; }
+                    return $"OK importresend pending={ilp}";
+                }
+
                 case "transfers":
                 {
                     // T6: the HOST's in-transit table - the records no save holds right now. A member has

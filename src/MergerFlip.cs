@@ -103,6 +103,7 @@ namespace BigAmbitionsMP
             try { CompanyBooks.Tick(); } catch { }    // P4a M0: the MEMBERSHIP EDGE - publish/apply on join, clear on the way out (nothing else fires on formation)
             try { CompanyFeed.Tick(); } catch { }     // P4b: the same edge for the shared transaction feed - a departed owner's rows go from the registry
             try { CampaignMirror.Tick(); } catch { }  // H-MERGERCAMPAIGN-1: and for the mirrored recruitment campaigns
+            try { ImportTransfer.Tick(); } catch { }  // H-MERGERIMPORT-1 F2: re-offer a PAID, unacknowledged import line (session-settled edge + once per game hour)
             if (_veilDepth > 0)
             {
                 // DIAG [FlipProbe] (2026-07-07, host stuck-flip: no 'flip OFF' after dissolve): a

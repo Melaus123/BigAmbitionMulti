@@ -1,0 +1,283 @@
+{
+  "id": "T-MERGERIMPORT",
+  "title": "H-MERGERIMPORT-1, two players: an import partnership line whose assigned warehouse belongs to a MERGED PARTNER is bought and delivered for real - the buyer's machine pays ONE native import charge and the partner's machine places the goods with the game's own warehouse delivery; and when the partner is away the very same line goes back to running natively on the stand-in, with no routed transfer at all; and a line the host PAID for whose deliver leg was lost is offered again until it is delivered and booked, instead of being stranded in silence; ends dissolved, NO save",
+  "preconditions": "Fixture save1 (host 'melaus', client 'Client1'). Build H-MERGERIMPORT-1 deployed on both machines. FIXTURE REQUIREMENTS, all three DISCOVERED at runtime and the run stops on the step that finds one missing: (1) the HOST holds an ImportPartnership with a live purchasing agent (step 13 - a plan is minted natively out of an HQ purchasing agent plus an import/export contract and this rig fabricates nothing); (2) Client1 owns a WAREHOUSE, which the merger flips onto the host (step 14, the same 'flipped' entry t-p4c-cargo uses); (3) the host's OWN warehouse holds some item, which is only used as a known-good, warehouse-storable item name (step 16). FIXTURE HYGIENE: `importtest` APPENDS a real ImportProduct to a real plan and arms it for today - in memory only, and the run never saves, so the fixture .hsg files are untouched. The refund leg (a warehouse too full for the order) is NOT driven here: it needs an order that is bigger than the warehouse's pallet capacity and still inside the wallet, and neither figure is known for this fixture - a wrong guess turns the leg into a not-enough-funds leg and asserts nothing. It is review-verified only. FOLD 2 (H1 the HELD deliver, M2 the per-item remainder, M4 the rewind prune): NO new leg is driven here, because none of the three is cheaply reachable on the rig - H1 needs the destination's runner to CHANGE between the relay and the acknowledgement, M2 needs the delivery to throw part-way through a multi-item leg, and M4 needs an EARLIER save of the same session to be loaded while this scenario never saves at all. All three are review-verified only.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "\\[Import\\] transfer .* refused",
+    "\\[Import\\] Receive:",
+    "\\[Import\\] HostRouteImportTransfer:",
+    "\\[Import\\] detach (prefix|finalizer):",
+    "\\[Import\\] the partner-warehouse (detach|re-attach) failed",
+    "\\[Import\\] a leg from"
+  ],
+  "oracles_report": [
+    "\\[Import\\] transfer .* started",
+    "\\[Import\\] transfer .* need answered",
+    "\\[Import\\] transfer .* charged",
+    "\\[Import\\] transfer .* delivered",
+    "\\[Import\\] transfer .* booked",
+    "\\[Import\\] transfer .* confirmed closed",
+    "\\[Import\\] transfer .* paid and unacknowledged",
+    "\\[Import\\] transfer .* re-bound"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 4, "role": "both", "cmd": "mark TEST MERGERIMPORT START", "expect_result": "OK MARK" },
+    { "seq": 5, "role": "h", "cmd": "merge propose ${clientPid}", "expect_result": "OK merge propose sent" },
+    { "seq": 6, "role": "h", "sleep_s": 1 },
+    { "seq": 7, "role": "h", "cmd": "offers", "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]" },
+    { "seq": 8, "role": "c", "cmd": "merge accept", "expect_result": "OK merge accept sent" },
+    { "seq": 9, "role": "h", "sleep_s": 3 },
+    { "seq": 10, "role": "h", "cmd": "mergestatus", "expect_result": "member=True.*flipped=[1-9]" },
+    { "seq": 11, "role": "h", "sleep_s": 30, "note": "the worlds settle and the first ownership/building publishes cross" },
+    { "seq": 12, "role": "h", "cmd": "status", "expect_result": "settled=True" },
+
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "importtest",
+      "expect_result": "^OK importtest plans=\\[id=\\S+ .*agentOk=True",
+      "capture": { "planId": "id=(\\S+) importer='[^']*' agent='[^']*' agentOk=True" },
+      "note": "FIXTURE REQUIREMENT 1, discovered: the host holds an import partnership whose purchasing agent resolves and is not being replaced. A run that fails HERE has found the fixture short of the one thing this feature cannot fabricate - report the plans= line as it stands"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "warehouses",
+      "expect_result": "^OK warehouses own=\\['[^']+'.*flipped=\\['[^']+'",
+      "capture": {
+        "srcKey": "own=\\['([^']+)'",
+        "destKey": "flipped=\\['([^']+)'"
+      },
+      "note": "FIXTURE REQUIREMENT 2: the partner's warehouse as the HOST sees it - merger-flipped, and nobody here simulating it. That is exactly the reg the native import pass refuses today, because the authority veil reverts it to native truth for the whole pass"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "warehouses",
+      "expect_result": "own=\\[.*'${destKey}'",
+      "note": "and the same warehouse is the CLIENT's own - so the two halves of the line really are on two machines"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "stockof ${srcKey}",
+      "expect_result": "^OK stockof addr='${srcKey}' items=\\[[^\\]]+\\]",
+      "capture": {
+        "item": "items=\\[(?:[^,\\]]+?:1,)*([^,\\]]+?):(?:[2-9]|[1-9]\\d+)(?:,|\\])",
+        "item2": "items=\\[(?:[^,\\]]+?:1,)*[^,\\]]+?:(?:[2-9]|[1-9]\\d+),(?:[^,\\]]+?:1,)*([^,\\]]+?):(?:[2-9]|[1-9]\\d+)(?:,|\\])"
+      },
+      "note": "FIXTURE REQUIREMENT 3: TWO known-good item names that a warehouse really can hold (they are sitting in one). Nothing is taken from this warehouse - the goods on this path are BOUGHT from the importer. The second name is leg D's: an import line's WEEKLY cap is per item, and legs A and B spend that item's whole allowance, so leg D must buy a different one or it would be capped to nothing before the deliver leg it is about ever exists (rig run 2026-09-20)"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "stockof ${destKey}",
+      "expect_result": "^OK stockof addr='${destKey}'",
+      "note": "the partner warehouse's pallets BEFORE (reported, not asserted - step 22 asserts the floor the delivery puts under them)"
+    },
+
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "importtest ${destKey} ${item} 2",
+      "expect_result": "^OK importtest plan=${planId} .*agentOk=True dest='${destKey}' item='${item}' amount=2 isTarget=False .*flipped=True booksHere=False",
+      "note": "LEG A ARMED. flipped=True booksHere=False IS the premise of the whole feature: this machine shows the partner's warehouse as its own to the native menus, but it is not the machine that books that building - so the native pass will not, and must not, deliver into it here"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "importrun",
+      "expect_result": "^OK importrun",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Import\\] transfer .* started - .* -> '${destKey}' \\([1-9] item\\(s\\), target=False, urgent=(?:True|False)\\)",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[Import\\] transfer .* need answered - 1 item\\(s\\), 2 unit\\(s\\) wanted at '${destKey}'",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Import\\] transfer .* charged \\$[0-9.]+",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[Import\\] transfer .* delivered 2 \\(remainder 0\\) at '${destKey}'",
+          "within_s": 40
+        },
+        {
+          "role": "h",
+          "regex": "\\[Import\\] transfer .* booked 2 \\(remainder 0\\)\\.",
+          "within_s": 45
+        }
+      ],
+      "note": "THE FEATURE, end to end, driven through the game's OWN entry point (ImportPartnership.DoAllDeliveries), so the authority veil and the detach are exercised for real. The five lines are the five places the work lands: the buyer starts the line, the PARTNER counts what its warehouse needs, the BUYER pays exactly one native ba:transaction_importdelivery charge, the PARTNER places the goods with the game's own warehouse delivery, and the BUYER books the delivered half. 'remainder 0' on both ends is the claim that nothing was paid for twice and nothing was lost"
+    },
+    { "seq": 20, "role": "h", "sleep_s": 8, "note": "the ack and the close finish crossing" },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "importstate",
+      "expect_result": "^OK importstate pending=0 applied=0 closed=1",
+      "note": "the buyer: nothing paid for and still unaccounted (pending=0), one line finished (closed=1), and it delivered none of it itself (applied=0)"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "importstate",
+      "expect_result": "^OK importstate pending=0 applied=1 closed=0",
+      "note": "and the mirror image on the partner: it placed one delivery and paid for nothing"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "stockof ${destKey}",
+      "expect_result": "${item}:(?:[2-9]|[1-9][0-9]+)(?:,|\\])",
+      "note": "the pallets at the partner's warehouse now hold AT LEAST the two units that were just bought - a floor, not an equality, because the warehouse may have held some of this item before (step 17 shows what it held)"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "mark leg A complete",
+      "expect_result": "OK MARK",
+      "note": "a marker in both logs between the routed leg and the stand-in leg, so the run folder reads cleanly"
+    },
+
+    {
+      "seq": 25,
+      "role": "c",
+      "drop": true,
+      "note": "LEG B: the partner leaves. The host is a member, so it designates itself the stand-in for the absent member's buildings - including that warehouse",
+      "expect_log": [
+        { "role": "h", "regex": "\\[Absence\\] simulating '${destKey}'", "within_s": 90 }
+      ]
+    },
+    { "seq": 26, "role": "h", "cmd": "mark client dropped", "expect_result": "OK MARK" },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "simulating_here=\\[.*${destKey}",
+      "note": "the host really is the machine running that warehouse now"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "importtest ${destKey} ${item} 3",
+      "expect_result": "^OK importtest plan=${planId} .*dest='${destKey}' item='${item}' amount=3 .*flipped=True booksHere=True",
+      "note": "THE ASSERTION OF LEG B, before anything runs: the same warehouse is still flipped, but booksHere has turned TRUE - this machine is now the single writer for it. The detach reads exactly that pair, so it must step aside and let the native pass do the whole line locally"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "importrun",
+      "expect_result": "^OK importrun pending=0 applied=0 closed=1",
+      "note": "and it did: the counters are untouched by this run - no need was asked, nothing was routed, nothing new was paid for over the wire. closed=1 is still leg A's line"
+    },
+    { "seq": 30, "role": "h", "sleep_s": 5 },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "importstate",
+      "expect_result": "^OK importstate pending=0 applied=0 closed=1",
+      "note": "unchanged a few seconds later, so nothing was merely slow: leg B never became a transfer at all"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "stockof ${destKey}",
+      "expect_result": "${item}:(?:[3-9]|[1-9][0-9]+)(?:,|\\])",
+      "note": "and the goods DID arrive: the stand-in's own copy of the absent partner's warehouse holds at least the three units the native pass just delivered into it"
+    },
+
+    { "seq": 33, "role": "c", "relaunch": true, "note": "the partner returns, so the run can end dissolved" },
+    { "seq": 34, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 35, "role": "h", "cmd": "acceptjoin", "expect_result": "^OK" },
+    { "seq": 36, "role": "h", "sleep_s": 15 },
+    { "seq": 37, "role": "h", "cmd": "mark leg D start", "expect_result": "OK MARK" },
+    { "seq": 38, "role": "h", "sleep_s": 20, "note": "the partner is back and running its own warehouse again, so the line routes once more" },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "importloss 1",
+      "expect_result": "^OK importloss next=1",
+      "note": "LEG D ARMED: the host will swallow the next inbound deliver leg AND forget its binding - which is exactly what a host restart between the charge and the ack leaves behind"
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "importtest ${destKey} ${item2} 2",
+      "expect_result": "^OK importtest plan=${planId} .*agentOk=True dest='${destKey}' item='${item2}' amount=2 .*flipped=True booksHere=False",
+      "note": "A SECOND item, because legs A and B have spent the first one's weekly import allowance (the cap is per item, on the buyer's own ledger) and a capped line is never charged at all. THE PREMISE OF LEG D, asserted before anything runs: the partner's warehouse is flipped here but booked THERE, so this line is routed and paid for over the wire - the case in which a lost deliver leg costs real money"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "importrun",
+      "expect_result": "^OK importrun",
+      "expect_log": [
+        { "role": "h", "regex": "\\[Import\\] transfer .* charged \\$[0-9.]+", "within_s": 40 },
+        { "role": "h", "regex": "\\[Import\\] transfer .* DEV importloss - the deliver from '${hostPid}' is dropped and the binding forgotten", "within_s": 40 }
+      ],
+      "note": "the buyer PAID and the deliver leg then vanished with its binding: the two lines together are the gap this fold closes"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "importstate",
+      "expect_result": "^OK importstate pending=1",
+      "note": "and there it sits: one line paid for and unacknowledged. Before this fold nothing would ever have offered it again"
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "importstate",
+      "expect_result": "^OK importstate pending=0 applied=1 closed=0",
+      "note": "the partner never saw the lost leg at all - applied=1 is still leg A's single delivery"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "importresend",
+      "expect_result": "^OK importresend pending=1",
+      "expect_log": [
+        { "role": "h", "regex": "\\[Import\\] transfer .* paid and unacknowledged - deliver offered again \\(lever\\)", "within_s": 20 },
+        { "role": "h", "regex": "\\[Import\\] transfer .* deliver from '${hostPid}' re-bound \\(the host held no binding", "within_s": 30 },
+        { "role": "c", "regex": "\\[Import\\] transfer .* delivered 2 \\(remainder 0\\) at '${destKey}'", "within_s": 45 },
+        { "role": "h", "regex": "\\[Import\\] transfer .* booked 2 \\(remainder 0\\)\\.", "within_s": 50 }
+      ],
+      "note": "THE FIX, end to end: the plan owner re-offers the paid row unchanged, the host re-binds an id it no longer held instead of dropping the leg, the partner places the goods (its own persisted idempotence would have re-acked had it already had them), and the buyer books them. The lever calls the very same ResendUnacked the session-settled edge and the hourly sweep call"
+    },
+    { "seq": 45, "role": "h", "sleep_s": 8, "note": "the ack and the close finish crossing" },
+    {
+      "seq": 46,
+      "role": "h",
+      "cmd": "importstate",
+      "expect_result": "^OK importstate pending=0 applied=0 closed=2",
+      "note": "the paid row reached one of its two exits: nothing is left pending, and the buyer has now finished two lines (leg A and the recovered leg D)"
+    },
+    { "seq": 47, "role": "c", "cmd": "merge leave", "expect_result": "OK merge leave sent", "note": "FIXTURE HYGIENE: end dissolved; NO save. The appended import product and the goods that moved live in memory only" },
+    { "seq": 48, "role": "h", "sleep_s": 5 },
+    { "seq": 49, "role": "h", "cmd": "mergestatus", "expect_result": "member=False.*flipped=0" },
+    { "seq": 50, "role": "h", "cmd": "dissolvecheck", "expect_result": "^OK dissolvecheck logistics=0 contracts=0 hrlist=0 hrtag=0 offers=0 copies=0" },
+    { "seq": 51, "role": "both", "cmd": "mark TEST MERGERIMPORT END", "expect_result": "OK MARK" }
+  ]
+}

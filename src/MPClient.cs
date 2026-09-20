@@ -747,6 +747,16 @@ namespace BigAmbitionsMP
                     if (ct != null) GameStatePatcher.EnqueueOnMainThread(() => CargoTransfer.Receive(ct));
                     break;
                 }
+                case MessageType.ImportTransfer:
+                {
+                    // H-MERGERIMPORT-1: one leg of a routed import line the host has handed to this machine
+                    // - a need ask or its answer, a paid deliver, or the warehouse's ack. Main thread - the
+                    // deliver leg places real stock through the game's own DeliverCargoToBuilding and the ack
+                    // leg books and refunds real money.
+                    var itp = env.GetPayload<ImportTransferPayload>();
+                    if (itp != null) GameStatePatcher.EnqueueOnMainThread(() => ImportTransfer.Receive(itp));
+                    break;
+                }
                 case MessageType.SharedPriceEdit:
                 {
                     // Host-relayed: this machine OWNS the shop — write the price into both native lists.

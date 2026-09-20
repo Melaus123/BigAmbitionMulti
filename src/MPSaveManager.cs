@@ -276,6 +276,12 @@ namespace BigAmbitionsMP
         public string TransferId  { get; set; } = "";
         public int    Day         { get; set; }
         public string PayloadJson { get; set; } = "";
+
+        /// <summary>H-MERGERIMPORT-1 fold 2: the GAME HOUR the mark was made, beside its day. The routed
+        /// import rewind check compares (Day, Hour) with the clock of the save actually loaded and drops
+        /// anything minted later than it. Rows written before fold 2 carry 0 here; the transfer id ends in
+        /// |day|hour, so their real mint time is parsed back from it.</summary>
+        public int    Hour        { get; set; }
     }
 
     /// <summary>Merger phase 4c part 2 r2: the PER-MACHINE cargo idempotence file (cargo-marks.bamp.json),
@@ -287,6 +293,18 @@ namespace BigAmbitionsMP
     {
         public List<MpCargoMarkEntry> Closed  { get; set; } = new();
         public List<MpCargoMarkEntry> Applied { get; set; } = new();
+
+        /// <summary>H-MERGERIMPORT-1 (batch 24): the ROUTED IMPORT sections of the same file, kept apart
+        /// from the cargo ones because the two families share nothing but the file. ImportPending is the
+        /// plan owner's rows that have been PAID FOR and not yet acknowledged - the money is gone, so a
+        /// restart must not lose the row that books the goods or refunds them (PayloadJson = the whole
+        /// ImportTransfer.Pending row). ImportApplied is the warehouse runner's delivered ids with the ack
+        /// each one sent, so a replayed deliver re-acknowledges instead of shelving twice. ImportClosed is
+        /// the plan owner's finished ids, so a re-offered ack books and refunds nothing a second
+        /// time.</summary>
+        public List<MpCargoMarkEntry> ImportPending { get; set; } = new();
+        public List<MpCargoMarkEntry> ImportApplied { get; set; } = new();
+        public List<MpCargoMarkEntry> ImportClosed  { get; set; } = new();
     }
 
     /// <summary>Merger phase 4c part 2 r3 (H1): the HOST's in-transit cargo table (cargo-transit.bamp.json),

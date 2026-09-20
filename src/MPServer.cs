@@ -2319,6 +2319,17 @@ namespace BigAmbitionsMP
                         GameStatePatcher.EnqueueOnMainThread(() => HostRouteCargoTransfer(ct, senderPid));
                     break;
                 }
+                case MessageType.ImportTransfer:
+                {
+                    // H-MERGERIMPORT-1: one leg of a routed import line - the need ask or its answer, the
+                    // paid deliver, the warehouse's ack or the plan owner's close. Main thread - the host is
+                    // a member too, so a leg addressed to this machine's own warehouse is applied here and
+                    // writes this save's stock.
+                    var itp = env.GetPayload<ImportTransferPayload>();
+                    if (itp != null && SenderIs(itp.PlayerId, senderPid, MessageType.ImportTransfer))
+                        GameStatePatcher.EnqueueOnMainThread(() => HostRouteImportTransfer(itp, senderPid));
+                    break;
+                }
                 case MessageType.SharedPriceEdit:
                 {
                     var pe = env.GetPayload<SharedPriceEditPayload>();
@@ -8603,6 +8614,237 @@ namespace BigAmbitionsMP
                 return src == owner || MergerSync.MergedRuntime(src, owner);
             }
             catch { return false; }
+        }
+
+        // -- H-MERGERIMPORT-1: the routed import line --
+
+        /// <summary>One routed import line the host is holding open: who asked, and which machine the host
+        /// bound the id to. The host stores no goods for this family - nothing is ever in transit, because the
+        /// plan owner only pays once the need has been answered and the delivery lands in one step.</summary>
+        private sealed class HostImportBind
+        {
+            public string SourcePid = "", DestRunner = "", RelayedTo = "";
+            /// <summary>Fold 3 (re-check M1): this binding was re-created from a bare deliver (a host restart or
+            /// a lost need), so an EMPTY RelayedTo proves nothing - the machine the goods went to before the
+            /// restart is unknown. Such a binding may relay, but it may never take the refund exit.</summary>
+            public bool ReBound;
+        }
+
+        private static readonly Dictionary<string, HostImportBind> _importBind = new();
+
+        /// <summary>H-MERGERIMPORT-1 fold 2: how many "held" lines this session may still log. A paid row
+        /// whose machine never comes back is re-offered every game hour, so that line is budgeted.</summary>
+        private static int _importHoldLogBudget = 20;
+
+#if BAMP_DEV
+        /// <summary>DEV ONLY (H-MERGERIMPORT-1 F3, the `importloss &lt;n&gt;` lever): swallow the next n inbound
+        /// deliver legs and forget their bindings - the exact shape a host restart between the charge and the
+        /// ack leaves behind. Never compiled into a player build.</summary>
+        internal static int ImportLossCountdown;
+#endif
+
+        private static void SendImportToPid(string pid, ImportTransferPayload p)
+        {
+            if (string.IsNullOrEmpty(pid)) return;
+            p.TargetPid = pid;
+            if (pid == MPConfig.PlayerId) ImportTransfer.Receive(p);
+            else SendToPid(pid, MessageEnvelope.Create(MessageType.ImportTransfer, "host", p));
+        }
+
+        /// <summary>Both ends of an import line must belong to ONE merged company: the SENDER (who runs the
+        /// plan - the plan lives in their own save and no other machine can name it) and whoever owns the
+        /// destination warehouse. Same membership test as CargoEndsAreOneCompany's first half, with the
+        /// sender's pid as one end - there is no second address to check, because the goods come from an
+        /// import/export business, not from a player building.</summary>
+        private static bool ImportEndsAreOneCompany(string senderPid, string destKey)
+        {
+            try
+            {
+                string owner = SharedShopOwnerPid(destKey);
+                if (owner.Length == 0) return false;
+                return owner == senderPid || MergerSync.MergedRuntime(owner, senderPid);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>HOST, MAIN THREAD. Every inbound leg of a routed import line. The host stamps SourcePid
+        /// and TargetPid itself and never takes the sender's word for either. The ask BINDS the id to one
+        /// asker and one runner; the answer may come only from that runner and goes only to that asker; the
+        /// deliver may come only from that asker - or, when the host holds NO binding for the id at all, it
+        /// re-binds it to the sender (F1 in the deliver branch below). A deliver is never dropped - the money
+        /// has already left the plan owner's wallet - so the deliver branch takes one of exactly three exits.
+        /// (a) NOBODY was ever handed these goods (RelayedTo empty) and nobody runs the destination now: the
+        /// host answers with a full-remainder ack, which is the plan owner's refund path - BUT ONLY for a
+        /// binding created by a need. A RE-BOUND binding (fold 3) has an empty RelayedTo because the host lost
+        /// its history, not because nobody was handed the goods, so with no runner it is HELD as in (b) and
+        /// never refunded on a guess. (b) The goods WERE
+        /// handed to a machine (RelayedTo set) and that machine no longer runs the destination - or nobody
+        /// does: the leg is HELD, neither relayed nor acked, because only the machine that was given them can
+        /// say what it shelved, while a different machine's applied-table has never seen this id and would
+        /// shelve them a second time; the plan owner's hourly re-offer retries until that machine runs the
+        /// warehouse again. (c) The runner IS the machine the goods went to: relay again, and its PERSISTED
+        /// idempotence answers with the identical figures without placing anything twice.
+        /// THE RESIDUAL, plainly: a row whose RelayedTo machine never runs that warehouse again stays PENDING
+        /// for good - paid, unbooked, unrefunded, which is the safe side of the money rule; and this table
+        /// lives in MEMORY, so a host restart forgets RelayedTo, after which a changed runner plus a lost ack
+        /// can still shelve the same goods twice.</summary>
+        public static void HostRouteImportTransfer(ImportTransferPayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null) return;
+                string tid = p.TransferId ?? "";
+                if (tid.Length == 0) { Plugin.Logger.LogWarning($"[Import] a leg from '{senderPid}' carries no transfer id - dropped."); return; }
+                string destKey = p.DestKey ?? "";
+
+                if (p.Action == ImportTransfer.ActNeed && !p.Answer)
+                {
+                    string runner = RouteTargetFor(destKey);
+                    if (runner.Length == 0 || !ImportEndsAreOneCompany(senderPid, destKey))
+                    {
+                        var refusal = new ImportTransferPayload
+                        {
+                            PlayerId = "host", Action = ImportTransfer.ActNeed, Answer = true, TransferId = tid,
+                            PlanId = p.PlanId, ImporterKey = p.ImporterKey, DestKey = destKey,
+                            Day = p.Day, Hour = p.Hour, IsTarget = p.IsTarget,
+                            Reason = runner.Length == 0 ? "nobody is running that destination"
+                                                        : "the two ends are not in one company",
+                        };
+                        Plugin.Logger.LogWarning($"[Import] transfer {tid} refused: {refusal.Reason} ('{destKey}') - nothing is charged.");
+                        SendImportToPid(senderPid, refusal);
+                        return;
+                    }
+                    if (_importBind.Count > 2000) _importBind.Clear();
+                    _importBind[tid] = new HostImportBind { SourcePid = senderPid, DestRunner = runner };
+                    p.PlayerId = "host"; p.SourcePid = senderPid;
+                    SendImportToPid(runner, p);
+                    return;
+                }
+
+                if (p.Action == ImportTransfer.ActNeed && p.Answer)
+                {
+                    _importBind.TryGetValue(tid, out var nd);
+                    if (nd == null)
+                    { Plugin.Logger.LogWarning($"[Import] transfer {tid} refused: a need ANSWER from '{senderPid}' for an id the host never asked about - dropped."); return; }
+                    if (senderPid != nd.DestRunner)
+                    { Plugin.Logger.LogWarning($"[Import] transfer {tid} refused: the need answer came from '{senderPid}', not from '{nd.DestRunner}' who was asked - dropped."); return; }
+                    string to = nd.SourcePid;
+                    if (to.Length == 0 || (to != MPConfig.PlayerId && !IsOnlinePid(to)))
+                    { Plugin.Logger.LogWarning($"[Import] transfer {tid}: the need answer is for '{to}', who is not here - dropped (nothing was charged)."); return; }
+                    p.PlayerId = "host"; p.SourcePid = to;
+                    SendImportToPid(to, p);
+                    return;
+                }
+
+                if (p.Action == ImportTransfer.ActDeliver)
+                {
+#if BAMP_DEV
+                    if (ImportLossCountdown > 0)
+                    {
+                        ImportLossCountdown--;
+                        _importBind.Remove(tid);
+                        Plugin.Logger.LogInfo($"[Import] transfer {tid}: DEV importloss - the deliver from '{senderPid}' is dropped and the binding forgotten ({ImportLossCountdown} left).");
+                        return;
+                    }
+#endif
+                    _importBind.TryGetValue(tid, out var bind);
+                    if (bind == null)
+                    {
+                        // H-MERGERIMPORT-1 F1: this table lives in MEMORY, so a host restart - or a need whose
+                        // record was lost - between the charge and the ack wipes the binding while the goods
+                        // are already PAID FOR on the sender's machine. Dropping the leg here would strand
+                        // them silently and forever. The binding never proved payment in the first place (the
+                        // charge happens on the sender's machine, not here), so demanding one buys no safety
+                        // at all: re-bind on the spot when the two ends are still one company and carry on
+                        // down the path below - which, with no runner, is the full-remainder ack, i.e. the refund.
+                        if (!ImportEndsAreOneCompany(senderPid, destKey))
+                        { Plugin.Logger.LogWarning($"[Import] transfer {tid} refused: a 'deliver' from '{senderPid}' for an id the host never answered a need for, and the two ends are not in one company - dropped."); return; }
+                        if (_importBind.Count > 2000) _importBind.Clear();
+                        bind = new HostImportBind { SourcePid = senderPid, DestRunner = RouteTargetFor(destKey), ReBound = true };
+                        _importBind[tid] = bind;
+                        Plugin.Logger.LogInfo($"[Import] transfer {tid}: deliver from '{senderPid}' re-bound (the host held no binding - a restart or a lost need).");
+                    }
+                    if (senderPid != bind.SourcePid)
+                    { Plugin.Logger.LogWarning($"[Import] transfer {tid} refused: the deliver came from '{senderPid}', not from '{bind.SourcePid}' the need was answered for - dropped."); return; }
+                    string runner = RouteTargetFor(destKey);
+                    if (runner.Length == 0 && bind.ReBound && string.IsNullOrEmpty(bind.RelayedTo))
+                    {
+                        // Fold 3 (re-check M1): a RE-BOUND binding does not know whether the goods were handed to
+                        // a machine before the restart, so 'nobody runs it' must not refund. HELD - the plan owner
+                        // offers the row again every game hour, and the first runner to appear gets the relay.
+                        if (_importHoldLogBudget > 0)
+                        {
+                            _importHoldLogBudget--;
+                            Plugin.Logger.LogWarning($"[Import] transfer {tid}: held - the host lost this transfer's history (re-bound) and nobody runs '{destKey}' now; no refund on a guess.");
+                        }
+                        return;
+                    }
+                    if (runner.Length == 0 && string.IsNullOrEmpty(bind.RelayedTo))
+                    {
+                        // The goods are PAID FOR and were never handed to anybody. Never drop this leg: hand it
+                        // straight back as an acknowledgement in which nothing was shelved, which is the plan
+                        // owner's refund path. RelayedTo empty is what makes that safe - see (a) above.
+                        var back = new ImportTransferPayload
+                        {
+                            PlayerId = "host", Action = ImportTransfer.ActAck, TransferId = tid, PlanId = p.PlanId,
+                            ImporterKey = p.ImporterKey, DestKey = destKey, Day = p.Day, Hour = p.Hour,
+                            IsTarget = p.IsTarget, Reason = "nobody is running that warehouse any more",
+                        };
+                        foreach (var it in p.Items ?? new List<ImportTransferItem>())
+                            if (it != null) back.Items.Add(new ImportTransferItem { ItemName = it.ItemName, Amount = it.Amount, PricePerUnit = it.PricePerUnit, Remainder = it.Amount });
+                        Plugin.Logger.LogWarning($"[Import] transfer {tid}: nobody runs '{destKey}' any more - every paid unit goes back to '{bind.SourcePid}' as a refund.");
+                        SendImportToPid(bind.SourcePid, back);
+                        return;
+                    }
+                    if (!string.IsNullOrEmpty(bind.RelayedTo) && runner != bind.RelayedTo)
+                    {
+                        // (b) The goods already went to a machine that may have shelved them, and somebody else
+                        // - or nobody - runs the destination now. Relaying would shelve them a second time (the
+                        // new machine's applied-table is empty for this id) and acking would refund goods that
+                        // are on a shelf, so the leg is HELD: no relay, no ack. The plan owner keeps offering
+                        // it every game hour, and the moment the original machine runs the warehouse again the
+                        // relay below re-acks from its persisted table.
+                        if (_importHoldLogBudget > 0)
+                        {
+                            _importHoldLogBudget--;
+                            Plugin.Logger.LogWarning($"[Import] transfer {tid}: held - the goods were handed to '{bind.RelayedTo}' and only that machine can say what it shelved; '{destKey}' is now run by '{(runner.Length == 0 ? "nobody" : runner)}'.");
+                        }
+                        return;
+                    }
+                    bind.RelayedTo = runner;
+                    p.PlayerId = "host"; p.SourcePid = bind.SourcePid;
+                    SendImportToPid(runner, p);
+                    Plugin.Logger.LogInfo($"[Import] transfer {tid}: deliver relayed to '{runner}' for '{destKey}'.");
+                    return;
+                }
+
+                if (p.Action == ImportTransfer.ActAck)
+                {
+                    _importBind.TryGetValue(tid, out var bind);
+                    if (bind == null)
+                    { Plugin.Logger.LogInfo($"[Import] transfer {tid}: an acknowledgement for an id the host no longer holds - dropped."); return; }
+                    if (senderPid != bind.RelayedTo)
+                    { Plugin.Logger.LogWarning($"[Import] transfer {tid} refused: the acknowledgement came from '{senderPid}', not from '{bind.RelayedTo}' the deliver was relayed to - dropped."); return; }
+                    p.PlayerId = "host"; p.SourcePid = bind.SourcePid;
+                    SendImportToPid(bind.SourcePid, p);
+                    return;
+                }
+
+                if (p.Action == ImportTransfer.ActClosed)
+                {
+                    _importBind.TryGetValue(tid, out var bind);
+                    if (bind == null)
+                    { Plugin.Logger.LogInfo($"[Import] transfer {tid}: a 'closed' for an id the host no longer holds - nothing to drop."); return; }
+                    if (senderPid != bind.SourcePid)
+                    { Plugin.Logger.LogWarning($"[Import] transfer {tid} refused: 'closed' came from '{senderPid}', not from the plan owner '{bind.SourcePid}' - dropped."); return; }
+                    _importBind.Remove(tid);
+                    Plugin.Logger.LogInfo($"[Import] transfer {tid}: confirmed closed by '{senderPid}' - the host's binding is dropped.");
+                    return;
+                }
+
+                Plugin.Logger.LogWarning($"[Import] transfer {tid}: unknown leg '{p.Action}' from '{senderPid}' - dropped.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Import] HostRouteImportTransfer: {ex.GetType().Name}: {ex.Message}"); }
         }
 
         /// <summary>HOST: hand the in-transit goods to whoever runs the destination NOW. With nobody

@@ -218,6 +218,7 @@ namespace BigAmbitionsMP
         CompanyMessages       = 215,     // MERGER PHASE 4b (PEOPLE) part 2 / P4 (2026-09-11, D20-5): THE PHONE RELAY. Four legs on one type, told apart by Action. "msg": a member's OWN business or staff message - the contact identity (id, category, description, address), the game's own messageKey + messageData + flags, and the BUTTON DESCRIPTORS (label key + the game's own background colour) - member -> HOST -> that member's ONLINE co-members, who re-raise it through the game's own Contact.GetContact + Contact.SendMessage so the contact auto-creates and the badge, the toast and the wording are all the game's. The button CLOSURES cannot travel (live UnityActions over the sender's objects, decompile TextMessage.cs:116-131), hence: "press": a co-member pressed a relayed copy's button - host -> the OWNER, whose machine runs the ORIGINAL closure exactly once; "handled": the owner -> the whole company, so every other copy clears its buttons and is marked read, which is what the game itself does to a message it pressed (ContextButton.SetUp); "refused" (review r2 MAJOR-2): the host, or the owner, -> the ONE presser, because a local click clears that copy's buttons BEFORE any answer (ContextButton.cs:77) - so a press nobody could run (owner offline, owner no longer holds the message, unknown to the host) is not silently lost: the presser puts the stored descriptors back, the copy is unread again and a real click can retry. The two ContextAction kinds are NOT pressed remotely: a salary negotiation opens LOCALLY on the presser through build A's candidate claim, and a health-insurance offer is ACTIONABLE since 4c part 2a (D23): the HR plan and the offer exist only in the owner's save, so the presser's accept/decline is ROUTED as a `mergerplanedit` leg to the machine that runs that headquarters, which runs the game's own AcceptOffer/DeclineOffer on the real offer. A receiver's copy carries NO contextAction, so deleting it can never discard the owner's candidate or offer (decompile ContactsApp.cs:452-465), and every copy is lifted at both save choke points - a relayed message never reaches a .hsg. A relayed COMPLAINT never runs StartComplaint here, so it is outside the receiver's 2-per-week cap (ComplaintHelper.cs:32-39). No join replay: a message is a moment, not a state.
         CargoTransfer         = 216,     // MERGER PHASE 4c PART 2 (2026-09-12, D20-7): CROSS-MEMBER DELIVERIES. A logistics leg whose warehouse and whose destination are run by DIFFERENT machines cannot happen in one pass: a replica's CountTotalResourcesInStock reads 0/stale (SharedShopStock.cs:10-18), so the source cannot even compute what the destination needs, and the native chain (LogisticsManagerPlanDestination.ProcessStockTarget) writes BOTH ends. Five legs on one type, told apart by Action, each effect landing ONCE on the machine that physically holds the object. "need": source runner -> HOST -> the destination's runner, carrying each stock target; the same message with Answer=true carries the per-item need back (ProcessStockTarget's own arithmetic, run where the shelves really are). "offer": the source has WITHDRAWN exactly those amounts natively and hands the host the in-transit record (the host is the authority and persists it in the mod's per-slot manifest, so goods can never be lost in the withdraw->deliver gap). "deliver": host -> the destination's runner, which runs the game's own DeliverCargoToBuilding with the native filters. "ack": the destination's per-item REMAINDER back through the host to the source, which returns it with ReturnToCargo and raises the game's own undelivered phone report. "return": host -> source - nobody runs the destination any more, or no acknowledgement within a game day, so the whole record goes home. Idempotent by TransferId at every step (a repeat of "deliver" for an applied id re-acks identically and delivers nothing). An EXPORT leg (isFactory + an import/export destination) has NO destination-side effect natively - ProcessStockTarget's export branch never calls DeliverCargoToBuilding - so it needs no need query and no deliver leg: the source runs it whole and books the export income itself (D20-7). Rides Gameplay - it is timely and small. r2 (review F3): a SIXTH action rides the SAME type - "closed" - the receiver's confirmation that an ack/return actually LANDED. The host re-offers the ack/return to whoever runs the source once per sweep and drops its record ONLY on "closed", so an outcome can never vanish with the machine it was aimed at; the receiver is idempotent by a PERSISTED set of closed ids. No new MessageType and no version change.
         ClientTrafficSnapshot = 217,     // TRAFFIC-CONSIST T1 (2026-09-18, design .modding/03-systems/traffic-consistency-design-2026-09-18.md Q1 option A; user ruling: "everyone needs to exist in the same world that is consistent with itself"): a CLIENT's own LEFTOVER ambient Gley cars, client -> HOST, on the UNRELIABLE lane and seq-guarded exactly like the host's own snapshot stream. Sent ONLY while that client's mode is ghost AND it still holds ambient local cars of its own - the switch-over window, where those cars exist on one machine and nowhere else; a client running local traffic alone is beyond 350 m from everyone and publishes nothing. The host keeps one SENSED visual stand-in per published car so its OWN thinking traffic brakes for them (and so the host's player can see them at all), and FOLDS the rows into the ordinary TrafficSnapshot it already sends to every OTHER peer under reserved ids (1,000,000 + 10,000 x owner ordinal + pool index), skipping the owner. No other client needs new code - 0.3.0 ones included. A 0.3.0 HOST does not know the type and only logs a warning (MPServer.cs:3024-3025), so the leftovers stay private exactly as they do today: degraded, never worse.
+        ImportTransfer        = 218,     // H-MERGERIMPORT-1 (batch 24, 2026-09-21): AN IMPORT PARTNERSHIP LINE AIMED AT A MERGED PARTNER'S WAREHOUSE. Entities.ImportPartnership.DoDeliveries prices (:184) and delivers (:272) only products whose assigned warehouse answers RentedByPlayer, and that method is inside the authority veil, so every merger-flipped partner building reverts to native truth for the pass and the line is skipped in silence - no charge, no goods, no message. Four legs on one type, told apart by Action, each native effect landing ONCE on the machine that holds the object. "need": the plan owner -> HOST -> the warehouse's runner, carrying each product's amount and the plan's isTarget flag; the same message with Answer=true carries the per-item need back (ImportProduct.GetAmountToBuy's own arithmetic, :39-51, run where the pallets are). "deliver": sent only AFTER the plan owner has applied the weekly-cap arithmetic (:188-211) and PAID one native charge (:236-247); the runner places the goods with the game's own DeliverCargoToBuilding under the iswarehousestorage filter (:278) and books the positive DeliveryTransaction (:282-287). "ack": the per-item REMAINDER home, where the plan owner books the delivered half (:288-305) and pays the game's own refund (:306-337). "closed": the plan owner's confirmation, the only thing that drops the host's binding. Idempotent by TransferId at every step and persisted on both sides (cargo-marks.bamp.json's import sections). Rides Gameplay - timely and small.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -1704,7 +1705,13 @@ namespace BigAmbitionsMP
         //      viewer's real subscription and run the building-exit presence teardown on the ambient
         //      exit. No capability gate and no old-peer branch exist for it (project rule 2026-09-18),
         //      so mixed sessions refuse at Hello per the freeze rule.
-        public const int Version = 24;
+        // v25 (2026-09-21, H-MERGERIMPORT-1): new message ImportTransfer=218 - a member's HQ purchasing
+        //      agent buying into a merged PARTNER's warehouse. A v24 peer drops every leg as "Unknown
+        //      message type": the need would never be answered, so nothing would ever be charged or
+        //      delivered and the line would stay as silently skipped as it is today. No capability gate
+        //      and no old-peer branch exist for it (project rule 2026-09-18), so mixed sessions refuse at
+        //      Hello per the freeze rule.
+        public const int Version = 25;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -4404,5 +4411,47 @@ namespace BigAmbitionsMP
         /// allows. Rides the "return" action; it never travels on its own.</summary>
         public bool   WithdrawAgain  { get; set; }
         public List<CargoTransferItem> Items { get; set; } = new();
+    }
+
+    // -- H-MERGERIMPORT-1 (batch 24): the routed import line (MessageType.ImportTransfer) --
+
+    /// <summary>ONE item on a routed import leg. Amount means the plan's ASK on a "need" leg
+    /// (ImportProduct.amount), the ANSWER on a "need" reply (the ask, or - in the plan's isTarget mode -
+    /// the ask minus BuildingHelper.CountResourcesInPallets at the partner's warehouse), and what was
+    /// actually PAID FOR from "deliver" onward. PricePerUnit is the game's own ImportProduct.Price times
+    /// the purchasing agent's discount, so the refund leg prices the remainder exactly as
+    /// ImportPartnership.DoDeliveries :309 does. Remainder is filled by the warehouse's ack: what would not
+    /// fit, which is refunded on the plan owner's machine.</summary>
+    public class ImportTransferItem
+    {
+        public string ItemName     { get; set; } = "";
+        public int    Amount       { get; set; }
+        public float  PricePerUnit { get; set; }
+        public int    Remainder    { get; set; }
+    }
+
+    /// <summary>The four legs of the routed import line - see the MessageType comment. Action is the
+    /// discriminator; Answer separates the "need" ASK from the "need" REPLY on the one action name.
+    /// TransferId is minted by the plan owner as plan id + warehouse key + game day + hour, so a delivery
+    /// pass that runs twice in one game hour mints the SAME id and the second run is dropped everywhere.
+    /// SourcePid/TargetPid are stamped by the HOST, never taken from the sender.</summary>
+    public class ImportTransferPayload
+    {
+        public string PlayerId    { get; set; } = "";
+        public string Action      { get; set; } = "";      // need | deliver | ack | closed
+        public bool   Answer      { get; set; }            // "need" only: false = the ask, true = the reply
+        public string TransferId  { get; set; } = "";
+        public string PlanId      { get; set; } = "";      // ImportPartnership.id on the plan owner's machine
+        public string ImporterKey { get; set; } = "";      // the import/export business the goods are bought from
+        public string DestKey     { get; set; } = "";      // the PARTNER's warehouse the goods are for
+        public string SourcePid   { get; set; } = "";      // host-stamped: the machine that runs the plan
+        public string TargetPid   { get; set; } = "";      // host-stamped: who this leg is addressed to
+        public int    Day         { get; set; }
+        public int    Hour        { get; set; }
+        public string Reason      { get; set; } = "";      // set on a refusal, logged - never shown
+        /// <summary>The plan's isTarget mode (ImportPartnership.isTarget): the amount is a TARGET stock
+        /// level at the warehouse rather than a flat order, so the need is counted against its pallets.</summary>
+        public bool   IsTarget    { get; set; }
+        public List<ImportTransferItem> Items { get; set; } = new();
     }
 }
