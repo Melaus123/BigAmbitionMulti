@@ -3347,6 +3347,10 @@ namespace BigAmbitionsMP
                         string detail = $"only on host ({nMine}): {(nMine > 0 ? onlyMine : "-")} | only on '{hello.PlayerId}' ({nTheirs}): {(nTheirs > 0 ? onlyTheirs : "-")}";
                         Plugin.Logger.LogWarning($"[Content] MOD MISMATCH: '{hello.PlayerId}' runs a different mod set — {detail}. "
                             + "Different game content can change prices, items and behavior between machines; informational only, join proceeds.");
+                        // H-MODSDIFFER-1 step 1 (2026-09-20): the warning above names at most 6
+                        // tokens per side, which is not enough to chase a content difference. One
+                        // uncapped INFO block per peer per session, re-armed if the SET changes.
+                        MPContentFingerprint.LogFullModBlockOnce(hello.PlayerId, mine, theirsMods, hello.PlayerId);
                         // (No posted lobby notice — round-253f: the host's strip line is DERIVED
                         // live from ModMismatchByPlayer ∩ LobbyPlayers, no timer to manage.)
                         // Round-253b (user test: the in-world host saw NOTHING — the lobby
@@ -3369,7 +3373,10 @@ namespace BigAmbitionsMP
                             Send(peer, MessageEnvelope.Create(MessageType.ModMismatch, "host", new ModMismatchPayload
                             {
                                 Summary = $"Your mods differ from the host's ({nTheirs} extra / {nMine} missing) — game content may differ.",
-                                Detail  = detail
+                                Detail  = detail,
+                                // H-MODSDIFFER-1 step 1: the joiner prints the same uncapped block we
+                                // just printed, which needs our full list (Detail is capped at 6/side).
+                                HostMods = mine
                             }));
                         }
                         catch { }

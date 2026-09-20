@@ -1079,6 +1079,11 @@ namespace BigAmbitionsMP
                     {
                         Plugin.Logger.LogWarning($"[Content] MOD MISMATCH vs host: {mm.Detail}");
                         ModMismatchVsHost = mm.Summary ?? "";   // round-253f: live-read strip line, no timer
+                        // H-MODSDIFFER-1 step 1 (2026-09-20): Detail is capped at 6 tokens per side and
+                        // this machine never otherwise learns the host's list, so the host now sends it
+                        // (ModMismatchPayload.HostMods) and we print the same uncapped block it printed.
+                        if (!string.IsNullOrEmpty(mm.HostMods))
+                            MPContentFingerprint.LogFullModBlockOnce("host", MPContentFingerprint.CachedMods, mm.HostMods, "host");
                     }
                     break;
                 }

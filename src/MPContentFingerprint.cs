@@ -286,6 +286,89 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        // ── H-MODSDIFFER-1 step 1 (2026-09-20, log-only) ──
+        /// <summary>The UNCAPPED four-line block the 6-token DiffMods summary cannot carry: both full
+        /// lists and both only-lists, sorted. The FULL lists keep "layout:" tokens (round-258 drops
+        /// those from the COMPARISON because they cannot desync gameplay, but a reader chasing a
+        /// content difference still wants to see them); the only-lists are the compared sets, so they
+        /// agree with the mismatch warning the player already got. Lines are split at ~900 characters
+        /// so a long list survives the log. <paramref name="diffSignature"/> identifies the difference
+        /// SET, so a caller can re-arm its once-per-peer budget when the set changes.</summary>
+        public static System.Collections.Generic.List<string> FullModBlock(string mine, string theirs, string peer, out string diffSignature)
+        {
+            var lines = new System.Collections.Generic.List<string>();
+            diffSignature = "";
+            try
+            {
+                var fullMine   = SortedTokens(mine,   keepLayouts: true);
+                var fullTheirs = SortedTokens(theirs, keepLayouts: true);
+                var cmpMine    = SortedTokens(mine,   keepLayouts: false);
+                var cmpTheirs  = SortedTokens(theirs, keepLayouts: false);
+                var onlyMine   = cmpMine.FindAll(s => !cmpTheirs.Contains(s));
+                var onlyTheirs = cmpTheirs.FindAll(s => !cmpMine.Contains(s));
+                diffSignature  = string.Join(",", onlyMine) + "|" + string.Join(",", onlyTheirs);
+                WrapTokens(lines, $"[Mods] full list MINE ({fullMine.Count}): ", fullMine);
+                WrapTokens(lines, $"[Mods] full list '{peer}' ({fullTheirs.Count}): ", fullTheirs);
+                WrapTokens(lines, "[Mods] only mine: ", onlyMine);
+                WrapTokens(lines, "[Mods] only theirs: ", onlyTheirs);
+            }
+            catch { }
+            return lines;
+        }
+
+        private static readonly System.Collections.Generic.Dictionary<string, string> _blockSaid =
+            new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal);
+
+        /// <summary>Log <see cref="FullModBlock"/> at INFO once per peer per session, re-armed only
+        /// when the difference SET changes. Budgeted this way on purpose: the block is uncapped, so it
+        /// must never repeat per join attempt or per hour.</summary>
+        public static void LogFullModBlockOnce(string peerPid, string mine, string theirs, string peerLabel)
+        {
+            try
+            {
+                var lines = FullModBlock(mine, theirs, peerLabel, out string sig);
+                if (lines.Count == 0) return;
+                lock (_blockSaid)
+                {
+                    if (_blockSaid.TryGetValue(peerPid ?? "", out var prev) && prev == sig) return;
+                    _blockSaid[peerPid ?? ""] = sig;
+                }
+                foreach (var line in lines) Plugin.Logger.LogInfo(line);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Mods] full-list block: {ex.Message}"); }
+        }
+
+        private static System.Collections.Generic.List<string> SortedTokens(string csv, bool keepLayouts)
+        {
+            var set = ParseModList(csv);
+            if (!keepLayouts) set.RemoveWhere(s => s.StartsWith("layout:", StringComparison.OrdinalIgnoreCase));
+            var list = new System.Collections.Generic.List<string>(set);
+            list.Sort(StringComparer.OrdinalIgnoreCase);
+            return list;
+        }
+
+        private static void WrapTokens(System.Collections.Generic.List<string> lines, string prefix, System.Collections.Generic.List<string> tokens)
+        {
+            const int MaxLine = 900;
+            if (tokens.Count == 0) { lines.Add(prefix + "-"); return; }
+            var sb = new System.Text.StringBuilder(prefix);
+            bool first = true;
+            foreach (var t in tokens)
+            {
+                if (!first && sb.Length + 2 + t.Length > MaxLine)
+                {
+                    lines.Add(sb.ToString());
+                    sb.Length = 0;
+                    sb.Append(prefix).Append("(cont.) ");
+                    first = true;
+                }
+                if (!first) sb.Append(", ");
+                sb.Append(t);
+                first = false;
+            }
+            lines.Add(sb.ToString());
+        }
+
         private static System.Collections.Generic.HashSet<string> ParseModList(string csv)
         {
             var set = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);

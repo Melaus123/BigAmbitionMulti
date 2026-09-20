@@ -392,6 +392,55 @@ namespace BigAmbitionsMP
                     return $"OK '{sAddr}' now reads name='{sName}' type=fastfoodrestaurant avail=False";
                 }
 
+                case "settype":
+                {
+                    // H-CLOCK60-1 rig lever (user-approved 2026-09-20). IN MEMORY ONLY: stamps a business
+                    // TYPE NAME onto one of this machine's own rented registrations, so a run can plant a
+                    // type that does not resolve (the field shape: a modded type gone from the world) and
+                    // then put the captured old one back. Nothing is written to a save - the scenario that
+                    // uses this lever never saves. Refuses an address this machine does not rent.
+                    // No argument = FIXTURE DISCOVERY (the `schedcount` shape): this machine's rented
+                    // registrations, '|' between entries and '=' before the type, because address keys
+                    // contain both spaces and ':'.
+                    if (arg.Length == 0)
+                    {
+                        var tregs = SaveGameManager.Current?.BuildingRegistrations;
+                        if (tregs == null) return "ERR no save loaded";
+                        var tsb = new StringBuilder("OK settype rented=[");
+                        int tn = 0;
+                        foreach (var treg in tregs)
+                        {
+                            if (treg == null) continue;
+                            bool trented = false; try { trented = treg.RentedByPlayer; } catch { }
+                            if (!trented) continue;
+                            string tk2 = ""; try { tk2 = GameStateReader.AddressKey(treg); } catch { }
+                            if (tk2.Length == 0) continue;
+                            string tt2 = ""; try { tt2 = treg.businessTypeName ?? ""; } catch { }
+                            if (tt2.Length == 0) continue;           // a premises with no type is no use to a run that plants and restores one
+                            if (tn++ > 0) tsb.Append('|');
+                            tsb.Append(tk2).Append('=').Append(tt2);
+                            if (tn >= 12) break;
+                        }
+                        return tsb.Append(']').ToString();
+                    }
+                    var ttk = arg.Split(' ');
+                    if (ttk.Length < 3) return "ERR usage: settype <num> <ba:street_x> <businessTypeName> (no argument lists this machine's rented registrations)";
+                    string taddr = ttk[0] + " " + ttk[1];
+                    string ttype = string.Join(" ", ttk, 2, ttk.Length - 2).Trim();
+                    var treg2 = GameStatePatcher.FindRegistration(taddr);
+                    if (treg2 == null) return $"ERR no registration for '{taddr}'";
+                    string told;
+                    try
+                    {
+                        if (!treg2.RentedByPlayer) return $"ERR '{taddr}' is not rented by the player on this machine";
+                        told = treg2.businessTypeName ?? "";
+                        treg2.businessTypeName = ttype;
+                    }
+                    catch (Exception exT) { return "ERR " + exT.Message; }
+                    string tkey = taddr; try { tkey = GameStateReader.AddressKey(treg2); } catch { }
+                    return $"OK settype {tkey} was='{told}' now='{ttype}' rented={treg2.RentedByPlayer}";
+                }
+
                 case "vacate":
                     // Round-260: client-side — sends the SAME VacateRequest the terminate
                     // patch sends, exercising the host's vacate reflect (the wedge fix).

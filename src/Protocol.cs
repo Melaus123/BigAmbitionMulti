@@ -1709,11 +1709,15 @@ namespace BigAmbitionsMP
 
     /// <summary>Sent by client on connect.</summary>
     /// <summary>Round-253: host → joiner on a mod-list mismatch. Summary is the short
-    /// player-facing notice; Detail is the capped diff for the joiner's log.</summary>
+    /// player-facing notice; Detail is the capped diff for the joiner's log. HostMods is the
+    /// host's FULL installed-mod list (H-MODSDIFFER-1 step 1, 2026-09-20): the joiner otherwise
+    /// never learns it, so it could not print the uncapped comparison block the host prints.
+    /// Informational only - nothing gates or branches on it.</summary>
     public class ModMismatchPayload
     {
-        public string Summary { get; set; } = "";
-        public string Detail  { get; set; } = "";
+        public string Summary  { get; set; } = "";
+        public string Detail   { get; set; } = "";
+        public string HostMods { get; set; } = "";
     }
 
     /// <summary>Bug-report v2 (2026-08-15): ask every connected peer for its logs while a

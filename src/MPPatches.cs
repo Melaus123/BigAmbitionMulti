@@ -515,6 +515,229 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── H-CLOCK60-1 (2026-09-20): the hourly business walk survives an unresolvable type ──
+        /// <summary>Parts 1 and 2. Native <c>BusinessSimulatorHelper.RunHourly</c>
+        /// (BusinessSimulatorHelper.cs:25-41) walks every RentedByPlayer registration and dereferences
+        /// <c>BusinessTypeHelper.GetData(reg).simulator</c> UNGUARDED. GetData is itself null-safe and
+        /// returns null whenever the registration's businessTypeName is not in the BusinessTypes
+        /// dictionary (BusinessTypeHelper.cs:112-128) - e.g. a type contributed by a mod that is now
+        /// missing or unloaded - so the walk NREs. RunHourly is the FIRST call of the native hour loop,
+        /// BEFORE Hour++ and Minute -= 60 (GameManager.cs:569-571), so that throw leaves the hour
+        /// un-rolled and re-throws on every frame: the clock stops for good (field bundle
+        /// 20260919-232853 - ~9,000 NREs per launch, save stuck at Hour=23 Minute=685, NPC sim and
+        /// energy dead).
+        /// PART 1 (the Prefix) is LOG-ONLY: it names every registration that could break the walk.
+        /// PART 2 is the SCOPE: while this method is on the stack ON THIS THREAD, a null GetData
+        /// result for a real registration is substituted with the game's own empty-premises type,
+        /// whose simulator is null, so native skips that registration exactly as it skips a genuinely
+        /// empty shop. NOTHING is written to the save - this is survival for one hour's walk, not a
+        /// repair of another mod's data. PART 3 is the tick-wall entry, which is what carries the save
+        /// if the substitution cannot be made.
+        /// PATCH ORDERING on RunHourly. Prefixes: Patch_MergerAuthorityVeil.Prefix (VeilPush, un-flips
+        /// merged partner shops) and this one - [HarmonyPriority(Priority.Last)] puts the hazard scan
+        /// AFTER the un-flip so it reports the registrations the native walk will really see instead of
+        /// the merged presentation. Postfix Patch_RunHourly_SimulateOccupiedShopDuringSkip (round-60)
+        /// runs while the flag is still up; harmless, its own GetData is already null-conditional and
+        /// its shop is the one native skips anyway. Finalizers: this one and the veil's are
+        /// pass-through, the tick wall's returns null - see the wall for why the order of the three
+        /// cannot matter. The flag is lowered in a Finalizer, so a throw can never leave it raised.</summary>
+        [HarmonyPatch(typeof(BusinessSimulatorHelper), nameof(BusinessSimulatorHelper.RunHourly))]
+        public static class Patch_BusinessSimulatorRunHourly_UnknownTypeScope
+        {
+            /// <summary>Depth of the native hourly walk on THIS thread. Thread-static on purpose: the
+            /// walk hands shops to DistributedWork worker threads (BusinessSimulatorHelper.cs:36) and
+            /// those must keep seeing the unmodified GetData result.</summary>
+            [ThreadStatic] private static int _depth;
+            internal static bool InHourlyWalk => _depth > 0;
+            /// <summary>The same scope for the hour loop's SIBLING walk (UpdateAllSecurityLevels, below).</summary>
+            internal static void EnterSiblingWalk() { _depth++; }
+            internal static void ExitSiblingWalk()  { if (_depth > 0) _depth--; }
+
+            private const int HazardBudget = 20;          // WARNING lines per session
+            private static string _lastHazardSig = "";
+            private static int _hazardLogged;
+
+            [HarmonyPriority(HarmonyLib.Priority.Last)]
+            static void Prefix()
+            {
+                // Scan BEFORE the flag goes up (and through the UNPATCHED string overload) so the
+                // hazard log reports native truth and not our own substitution.
+                try { ScanHazards(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Clock] Patch_BusinessSimulatorRunHourly_UnknownTypeScope scan: {ex.Message}"); }
+                _depth++;
+            }
+
+            static Exception Finalizer(Exception __exception)
+            {
+                try { if (_depth > 0) _depth--; }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Clock] Patch_BusinessSimulatorRunHourly_UnknownTypeScope pop: {ex.Message}"); }
+                return __exception;   // pass-through - containment is the tick wall's job, not ours
+            }
+
+            /// <summary>Part 1 - the hazard log. One pass per GAME HOUR at most (this is an hourly
+            /// method) and it only speaks when the hazardous SET changes, so a steady state is silent.</summary>
+            private static void ScanHazards()
+            {
+                if (_hazardLogged >= HazardBudget) return;
+                var regs = SaveGameManager.Current?.BuildingRegistrations;
+                if (regs == null) return;
+
+                var sig = new System.Text.StringBuilder();
+                var lines = new System.Collections.Generic.List<string>();
+                foreach (var reg in regs)
+                {
+                    if (reg == null)
+                    {
+                        sig.Append("<null>;");
+                        lines.Add("[Clock] hourly hazard: '<null registration>' type='<none>' data=null building=null"
+                                  + " - this registration can break the hourly business walk.");
+                        continue;
+                    }
+                    if (!reg.RentedByPlayer) continue;
+                    bool noBuilding = reg.BuildingCached == null;
+                    // The STRING overload is deliberate: it is what GetData(BuildingRegistration) calls
+                    // for a non-null registration and it is not the method part 2 patches.
+                    bool noData = BusinessTypeHelper.GetData(reg.businessTypeName) == null;
+                    if (!noBuilding && !noData) continue;
+                    string key = GameStateReader.AddressKey(reg);
+                    sig.Append(key).Append(noData ? "|D" : "|-").Append(noBuilding ? "B;" : "-;");
+                    lines.Add($"[Clock] hourly hazard: '{key}' type='{reg.businessTypeName}' "
+                              + $"data={(noData ? "null" : "ok")} building={(noBuilding ? "null" : "ok")}"
+                              + " - this registration can break the hourly business walk.");
+                }
+
+                string s = sig.ToString();
+                if (s == _lastHazardSig) return;          // set unchanged - say nothing
+                _lastHazardSig = s;
+                foreach (var line in lines)
+                {
+                    if (_hazardLogged >= HazardBudget) break;
+                    _hazardLogged++;
+                    Plugin.Logger.LogWarning(line);
+                }
+            }
+        }
+
+        /// <summary>H-CLOCK60-1, the SECOND site (found by the rig, t-clock60 run 1). RunMainGameTick calls
+        /// BusinessHelper.UpdateAllSecurityLevels at the TOP of the tick whenever the hour loop raised
+        /// _pendingUpdateSecurityLevel (GameManager.cs:563-567) - BEFORE `Minute += delta` - and that walk does
+        /// `GetData(reg).HasTag(...)` unguarded for every rented registration (Helpers/BusinessHelper.cs:497-506).
+        /// A throw leaves the pending flag TRUE, so it re-throws every tick and the clock never advances again.
+        /// The unknown-type / no-building substitution is therefore active inside this walk too; the tick wall
+        /// lists the method as the backstop (a swallowed throw lets the native flag reset run).</summary>
+        [HarmonyPatch(typeof(Helpers.BusinessHelper), nameof(Helpers.BusinessHelper.UpdateAllSecurityLevels))]
+        public static class Patch_BusinessHelper_UpdateAllSecurityLevels_UnknownTypeScope
+        {
+            // SCOPE NOTE (review MEDIUM-2): the scope is TEMPORAL - 'one of the two walks is on this thread's stack' -
+            // not per-registration. Native code the walks call synchronously (ForceCompleteAllWork, a SimulateBusiness
+            // that could not be enqueued) sees the same answer for ANOTHER broken registration. Only a save that
+            // already holds a broken registration can notice, and every substitution is named in the log.
+            static void Prefix()
+            {
+                try { Patch_BusinessSimulatorRunHourly_UnknownTypeScope.EnterSiblingWalk(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Clock] Patch_BusinessHelper_UpdateAllSecurityLevels_UnknownTypeScope prefix: {ex.Message}"); }
+            }
+            static Exception? Finalizer(Exception? __exception)
+            {
+                try { Patch_BusinessSimulatorRunHourly_UnknownTypeScope.ExitSiblingWalk(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Clock] Patch_BusinessHelper_UpdateAllSecurityLevels_UnknownTypeScope finalizer: {ex.Message}"); }
+                return __exception;   // pass-through: the tick wall decides
+            }
+        }
+
+        /// <summary>H-CLOCK60-1 part 2 - the substitution itself. It fires ONLY while the native hourly
+        /// walk is on this thread's stack, ONLY for a real registration, and ONLY for the two shapes the
+        /// walk cannot survive: the type did not resolve (the lookup came back null), or the type
+        /// resolved but the registration's BUILDING is missing from this world. Everywhere else GetData
+        /// behaves exactly as before: the UI must never show a modded shop as empty premises.
+        /// THE BUILDING CASE (user-approved 2026-09-20): a rented registration whose BuildingCached is
+        /// null is enqueued by the walk like any other and then NREs deep inside the worker
+        /// (BuildingRegistration.get_Neighborhood <- RetailBusinessSimulator.SimulateCurrentHour <-
+        /// BusinessSimulatorHelper.SimulateBusiness <- DistributedWork.ProgressWork <- GameManager.Update:
+        /// 604 throws in one field bundle, seen by the player as 'customers stand still'). With the
+        /// stand-in native reads simulator == null and never enqueues it.
+        /// The stand-in is the game's OWN "ba:businesstype_empty" and it is used only after this code
+        /// has checked that its simulator is null - that null IS the mechanism, because native reads
+        /// data.simulator first (BusinessSimulatorHelper.cs:32) and short-circuits, so the registration
+        /// is skipped for this hour and nothing else on the type is ever read. If the empty type does
+        /// not resolve, or a future build gives it a simulator, NO substitution is made and the null
+        /// stands: the tick-chain wall (part 3) then contains the native throw and the hour still rolls.
+        /// INLINING CAVEAT: GetData(BuildingRegistration) is a tiny method and Mono has already inlined
+        /// a small callee out of this very RunHourly body once (round-60 header above, the isRunning
+        /// getter). If that happens here this postfix is simply never reached and part 3 carries the
+        /// save on its own - which is why part 3 is not optional.</summary>
+        [HarmonyPatch(typeof(BusinessTypeHelper), nameof(BusinessTypeHelper.GetData), new Type[] { typeof(BuildingRegistration) })]
+        public static class Patch_BusinessTypeHelper_GetData_EmptyDuringHourlyWalk
+        {
+            private const string EmptyTypeName = "ba:businesstype_empty";
+            private const int Budget = 20;                // addresses named per session
+
+            private static BusinessType? _empty;
+            private static bool _emptyResolved;
+            private static int _faults;                   // budget for this Postfix's own fault lines (review MEDIUM-5)
+            private static readonly System.Collections.Generic.HashSet<string> _said =
+                new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+
+            static void Postfix(BuildingRegistration registration, ref BusinessType __result)
+            {
+                try
+                {
+                    if (registration == null) return;
+                    if (!Patch_BusinessSimulatorRunHourly_UnknownTypeScope.InHourlyWalk) return;
+
+                    // The two hazards, exactly as the part-1 scan names them. BuildingCached
+                    // (BuildingRegistration.cs:165-174) is a null-safe Dictionary lookup through
+                    // BuildingHelper.GetBuilding whose answer it then caches on the registration, so this
+                    // costs at most one lookup per registration per game hour and cannot throw on its own.
+                    bool noData = __result == null;
+                    bool noBuilding = false;
+                    try { noBuilding = registration.BuildingCached == null; }
+                    catch (Exception exB) { if (_faults++ < 10) Plugin.Logger.LogWarning($"[Clock] hourly walk: building check: {exB.Message}"); }
+                    if (!noData && !noBuilding) return;
+
+                    if (!_emptyResolved)
+                    {
+                        _emptyResolved = true;
+                        // The STRING overload - a different method, so this cannot recurse into us.
+                        var candidate = BusinessTypeHelper.GetData(EmptyTypeName);
+                        if (candidate == null)
+                            Plugin.Logger.LogWarning($"[Clock] hourly walk: the game's own '{EmptyTypeName}' type did not resolve - "
+                                + "no stand-in available, the tick-chain wall contains the native throw instead.");
+                        else if (candidate.simulator != null)
+                            Plugin.Logger.LogWarning($"[Clock] hourly walk: '{EmptyTypeName}' HAS a simulator in this build - refusing to "
+                                + "stand it in (it would simulate business for an unknown type); the tick-chain wall contains the native throw instead.");
+                        // Review HIGH-1: the SECOND walk (UpdateAllSecurityLevels) keys off a TAG, not the simulator:
+                        // a stand-in that carried 'allowtheft' would send the registration into UpdateSecurityLevel,
+                        // which WRITES securityLevelPercentage (a saved field) - or NREs for a building-less one.
+                        else if (candidate.HasTag(BigAmbitions.Tags.TagRef.Businesstag.allowtheft))
+                            Plugin.Logger.LogWarning($"[Clock] hourly walk: '{EmptyTypeName}' carries the 'allowtheft' tag in this build - refusing "
+                                + "to stand it in (the security walk would write a security level for an unknown type); the tick-chain wall contains the native throw instead.");
+                        else
+                        {
+                            _empty = candidate;
+                            Plugin.Logger.LogInfo($"[Clock] hourly walk: stand-in verified - '{EmptyTypeName}' has no simulator and no "
+                                + "'allowtheft' tag, so both native walks skip a substituted registration.");
+                        }
+                    }
+
+                    var stand = _empty;
+                    if (stand == null) return;
+                    __result = stand;
+
+                    // One line per ADDRESS per session out of the shared budget: an address with both
+                    // hazards speaks once, and the type it names is the one the walk really saw.
+                    string key = GameStateReader.AddressKey(registration);
+                    if (_said.Count < Budget && _said.Add(key))
+                        Plugin.Logger.LogWarning(noData
+                            ? $"[Clock] hourly walk: '{key}' has unknown business type '{registration.businessTypeName}' - "
+                              + "treated as empty premises for this hour's walk only (nothing written)."
+                            : $"[Clock] hourly walk: '{key}' has NO BUILDING in this world (type '{registration.businessTypeName}') - "
+                              + "skipped for this hour's walk only (nothing written).");
+                }
+                catch (Exception ex) { if (_faults++ < 10) Plugin.Logger.LogWarning($"[Clock] Patch_BusinessTypeHelper_GetData_EmptyDuringHourlyWalk: {ex.Message}"); }
+            }
+        }
+
         // ── Round-60b: normal-speed customer VISUALS during a consensus skip ─────
         // During a skip the world stays visible (no native TM blur) while the clock
         // runs at 25 game-min/s — the interior spawner's 1s check finds every entry
@@ -5599,6 +5822,14 @@ namespace BigAmbitionsMP
                 ("Helpers.EmployeeHelper",          "RunDaily"),
                 ("BigAmbitions.Rivals.RivalsHelper","RunDaily"),
                 // ── hourly chain (RunMainGameTick), in call order ──
+                // H-CLOCK60-1 part 3 (2026-09-20). FIRST call of the native hour loop
+                // (GameManager.cs:569), BEFORE Hour++ and Minute -= 60 (:570-571): an uncontained
+                // throw here leaves the hour un-rolled and re-throws every frame, so the clock stops
+                // dead instead of losing one step (field bundle 20260919-232853 - ~9,000 NREs, save
+                // stuck at Hour=23 Minute=685). Namespace-less global type, resolved by
+                // AccessTools.TypeByName exactly as the merger veil already resolves it.
+                ("Helpers.BusinessHelper",          "UpdateAllSecurityLevels"), // H-CLOCK60-1: runs at the TOP of the tick while the hour loop's pending flag is up; a throw here re-throws EVERY tick before Minute advances
+                ("BusinessSimulatorHelper",         "RunHourly"),
                 ("JobHelper",                       "RunHourly"),
                 ("Helpers.ParkingSimulator",        "RunHourly"),
                 ("Helpers.RecruitmentHelper",       "RunHourly"),

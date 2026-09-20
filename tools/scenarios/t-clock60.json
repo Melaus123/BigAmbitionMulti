@@ -1,0 +1,173 @@
+{
+  "id": "T-CLOCK60",
+  "title": "H-CLOCK60-1: the native hourly business walk survives a registration whose business type does not resolve. Host only (the rig needs two instances; the client just joins and watches). One of the host's own rented shops is given the unresolvable type 'bogusmod:businesstype_missing' IN MEMORY by the DEV lever `settype`; the clock is moved to three minutes before an hour and LIVE time crosses it, so the NATIVE hour loop really runs. The hour must roll, the two [Clock] lines must appear, no tick must be swallowed; then the old type is put back and one more hour is crossed clean. NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1). Dev build with the levers settype / clock (BAMP_DEV). The host must rent at least one registration with a non-empty business type - the `settype` discovery step fails loudly if none does. Nothing is ever saved: the planted type lives only in memory and is restored before the end mark.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "\\[Guard\\] BusinessSimulatorHelper\\.RunHourly threw during the",
+    "\\[TickIso\\] the game's main tick threw .*(DistributedWork|SimulateBusiness|BusinessSimulator)",
+    "\\[TickIso\\] the game's main tick threw",
+    "\\[Guard\\] BusinessHelper\\.UpdateAllSecurityLevels threw"
+  ],
+  "oracles_report": [
+    "\\[Clock\\] hourly walk: stand-in verified",
+    "has NO BUILDING in this world",
+    "NullReferenceException"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST CLOCK60 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the host's world settles before the clock is touched"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "settype",
+      "expect_result": "^OK settype rented=\\[[^|=\\]]+=[^|\\]]",
+      "capture": {
+        "addr": "rented=\\[([^|=\\]]+)=",
+        "oldtype": "rented=\\[[^|=\\]]+=([^|\\]]+)"
+      },
+      "note": "PRECONDITION + runtime pick: the host's first rented registration with a real type is the test shop; its type is captured for the restore"
+    },
+    {
+      "role": "h",
+      "cmd": "blocksave 180",
+      "expect_result": "^OK saves read as blocked",
+      "note": "Belt for the fixture: blocks the mod's COORDINATED saves on the host while the bogus type is planted (in an MP session the periodic autosave is one of them - the native autosave timer is suppressed/redirected by the mod, MPPatches ~:8351/:8402). It does NOT touch the native timer itself. fixture_reset never restores a .hsg, so nothing may save in this window; 180 s covers the ~60 s the type stays planted.",
+      "seq": 8
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "settype ${addr} bogusmod:businesstype_missing",
+      "expect_result": "^OK settype .* was='${oldtype}' now='bogusmod:businesstype_missing' rented=True",
+      "note": "IN MEMORY ONLY - the type the walk will fail to resolve"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "^OK",
+      "capture": {
+        "h1": "hour=(\\d+)\\."
+      },
+      "note": "the hour before the boundary"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "clock ${h1}:57",
+      "expect_result": "^OK clock ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Clock\\] hourly hazard: '${addr}' type='bogusmod:businesstype_missing'",
+          "within_s": 150
+        },
+        {
+          "role": "h",
+          "regex": "\\[Clock\\] hourly walk: '${addr}' has unknown business type",
+          "within_s": 150
+        },
+        {
+          "role": "h",
+          "regex": "\\[Clock\\] hourly walk: stand-in verified",
+          "within_s": 150.0
+        }
+      ],
+      "note": "BOTH native walks are covered since the manager's fold (RunHourly and UpdateAllSecurityLevels): no TICK-ISO swallow and no tick-wall line may appear - they are hard absent oracles again. PRECONDITION of the absent oracles: the stand-in was ACCEPTED on this game build ('stand-in verified'). If a game update gives 'ba:businesstype_empty' a simulator or the allowtheft tag the mod REFUSES the stand-in by design and the tick wall carries the throw - this step then fails first, with that reason, instead of the guard oracles misreporting a correct build."
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "live time crosses the boundary through the ordinary tick"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "hour=(?!${h1}\\.)(?:[0-9]|1[0-9]|2[0-3])\\.\\d ",
+      "capture": {
+        "h2": "hour=(\\d+)\\."
+      },
+      "note": "THE CLOCK ASSERTION: the hour really rolled (a different hour) and it reads 0-23 with a fraction, i.e. Minute < 60 - a stalled walk leaves Minute piling up past 60"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "settype ${addr} ${oldtype}",
+      "expect_result": "^OK settype .* was='bogusmod:businesstype_missing' now='${oldtype}' rented=True",
+      "note": "the shop is handed back its real type; nothing was ever written to a save"
+    },
+    {
+      "seq": 15,
+      "role": "both",
+      "cmd": "mark TEST CLOCK60 RESTORED",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "clock ${h2}:57",
+      "expect_result": "^OK clock "
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "one more live boundary, this time with the real type"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "hour=(?!${h2}\\.)(?:[0-9]|1[0-9]|2[0-3])\\.\\d ",
+      "note": "the clean hour: it rolls again. No new hazard/walk line for this address may appear after the RESTORED mark - read the host log from that mark"
+    },
+    {
+      "seq": 19,
+      "role": "both",
+      "cmd": "mark TEST CLOCK60 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
