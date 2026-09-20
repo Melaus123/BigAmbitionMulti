@@ -23,10 +23,19 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPRestSync
     {
-        public const float SkipMinutesPerRealSecond = 25f;
+        /// <summary>Game-minutes of simulation per REAL second while a consensus skip runs - the SINGLE
+        /// source of truth for the rate. Read by the skip executor on host and clients (TickSkipFrame) and
+        /// by the client's BEHIND catch-up (TimeSync.TickClockCorrection). A field, not a const, so the DEV
+        /// lever `skiprate` can change it at runtime and one rig run can compare rates without a rebuild -
+        /// verified safe: nothing needs it at compile time (no attribute argument, no default parameter, no
+        /// case label; the only two reads are the two tick sites above). 50 since 2026-09-20 (user ruling,
+        /// was 25): the ~70 ms of economy per simulated hour is unchanged, twice as much of it per second.</summary>
+        public static float SkipMinutesPerRealSecond = 50f;
         // Defensive ceiling on game-minutes simulated in a SINGLE frame during a skip: a frame-time spike
-        // (alt-tab, stall) must not dump many hours of economy into one frame (~70ms/simulated-hour). At the
-        // normal 25 min/s rate a frame advances <1 min, so this only ever caps a recovery frame after a spike.
+        // (alt-tab, stall) must not dump many hours of economy into one frame (~70ms/simulated-hour). This is
+        // a per-FRAME absolute and is deliberately NOT derived from the rate. At 50 min/s a 60 fps frame
+        // advances ~0.8 min, so it still only caps a recovery frame after a spike - one longer than ~1.2 s
+        // (it was ~2.4 s at 25 min/s).
         public const float MaxSkipMinutesPerFrame = 60f;
 
         // ── Local state ───────────────────────────────────────────────────────
@@ -241,6 +250,26 @@ namespace BigAmbitionsMP
         public static int  RequiredVotes;
         public static volatile bool SkipActive;
 
+        // ── Skip stopwatch (batch-21 measurement; written on the SkipActive edge in TickSkipFrame) ──
+        /// <summary>Real seconds the LAST completed skip on this machine took, and the one before it
+        /// (so one rig step can compare two legs). -1 until a skip has finished this session.</summary>
+        public static float  LastSkipRealSeconds  = -1f;
+        public static float  PrevSkipRealSeconds  = -1f;
+        /// <summary>Game-minutes at the start/end of that skip, and the goal it was racing to. The END
+        /// value is FROZEN once the skip stops, which is what lets a rig compare two machines' clocks
+        /// exactly - a live clock moves between two rig commands, this one does not.</summary>
+        public static double LastSkipStartMinutes = -1d;
+        public static double LastSkipEndMinutes   = -1d;
+        public static double LastSkipGoalMinutes  = -1d;
+        /// <summary>The goal of the skip running right now (0 = none) - clients get it from ApplyState.</summary>
+        public static double SkipGoalMinutes => _skipGoalMinutes;
+        /// <summary>Real seconds the CURRENT skip has been running (-1 when none).</summary>
+        public static float  SkipElapsedRealSeconds
+            => (SkipActive && _skipStartedReal > 0f) ? Time.unscaledTime - _skipStartedReal : -1f;
+        private static bool   _skipWasActive;
+        private static float  _skipStartedReal;
+        private static double _skipStartedMin;
+
         // ── Host-only ─────────────────────────────────────────────────────────
         private static readonly Dictionary<string, RestVoteEntry> _hostVotes = new();
         private static double _skipGoalMinutes;
@@ -249,6 +278,7 @@ namespace BigAmbitionsMP
         {
             Seated = false; ActivityName = ""; ActivityState = -1;
             Loitering = false;
+            _skipWasActive = false; _skipStartedReal = 0f;   // the stopwatch's edge state must not survive a session boundary
             DockButtons.Clear();
             _localVoteActive = false; _localGoal = 0;
             _machine = null;
@@ -1314,6 +1344,27 @@ namespace BigAmbitionsMP
         /// Called every frame from MPCanvasUI for smoothness; Tick() itself is throttled to 0.5s.</summary>
         public static void TickSkipFrame()
         {
+            // Skip stopwatch (batch-21): this is the only frame-resolution site that runs on host AND
+            // clients whether or not a skip is active, so the start/stop edge is read here. Two compares
+            // per frame in the common case - no work, no allocation.
+            if (SkipActive != _skipWasActive)
+            {
+                _skipWasActive = SkipActive;
+                try
+                {
+                    if (SkipActive) { _skipStartedReal = Time.unscaledTime; _skipStartedMin = NowMinutes(); }
+                    else if (_skipStartedReal > 0f)
+                    {
+                        PrevSkipRealSeconds  = LastSkipRealSeconds;
+                        LastSkipRealSeconds  = Time.unscaledTime - _skipStartedReal;
+                        LastSkipStartMinutes = _skipStartedMin;
+                        LastSkipEndMinutes   = NowMinutes();
+                        LastSkipGoalMinutes  = _skipGoalMinutes;
+                        _skipStartedReal     = 0f;
+                    }
+                }
+                catch { }
+            }
             if (!SkipActive) return;
             double now = NowMinutes();
             if (now >= _skipGoalMinutes) return;   // reached the goal; HostTick / the state broadcast closes it out

@@ -192,11 +192,41 @@ namespace BigAmbitionsMP
         /// owner this session (session-wide — the dedup ledger itself is the count).</summary>
         internal static int SentCount => _sent.Count;
 
+        // ── H-SKIPDOUBLE-1 measurement (2026-09-20, read by the DEV lever `tilldupes`) ──────
+        /// <summary>Live NPC checkouts completed per shop address on this machine this session.
+        /// Order.Pay is the single point every NPC checkout passes through, and the abstract hourly
+        /// simulator does NOT call it (RetailBusinessSimulator.ProcessCustomer flags its own entries),
+        /// so this counts ONLY live serves - the half of the till-duplication question that the order
+        /// list cannot answer on its own. One dictionary write per checkout; nothing per frame. DEV BUILDS ONLY
+        /// (the body is compiled out of a release). CAVEATS: it keys on the building the LOCAL PLAYER stands in,
+        /// so it is meaningful only while that player stays in the measured shop; and shop types whose customers
+        /// never pass Order.Pay (a gym completes through Customer.CompleteOrder) read 0 here even when served live.
+        /// 0 for an address with no live checkout yet (the hook itself always exists in this build).</summary>
+        private static readonly System.Collections.Generic.Dictionary<string, int> _livePays = new();
+        internal static int LivePayCount(string addressKey)
+            => (!string.IsNullOrEmpty(addressKey) && _livePays.TryGetValue(addressKey, out var n)) ? n : 0;
+        private static void NoteLivePay()
+        {
+#if BAMP_DEV   // review MEDIUM: a measurement for a DEV lever must cost a release build nothing (it allocated a key per checkout)
+            try
+            {
+                var regL = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                if (regL == null) return;
+                string kL = GameStateReader.AddressKey(regL);
+                if (string.IsNullOrEmpty(kL)) return;
+                _livePays.TryGetValue(kL, out var nL);
+                _livePays[kL] = nL + 1;
+            }
+            catch { }
+#endif
+        }
+
         static void Postfix(Order __instance, bool isPlayer, bool __result)
         {
             try
             {
                 if (!__result || isPlayer || __instance == null) return;
+                NoteLivePay();   // H-SKIPDOUBLE-1 census - before the helper gate, so an OWNER counts too
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 if (!BusinessHelperRoute.HelperHere(out var addr)) return;
                 string? entryId = CustomerEntrySync.EntryIdOf(__instance);

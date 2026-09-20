@@ -740,10 +740,15 @@ namespace BigAmbitionsMP
 
         // ── Round-60b: normal-speed customer VISUALS during a consensus skip ─────
         // During a skip the world stays visible (no native TM blur) while the clock
-        // runs at 25 game-min/s — the interior spawner's 1s check finds every entry
-        // that came due in the last ~25 game-minutes and spawns them ALL, flooding
+        // runs at MPRestSync.SkipMinutesPerRealSecond game-min/s (50 since 2026-09-20,
+        // was 25) — the interior spawner's 1s check finds every entry that came due
+        // in the last second's worth of skipped minutes and spawns them ALL, flooding
         // the shop with bodies that real-time serving can never clear (user report
-        // 2026-07-23). The player moves at normal speed during a skip, so the world
+        // 2026-07-23). The pacing below is RATE-INDEPENDENT by construction and needed
+        // no change when the rate doubled: the interval it computes comes from this
+        // shop's own demand for this hour and the NORMAL clock rate (MinutesMultiplier),
+        // never from the skip rate, so a faster skip only means more entries are consumed
+        // by the native loop behind the same steady stream of bodies. The player moves at normal speed during a skip, so the world
         // should LOOK like normal speed (user design): bodies arrive at the rate
         // this shop, this hour, would produce at the NORMAL clock — the hour's
         // demand spread over the hour, converted through the game's own

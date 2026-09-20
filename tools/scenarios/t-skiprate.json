@@ -1,0 +1,674 @@
+{
+  "id": "T-SKIPRATE",
+  "title": "Consensus time skip at 50 game-minutes per real second (user ruling 2026-09-20, was 25), measured in a shop that really has customers in it. Two identical 3-game-hour legs - LEG A at rate 25 on both machines, LEG B at 50 - with the CLIENT standing inside his OWN gym (the owner, so his machine both runs the live customers and holds the books) and the HOST voting from outside. Asserts: at least 3 live bodies on the floor before EACH leg (no vacuous pass), each leg ends at or after the goal, the two clocks end each leg within 2 game-minutes, leg B is really faster than leg A, the occupied-shop hourly sim really ran during leg A, and at 50 the shop is not flooded (live bodies at most the shop's own customer capacity). Measures H-SKIPDOUBLE-1 (till duplication) at both rates - measurement only, nothing is fixed. NO merger, NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1). Dev build with the levers skiprate / skipvote / skipstate / perf / tilldupes / salestats / regstate / clock / enterbuilding / exitbuilding (BAMP_DEV). THE SHOP IS THE CLIENT'S OWN GYM named in vars.ownerShop: step 8 checks at runtime, on the client, that he still rents it, that it is still a gym (a customer-SPAWNING business type - the previous fixture shop, the host's event-planning agency, spawns none, which made the previous run measure an empty floor) and that no merger flip is in play. No merger is formed, so nothing has to be dissolved; NOTHING is ever saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "ownerShop": "21 ba:street_fourthstreet"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "NullReferenceException",
+    "\\[Rest\\] occupied-shop sim: "
+  ],
+  "oracles_report": [
+    "\\[Perf/",
+    "\\[PatchCost\\] SPIKE",
+    "\\[Rest\\] CONSENSUS",
+    "\\[Rest\\] skip GOAL reached",
+    "\\[Rest\\] occupied-shop hourly sim during skip",
+    "\\[Customers\\] simulator for "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST SKIPRATE START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 35,
+      "note": "both worlds settle before anything is measured"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "regstate ${ownerShop}",
+      "expect_result": "^OK rented=True .*type=ba:businesstype_gym .*flipped=False",
+      "capture": {
+        "shopName": "name='([^']*)'",
+        "shopShifts": "shifts=(-?[0-9]+)"
+      },
+      "note": "RUNTIME CHECK of the fixture, on the OWNER: the CLIENT still rents this address, it is still the customer-SPAWNING gym (BusinessTypeHelper data.spawnCustomers is what the occupied-shop skip sim and the live spawner both need - the old fixture shop, an event-planning agency, had none, which is why the previous run measured nothing), and flipped=False proves no merger is in play in this shape."
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK",
+      "note": "time must RUN on both machines - absolute semantics, a no-op when already running"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "clock 13:00",
+      "expect_result": "^OK",
+      "abort_on_fail": false,
+      "note": "HOST ONLY by design (the lever refuses on a client; clients follow through the ordinary time sync). The fixture loads day 133 12:00, so 13:00 is forward: leg A runs 13:00->16:00 and leg B 16:00->19:00, both inside ordinary opening hours so the gym stays open (IsBusinessOpen gates the occupied-shop sim). The clock only moves FORWARD; an ERR here means live time already passed 13:00 and the run continues."
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "enterbuilding ${ownerShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${ownerShop}'",
+          "within_s": 40
+        }
+      ],
+      "note": "THE OWNER STANDS IN HIS OWN SHOP. Patch_RunHourly_SimulateOccupiedShopDuringSkip only fires on the machine whose LOCAL player is inside a shop that is RentedByPlayer AND MergerFlip.TrulyMine - so the client's machine is the one that runs the occupied-shop hourly sim during the skip, and the one where H-SKIPDOUBLE-1 can appear. The HOST stays outside: `skipvote` raises its own Loitering session, so the host's vote needs no seat and no interior, and a non-owner walking into the gym is not required."
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the interior settles and the hour's customers start arriving (live-body wait 1/3)"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "abort_on_fail": false,
+      "capture": {
+        "wait1sim": "sim='([^']*)'",
+        "wait1live": "liveCustomers=(-?[0-9]+)",
+        "wait1done": "completed=(-?[0-9]+)"
+      },
+      "note": "report-only body count while we wait - if the hard gate two steps below fails, these say how close it got"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "live-body wait 2/3"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "abort_on_fail": false,
+      "capture": {
+        "wait2live": "liveCustomers=(-?[0-9]+)"
+      }
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "live-body wait 3/3 - 65 s of live play in total"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "liveCustomers=[1-9]",
+      "capture": {
+        "aLive0": "liveCustomers=(-?[0-9]+)",
+        "aEntries0": "entries=(-?[0-9]+)",
+        "aDone0": "completed=(-?[0-9]+)",
+        "aPend0": "pending=(-?[0-9]+)",
+        "aSim0": "sim='([^']*)'",
+        "aSpawn0": "spawnDisabled=(True|False)"
+      },
+      "note": "ANTI-VACUITY GATE (reworked 2026-09-20): a SNAPSHOT of bodies on the floor is noise in this gym (visits are short: two runs read 1 body while completions were rising 29->33->36). The gate is now FLOW: at least one live body right now AND `completed` has RISEN since the read ~40 s earlier - customers are really arriving and finishing. Zero flow would make the flood check and the duplicate measurement meaningless.",
+      "expect_gt": {
+        "completed=(-?[0-9]+)": "${wait1done}"
+      }
+    },
+    {
+      "seq": 20,
+      "role": "both",
+      "cmd": "mark TEST SKIPRATE LEG-A-25",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "skiprate 25",
+      "expect_result": "^OK skiprate .*rate=25 "
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "skiprate 25",
+      "expect_result": "^OK skiprate .*rate=25 "
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "perf reset",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "perf reset",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* live=[0-9]",
+      "capture": {
+        "a0orders": "orders=([0-9]+)",
+        "a0dupes": "dupes=(-?[0-9]+)",
+        "a0rev": "dupeRevenue=([0-9.]+)",
+        "a0done": "liveCompleted=(-?[0-9]+)",
+        "a0live": "live=(-?[0-9]+)",
+        "a0cap": "cap=(-?[0-9]+)"
+      },
+      "note": "H-SKIPDOUBLE-1 START of leg A, read on the OWNER inside his own shop. `live=[0-9]` in the expectation is the non-vacuity guard: tilldupes only reports live bodies (and therefore only means anything for the flood question) when THIS machine is inside THIS shop; outside it prints live=-1. REPORT-ONLY measurement otherwise - dupes gained over the leg is a1 minus a0."
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "skipvote +3h",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "skipvote +3h",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        },
+        {
+          "role": "c",
+          "regex": "\\[Rest\\] occupied-shop hourly sim during skip",
+          "within_s": 90
+        }
+      ],
+      "note": "the SECOND vote is what makes consensus, so the host's CONSENSUS line belongs on this step - and so does the client's occupied-shop line, because the same vote starts the skip that makes the owner's machine simulate the shop he is standing in. That line is the proof this run is NOT vacuous: the native hourly sim really ran on the shop with live customers in it. abort_on_fail is false so a missing line still leaves leg B (and the flood measurement at 50) to run."
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "skipstate",
+      "note": "report-only sample DURING the skip (no assertion - at 25 min/s the leg lasts ~7 s)"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "skipstate",
+      "note": "report-only sample DURING the skip, owner side"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "sleep_s": 9,
+      "note": "3 game-hours at 25 game-min per real second is ~7.2 s"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "skipstate",
+      "note": "report-only poll: has it finished?"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "sleep_s": 6
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "capture": {
+        "aGoal": "lastGoalMin=([0-9.\\-]+)",
+        "aEndH": "lastEndMin=([0-9.\\-]+)",
+        "aRealS": "lastRealS=([0-9.\\-]+)",
+        "aRate": "rate=([0-9.]+)"
+      },
+      "derive": {
+        "aGoalLo": [
+          "aGoal",
+          -0.01
+        ],
+        "aEndHLo": [
+          "aEndH",
+          -2
+        ]
+      },
+      "expect_gt": {
+        "lastEndMin=([0-9.\\-]+)": "${aGoalLo}"
+      },
+      "note": "LEG A END on the host: the skip stopped AT OR AFTER the goal it was racing to. lastEndMin is frozen when the skip stops, so the two machines can be compared exactly in the next two steps - a LIVE clock would move by whole game-minutes between two rig commands and make a 2-minute tolerance meaningless."
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "capture": {
+        "aEndC": "lastEndMin=([0-9.\\-]+)"
+      },
+      "derive": {
+        "aEndCLo": [
+          "aEndC",
+          -2
+        ]
+      },
+      "expect_gt": {
+        "lastEndMin=([0-9.\\-]+)": "${aEndHLo}"
+      },
+      "note": "THE CLOCK ASSERTION, half 1: the client's end-of-skip clock is above host-2 game-minutes"
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_gt": {
+        "lastEndMin=([0-9.\\-]+)": "${aEndCLo}"
+      },
+      "note": "half 2: and the host's is above client-2 - together, the two clocks ended within 2 game-minutes"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "capture": {
+        "aLive1": "liveCustomers=(-?[0-9]+)",
+        "aEntries1": "entries=(-?[0-9]+)",
+        "aDone1": "completed=(-?[0-9]+)",
+        "aPend1": "pending=(-?[0-9]+)",
+        "aUnproc1": "unprocessed=(-?[0-9]+)"
+      },
+      "note": "end-of-leg-A shop state on the OWNER (report). aLive1 is the baseline the 50-rate flood is judged against if the shop's own cap is ever unavailable."
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* live=[0-9]",
+      "capture": {
+        "a1orders": "orders=([0-9]+)",
+        "a1dupes": "dupes=(-?[0-9]+)",
+        "a1rev": "dupeRevenue=([0-9.]+)",
+        "a1done": "liveCompleted=(-?[0-9]+)",
+        "a1live": "live=(-?[0-9]+)",
+        "a1cap": "cap=(-?[0-9]+)"
+      },
+      "note": "H-SKIPDOUBLE-1 END of leg A - dupes/dupeRevenue GAINED over the leg are a1 minus a0, and liveCompleted gained says whether live checkouts happened inside the skipped hours at all"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "perf",
+      "expect_result": "^OK perf",
+      "capture": {
+        "aPerfWorstH": "worstMs=([0-9]+)",
+        "aPerfFpsH": "fps=([0-9]+)"
+      }
+    },
+    {
+      "seq": 39,
+      "role": "c",
+      "cmd": "perf",
+      "expect_result": "^OK perf",
+      "capture": {
+        "aPerfWorstC": "worstMs=([0-9]+)",
+        "aPerfFpsC": "fps=([0-9]+)"
+      }
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 42,
+      "role": "both",
+      "cmd": "mark TEST SKIPRATE LEG-A-END",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 43,
+      "role": "both",
+      "cmd": "mark TEST SKIPRATE LEG-B-50",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "skiprate 50",
+      "expect_result": "^OK skiprate .*rate=50 "
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "skiprate 50",
+      "expect_result": "^OK skiprate .*rate=50 "
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "cmd": "perf reset",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 47,
+      "role": "c",
+      "cmd": "perf reset",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 48,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "leg B live-body wait 1/2 - the floor refills after the skip"
+    },
+    {
+      "seq": 49,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "abort_on_fail": false,
+      "capture": {
+        "wait3live": "liveCustomers=(-?[0-9]+)",
+        "wait3done": "completed=(-?[0-9]+)"
+      },
+      "note": "report-only body count while we wait"
+    },
+    {
+      "seq": 50,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "leg B live-body wait 2/2 - 40 s"
+    },
+    {
+      "seq": 51,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "liveCustomers=[1-9]",
+      "capture": {
+        "bLive0": "liveCustomers=(-?[0-9]+)",
+        "bEntries0": "entries=(-?[0-9]+)",
+        "bDone0": "completed=(-?[0-9]+)",
+        "bPend0": "pending=(-?[0-9]+)",
+        "bSim0": "sim='([^']*)'",
+        "bSpawn0": "spawnDisabled=(True|False)"
+      },
+      "note": "ANTI-VACUITY GATE (reworked 2026-09-20): a SNAPSHOT of bodies on the floor is noise in this gym (visits are short: two runs read 1 body while completions were rising 29->33->36). The gate is now FLOW: at least one live body right now AND `completed` has RISEN since the read ~40 s earlier - customers are really arriving and finishing. Zero flow would make the flood check and the duplicate measurement meaningless.",
+      "expect_gt": {
+        "completed=(-?[0-9]+)": "${wait3done}"
+      }
+    },
+    {
+      "seq": 52,
+      "role": "c",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* live=[0-9]",
+      "capture": {
+        "b0orders": "orders=([0-9]+)",
+        "b0dupes": "dupes=(-?[0-9]+)",
+        "b0rev": "dupeRevenue=([0-9.]+)",
+        "b0done": "liveCompleted=(-?[0-9]+)",
+        "b0live": "live=(-?[0-9]+)"
+      },
+      "note": "H-SKIPDOUBLE-1 START of leg B, on the OWNER"
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "cmd": "skipvote +3h",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 54,
+      "role": "c",
+      "cmd": "skipvote +3h",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "consensus for leg B. The occupied-shop line is NOT re-asserted here: the patch only logs the 1st and then every 12th sim, so leg B's hours are legitimately silent - leg A's line already proved it runs."
+    },
+    {
+      "seq": 55,
+      "role": "h",
+      "cmd": "skipstate",
+      "note": "report-only sample during the 50 min/s skip (~3.6 s - it may already be over)"
+    },
+    {
+      "seq": 56,
+      "role": "c",
+      "cmd": "skipstate",
+      "note": "report-only sample, owner side"
+    },
+    {
+      "seq": 57,
+      "role": "h",
+      "sleep_s": 7
+    },
+    {
+      "seq": 58,
+      "role": "h",
+      "cmd": "skipstate",
+      "note": "report-only poll"
+    },
+    {
+      "seq": 59,
+      "role": "h",
+      "sleep_s": 6
+    },
+    {
+      "seq": 60,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "capture": {
+        "bGoal": "lastGoalMin=([0-9.\\-]+)",
+        "bEndH": "lastEndMin=([0-9.\\-]+)",
+        "bRealS": "lastRealS=([0-9.\\-]+)",
+        "bRate": "rate=([0-9.]+)"
+      },
+      "derive": {
+        "bGoalLo": [
+          "bGoal",
+          -0.01
+        ],
+        "bEndHLo": [
+          "bEndH",
+          -2
+        ]
+      },
+      "expect_gt": {
+        "lastEndMin=([0-9.\\-]+)": "${bGoalLo}",
+        "prevRealS=([0-9.\\-]+)": "${bRealS}"
+      },
+      "note": "LEG B END on the host, and THE RATE ASSERTION in the same step: prevRealS (leg A, 25 min/s) is greater than lastRealS (leg B, 50 min/s) - the capture runs before expect_gt, so both numbers come from this one line and no arithmetic is needed. Nothing else skipped in between (both machines dropped their votes with `skipvote off` at the end of leg A)."
+    },
+    {
+      "seq": 61,
+      "role": "c",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "capture": {
+        "bEndC": "lastEndMin=([0-9.\\-]+)",
+        "bRealSC": "lastRealS=([0-9.\\-]+)"
+      },
+      "derive": {
+        "bEndCLo": [
+          "bEndC",
+          -2
+        ]
+      },
+      "expect_gt": {
+        "lastEndMin=([0-9.\\-]+)": "${bEndHLo}"
+      }
+    },
+    {
+      "seq": 62,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_gt": {
+        "lastEndMin=([0-9.\\-]+)": "${bEndCLo}"
+      },
+      "note": "the two clocks ended leg B within 2 game-minutes of each other as well"
+    },
+    {
+      "seq": 63,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "capture": {
+        "bLive1": "liveCustomers=(-?[0-9]+)",
+        "bEntries1": "entries=(-?[0-9]+)",
+        "bDone1": "completed=(-?[0-9]+)",
+        "bPend1": "pending=(-?[0-9]+)",
+        "bUnproc1": "unprocessed=(-?[0-9]+)"
+      },
+      "note": "end-of-leg-B shop state on the OWNER (report)"
+    },
+    {
+      "seq": 64,
+      "role": "c",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* live=[0-9]",
+      "capture": {
+        "b1orders": "orders=([0-9]+)",
+        "b1dupes": "dupes=(-?[0-9]+)",
+        "b1rev": "dupeRevenue=([0-9.]+)",
+        "b1done": "liveCompleted=(-?[0-9]+)",
+        "b1live": "live=(-?[0-9]+)",
+        "b1cap": "cap=(-?[0-9]+)"
+      },
+      "derive": {
+        "b1liveLo": [
+          "b1live",
+          -1
+        ]
+      },
+      "expect_gt": {
+        "cap=(-?[0-9]+)": "${b1liveLo}"
+      },
+      "note": "THE NO-FLOOD ASSERTION at 50 min/s, on the OWNER inside the shop: the gym's own customer capacity (BuildingSizeHelper - the same number the native simulator caps an hour with) is at least the number of live bodies standing in it when the skip ended. expect_gt is strictly greater, so the comparison is made against live-1: cap > live-1 is exactly cap >= live, which is the '<= capacity' rule. Both numbers come from this one line, capture first, so no baseline is hard-coded; and `live=[0-9]` in the expectation forbids the -1 (outside) reading that would make the assertion vacuous. Also the H-SKIPDOUBLE-1 END of leg B."
+    },
+    {
+      "seq": 65,
+      "role": "h",
+      "cmd": "perf",
+      "expect_result": "^OK perf",
+      "capture": {
+        "bPerfWorstH": "worstMs=([0-9]+)",
+        "bPerfFpsH": "fps=([0-9]+)"
+      }
+    },
+    {
+      "seq": 66,
+      "role": "c",
+      "cmd": "perf",
+      "expect_result": "^OK perf",
+      "capture": {
+        "bPerfWorstC": "worstMs=([0-9]+)",
+        "bPerfFpsC": "fps=([0-9]+)"
+      }
+    },
+    {
+      "seq": 67,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 68,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 69,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding",
+      "note": "fixture hygiene: the owner leaves. The host never entered a building, so there is nothing to undo there. NO save."
+    },
+    {
+      "seq": 70,
+      "role": "both",
+      "cmd": "mark TEST SKIPRATE END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

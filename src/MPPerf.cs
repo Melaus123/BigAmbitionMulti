@@ -34,6 +34,27 @@ namespace BigAmbitionsMP
         private static int    _spikes;
         private static int    _gc0, _gc1, _gc2;
 
+        /// <summary>Batch-21 DEV read: the CURRENT window's frame figures without waiting for the
+        /// 10-second [Perf] line. Cheap - it only formats counters the window already keeps. With
+        /// reset=true the window restarts, so a rig leg's worst frame is that leg's own.</summary>
+        internal static string Snapshot(bool reset = false)
+        {
+            double nowMs = _sw.Elapsed.TotalMilliseconds;
+            double avg   = _frames > 0 ? _frameTotalMs / _frames : 0;
+            string s = $"windowS={(nowMs - _windowStartMs) / 1000.0:F1} frames={_frames} avgMs={avg:F1} "
+                     + $"fps={(avg > 0 ? 1000.0 / avg : 0):F0} worstMs={_frameMaxMs:F0} spikes={_spikes}";
+            if (reset)
+            {
+                _frames = 0; _frameTotalMs = 0; _frameMaxMs = 0; _spikes = 0;
+                _windowStartMs = nowMs;
+                // Review MEDIUM: restart the WHOLE window like its own rollover does - otherwise the next 10 s [Perf]
+                // line divides the old per-system totals by the new frame count and over-counts the gc delta.
+                _slots.Clear(); _patchSlots.Clear();
+                _gc0 = System.GC.CollectionCount(0); _gc1 = System.GC.CollectionCount(1); _gc2 = System.GC.CollectionCount(2);
+            }
+            return s;
+        }
+
         public static long Begin() => Enabled ? _sw.ElapsedTicks : 0L;
 
         public static void End(string name, long t0)

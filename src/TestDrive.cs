@@ -51,6 +51,16 @@ namespace BigAmbitionsMP
             return "h";
         }
 
+        /// <summary>H-SKIPDOUBLE-1 (`tilldupes`): net48 has no ReferenceEqualityComparer, and the
+        /// question is precisely whether the SAME Order object sits in the till list twice - value
+        /// equality would answer a different question. RuntimeHelpers.GetHashCode is the identity
+        /// hash, unaffected by any Equals/GetHashCode the type may define.</summary>
+        private sealed class OrderRefEq : System.Collections.Generic.IEqualityComparer<Order>
+        {
+            public bool Equals(Order a, Order b) => ReferenceEquals(a, b);
+            public int GetHashCode(Order o) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(o);
+        }
+
         /// <summary>"blocksave" verb state — MPSaveCoordinator.SaveBlockedBy honors it (dev builds)
         /// so the round-237 deferral machinery can be exercised end-to-end (defer → heartbeat →
         /// resume → upload) without a human sitting in the Interior Designer.  The NATIVE gate
@@ -488,6 +498,180 @@ namespace BigAmbitionsMP
                     var (newDay, newHour) = GameStateReader.GetGameTime();
                     string now = $"{(int)newHour:00}:{(int)((newHour % 1f) * 60f):00}";
                     return $"OK clock {was} -> {now} on day {newDay} (advanced {delta:0.#} game-minutes through RunMainGameTick; day was {curDay})";
+                }
+
+                // ── Batch-21: consensus-skip rate levers (user ruling 2026-09-20) ──────
+                case "skiprate":
+                {
+                    // The skip rate is ONE runtime value (MPRestSync.SkipMinutesPerRealSecond), read by the
+                    // skip executor on every machine and by the client's BEHIND catch-up. Setting it here is
+                    // LOCAL to this instance - a scenario that compares rates sets it on every instance.
+                    if (arg.Length == 0)
+                        return $"OK skiprate rate={MPRestSync.SkipMinutesPerRealSecond:0.##} maxPerFrame={MPRestSync.MaxSkipMinutesPerFrame:0.##}";
+                    if (!float.TryParse(arg.Trim(), out var srWant) || srWant < 1f || srWant > 600f)
+                        return "ERR usage: skiprate [<game-minutes-per-real-second> 1-600] (no argument prints the rate)";
+                    float srWas = MPRestSync.SkipMinutesPerRealSecond;
+                    MPRestSync.SkipMinutesPerRealSecond = srWant;
+                    Plugin.Logger.LogInfo($"[TestDrive] skiprate {srWas:0.##} -> {srWant:0.##} game-min per real second (this machine only).");
+                    return $"OK skiprate was={srWas:0.##} rate={MPRestSync.SkipMinutesPerRealSecond:0.##} maxPerFrame={MPRestSync.MaxSkipMinutesPerFrame:0.##}";
+                }
+
+                case "skipvote":
+                {
+                    // A scriptable consensus-skip vote. SetSkipRequest needs Seated || Loitering, and a rig
+                    // has no seat, so the vote is raised in LOITERING mode (the standing vote, MPRestSync
+                    // ~:202-218) exactly as the HUD button does. 'off' drops the vote and the loiter session.
+                    // Forms: HH:MM = the NEXT occurrence of that clock time; +<n>h / +<n>m = that far ahead of
+                    // THIS machine's clock, which is what a rate comparison needs (the same span on both
+                    // machines whatever hour the fixture loads at). The goal is the host's to reconcile - it
+                    // races to the EARLIEST goal across all votes.
+                    string sv = arg.Trim();
+                    if (sv.Length == 0) return "ERR usage: skipvote <HH:MM>|+<n>h|+<n>m|off";
+                    if (sv.Equals("off", StringComparison.OrdinalIgnoreCase))
+                    {
+                        MPRestSync.SetSkipRequest(false);
+                        MPRestSync.SetLoitering(false);
+                        return $"OK skipvote goal=- seated={MPRestSync.Seated} loitering={MPRestSync.Loitering}";
+                    }
+                    double svGoal;
+                    if (sv[0] == '+')
+                    {
+                        char svUnit = char.ToLowerInvariant(sv[sv.Length - 1]);
+                        string svNum = (svUnit == 'h' || svUnit == 'm') ? sv.Substring(1, sv.Length - 2) : sv.Substring(1);
+                        if (!double.TryParse(svNum.Trim(), out var svAmount) || svAmount <= 0)
+                            return "ERR usage: skipvote +<n>h | +<n>m (a positive amount)";
+                        svGoal = MPRestSync.NowMinutes() + (svUnit == 'm' ? svAmount : svAmount * 60.0);
+                    }
+                    else
+                    {
+                        int svColon = sv.IndexOf(':');
+                        if (svColon <= 0 || !int.TryParse(sv.Substring(0, svColon).Trim(), out var svH)
+                                         || !int.TryParse(sv.Substring(svColon + 1).Trim(), out var svM)
+                                         || svH < 0 || svH > 23 || svM < 0 || svM > 59)
+                            return "ERR usage: skipvote <HH:MM>|+<n>h|+<n>m|off";
+                        svGoal = MPRestSync.NextOccurrence(svH, svM);
+                    }
+                    MPRestSync.SetLoitering(true);
+                    MPRestSync.SetSkipRequest(true, svGoal);
+                    return $"OK skipvote goal={MPRestSync.Fmt(MPRestSync.LocalGoal)} seated={MPRestSync.Seated} loitering={MPRestSync.Loitering}";
+                }
+
+                case "skipstate":
+                {
+                    // Everything a rate comparison turns on, on one line. The *Min fields are raw total
+                    // game-minutes so a run can compare two machines numerically; lastEndMin/lastGoalMin/
+                    // lastRealS are FROZEN when the skip stops (a live clock moves between two rig commands,
+                    // these do not), and prevRealS is the leg before - so one step can assert A > B.
+                    var skb = new StringBuilder("OK skipstate ");
+                    double skGoal = 0, skNow = 0;
+                    try { skGoal = MPRestSync.SkipGoalMinutes; } catch { }
+                    try { skNow  = MPRestSync.NowMinutes(); }    catch { }
+                    skb.Append($"active={MPRestSync.SkipActive} ");
+                    skb.Append($"goal={(skGoal > 0 ? MPRestSync.Fmt(skGoal) : "-")} ");
+                    skb.Append($"now={MPRestSync.Fmt(skNow)} votes=[");
+                    try
+                    {
+                        int skN = 0;
+                        foreach (var skV in MPRestSync.Votes)
+                        {
+                            if (skV == null) continue;
+                            if (skN++ > 0) skb.Append(';');
+                            skb.Append(skV.PlayerId).Append('=').Append(MPRestSync.Fmt(skV.GoalMinutes));
+                        }
+                    }
+                    catch { }
+                    skb.Append($"] rate={MPRestSync.SkipMinutesPerRealSecond:0.##} required={MPRestSync.RequiredVotes} ");
+                    skb.Append($"localVote={MPRestSync.LocalVoteActive} loitering={MPRestSync.Loitering} ");
+                    skb.Append($"elapsedReal={MPRestSync.SkipElapsedRealSeconds:F2} lastRealS={MPRestSync.LastSkipRealSeconds:F2} ");
+                    skb.Append($"prevRealS={MPRestSync.PrevSkipRealSeconds:F2} ");
+                    skb.Append($"nowMin={skNow:F2} goalMin={skGoal:F2} lastStartMin={MPRestSync.LastSkipStartMinutes:F2} ");
+                    skb.Append($"lastEndMin={MPRestSync.LastSkipEndMinutes:F2} lastGoalMin={MPRestSync.LastSkipGoalMinutes:F2}");
+                    return skb.ToString();
+                }
+
+                case "perf":
+                {
+                    // The mod's own frame figures without waiting for the 10-second [Perf] line (MPPerf keeps
+                    // the counters already - this only formats them). 'reset' restarts the window so a rig
+                    // leg's worst frame belongs to that leg.
+                    bool pfReset = arg.Trim().Equals("reset", StringComparison.OrdinalIgnoreCase);
+                    string pfRole = MPServer.IsRunning ? "MP-HOST" : (MPClient.IsConnected ? "MP-CLIENT" : "SP");
+                    string pfLine;
+                    try { pfLine = MPPerf.Snapshot(pfReset); }
+                    catch (Exception exP) { return "ERR " + exP.Message; }
+                    return $"OK perf role={pfRole} {pfLine}{(pfReset ? " (window reset)" : "")}";
+                }
+
+                case "tilldupes":
+                {
+                    // H-SKIPDOUBLE-1 MEASUREMENT (user-approved 2026-09-20 - measure only, no fix).
+                    // During a skip Patch_RunHourly_SimulateOccupiedShopDuringSkip runs the OCCUPIED shop's
+                    // full native hourly sim while live customers are still being served. That native pass
+                    // builds the hour's list from every CustomerEntry whose spawnTime matches the hour with NO
+                    // 'completed' filter (RetailBusinessSimulator.CacheCustomersForCurrentHour :199-210) and
+                    // ends with an unconditional unprocessedCompletedOrders.Add(customerEntry.order)
+                    // (:229-274) - while the live serve paths add the SAME Order object (Customer.cs:395,
+                    // FullServiceEmployee.cs:156, SelfServiceEmployee.cs:150). So an order served live inside
+                    // a skipped hour can sit in the day's till list TWICE.
+                    // WHAT AN EXTRA REFERENCE IS WORTH: at the day roll BusinessHelper.CreateDailyOrderHistory
+                    // (:232-259) walks the list per ENTRY (filter: order.completed && any entry paid), hands
+                    // each to AddOrderSales (:280-296), which sums OrderEntry.price for every entry that is
+                    // available && priceAccceptable && paid into ItemReport.totalPrice; the sum of those is
+                    // orderHistoryEntry.totalRevenue, which ProcessDailyOrders (:221-231) pays out with
+                    // ChangeMoneySafe. dupeRevenue below reproduces exactly that sum for each EXTRA reference.
+                    // READ-ONLY: it counts references and never touches the list.
+                    if (arg.Length == 0) return "ERR usage: tilldupes <num> <ba:street_x>";
+                    var tdReg = GameStatePatcher.FindRegistration(arg);
+                    if (tdReg == null) return $"ERR no registration at '{arg}'";
+                    string tdKey = arg; try { tdKey = GameStateReader.AddressKey(tdReg); } catch { }
+                    int tdOrders = 0, tdDistinct = -1;
+                    double tdDupeRev = 0;
+                    try
+                    {
+                        var tdList = tdReg.unprocessedCompletedOrders;
+                        var tdSeen = new System.Collections.Generic.HashSet<Order>(new OrderRefEq());
+                        if (tdList != null)
+                        {
+                            for (int tdI = 0; tdI < tdList.Count; tdI++)
+                            {
+                                var tdO = tdList[tdI];
+                                if (tdO == null) continue;
+                                tdOrders++;
+                                if (tdSeen.Add(tdO)) continue;          // first reference - the legitimate one
+                                if (!tdO.completed) continue;           // the day roll would ignore it entirely
+                                bool tdPaid = false; double tdSum = 0;
+                                if (tdO.entries != null)
+                                    foreach (var tdE in tdO.entries)
+                                    {
+                                        if (tdE == null) continue;
+                                        if (tdE.paid) tdPaid = true;
+                                        if (tdE.available && tdE.priceAccceptable && tdE.paid) tdSum += tdE.price;
+                                    }
+                                if (tdPaid) tdDupeRev += tdSum;
+                            }
+                        }
+                        tdDistinct = tdSeen.Count;
+                    }
+                    catch (Exception exT) { return "ERR " + exT.Message; }
+                    int tdCap = -1;
+                    try
+                    {
+                        tdCap = Buildings.BuildingSizeHelper.GetData(tdReg)
+                                .GetCustomerCapacity(tdReg.BuildingCached.BuildingType, tdReg.BuildingCached.BuildingVersion);
+                    }
+                    catch { }
+                    int tdLive = -1;
+                    try
+                    {
+                        if (BuildingManager.IsInsideBuilding
+                            && string.Equals(MPRegisterSync.CurrentShopAddress ?? "", tdKey, StringComparison.Ordinal))
+                            tdLive = CustomerPuppets.LiveCustomerCount;
+                    }
+                    catch { }
+                    int tdLiveDone = -1;
+                    try { tdLiveDone = Patch_Order_Pay_HelperForward.LivePayCount(tdKey); } catch { }
+                    return $"OK tilldupes {tdKey} orders={tdOrders} distinct={tdDistinct} dupes={(tdDistinct < 0 ? -1 : tdOrders - tdDistinct)} "
+                         + $"dupeRevenue={tdDupeRev:F2} liveCompleted={tdLiveDone} live={tdLive} cap={tdCap}";
                 }
 
                 case "pause":
