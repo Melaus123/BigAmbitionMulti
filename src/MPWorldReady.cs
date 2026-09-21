@@ -55,11 +55,18 @@ namespace BigAmbitionsMP
                             $"{(exMsg.Length > 0 ? $" ex='{exMsg}'" : "")} — the {SettleSeconds:0}s settle clock restarts (sweep 3a).");
                     _rawWasTrue = false;
                     _rawTrueSince = -1f;
+                    // PROBE-START: P-CARSTACK  (log-only; compare-and-assign inside the probe)
+                    try { CarStackProbe.NoteSettled(false); } catch { }
+                    // PROBE-END: P-CARSTACK
                     return false;
                 }
                 _rawWasTrue = true;
                 if (_rawTrueSince < 0f) _rawTrueSince = Time.unscaledTime;
-                return Time.unscaledTime - _rawTrueSince >= SettleSeconds;
+                bool settledNow = Time.unscaledTime - _rawTrueSince >= SettleSeconds;
+                // PROBE-START: P-CARSTACK  (log-only; compare-and-assign inside the probe)
+                try { CarStackProbe.NoteSettled(settledNow); } catch { }
+                // PROBE-END: P-CARSTACK
+                return settledNow;
             }
         }
 

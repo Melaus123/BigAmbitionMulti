@@ -2769,6 +2769,22 @@ namespace BigAmbitionsMP
 
         /// <summary>Which traffic this machine runs: "ghost" (the host's) or "local" (its own). Ghost by default
         /// — today's behaviour — and reset to it on leave (P7).</summary>
+        // PROBE-START: P-CARSTACK  (read-only walk of the EXISTING traffic-ghost table)
+        internal static void ProbeGhostBodies(System.Action<string, string, string, GameObject> add)
+        {
+            try
+            {
+                foreach (var kv in _ghosts)
+                {
+                    var g = kv.Value;
+                    if (g?.Go == null) continue;
+                    add("traffic-ghost", g.Model ?? "", kv.Key.ToString(), g.Go);
+                }
+            }
+            catch { }
+        }
+        // PROBE-END: P-CARSTACK
+
         public  static string ClientTrafficMode { get; private set; } = ModeGhost;
         /// <summary>True on a CLIENT that is running its OWN ambient traffic. Never true on the host (its traffic is
         /// its own by definition, and every rule this gates is client-side).</summary>
@@ -2799,6 +2815,9 @@ namespace BigAmbitionsMP
                     return;
                 }
                 ClientTrafficMode = mode; _modeSeq = p.Seq; _handoverAt = Time.unscaledTime;
+                // PROBE-START: P-CARSTACK  (log-only; this is the traffic-mode edge TAKING FORCE)
+                try { CarStackProbe.NoteTrafficMode(mode); } catch { }
+                // PROBE-END: P-CARSTACK
                 _handover = mode == ModeLocal ? HandoverToLocal : HandoverToGhost;
                 _nextClientSimBeat = 0f;                  // the handover starts on this frame's beat, not up to 1 s late
                 if (mode == ModeLocal) EnterLocalMode(); else EnterGhostMode();

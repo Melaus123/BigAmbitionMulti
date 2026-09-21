@@ -569,11 +569,28 @@ namespace BigAmbitionsMP
                                 if (!onFloor.Contains(e) && !(e.order != null && e.order.completed)) continue;
                                 heldBack.Add(new System.Collections.Generic.KeyValuePair<int, AI.Customers.CustomerEntries.CustomerEntry>(i, e));
                                 entries.RemoveAt(i);
+                                // H-SKIPWALKIN-1: remember that THIS hour's pass ran without THIS entry.
+                                // If its shopper later walks out without paying, that is the one entry
+                                // nobody has billed, and the hand-back gives it back to this simulator.
+                                try { SkipHandback.NoteSetAside(e, hour); } catch { }
                             }
                         heldBack.Reverse();                                // descending index order -> ascending, for the re-insert
                     }
                     catch (Exception exS) { Plugin.Logger.LogWarning($"[Rest] occupied-shop set-aside: {exS.Message}"); }
 
+                    // B5 INSTRUMENT: how many body-less entries of this hour the sim was handed
+                    // (candidates) and how many orders it actually put on the till. The difference is
+                    // the native hourly CAPACITY drop - entries the simulator marks completed without
+                    // ever adding an order (ProcessAllCustomersFromThisHour, `i < cap`).
+                    int sdCand = 0, sdBefore = 0, sdAfter = 0;
+                    try
+                    {
+                        if (entries != null)
+                            for (int i = 0; i < entries.Count; i++)
+                                if (entries[i] != null && entries[i].spawnTime.Hour == hour) sdCand++;
+                        sdBefore = current.unprocessedCompletedOrders?.Count ?? 0;
+                    }
+                    catch { }
                     try
                     {
                         data.simulator.SetUp(current, hour);
@@ -596,6 +613,12 @@ namespace BigAmbitionsMP
                         catch (Exception exR) { Plugin.Logger.LogWarning($"[Rest] occupied-shop set-aside restore: {exR.Message}"); }
                     }
 
+                    try
+                    {
+                        sdAfter = current.unprocessedCompletedOrders?.Count ?? 0;
+                        ShopDayMeter.NotePaperSim(current, sdCand, sdAfter - sdBefore, hour);
+                    }
+                    catch { }
                     _simmed++;
                     if (!skipTail && (_simmed == 1 || _simmed % 12 == 0))   // a tail roll has its own line below - no skip is active there
                         Plugin.Logger.LogInfo($"[Rest] occupied-shop hourly sim during skip: '{current.BusinessName}' h{hour} (#{_simmed}) setAside={heldBack.Count} — SP time-machine parity (round-60).");
@@ -852,6 +875,21 @@ namespace BigAmbitionsMP
         // this shop, this hour, would produce at the NORMAL clock — the hour's
         // demand spread over the hour, converted through the game's own
         // MinutesMultiplier. Busy hours look busy, dead hours look dead. The
+        // D-SKIPPACE-1 (2026-09-21) MOVED THE TARGET, deliberately: the shop no longer looks like
+        // normal speed during a skip, it looks BUSY - bodies and staff move and animate at
+        // MPRestSync.SkipPace (the real skip multiple, user ruling 2026-09-21). So the throttle now
+        // follows that pace: the interval is the normal-speed interval CLAMPED to its ordinary
+        // [1.5 s, 90 s] guards and only THEN divided by SkipPace, i.e. arrivals x N. Dividing after the
+        // clamp is the fix the user asked for - "the 1.5 second minimum gap might not make sense when
+        // everyone is not only entering but also leaving at the faster rate": at 50x the burst guard is
+        // 30 ms and the dead-hour ceiling 1.8 s, so both guards mean the same thing in SHOP time at any
+        // pace as they did at 1x. FLOOR OCCUPANCY STAYS ABOUT
+        // THE SAME, which is the whole point: a shopper's dwell time is walking + animations, and both
+        // are divided by the same N, so N times as many arrivals each staying 1/N as long leaves the
+        // same number of people standing in the shop (Little's law) - a busy-LOOKING floor, not a
+        // flooded one. MinSecondsBetween (1.5 s burst guard) and MaxSecondsBetween are the NORMAL-speed
+        // guards and are applied at normal speed, before the pace divides them; the native capacity
+        // return is untouched, so the hard flood ceiling is exactly as before.
         // economy is unaffected: an entry denied a body has no live shopper at all, so
         // the round-60 hourly sim is the ONLY path that bills it. (Corrected 2026-09-20,
         // H-SKIPDOUBLE-1: the per-order-entry flags do NOT dedup the two paths - they
@@ -868,8 +906,8 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(IndoorCustomerSpawner), "CanSpawnCustomer")]
         public static class Patch_IndoorSpawner_SkipVisualPace
         {
-            private const float MinSecondsBetween = 1.5f;   // burst guard (rush hours)
-            private const float MaxSecondsBetween = 90f;    // dead-hour ceiling
+            private const float MinSecondsBetween = 1.5f;   // burst guard (rush hours), at NORMAL speed
+            private const float MaxSecondsBetween = 90f;    // dead-hour ceiling, at NORMAL speed
 
             private static float _nextAllowed;
 
@@ -883,11 +921,12 @@ namespace BigAmbitionsMP
             private static int _cachedHour = -1;
             private static string _cachedAddr = "";
             private static float _cachedInterval = 8f;
+            private static float _cachedPace = 1f;   // D-SKIPPACE-1: part of the cache KEY - the interval follows the visual pace
             private static System.Reflection.FieldInfo _minMultField;
 
             /// <summary>The game's normal clock rate (game-minutes per real second) —
             /// GameManager.MinutesMultiplier, the exact factor normal play runs at.</summary>
-            private static float NormalMinutesPerRealSecond()
+            internal static float NormalMinutesPerRealSecond()
             {
                 try
                 {
@@ -900,7 +939,10 @@ namespace BigAmbitionsMP
 
             /// <summary>Real seconds between arrivals THIS shop/hour would show at normal
             /// speed: (60 / entries-this-hour) game-minutes between customers, divided by
-            /// the normal game-min-per-real-second rate. Recomputed on shop/hour change.</summary>
+            /// the normal game-min-per-real-second rate, CLAMPED to the two normal-speed guards,
+            /// and only then divided by the shop's visual pace (D-SKIPPACE-1) so arrivals - and the
+            /// two guards with them - keep step with the sped-up floor.
+            /// Recomputed on shop / hour / pace change - the pace is part of the cache key.</summary>
             private static float CurrentNormalPaceInterval()
             {
                 try
@@ -910,9 +952,10 @@ namespace BigAmbitionsMP
                     int hour = SaveGameManager.Current.Hour;
                     string addr = "";
                     try { addr = GameStateReader.AddressKey(reg); } catch { }
-                    if (hour != _cachedHour || addr != _cachedAddr)
+                    float pace = UnityEngine.Mathf.Max(1f, MPRestSync.SkipPace);
+                    if (hour != _cachedHour || addr != _cachedAddr || UnityEngine.Mathf.Abs(pace - _cachedPace) > 0.001f)
                     {
-                        _cachedHour = hour; _cachedAddr = addr;
+                        _cachedHour = hour; _cachedAddr = addr; _cachedPace = pace;
                         int n = 0;
                         try
                         {
@@ -921,7 +964,8 @@ namespace BigAmbitionsMP
                         }
                         catch { }
                         float gameMinBetween = 60f / UnityEngine.Mathf.Max(1, n);
-                        _cachedInterval = UnityEngine.Mathf.Clamp(gameMinBetween / NormalMinutesPerRealSecond(), MinSecondsBetween, MaxSecondsBetween);
+                        float normalInterval = UnityEngine.Mathf.Clamp(gameMinBetween / NormalMinutesPerRealSecond(), MinSecondsBetween, MaxSecondsBetween);
+                        _cachedInterval = normalInterval / pace;
                     }
                     return _cachedInterval;
                 }

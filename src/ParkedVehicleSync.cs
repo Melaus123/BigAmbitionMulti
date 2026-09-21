@@ -97,6 +97,24 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<long, ParkedVehicleDto> _clientKnown = new();
         // Only instantiated ghosts (subset, bounded by ViewRadius).
         private static readonly Dictionary<long, GameObject> _clientGhosts = new();
+
+        // PROBE-START: P-CARSTACK  (read-only walk of the EXISTING parked-car tables)
+        internal static void ProbeParkedBodies(System.Action<string, string, string, GameObject> add)
+        {
+            try
+            {
+                foreach (var kv in _clientGhosts)
+                    if (kv.Value != null) add("parked-ghost", kv.Value.name ?? "", kv.Key.ToString(), kv.Value);
+            }
+            catch { }
+            try
+            {
+                foreach (var kv in _hostTracked)
+                    if (kv.Value != null) add("parked-host", kv.Value.name ?? "", kv.Key.ToString(), kv.Value);
+            }
+            catch { }
+        }
+        // PROBE-END: P-CARSTACK
         private static float _cullTimer;
 
         // Reflection-cached pool entry points.

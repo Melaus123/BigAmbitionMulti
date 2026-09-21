@@ -31,6 +31,56 @@ namespace BigAmbitionsMP
         /// case label; the only two reads are the two tick sites above). 50 since 2026-09-20 (user ruling,
         /// was 25): the ~70 ms of economy per simulated hour is unchanged, twice as much of it per second.</summary>
         public static float SkipMinutesPerRealSecond = 50f;
+
+        // ── D-SKIPPACE-1 (user-approved 2026-09-21): the shop's VISUAL pace during a skip ──
+        /// <summary>THE ONE NUMBER the user asked to be easy to change: the most a skipping shop's
+        /// bodies may be sped up. 1000 (user ruling 2026-09-21: "if we do 50x then let's see 50x, I'll
+        /// judge if it looks wrong" - so the shipped pace is the REAL skip multiple, un-capped in
+        /// practice, and this number is only the safety rail a dev can lower). Only two writers: this
+        /// initialiser and the `skippace` DEV lever. Setting it to 1 turns the feature off here.</summary>
+        public static float MaxSkipVisualPace = 1000f;
+
+        // ── BATCH-26 FOLD 3 (A): the LIVE skip-shop mode is GONE (user decision 2026-09-21, after the
+        // three-way gym comparison: per scheduled shopper, normal 0.52 orders / $12.3, LIVE 50x
+        // 0.25 / $5.8, PAPER 50x 0.65 / $16.1). The PAPER simulator - vanilla's own fast-forward
+        // method - is the accountant during a skip, and the sped-up floor is decoration. There is no
+        // mode switch left: SkipShopMode / SkipShopLiveNow and the `skipshop` lever are deleted.
+
+        private static int   _paceFrame  = -1;
+        private static float _paceCached = 1f;
+
+        /// <summary>How much faster the SHOP looks while a consensus skip runs: the skip's clock rate
+        /// divided by the NORMAL clock rate (GameManager.MinutesMultiplier - the same helper the
+        /// round-60b arrival throttle uses, never a second copy of it), clamped to [1, MaxSkipVisualPace].
+        /// 1 whenever no skip is running, so every reader is free outside a skip. Memoised per frame so
+        /// that per-frame READERS (the puppet chase clamp) cost one int compare, not a reflection call.</summary>
+        public static float SkipPace
+        {
+            get
+            {
+                if (!SkipActive) return 1f;
+                int f = Time.frameCount;
+                if (f == _paceFrame) return _paceCached;
+                _paceFrame = f;
+                float norm = 1f;
+                try { norm = MPPatches.Patch_IndoorSpawner_SkipVisualPace.NormalMinutesPerRealSecond(); } catch { }
+                if (norm < 0.05f) norm = 1f;
+                _paceCached = Mathf.Clamp(SkipMinutesPerRealSecond / norm, 1f, Mathf.Max(1f, MaxSkipVisualPace));
+                return _paceCached;
+            }
+        }
+
+        /// <summary>True only while THIS player's own body should be sped up: a skip is running and the
+        /// player is actually working a station. Read LIVE from the game's own activity state, never
+        /// latched - the moment the player stops working, the body is normal again.</summary>
+        public static bool LocalBodyPaced
+        {
+            get
+            {
+                try { return SkipActive && CurrentActivityName() == "Work" && AvatarInActivity(); }
+                catch { return false; }
+            }
+        }
         // Defensive ceiling on game-minutes simulated in a SINGLE frame during a skip: a frame-time spike
         // (alt-tab, stall) must not dump many hours of economy into one frame (~70ms/simulated-hour). This is
         // a per-FRAME absolute and is deliberately NOT derived from the rate. At 50 min/s a 60 fps frame
@@ -286,6 +336,8 @@ namespace BigAmbitionsMP
             _hostVotes.Clear(); _skipGoalMinutes = 0;
             TimeSync.AheadHeld = false;   // drop any stale ahead-hold so it can't freeze the clock
             try { MPPatches.Patch_IndoorSpawner_SkipVisualPace.ClearDenialStamp(); } catch { }   // H-SKIPTAIL-1: the skip-pacing denial stamp is skip state too
+            try { SkipPaceBodies.RestoreAll(); } catch { }   // D-SKIPPACE-1: no body may carry a scaled speed across a session boundary
+            try { SkipHandback.Reset(); } catch { }         // H-SKIPWALKIN-1: the set-aside registry is skip state too
         }
 
         /// <summary>On RECONNECT, clear ONLY the consensus/skip state — the host's vote tally and any
@@ -1363,6 +1415,12 @@ namespace BigAmbitionsMP
                         LastSkipGoalMinutes  = _skipGoalMinutes;
                         _skipStartedReal     = 0f;
                     }
+                    // D-SKIPPACE-1: the shop's visual pace lives on this SAME edge - one apply pass when
+                    // a skip starts, one restore pass when it ends. Nothing in between, nothing per frame.
+                    if (SkipActive) SkipPaceBodies.OnSkipStarted(); else SkipPaceBodies.RestoreAll();
+                    // PROBE-START: P-CARSTACK  (log-only; the SkipActive TRUE->FALSE edge is one of its triggers)
+                    try { CarStackProbe.NoteSkipActive(SkipActive); } catch { }
+                    // PROBE-END: P-CARSTACK
                 }
                 catch { }
             }

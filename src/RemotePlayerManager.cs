@@ -394,6 +394,22 @@ namespace BigAmbitionsMP
         public static IReadOnlyList<string> GetRemotePlayerIds() =>
             new List<string>(_players.Keys);
 
+        /// <summary>D-SKIPPACE-1: true when this transform belongs to a remote player's avatar clone.
+        /// Registry check (same shape as IsRemoteAvatarCollider below), never name matching. Used to keep
+        /// the skip's animation pacing off other people's bodies - their animator state is mirrored from
+        /// the wire, so speeding it up locally would make them disagree with their owner's screen.</summary>
+        internal static bool IsRemoteAvatarTransform(Transform? t)
+        {
+            try
+            {
+                if (t == null || _players.Count == 0) return false;
+                foreach (var go in _players.Values)
+                    if (go != null && t.IsChildOf(go.transform)) return true;   // IsChildOf(self) is true
+            }
+            catch { }
+            return false;
+        }
+
         /// <summary>Sweep-3 mis#5: true when this collider belongs to a remote player's stand-in
         /// body (the host gives those bodies a solid player-layer capsule for Gley's raycasts, so
         /// native player-triggers fire for them). Registry check, not name matching.</summary>

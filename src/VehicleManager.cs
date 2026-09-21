@@ -1764,6 +1764,22 @@ namespace BigAmbitionsMP
         /// <summary>Count of player-vehicle ghosts on this client (census/diagnostics).</summary>
         public static int RemoteVehicleCount => _remoteVehicles.Count;
 
+        // PROBE-START: P-CARSTACK  (read-only walk of the EXISTING player-vehicle ghost table)
+        internal static void ProbeRemoteBodies(System.Action<string, string, string, GameObject> add)
+        {
+            try
+            {
+                foreach (var kv in _remoteVehicles)
+                {
+                    var rv = kv.Value;
+                    if (rv?.Go == null) continue;
+                    add("pv-ghost", rv.TypeName ?? "", kv.Key ?? "", rv.Go);
+                }
+            }
+            catch { }
+        }
+        // PROBE-END: P-CARSTACK
+
         /// <summary>TRAFFIC-CONSIST T4 census (once per 30 s, never per frame): how many player-vehicle ghosts carry
         /// a LIVE sense proxy on the sensed layer. 0 before T2, equal to RemoteVehicleCount after it - which is the
         /// whole answer to I2.</summary>

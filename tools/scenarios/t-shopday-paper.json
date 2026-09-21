@@ -1,0 +1,483 @@
+{
+  "id": "T-SHOPDAY-PAPER",
+  "title": "BATCH-26 FOLD 3: the same three game hours of the client-owned GYM, crossed by ONE consensus skip. The paper simulator bills the occupied shop; a shopper who walks out unpaid is handed back to it (H-SKIPWALKIN-1). The run asserts the ACCOUNTING IDENTITY on the owner's machine. NO save.",
+  "preconditions": "Reporter fixture session fx-hq1 (day 44, MERGED - vars.keepMerger true). Dev build with skipvote / skipstate / shopday / employees / schedcount / tilldupes / perf / skippace / enterbuilding / exitbuilding (BAMP_DEV). THE SHOP IS THE GYM at vars.shop, picked by t-shopday-pick: of the four player-owned customer shops it had by far the most shopper entries for the measured morning (gym 203, fast food 137, hairdresser 74, clothing 40, read on each shop's OWNING machine). ITS OWNER IS THE CLIENT, so Client1's machine runs its live customers and its till and is the machine whose numbers matter; the host stands inside the same gym and waits. The fixture loads at 17:38 with Client1 already inside a building, so both step outside for a setup skip to 10:45 the next morning - that skip is taken OUTDOORS, with no shop occupied. BATCH-26 FOLD 3: the LIVE skip-shop mode and its lever are deleted, so there is no mode to set; the paper simulator is the accountant during every skip. The owner's row now also carries the ACCOUNTING IDENTITY (idDue = idBilled + idFloor + idNosale + idCapDrop + idUnbilled, with idUnbilled 0), the H-SKIPWALKIN-1 hand-back counters, and the fold-3 measurements (visit length in game minutes, follower puppet lag, the churn counters). NOTHING IS SAVED. ORACLE NOTE: the NullReferenceException oracle carries the `(?<!swallowed )` lookbehind (as t-skippace-watch does) because fx-hq1 prints the mod's own '[Gley] swallowed NullReferenceException' traffic-collider diagnostic, which has nothing to do with this fold.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "shop": "60 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "(?<!swallowed )NullReferenceException"
+  ],
+  "oracles_report": [
+    "\\[Rest\\] CONSENSUS",
+    "\\[Rest\\] skip GOAL reached",
+    "\\[SkipPace\\] ",
+    "\\[CarStack\\] ",
+    "\\[Customers\\] ",
+    "\\[Perf/"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST T-SHOPDAY-PAPER START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 32,
+      "note": "both worlds settle before anything is measured"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "fx-hq1 loads Client1 inside a building; report-only, an outdoor player only warns"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "skiprate",
+      "expect_result": "^OK skiprate rate=50 ",
+      "note": "the SHIPPED rate is what is measured - read, not set, so a drift fails here"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "the SETUP skip: 17:38 -> 10:45 next day, ~20 s at rate 50, taken outdoors"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 40
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "note": "the setup skip finished - every number below is measured in the morning it reached"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "THE OWNER (Client1) STANDS IN HIS OWN GYM - his machine runs its live customers and its till"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the other player waits inside the same gym and does nothing else"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "sleep_s": 22,
+      "note": "the floor fills at NORMAL speed - this is the 'before' every leg starts from"
+    },
+    {
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK",
+      "note": "F (stand-in readouts): the world clock is STOPPED so the four reads below are all taken at the SAME game minute on both machines.",
+      "seq": 24
+    },
+    {
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK",
+      "seq": 25
+    },
+    {
+      "role": "c",
+      "cmd": "employees ${shop}",
+      "expect_result": "^OK \\d+ employee",
+      "capture": {
+        "ownerEmployees": "^OK (\\d+) employee"
+      },
+      "note": "F: the OWNER's roster for the gym - the real staff records.",
+      "seq": 26
+    },
+    {
+      "role": "h",
+      "cmd": "employees ${shop}",
+      "expect_result": "^OK \\d+ employee",
+      "capture": {
+        "followerEmployees": "^OK (\\d+) employee"
+      },
+      "note": "F: the NON-OWNER's roster for the same gym. The manager question: does it hold the owner's real staff records AND extra BAMP_DUTY stand-in records?",
+      "seq": 27
+    },
+    {
+      "role": "c",
+      "cmd": "schedcount ${shop}",
+      "expect_result": "^OK",
+      "note": "F: the OWNER's shift count for the gym.",
+      "seq": 28
+    },
+    {
+      "role": "h",
+      "cmd": "schedcount ${shop}",
+      "expect_result": "^OK",
+      "note": "F: the NON-OWNER's shift count for the same gym - stand-in BAMP_DUTY shifts would show up here as extra.",
+      "seq": 29
+    },
+    {
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK",
+      "seq": 30
+    },
+    {
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK",
+      "seq": 31
+    },
+    {
+      "role": "h",
+      "sleep_s": 8,
+      "note": "the floor runs again before the measured window opens",
+      "seq": 32
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "shopday ${shop}",
+      "expect_result": "pending=[1-9]",
+      "capture": {
+        "preLive": "live=(\\d+)",
+        "preEntries": "entries=(\\d+)",
+        "preDue": "due=(\\d+)",
+        "preTill": "tillOrders=(\\d+)",
+        "preRev": "paidRevenue=([0-9.]+)",
+        "preCap": "cap=(-?\\d+)",
+        "preMinMult": "minMult=([0-9.]+)"
+      },
+      "note": "THE FLOW PREMISE: shoppers are still due today at this shop. Without this the leg could 'pass' on a dead shop and the table would compare two zeros."
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "cmd": "shopday ${shop}",
+      "expect_result": "live=[1-9]",
+      "note": "THE SECOND HALF OF THE PREMISE: bodies are really standing on the floor at normal speed before the window opens."
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "perf reset",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "cmd": "perf reset",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "shopday reset",
+      "expect_result": "^OK shopday reset"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "shopday reset",
+      "expect_result": "^OK shopday reset"
+    },
+    {
+      "seq": 39,
+      "role": "c",
+      "cmd": "skipstate",
+      "expect_result": "^OK skipstate",
+      "capture": {
+        "startMin": "nowMin=([0-9.]+)"
+      },
+      "note": "the window's START clock in raw game-minutes - the end is compared against it"
+    },
+    {
+      "seq": 40,
+      "role": "c",
+      "cmd": "skipvote +3h",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "skipvote +3h",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "ONE consensus skip over the SAME three game hours the normal leg waits out - ~3.6 real seconds at rate 50"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the skip runs and the world settles behind it"
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "note": "the measured skip finished"
+    },
+    {
+      "seq": 44,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 45,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "THE DRAIN: 60 real seconds at normal speed so bodies mid-checkout when the window closed can finish, and a paced body that failed to restore would show up here"
+    },
+    {
+      "seq": 47,
+      "role": "c",
+      "cmd": "skipstate",
+      "expect_result": "^OK skipstate",
+      "capture": {
+        "endMin": "nowMin=([0-9.]+)"
+      },
+      "expect_gt": {
+        "nowMin=([0-9.]+)": "${startMin}"
+      },
+      "note": "THE WINDOW REALLY RAN: the clock is past where it started"
+    },
+    {
+      "seq": 48,
+      "role": "c",
+      "cmd": "skippace",
+      "expect_result": "^OK skippace max=1000 now=1 scaledBodies=0",
+      "note": "EVERY paced body was restored - the dictionary is empty and the pace reads 1 again"
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "cmd": "skippace",
+      "expect_result": "^OK skippace max=1000 now=1 scaledBodies=0"
+    },
+    {
+      "seq": 50,
+      "role": "c",
+      "cmd": "shopday ${shop}",
+      "expect_result": "^OK shopday .*idUnbilled=0 .*bodiesOverCap=False",
+      "capture": {
+        "endEntries": "entries=(\\d+)",
+        "endDue": "due=(\\d+)",
+        "endWindow": "window=(\\d+)",
+        "bodies": "bodies=(\\d+)",
+        "maxBodies": "maxBodies=(\\d+)",
+        "cap": " cap=(-?\\d+)",
+        "completeOrders": "completeOrders=(\\d+)",
+        "livePays": "livePays=(-?\\d+)",
+        "unpaidExits": "unpaidExits=(\\d+)",
+        "paperHours": "paperHours=(\\d+)",
+        "paperCandidates": "paperCandidates=(\\d+)",
+        "paperOrders": "paperOrders=(\\d+)",
+        "capDrops": "capDrops=(\\d+)",
+        "endTill": "tillOrders=(\\d+)",
+        "endRev": "paidRevenue=([0-9.]+)",
+        "handBacks": "handBacks=(\\d+)",
+        "hbPaid": "hbPaid=(\\d+)",
+        "hbNothing": "hbNothing=(\\d+)",
+        "hbLate": "hbLate=(\\d+)",
+        "hbEarly": "hbEarly=(\\d+)",
+        "hbRevenue": "hbRevenue=([0-9.]+)",
+        "idDue": "idDue=(\\d+)",
+        "idBilled": "idBilled=(\\d+)",
+        "idFloor": "idFloor=(\\d+)",
+        "idNosale": "idNosale=(\\d+)",
+        "idCapDrop": "idCapDrop=(\\d+)",
+        "idUnbilled": "idUnbilled=(\\d+)",
+        "idOpen": "idOpen=(\\d+)",
+        "idPending": "idPending=(\\d+)",
+        "visitAvg": "visitAvgMin=([0-9.]+)",
+        "visitMax": "visitMaxMin=([0-9.]+)",
+        "visitN": "visitN=(\\d+)"
+      },
+      "note": "THE OWNER'S TABLE ROW, and the fold's assertion: the ACCOUNTING IDENTITY holds (idUnbilled=0 - every entry that came due is billed, on the floor, a no-sale, or a native capacity drop) and the floor never went over the shop's capacity."
+    },
+    {
+      "seq": 51,
+      "role": "h",
+      "cmd": "shopday ${shop}",
+      "expect_result": "^OK shopday",
+      "capture": {
+        "hostBodies": "bodies=(\\d+)",
+        "hostMaxBodies": "maxBodies=(\\d+)",
+        "hostUnpaid": "unpaidExits=(\\d+)",
+        "lagAvg": "lagAvg=([0-9.]+)",
+        "lagMax": "lagMax=([0-9.]+)",
+        "lagN": "lagN=(\\d+)",
+        "leaveStale": "leaveStale=(\\d+)",
+        "puppetLeaves": "puppetLeaves=(\\d+)",
+        "leaveMissing": "leaveMissing=(\\d+)"
+      },
+      "note": "the FOLLOWER's view: puppet lag and the churn counters, which until this fold were reset every 10 s without ever being printed."
+    },
+    {
+      "seq": 52,
+      "role": "c",
+      "cmd": "tilldupes ${shop}",
+      "expect_result": "dupes=0",
+      "capture": {
+        "tdOrders": "orders=(\\d+)",
+        "tdDistinct": "distinct=(\\d+)",
+        "tdLiveCompleted": "liveCompleted=(-?\\d+)",
+        "tdPaidRev": "paidRevenue=([0-9.]+)"
+      },
+      "note": "NO ORDER REACHED THE TILL TWICE - the H-SKIPDOUBLE-1 invariant this fold must not break"
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "cmd": "tilldupes ${shop}",
+      "expect_result": "dupes=0"
+    },
+    {
+      "seq": 54,
+      "role": "c",
+      "cmd": "perf",
+      "expect_result": "^OK perf",
+      "capture": {
+        "cWorst": "worstMs=(\\d+)",
+        "cAvg": "avgMs=([0-9.]+)",
+        "cSpikes": "spikes=(\\d+)"
+      }
+    },
+    {
+      "seq": 55,
+      "role": "h",
+      "cmd": "perf",
+      "expect_result": "^OK perf",
+      "capture": {
+        "hWorst": "worstMs=(\\d+)",
+        "hAvg": "avgMs=([0-9.]+)",
+        "hSpikes": "spikes=(\\d+)"
+      }
+    },
+    {
+      "seq": 56,
+      "role": "both",
+      "cmd": "mark TEST SHOPDAY END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

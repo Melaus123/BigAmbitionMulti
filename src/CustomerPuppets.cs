@@ -104,6 +104,7 @@ namespace BigAmbitionsMP
                 _looksById.Clear();
                 _looksSent.Clear();
                 _myBldg = "";
+                try { SkipPaceBodies.RestoreAll(); } catch { }   // D-SKIPPACE-1: leaving the building / session end - no body keeps a scaled speed
                 if (_followerHere) { try { IndoorCustomerSpawner.EnableCustomersSpawn(); } catch { } }
                 _followerHere = false;
             }
@@ -535,13 +536,25 @@ namespace BigAmbitionsMP
             return id;
         }
 
+        /// <summary>D-SKIPPACE-1 (2026-09-21): THE row-stream period, in real seconds - the ONE
+        /// definition. 0.25 s normally; while a skip runs the shop's bodies move at MPRestSync.SkipPace,
+        /// so a follower's puppet would be chasing a position a whole sped-up stride out of date - the
+        /// stream speeds up with them, to a 20 Hz ceiling (pace clamped to 5) so a 50x skip cannot turn
+        /// the wire into a firehose. Every reader that used to assume 0.25 s reads THIS.
+        /// The 2.5 s stale timeout is NOT derived from it and does not change (a follower must still
+        /// tolerate a couple of lost batches before walking a puppet out).</summary>
+        internal static float StreamInterval
+        {
+            get { return 0.25f / Mathf.Clamp(MPRestSync.SkipPace, 1f, 5f); }
+        }
+
         // ── Simulator: stream my live customers ─────────────────────────────────────────────────────
         private static void SimulatorStreamTick()
         {
             if (string.IsNullOrEmpty(_myBldg)) return;
             if (!_authority.TryGetValue(_myBldg, out var sim) || sim != MPConfig.PlayerId) return;
             if (Time.unscaledTime < _nextStreamAt) return;
-            _nextStreamAt = Time.unscaledTime + 0.25f;
+            _nextStreamAt = Time.unscaledTime + StreamInterval;
 
             var p = new CustomerPuppetStatePayload { AddressKey = _myBldg, SimulatorPid = MPConfig.PlayerId };
             try
@@ -784,7 +797,7 @@ namespace BigAmbitionsMP
             if (!_serveActorRunning)
             {
                 _serveActorRunning = true;
-                _actorHardDeadline = Time.unscaledTime + 15f;
+                _actorHardDeadline = Time.unscaledTime + 15f / MPRestSync.SkipPace;   // D-SKIPPACE-1
                 _serveActorHandle = me.StartCoroutine(ServeActor(me));
             }
         }
@@ -812,8 +825,9 @@ namespace BigAmbitionsMP
             if (a == null || !a.isActiveAndEnabled) yield break;
             bool destOk = false;
             try { destOk = a.SetDestination(pos); } catch { yield break; }
-            float deadline = Time.unscaledTime + 6f;
-            float diagAt   = Time.unscaledTime + 1f;
+            float pace     = MPRestSync.SkipPace;   // D-SKIPPACE-1: read ONCE for the whole walk, so its windows cannot drift mid-walk
+            float deadline = Time.unscaledTime + 6f / pace;
+            float diagAt   = Time.unscaledTime + 1f / pace;
             Vector3 startPos = me.transform.position;
             bool diagDone = false;
             bool reached = false;
@@ -866,7 +880,7 @@ namespace BigAmbitionsMP
         /// after velocity reaches zero (MoveToPosition's rotate branch).</summary>
         private static System.Collections.IEnumerator SettleThenFace(ThirdPersonCharacter me, Vector3 face)
         {
-            float end = Time.unscaledTime + 0.8f;
+            float end = Time.unscaledTime + 0.8f / MPRestSync.SkipPace;   // D-SKIPPACE-1: a faster body settles sooner
             while (Time.unscaledTime < end)
             {
                 bool moving = false;
@@ -887,7 +901,7 @@ namespace BigAmbitionsMP
                     // Round-148: the user reports NOTHING visible while 'served 1' still logs — so either the
                     // actor stalls between acts or every act runs invisibly.  Breadcrumbs for the first serve
                     // separate those two worlds; retire with the serve-mirror probes.
-                    _actorHardDeadline = Time.unscaledTime + 15f;   // round-149: per-act watchdog window
+                    _actorHardDeadline = Time.unscaledTime + 15f / MPRestSync.SkipPace;   // round-149: per-act watchdog window (D-SKIPPACE-1: scales with the performance)
                     switch (act)
                     {
                         case ServeAct.Fetch:
@@ -926,7 +940,7 @@ namespace BigAmbitionsMP
                             // further beat arrives within a grace second, this grab was the last: go home.
                             if (_serveQueue.Count == 0 && !_returnQueued)
                             {
-                                float graceEnd = Time.unscaledTime + 1.0f;
+                                float graceEnd = Time.unscaledTime + 1.0f / MPRestSync.SkipPace;   // D-SKIPPACE-1
                                 while (Time.unscaledTime < graceEnd && _serveQueue.Count == 0) yield return null;
                                 if (_serveQueue.Count == 0 && !_returnQueued)
                                 {
@@ -1144,7 +1158,20 @@ namespace BigAmbitionsMP
                             ApplyLookTo(pup.tpc, lk);
                         }
                     }
-                    pup.target   = new Vector3(r.X, r.Y, r.Z);
+                    var newTarget = new Vector3(r.X, r.Y, r.Z);
+                    // D (fold 3): PUPPET LAG - how far this body still is from the target that has just
+                    // arrived for it. One vector subtract on a row we were already applying.
+                    try
+                    {
+                        if (pup.go != null)
+                        {
+                            var lagV = newTarget - pup.go.transform.position;
+                            lagV.y = 0f;
+                            ShopDayMeter.NoteLag(lagV.magnitude);
+                        }
+                    }
+                    catch { }
+                    pup.target   = newTarget;
                     pup.yaw      = r.Yaw;
                     pup.lastSeen = Time.unscaledTime;
                     if (pup.leaving) pup.leaving = false;   // simulator says they're still here
@@ -1153,7 +1180,7 @@ namespace BigAmbitionsMP
                 }
                 // Rows that vanished = customers who left/were served away → walk out.
                 foreach (var kv in _puppets)
-                    if (!seen.Contains(kv.Key) && !kv.Value.leaving) { _leaveMissing++; StartLeaving(kv.Value); }
+                    if (!seen.Contains(kv.Key) && !kv.Value.leaving) { _leaveMissing++; _leaveMissingTotal++; StartLeaving(kv.Value); }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] apply puppets: {ex.Message}"); }
         }
@@ -1197,6 +1224,21 @@ namespace BigAmbitionsMP
         private static int _puppetSpawns, _puppetLeaves, _leaveMissing, _leaveStale;
         private static float _nextChurnAt;
 
+        // BATCH-26 FOLD 3 (D): the four counters above are zeroed by ChurnTick every 10 s and were
+        // never printed anywhere, so nothing could ever be read off them. These are the same events
+        // counted CUMULATIVELY for the measured window - zeroed only by `shopday reset` - and the
+        // `shopday` lever prints them. Nothing new is computed: they are incremented beside the
+        // existing bumps.
+        private static int _leaveStaleTotal, _puppetLeavesTotal, _leaveMissingTotal, _puppetSpawnsTotal;
+        internal static int LeaveStaleTotal    { get { return _leaveStaleTotal; } }
+        internal static int PuppetLeavesTotal  { get { return _puppetLeavesTotal; } }
+        internal static int LeaveMissingTotal  { get { return _leaveMissingTotal; } }
+        internal static int PuppetSpawnsTotal  { get { return _puppetSpawnsTotal; } }
+        internal static void ResetChurnTotals()
+        {
+            _leaveStaleTotal = _puppetLeavesTotal = _leaveMissingTotal = _puppetSpawnsTotal = 0;
+        }
+
         /// <summary>Round-131: one line every 10s on the FOLLOWER comparing bodies created against bodies sent
         /// away, split by cause.  A healthy shop churns very little; spawns ≈ leaves every few seconds means the
         /// simulator's row ids are not stable, not that customers are misbehaving.</summary>
@@ -1211,7 +1253,7 @@ namespace BigAmbitionsMP
 
         private static void StartLeaving(Puppet pup)
         {
-            _puppetLeaves++;
+            _puppetLeaves++; _puppetLeavesTotal++;
             pup.leaving = true;
             pup.leaveAt = Time.unscaledTime + 6f;   // hard stop even if no exit is reachable
             try
@@ -1233,13 +1275,13 @@ namespace BigAmbitionsMP
                 var pup = kv.Value;
                 if (pup.go == null) { dead.Add(kv.Key); continue; }
                 // Stale stream (simulator disconnect / hitch) → walk out rather than freeze mid-stride.
-                if (!pup.leaving && now - pup.lastSeen > 2.5f) { _leaveStale++; StartLeaving(pup); }
+                if (!pup.leaving && now - pup.lastSeen > 2.5f) { _leaveStale++; _leaveStaleTotal++; StartLeaving(pup); }
 
                 var tr = pup.go.transform;
                 Vector3 to = pup.target - tr.position;
                 to.y = 0f;
                 float dist = to.magnitude;
-                float speed = Mathf.Clamp(dist / 0.25f, 0f, 4f);   // cover the gap by the next tick, capped
+                float speed = Mathf.Clamp(dist / StreamInterval, 0f, 4f * MPRestSync.SkipPace);   // cover the gap by the NEXT tick - the same one live interval the simulator streams on - capped (D-SKIPPACE-1: the cap follows the shop's skip pace, 1 outside a skip)
                 if (dist > 0.02f)
                 {
                     tr.position = Vector3.MoveTowards(tr.position, pup.target, speed * Time.deltaTime);

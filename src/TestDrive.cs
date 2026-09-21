@@ -1,4 +1,4 @@
-#if BAMP_DEV
+﻿#if BAMP_DEV
 using System;
 using System.IO;
 using System.Text;
@@ -506,6 +506,248 @@ namespace BigAmbitionsMP
                     return $"OK skiprate was={srWas:0.##} rate={MPRestSync.SkipMinutesPerRealSecond:0.##} maxPerFrame={MPRestSync.MaxSkipMinutesPerFrame:0.##}";
                 }
 
+                // ── D-SKIPPACE-1: the shop's VISUAL pace during a skip (user ruling 2026-09-21) ──
+                case "skippace":
+                {
+                    // ONE number, LOCAL to this instance (like skiprate): the cap on how much faster the
+                    // shop's bodies look while a consensus skip runs. 1 = the feature is off here.
+                    if (arg.Length == 0)
+                        return $"OK skippace max={MPRestSync.MaxSkipVisualPace:0.##} now={MPRestSync.SkipPace:0.##} "
+                             + $"scaledBodies={SkipPaceBodies.ScaledBodies} animScaled={SkipPaceBodies.AnimScaled} "
+                             + $"walkmax={SkipPaceBodies.MaxPacedBodySpeed:0.##} "
+                             + $"localBodyPaced={MPRestSync.LocalBodyPaced}";
+                    // `skippace walkmax <m/s>`: the OTHER rail - metres per second a paced body may reach.
+                    // 1000 ships (un-capped); the game's own run speed is 6, so `walkmax 6` restores the
+                    // pre-2026-09-21 ceiling on this machine without touching the pace itself.
+                    if (arg.Trim().StartsWith("walkmax", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string wmArg = arg.Trim().Substring(7).Trim();
+                        if (wmArg.Length == 0 || !float.TryParse(wmArg, out var wmWant) || wmWant < 0.5f || wmWant > 1000f)
+                            return "ERR usage: skippace walkmax <metres-per-second 0.5-1000>";
+                        float wmWas = SkipPaceBodies.MaxPacedBodySpeed;
+                        SkipPaceBodies.MaxPacedBodySpeed = wmWant;
+                        Plugin.Logger.LogInfo($"[TestDrive] skippace walkmax {wmWas:0.##} -> {wmWant:0.##} m/s (this machine only).");
+                        return $"OK skippace max={MPRestSync.MaxSkipVisualPace:0.##} now={MPRestSync.SkipPace:0.##} "
+                             + $"scaledBodies={SkipPaceBodies.ScaledBodies} animScaled={SkipPaceBodies.AnimScaled} "
+                             + $"walkmax={SkipPaceBodies.MaxPacedBodySpeed:0.##} was={wmWas:0.##}";
+                    }
+                    if (!float.TryParse(arg.Trim(), out var spWant) || spWant < 1f || spWant > 1000f)
+                        return "ERR usage: skippace [<max-visual-pace> 1-1000] | skippace walkmax <m/s> (no argument prints the pace)";
+                    float spWas = MPRestSync.MaxSkipVisualPace;
+                    MPRestSync.MaxSkipVisualPace = spWant;
+                    Plugin.Logger.LogInfo($"[TestDrive] skippace {spWas:0.##} -> {spWant:0.##} max visual pace (this machine only).");
+                    return $"OK skippace max={MPRestSync.MaxSkipVisualPace:0.##} now={MPRestSync.SkipPace:0.##} "
+                         + $"scaledBodies={SkipPaceBodies.ScaledBodies} animScaled={SkipPaceBodies.AnimScaled} "
+                         + $"walkmax={SkipPaceBodies.MaxPacedBodySpeed:0.##} "
+                         + $"localBodyPaced={MPRestSync.LocalBodyPaced} was={spWas:0.##}";
+                }
+
+                // ── BATCH-26 FOLD 2 (B5): the day's shop measurement, on one line ──
+                case "shopday":
+                {
+                    // READ-ONLY apart from 'reset', which zeroes the counters and stamps the window's
+                    // start clock. Everything here is either a plain counter bumped on an event that
+                    // was already happening (ShopDayMeter) or a walk of tables the game already keeps.
+                    if (arg.Trim().Equals("reset", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ShopDayMeter.Reset();
+                        return $"OK shopday reset day={ShopDayMeter.WindowDay} hour={ShopDayMeter.WindowHour}";
+                    }
+                    if (arg.Length == 0) return "ERR usage: shopday <num> <ba:street_x> | shopday reset";
+                    var sdReg = GameStatePatcher.FindRegistration(arg);
+                    if (sdReg == null) return $"ERR no registration at '{arg}'";
+                    string sdKey = arg; try { sdKey = GameStateReader.AddressKey(sdReg); } catch { }
+                    int sdDay = -1, sdHour = -1;
+                    try { sdDay = SaveGameManager.Current.Day; sdHour = SaveGameManager.Current.Hour; } catch { }
+                    // THE DAY'S SHOPPER LIST: every CustomerEntry the game generated for this address.
+                    // 'due' = its spawn hour has arrived; 'pending' = still ahead of the clock; 'window'
+                    // = due since the last `shopday reset`, which is the measured stretch.
+                    int sdTotal = 0, sdDue = 0, sdPending = 0, sdDone = 0, sdWindow = 0;
+                    try
+                    {
+                        var sdList = AI.Customers.CustomerEntries.CustomerEntriesHelper.GetEntriesByAddress(sdReg.Address);
+                        if (sdList != null)
+                            foreach (var sdE in sdList)
+                            {
+                                if (sdE == null) continue;
+                                sdTotal++;
+                                if (sdE.completed) sdDone++;
+                                if (sdE.spawnTime.Hour <= sdHour)
+                                {
+                                    sdDue++;
+                                    if (ShopDayMeter.WindowHour >= 0 && sdE.spawnTime.Hour >= ShopDayMeter.WindowHour) sdWindow++;
+                                }
+                                else sdPending++;
+                            }
+                    }
+                    catch (Exception exSd) { return "ERR " + exSd.Message; }
+                    // THE TILL: the same arithmetic the `tilldupes` lever uses, so the two can never
+                    // disagree - orders on the list, distinct orders, and what one reference is worth.
+                    int sdOrders = 0, sdDistinct = 0;
+                    double sdPaidRev = 0;
+                    try
+                    {
+                        var sdTill = sdReg.unprocessedCompletedOrders;
+                        var sdSeen = new System.Collections.Generic.HashSet<Order>(new TillDupes.RefEq<Order>());
+                        if (sdTill != null)
+                            for (int sdI = 0; sdI < sdTill.Count; sdI++)
+                            {
+                                var sdO = sdTill[sdI];
+                                if (sdO == null) continue;
+                                sdOrders++;
+                                if (sdSeen.Add(sdO)) sdPaidRev += TillDupes.ExtraReferenceValue(sdO);
+                            }
+                        sdDistinct = sdSeen.Count;
+                    }
+                    catch { }
+                    // ── BATCH-26 FOLD 3 (G): THE ACCOUNTING IDENTITY over the measured window ──
+                    // Every entry whose spawn hour has fully PASSED (so its hourly pass has run) is
+                    // exactly one of: BILLED (some reference to its order is on the till - a live
+                    // checkout, a paper order, or a hand-back), still on the FLOOR in a live body,
+                    // NOSALE (its order is completed with nothing on the till: a native walk-out, or a
+                    // hand-back that found nothing to sell), a native CAPDROP (the entry marked
+                    // completed with no order at all), or UNBILLED - which is the bug, and must read 0.
+                    // Only hours the PAPER SIMULATOR actually covered are judged: a normal-speed hour spent
+                    // standing in your own shop is exempt from native RunHourly and is billed by nobody in
+                    // vanilla either, so its entries are counted as idNoPass and left out of the identity.
+                    // Entries of the CURRENT hour are still OPEN (their pass has not run); later hours
+                    // are PENDING. The floor is read from the LOCAL interior's registry, so the figure
+                    // only means anything on a machine standing in the measured shop - which is how the
+                    // t-shopday-* scenarios are built.
+                    int idDue = 0, idBilled = 0, idFloor = 0, idNosale = 0, idCapDrop = 0, idUnbilled = 0, idOpen = 0, idPending = 0, idNoPass = 0;
+                    try
+                    {
+                        var idTill = new System.Collections.Generic.HashSet<Order>(new TillDupes.RefEq<Order>());
+                        var idT = sdReg.unprocessedCompletedOrders;
+                        if (idT != null)
+                            for (int idI = 0; idI < idT.Count; idI++)
+                                if (idT[idI] != null) idTill.Add(idT[idI]);
+                        var idOnFloor = new System.Collections.Generic.HashSet<AI.Customers.CustomerEntries.CustomerEntry>(
+                                            new TillDupes.RefEq<AI.Customers.CustomerEntries.CustomerEntry>());
+                        var idBodies = IndoorCustomerSpawner.Customers;
+                        if (idBodies != null)
+                            for (int idI = 0; idI < idBodies.Count; idI++)
+                            {
+                                var idCe = idBodies[idI]?.customerEntry;
+                                if (idCe != null) idOnFloor.Add(idCe);
+                            }
+                        int idFrom = ShopDayMeter.WindowHour >= 0 ? ShopDayMeter.WindowHour : 0;
+                        var idList = AI.Customers.CustomerEntries.CustomerEntriesHelper.GetEntriesByAddress(sdReg.Address);
+                        if (idList != null)
+                            foreach (var idE in idList)
+                            {
+                                if (idE == null) continue;
+                                int idH = idE.spawnTime.Hour;
+                                if (idH > sdHour) { idPending++; continue; }
+                                if (idH == sdHour) { idOpen++; continue; }
+                                if (idH < idFrom) continue;
+                                // An hour the paper simulator was never the accountant for (a normal-speed
+                                // hour inside the occupied shop, which native RunHourly exempts) is not this
+                                // fold's business - vanilla bills nobody for it either. Counted, not judged.
+                                if (!ShopDayMeter.PaperCoveredHour(sdDay, idH)) { idNoPass++; continue; }
+                                idDue++;
+                                if (idOnFloor.Contains(idE)) { idFloor++; continue; }
+                                if (idE.order != null && idTill.Contains(idE.order)) { idBilled++; continue; }
+                                if (idE.order != null && idE.order.completed) { idNosale++; continue; }
+                                if (idE.completed) { idCapDrop++; continue; }
+                                idUnbilled++;
+                            }
+                    }
+                    catch (Exception exId) { return "ERR identity " + exId.Message; }
+                    int sdCap = -1;
+                    try
+                    {
+                        sdCap = Buildings.BuildingSizeHelper.GetData(sdReg)
+                                .GetCustomerCapacity(sdReg.BuildingCached.BuildingType, sdReg.BuildingCached.BuildingVersion);
+                    }
+                    catch { }
+                    int sdLive = -1;
+                    try { sdLive = IndoorCustomerSpawner.Customers?.Count ?? -1; } catch { }
+                    int sdLivePay = -1;
+                    try { sdLivePay = Patch_Order_Pay_HelperForward.LivePayCount(sdKey); } catch { }
+                    float sdMinMult = 1f;
+                    try { sdMinMult = MPPatches.Patch_IndoorSpawner_SkipVisualPace.NormalMinutesPerRealSecond(); } catch { }
+                    return $"OK shopday {sdKey} day={sdDay} hour={sdHour} windowFrom={ShopDayMeter.WindowDay}/{ShopDayMeter.WindowHour} "
+                         + $"entries={sdTotal} due={sdDue} pending={sdPending} window={sdWindow} entriesCompleted={sdDone} "
+                         + $"bodies={ShopDayMeter.BodiesSpawned} maxBodies={ShopDayMeter.MaxBodies} live={sdLive} cap={sdCap} "
+                         + $"completeOrders={ShopDayMeter.LiveCompleteOrders} livePays={sdLivePay} unpaidExits={ShopDayMeter.UnpaidExits} "
+                         + $"paperHours={ShopDayMeter.PaperHours} paperCandidates={ShopDayMeter.PaperCandidates} paperOrders={ShopDayMeter.PaperOrders} "
+                         + $"capDrops={ShopDayMeter.CapDrops} paperShop='{ShopDayMeter.PaperShop}' "
+                         + $"tillOrders={sdOrders} tillDistinct={sdDistinct} paidRevenue={sdPaidRev:F2} "
+                         + $"handBacks={SkipHandback.HandBacks} hbPaid={SkipHandback.HandBackPaid} hbNothing={SkipHandback.HandBackNothing} "
+                         + $"hbLate={SkipHandback.HandBackLate} hbEarly={SkipHandback.HandBackEarly} hbRevenue={SkipHandback.HandBackRevenue:F2} "
+                         + $"idDue={idDue} idBilled={idBilled} idFloor={idFloor} idNosale={idNosale} idCapDrop={idCapDrop} "
+                         + $"idUnbilled={idUnbilled} idNoPass={idNoPass} idOpen={idOpen} idPending={idPending} "
+                         + $"visitAvgMin={(ShopDayMeter.VisitN > 0 ? ShopDayMeter.VisitSum / ShopDayMeter.VisitN : 0f):F1} "
+                         + $"visitMaxMin={ShopDayMeter.VisitMax:F1} visitN={ShopDayMeter.VisitN} "
+                         + $"lagAvg={(ShopDayMeter.LagN > 0 ? ShopDayMeter.LagSum / ShopDayMeter.LagN : 0f):F2} "
+                         + $"lagMax={ShopDayMeter.LagMax:F2} lagN={ShopDayMeter.LagN} "
+                         + $"leaveStale={CustomerPuppets.LeaveStaleTotal} puppetLeaves={CustomerPuppets.PuppetLeavesTotal} "
+                         + $"leaveMissing={CustomerPuppets.LeaveMissingTotal} "
+                         + $"bodiesOverCap={(sdCap > 0 && ShopDayMeter.MaxBodies > sdCap)} minMult={sdMinMult:0.###}";
+                }
+
+                // ── BATCH-26 FOLD 4: the POSITIVE CONTROL for the H-SKIPWALKIN-1 hand-back ──
+                case "custevict":
+                {
+                    // Send up to n live bodies home THE WAY CLOSING TIME SENDS THEM: the native private
+                    // Customer.InstantlyLeave (Customer.cs :147-155), which is exactly what
+                    // Customer.OnNewHour (:118-128) calls when the shop is shut and which ends in
+                    // Customer.Leave - the one funnel H-SKIPWALKIN-1 hangs off. NO new write path: this
+                    // lever calls a method the game calls itself every day at closing time.
+                    //
+                    // Only bodies whose order is NOT completed are taken - a shopper who has already
+                    // paid is owed nothing and would prove nothing - and the player's own body never is.
+                    // THIS MACHINE ONLY, and only the interior it is standing in, because
+                    // IndoorCustomerSpawner.Customers IS the local interior's live register.
+                    int ceWant;
+                    if (!int.TryParse(arg.Trim(), out ceWant) || ceWant <= 0)
+                        return "ERR usage: custevict <n> (a positive count of live bodies to send home)";
+                    var ceTake = new System.Collections.Generic.List<Customer>();
+                    try
+                    {
+                        // Collected FIRST, then evicted: InstantlyLeave -> Leave can touch the register,
+                        // and a list being walked is not a list to mutate.
+                        var ceAll = IndoorCustomerSpawner.Customers;
+                        if (ceAll == null) return "ERR custevict no indoor customer register (stand inside the shop)";
+                        for (int ceI = 0; ceI < ceAll.Count && ceTake.Count < ceWant; ceI++)
+                        {
+                            var ceC = ceAll[ceI];
+                            if (ceC == null || ceC.isPlayer) continue;
+                            var ceE = ceC.customerEntry;
+                            if (ceE == null || ceE.order == null) continue;      // SkipHandback reads the ENTRY's order
+                            if (ceC.order == null || ceC.order.completed) continue;  // Leave and the unpaid-exit counter read the BODY's
+                            ceTake.Add(ceC);
+                        }
+                    }
+                    catch (Exception exCe) { return "ERR custevict " + exCe.Message; }
+                    var ceIds = new StringBuilder();
+                    int ceDone = 0;
+                    foreach (var ceC in ceTake)
+                    {
+                        try
+                        {
+                            // AccessTools searches base types, so a SelfServiceCustomer / GymCustomer
+                            // subclass still resolves Customer's own private InstantlyLeave.
+                            var ceMi = HarmonyLib.AccessTools.Method(ceC.GetType(), "InstantlyLeave", new Type[0]);
+                            if (ceMi == null) continue;
+                            var ceE = ceC.customerEntry;
+                            int ceH = -1;
+                            try { ceH = ceE.spawnTime.Hour; } catch { }
+                            int ceHash = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(ceE);
+                            ceMi.Invoke(ceC, new object[0]);
+                            ceDone++;
+                            if (ceIds.Length > 0) ceIds.Append(',');
+                            ceIds.Append($"h{ceH}#{ceHash:X}");
+                        }
+                        catch (Exception exCe2)
+                        {
+                            try { Plugin.Logger.LogWarning($"[TestDrive] custevict: {exCe2.Message}"); } catch { }
+                        }
+                    }
+                    return $"OK custevict asked={ceWant} evicted={ceDone} skipActive={MPRestSync.SkipActive} ids={ceIds}";
+                }
+
                 case "skipvote":
                 {
                     // A scriptable consensus-skip vote. SetSkipRequest needs Seated || Loitering, and a rig
@@ -622,6 +864,11 @@ namespace BigAmbitionsMP
                     string tdKey = arg; try { tdKey = GameStateReader.AddressKey(tdReg); } catch { }
                     int tdOrders = 0, tdDistinct = -1;
                     double tdDupeRev = 0;
+                    // D-SKIPPACE-1 gate measurement: what the till list is WORTH - the same single formula
+                    // (TillDupes.ExtraReferenceValue, the value of ONE reference to an order at the day
+                    // roll) summed over the DISTINCT orders instead of over the extra references. Paired
+                    // with liveCompleted below it says how much money a skipped stretch actually produced.
+                    double tdPaidRev = 0;
                     try
                     {
                         var tdList = tdReg.unprocessedCompletedOrders;
@@ -633,7 +880,7 @@ namespace BigAmbitionsMP
                                 var tdO = tdList[tdI];
                                 if (tdO == null) continue;
                                 tdOrders++;
-                                if (tdSeen.Add(tdO)) continue;          // first reference - the legitimate one
+                                if (tdSeen.Add(tdO)) { tdPaidRev += TillDupes.ExtraReferenceValue(tdO); continue; }   // first reference - the legitimate one, and what it will pay
                                 tdDupeRev += TillDupes.ExtraReferenceValue(tdO);   // THE shared formula (TillDupes, CustomerEntrySync.cs) - the tripwire bills a removed duplicate with this same code
                             }
                         }
@@ -658,7 +905,8 @@ namespace BigAmbitionsMP
                     int tdLiveDone = -1;
                     try { tdLiveDone = Patch_Order_Pay_HelperForward.LivePayCount(tdKey); } catch { }
                     return $"OK tilldupes {tdKey} orders={tdOrders} distinct={tdDistinct} dupes={(tdDistinct < 0 ? -1 : tdOrders - tdDistinct)} "
-                         + $"dupeRevenue={tdDupeRev:F2} liveCompleted={tdLiveDone} live={tdLive} cap={tdCap}";
+                         + $"dupeRevenue={tdDupeRev:F2} liveCompleted={tdLiveDone} live={tdLive} cap={tdCap} "
+                         + $"paidRevenue={tdPaidRev:F2}";
                 }
 
                 case "pause":

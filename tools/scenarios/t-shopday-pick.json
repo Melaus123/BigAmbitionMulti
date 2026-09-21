@@ -1,0 +1,240 @@
+{
+  "id": "T-SHOPDAY-PICK",
+  "title": "BATCH-26 FOLD 2 step 0 (B7): PICK THE SHOP. Load fx-hq1, settle, carry the pair to the next trading morning with one consensus skip taken OUTDOORS, then read the new `shopday` lever for each of the four player-owned customer shops (host: clothing store, hairdresser; client: fast food, gym) and stop. The shop with the MOST entries in the coming hours is the one the three measured legs (t-shopday-normal / -live / -paper) are built around. Measures only - no skip mode is set, nobody enters a building, NOTHING is saved.",
+  "preconditions": "Reporter fixture session fx-hq1 (day 44, MERGED - vars.keepMerger true). Dev build with skipvote / skipstate / shopday / pause / exitbuilding (BAMP_DEV). The fixture loads at 17:38 with Client1 already inside a building, so both players step outside before the setup skip. ORACLE NOTE: the absent-oracle for NullReferenceException uses the `(?<!swallowed )` lookbehind, as t-skippace-watch does, because this fixture prints the mod's own '[Gley] swallowed NullReferenceException' traffic-collider diagnostic.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "shopClothing": "20 ba:street_fifthavenue",
+    "shopHair": "58 ba:street_fifthavenue",
+    "shopFood": "11 ba:street_tenthavenue",
+    "shopGym": "60 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "(?<!swallowed )NullReferenceException"
+  ],
+  "oracles_report": [
+    "\\[Rest\\] CONSENSUS",
+    "\\[Rest\\] skip GOAL reached",
+    "\\[CarStack\\] ",
+    "\\[Perf/"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST SHOPDAY-PICK START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 32,
+      "note": "both worlds settle before anything is read"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "fx-hq1 loads Client1 inside a building; report-only because an outdoor player just warns"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "skiprate",
+      "expect_result": "^OK skiprate rate=50 "
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "17:38 -> 10:45 next day is ~17h at 50 game-min per real second = ~20 s, taken OUTDOORS so no shop is occupied and the skip is identical whatever mode is set later."
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 40
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "shopday reset",
+      "expect_result": "^OK shopday reset"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "shopday ${shopClothing}",
+      "expect_result": "^OK shopday .* entries=",
+      "capture": {
+        "clothingEntries": "entries=(\\d+)",
+        "pickHour": "hour=(\\d+)"
+      },
+      "note": "THE PREMISE OF THE WHOLE FOLD IS ASSERTED HERE: the morning really was reached and the day's shopper list exists."
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "shopday ${shopHair}",
+      "expect_result": "^OK shopday .* entries=",
+      "capture": {
+        "hairEntries": "entries=(\\d+)"
+      }
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "shopday ${shopFood}",
+      "expect_result": "^OK shopday .* entries=",
+      "capture": {
+        "foodEntries": "entries=(\\d+)"
+      }
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "shopday ${shopGym}",
+      "expect_result": "^OK shopday .* entries=",
+      "capture": {
+        "gymEntries": "entries=(\\d+)"
+      }
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "shopday ${shopFood}",
+      "expect_result": "^OK shopday .* entries=",
+      "note": "the client reads its own two shops: the two machines must see the same shopper list, or the comparison below is not comparing one world."
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "shopday ${shopGym}",
+      "expect_result": "^OK shopday .* entries="
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "salestats ${shopClothing}",
+      "expect_result": "^OK",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "salestats ${shopGym}",
+      "expect_result": "^OK",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "perf",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "perf",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 31,
+      "role": "both",
+      "cmd": "mark TEST SHOPDAY-PICK END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

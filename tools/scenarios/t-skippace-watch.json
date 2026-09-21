@@ -1,0 +1,256 @@
+{
+  "id": "T-SKIPPACE-WATCH",
+  "title": "D-SKIPPACE-1 FOR THE USER TO WATCH, not to measure: load the fx-hq1 reporter fixture, skip the pair into a trading morning, put the owner ('melaus', host) and the follower (Client1) in the same staffed clothing store, run ONE 9-game-hour consensus skip at the shipped rate with the shipped un-capped visual pace (~50x, ~11 real seconds of sped-up shop floor), then hold both machines still for 20 s so the restored floor can be seen next to it, and stop. t-skippace-till-1 and t-skippace-till-full are the legs that assert and measure; this one asserts only that the world loaded, both players are inside and the skip really ran, so nothing aborts the run out from under the person watching it. Run it with rigrun's --keep-open to keep the two windows up afterwards. NO save.",
+  "preconditions": "Reporter fixture session fx-hq1 (day 44, MERGED - vars.keepMerger true, so tools/regress.py resets it with --keep-merger). Host 'melaus' owns the clothing store in vars.ownerShop (14 staff shifts). Dev build with skipvote / skipstate / pause / enterbuilding / exitbuilding (BAMP_DEV). Shipped rate (50) and shipped pace (MaxSkipVisualPace 1000) - neither lever is touched, so what is on screen is what ships. The fixture loads at 17:38 with Client1 inside a building: both players step outside and a setup skip carries them to the next 10:30 before the watched skip begins. NOTHING is saved. ORACLE NOTE (run 2, 2026-09-21): the absent-oracle for NullReferenceException is written `(?<!swallowed )NullReferenceException` here, unlike the other scenarios in this folder. On the fx-hq1 fixture the mod's own traffic guard prints `[Gley] swallowed NullReferenceException in traffic collider handler` for leftover published taxi colliders - its own diagnostic, nothing to do with this fold - and the bare pattern failed a run in which all 60 steps passed. The lookbehind lets ONLY that swallow line through; a real NullReferenceException still fails the run.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "ownerShop": "20 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "(?<!swallowed )NullReferenceException"
+  ],
+  "oracles_report": [
+    "\\[Rest\\] CONSENSUS",
+    "\\[Rest\\] skip GOAL reached",
+    "\\[SkipPace\\] ",
+    "\\[Customers\\] ",
+    "\\[Perf/"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "note": "THE FIXTURE NAME IS THE `session` VAR - rigrun substitutes it here and --session overrides it, which is how every scenario in this folder names its save."
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST SKIPPACE-WATCH START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 35,
+      "note": "both worlds settle before anything is measured"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK",
+      "note": "time must RUN on both machines - absolute semantics, a no-op when already running"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "RUN 1 OF THIS SCENARIO FOUND IT (2026-09-21): the fx-hq1 reporter fixture loads Client1 ALREADY INSIDE a building, so his `enterbuilding` was refused with 'already inside a building - exitbuilding first' and the run died at that step. Both players step outside first; report-only, because a player who is already outdoors logs a warning and changes nothing."
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "RUN 1 OF THIS SCENARIO FOUND IT (2026-09-21): the fx-hq1 reporter fixture loads Client1 ALREADY INSIDE a building, so his `enterbuilding` was refused with 'already inside a building - exitbuilding first' and the run died at that step. Both players step outside first; report-only, because a player who is already outdoors logs a warning and changes nothing."
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 8,
+      "note": "the two building transitions finish before anything else is asked"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "skiprate",
+      "expect_result": "^OK skiprate rate=50 ",
+      "note": "THE SHIPPED RATE IS THE MEASUREMENT: 9 game hours at 50 game-min per real second is ~11 real seconds - long enough to watch and to sample three times mid-skip. Read, not set, so a drift from 50 fails here."
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "skipvote 10:30",
+      "expect_result": "^OK skipvote goal=",
+      "note": "THE FIXTURE'S OWN CLOCK IS THE REASON THIS SKIP EXISTS (measured run 1: fx-hq1 loads day 44 17:38, and the `clock` lever only moves FORWARD INSIDE THE DAY, so it cannot reach a morning). A consensus skip to the NEXT 10:30 does what `clock` cannot: it crosses midnight through the game's own time path and lands the pair in the middle of a trading morning, which is the only way the measured skip below gets ~9 uninterrupted shop hours to run through. Both players are OUTDOORS for it, so it scales no bodies and costs the measurement nothing."
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "skipvote 10:30",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "the second vote makes consensus; the setup skip is ~19 s of world at the shipped rate."
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 35,
+      "note": "the setup skip runs (17:38 -> 10:30 next day is ~16h50m = ~20 s at rate 50) and the world settles behind it"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "note": "THE SETUP SKIP FINISHED - asserted, because every number below is measured in the morning it was supposed to reach."
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-",
+      "abort_on_fail": false,
+      "note": "the setup vote is dropped on both machines so the measured vote below is a fresh one"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "enterbuilding ${ownerShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] enterbuilding '${ownerShop}'",
+          "within_s": 40
+        }
+      ],
+      "note": "THE OWNER STANDS IN HIS OWN SHOP - his machine runs the live customers and the tills, and is the machine D-SKIPPACE-1 acts on."
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "enterbuilding ${ownerShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${ownerShop}'",
+          "within_s": 40
+        }
+      ],
+      "note": "THE FOLLOWER stands in the SAME shop and does nothing else: his customers are PUPPETS driven by the owner's row stream, so this is where a sped-up floor is seen from the other side of the wire."
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "the shop fills with live customers at NORMAL speed - this is the 'before' the sped-up floor is judged against"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "skipvote +9h",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "skipvote +9h",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[SkipPace\\] applied",
+          "within_s": 90
+        }
+      ],
+      "note": "the second vote makes consensus; the watched skip starts within a second or two of this line."
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "THE WATCH: ~11 real seconds of 9 game hours of shop at the shipped pace, then the floor is back to normal and still on screen."
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "note": "the watched skip has finished - asserted only so the run cannot report success if nothing ever ran."
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 30,
+      "role": "both",
+      "cmd": "mark TEST SKIPPACE-WATCH END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

@@ -1,0 +1,634 @@
+{
+  "id": "T-SKIPPACE-TILL-1",
+  "title": "D-SKIPPACE-1 leg 1 of 2 in a STAFFED TILL SHOP: the CONTROL. The same setup skip into a trading morning and the same 9-game-hour measured consensus skip in the same shop at the same shipped rate (50 game-min per real second), with `skippace 1` on BOTH machines - the visual pace clamps to 1, nothing is scaled, and the floor looks exactly as it did before D-SKIPPACE-1. Its numbers are what t-skippace-till-full's are compared against: both legs are reset from the same fixture (fx-hq1, --keep-merger) and reach the same morning the same way. The HOST 'melaus' is the OWNER of the clothing store in vars.ownerShop (14 staff shifts) and stands in it; Client1 stands in the SAME shop as the FOLLOWER and only waits. ASSERTED: the customer FLOW premise before the skip (a live body AND completed rising over ~2 minutes of live play), till duplication GAINED is zero (dupes=0 dupeRevenue=0.00 before, at three mid-skip samples and after), live bodies <= the shop's own customer capacity at those same four readings, `skippace` reads now=1 scaledBodies=0 at the end, and - the control's own premise - NO `[SkipPace] applied` line anywhere in either log, because a clamp of 1 must scale nothing at all. REPORTED, never asserted: paidRevenue and order count before/after, liveCompleted against the occupied-shop set-aside lines, the body counts next to the cap, worst frame ms on BOTH machines, the real seconds the skip took, and every [Customers] line on the follower. NO merger change, NO save.",
+  "preconditions": "Reporter fixture session fx-hq1 (day 44, MERGED pair - vars.keepMerger true, so tools/regress.py resets it with --keep-merger and the standing company survives). Host 'melaus' owns the clothing store in vars.ownerShop; Client1 owns businesses elsewhere and owns nothing here. Dev build with the levers skippace / skipvote / skipstate / skiprate / perf / tilldupes / salestats / regstate / clock / pause / enterbuilding / exitbuilding (BAMP_DEV). NO WORKING-PLAYER LEVER EXISTS (checked 2026-09-21: TestDrive has no work/duty/register/station arm that starts the native Work activity on the local player - `schednull` only injects a SYNTHETIC duty employee record for the schedule tables), so neither player works the till and MPRestSync.LocalBodyPaced stays False in both legs; the animation evidence comes from the shop's OWN staff, which is why this fixture has 14 shifts. The skip RATE stays the shipped 50, so the 9-game-hour skip lasts ~11 real seconds - long enough for the user to watch and for three mid-skip samples. THE CLOCK IS SET BY A SETUP CONSENSUS SKIP, NOT BY THE `clock` LEVER: fx-hq1 loads day 44 17:38 and `clock` only moves forward inside the day, so an asserted skip to the next 10:30 puts the pair in a trading morning first; and both players `exitbuilding` before entering, because the fixture loads Client1 inside a building. The flow premise then guarantees the measured skip starts in a shop with customers in it. NOTHING is ever saved. ORACLE NOTE (run 2, 2026-09-21): the absent-oracle for NullReferenceException is written `(?<!swallowed )NullReferenceException` here, unlike the other scenarios in this folder. On the fx-hq1 fixture the mod's own traffic guard prints `[Gley] swallowed NullReferenceException in traffic collider handler` for leftover published taxi colliders - its own diagnostic, nothing to do with this fold - and the bare pattern failed a run in which all 60 steps passed. The lookbehind lets ONLY that swallow line through; a real NullReferenceException still fails the run.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "ownerShop": "20 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "(?<!swallowed )NullReferenceException",
+    "\\[EconProbe\\] tripwire: ",
+    "\\[EconProbe\\] TRIPWIRE duplicate till entries",
+    "\\[SkipPace\\] applied"
+  ],
+  "oracles_report": [
+    "\\[Perf/",
+    "\\[PatchCost\\] SPIKE",
+    "\\[Rest\\] CONSENSUS",
+    "\\[Rest\\] skip GOAL reached",
+    "\\[Rest\\] occupied-shop hourly sim during skip",
+    "\\[Rest\\] occupied-shop hourly sim set aside",
+    "\\[Rest\\] occupied-shop sim: ",
+    "\\[Rest\\] occupied-shop set-aside",
+    "\\[SkipPace\\] ",
+    "\\[Customers\\] "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "note": "THE FIXTURE NAME IS THE `session` VAR - rigrun substitutes it here and --session overrides it, which is how every scenario in this folder names its save."
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST SKIPPACE-TILL-1 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 35,
+      "note": "both worlds settle before anything is measured"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "regstate ${ownerShop}",
+      "expect_result": "^OK rented=True",
+      "capture": {
+        "shopName": "name='([^']*)'",
+        "shopType": "type=([^ ]*)",
+        "shopShifts": "shifts=([0-9]+)",
+        "shopFlipped": "flipped=(True|False)"
+      },
+      "note": "RUNTIME CHECK on the OWNER: the host still rents this address. name / type / shifts / flipped are CAPTURED FOR THE REPORT rather than asserted - fx-hq1 is a merged pair on purpose, so a flip reading here is fixture truth, not a fault."
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK",
+      "note": "time must RUN on both machines - absolute semantics, a no-op when already running"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "RUN 1 OF THIS SCENARIO FOUND IT (2026-09-21): the fx-hq1 reporter fixture loads Client1 ALREADY INSIDE a building, so his `enterbuilding` was refused with 'already inside a building - exitbuilding first' and the run died at that step. Both players step outside first; report-only, because a player who is already outdoors logs a warning and changes nothing."
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "RUN 1 OF THIS SCENARIO FOUND IT (2026-09-21): the fx-hq1 reporter fixture loads Client1 ALREADY INSIDE a building, so his `enterbuilding` was refused with 'already inside a building - exitbuilding first' and the run died at that step. Both players step outside first; report-only, because a player who is already outdoors logs a warning and changes nothing."
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "sleep_s": 8,
+      "note": "the two building transitions finish before anything else is asked"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "skippace 1",
+      "expect_result": "^OK skippace max=1 ",
+      "note": "THE ONLY DIFFERENCE FROM t-skippace-till-full, and it is set BEFORE the setup skip so that not one body is ever scaled in this run. The lever is LOCAL to an instance, so it is set on BOTH machines: max=1 clamps the visual pace to 1, turning the whole feature off here."
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "skippace 1",
+      "expect_result": "^OK skippace max=1 ",
+      "note": "THE ONLY DIFFERENCE FROM t-skippace-till-full, and it is set BEFORE the setup skip so that not one body is ever scaled in this run. The lever is LOCAL to an instance, so it is set on BOTH machines: max=1 clamps the visual pace to 1, turning the whole feature off here."
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "skiprate",
+      "expect_result": "^OK skiprate rate=50 ",
+      "note": "THE SHIPPED RATE IS THE MEASUREMENT: 9 game hours at 50 game-min per real second is ~11 real seconds - long enough to watch and to sample three times mid-skip. Read, not set, so a drift from 50 fails here."
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "skipvote 10:30",
+      "expect_result": "^OK skipvote goal=",
+      "note": "THE FIXTURE'S OWN CLOCK IS THE REASON THIS SKIP EXISTS (measured run 1: fx-hq1 loads day 44 17:38, and the `clock` lever only moves FORWARD INSIDE THE DAY, so it cannot reach a morning). A consensus skip to the NEXT 10:30 does what `clock` cannot: it crosses midnight through the game's own time path and lands the pair in the middle of a trading morning, which is the only way the measured skip below gets ~9 uninterrupted shop hours to run through. Both players are OUTDOORS for it, so it scales no bodies and costs the measurement nothing."
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "skipvote 10:30",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "the second vote makes consensus; the setup skip is ~19 s of world at the shipped rate."
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 35,
+      "note": "the setup skip runs (17:38 -> 10:30 next day is ~16h50m = ~20 s at rate 50) and the world settles behind it"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "capture": {
+        "setupEnd": "lastEndMin=([0-9.\\-]+)",
+        "setupReal": "lastRealS=([0-9.\\-]+)"
+      },
+      "note": "THE SETUP SKIP FINISHED - asserted, because every number below is measured in the morning it was supposed to reach."
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-",
+      "abort_on_fail": false,
+      "note": "the setup vote is dropped on both machines so the measured vote below is a fresh one"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "enterbuilding ${ownerShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] enterbuilding '${ownerShop}'",
+          "within_s": 40
+        }
+      ],
+      "note": "THE OWNER STANDS IN HIS OWN SHOP - his machine runs the live customers and the tills, and is the machine D-SKIPPACE-1 acts on."
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "enterbuilding ${ownerShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${ownerShop}'",
+          "within_s": 40
+        }
+      ],
+      "note": "THE FOLLOWER stands in the SAME shop and does nothing else: his customers are PUPPETS driven by the owner's row stream, so this is where a sped-up floor is seen from the other side of the wire."
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the interior settles and the hour's customers start arriving (live-body wait 1/3)"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "abort_on_fail": false,
+      "capture": {
+        "wait1live": "liveCustomers=(-?[0-9]+)",
+        "wait1done": "completed=(-?[0-9]+)"
+      },
+      "note": "report-only body count while we wait - if the flow gate below fails, these say how close it got"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "live-body wait 2/3"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "abort_on_fail": false,
+      "capture": {
+        "wait2live": "liveCustomers=(-?[0-9]+)"
+      }
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "live-body wait 3/3 - 65 s of live play in total"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "MEASURED WINDOW, run 2 (2026-09-21): this clothing store completes roughly ONE customer per 45 s of live play at ~11:30, so a 45 s flow window is a coin flip - t-skippace-till-1 saw completed rise 16->17 and t-skippace-till-full saw 18 three times in 80 s and failed its own premise. The pre-skip wait is ~2 minutes of live play, which is several expected completions, so the premise measures the shop and not the dice."
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "live-body wait, continued"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "abort_on_fail": false,
+      "capture": {
+        "wait3live": "liveCustomers=(-?[0-9]+)",
+        "wait3done": "completed=(-?[0-9]+)"
+      },
+      "note": "report-only reading halfway through the longer wait - it says how the flow was moving if the gate below still fails"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "live-body wait, continued"
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "liveCustomers=[1-9]",
+      "capture": {
+        "preLive": "liveCustomers=(-?[0-9]+)",
+        "preEntries": "entries=(-?[0-9]+)",
+        "preDone": "completed=(-?[0-9]+)",
+        "prePend": "pending=(-?[0-9]+)",
+        "preSim": "sim='([^']*)'",
+        "preSpawn": "spawnDisabled=(True|False)"
+      },
+      "expect_gt": {
+        "completed=(-?[0-9]+)": "${wait1done}"
+      },
+      "note": "THE PREMISE OF THE WHOLE SCENARIO (anti-vacuity, FLOW not snapshot): at least one live body right now AND `completed` has RISEN since the first read, ~2 minutes of live play earlier. Customers really arrive and finish here, so 'the shop looks busy during a skip' is a question that can be asked at all."
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "abort_on_fail": false,
+      "capture": {
+        "preSimC": "sim='([^']*)'",
+        "preLiveC": "liveCustomers=(-?[0-9]+)"
+      },
+      "note": "the FOLLOWER's view of the same shop (report): sim should name the host, and his own native customer table is suppressed while he follows."
+    },
+    {
+      "seq": 37,
+      "role": "both",
+      "cmd": "mark TEST SKIPPACE-TILL-1 ARMED",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "perf reset",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 39,
+      "role": "c",
+      "cmd": "perf reset",
+      "expect_result": "^OK perf"
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
+      "capture": {
+        "m0orders": "orders=([0-9]+)",
+        "m0dupes": "dupes=(-?[0-9]+)",
+        "m0rev": "dupeRevenue=([0-9.]+)",
+        "m0done": "liveCompleted=(-?[0-9]+)",
+        "m0live": "live=(-?[0-9]+)",
+        "m0cap": "cap=(-?[0-9]+)",
+        "m0paid": "paidRevenue=([0-9.]+)"
+      },
+      "note": "MONEY BASELINE on the OWNER inside his own shop. ASSERTED: dupes=0 dupeRevenue=0.00, so a duplicate that existed BEFORE the skip fails here instead of hiding in the difference. `live=[0-9]` forbids the -1 (outside) reading that would make the flood checks vacuous."
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "skipvote +9h",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 42,
+      "role": "c",
+      "cmd": "skipvote +9h",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "the SECOND vote is what makes consensus. The control leg has NO [SkipPace] expectation here - the opposite: that line is in oracles_absent, so its appearance anywhere fails the run."
+    },
+    {
+      "seq": 43,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the skip get going (~11 s at the shipped rate 50)"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
+      "capture": {
+        "s1live": "live=(-?[0-9]+)",
+        "s1cap": "cap=(-?[0-9]+)",
+        "s1orders": "orders=([0-9]+)",
+        "s1paid": "paidRevenue=([0-9.]+)"
+      },
+      "derive": {
+        "s1liveLo": [
+          "s1live",
+          -1
+        ]
+      },
+      "expect_gt": {
+        "cap=(-?[0-9]+)": "${s1liveLo}"
+      },
+      "note": "FLOOD SAMPLE 1 of 3. The shop's own customer capacity (BuildingSizeHelper - the same number the native simulator caps an hour with) is at least the number of live bodies: expect_gt is strictly greater, so cap > live-1 is exactly 'live <= cap'. Both numbers come from this one line, capture first, so nothing is hard-coded. THIS is the assertion that an un-capped floor is a BUSY floor and not a flooded one."
+    },
+    {
+      "seq": 45,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
+      "capture": {
+        "s2live": "live=(-?[0-9]+)",
+        "s2cap": "cap=(-?[0-9]+)",
+        "s2orders": "orders=([0-9]+)",
+        "s2paid": "paidRevenue=([0-9.]+)"
+      },
+      "derive": {
+        "s2liveLo": [
+          "s2live",
+          -1
+        ]
+      },
+      "expect_gt": {
+        "cap=(-?[0-9]+)": "${s2liveLo}"
+      },
+      "note": "FLOOD SAMPLE 2 of 3."
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 48,
+      "role": "h",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
+      "capture": {
+        "s3live": "live=(-?[0-9]+)",
+        "s3cap": "cap=(-?[0-9]+)",
+        "s3orders": "orders=([0-9]+)",
+        "s3paid": "paidRevenue=([0-9.]+)"
+      },
+      "derive": {
+        "s3liveLo": [
+          "s3live",
+          -1
+        ]
+      },
+      "expect_gt": {
+        "cap=(-?[0-9]+)": "${s3liveLo}"
+      },
+      "note": "FLOOD SAMPLE 3 of 3 - the third mid-skip reading the measurement asks for."
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "sleep_s": 10,
+      "note": "the skip finishes (~11 s at rate 50)"
+    },
+    {
+      "seq": 50,
+      "role": "h",
+      "cmd": "skipstate",
+      "note": "report-only poll: has it finished?"
+    },
+    {
+      "seq": 51,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 52,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "capture": {
+        "goalH": "lastGoalMin=([0-9.\\-]+)",
+        "endH": "lastEndMin=([0-9.\\-]+)",
+        "realS": "lastRealS=([0-9.\\-]+)",
+        "rate": "rate=([0-9.]+)"
+      },
+      "derive": {
+        "goalLo": [
+          "goalH",
+          -0.01
+        ]
+      },
+      "expect_gt": {
+        "lastEndMin=([0-9.\\-]+)": "${goalLo}"
+      },
+      "note": "THE SKIP FINISHED and stopped at or after the goal it was racing to, on the host. lastRealS is the real-seconds figure the report needs."
+    },
+    {
+      "seq": 53,
+      "role": "c",
+      "cmd": "skipstate",
+      "expect_result": "active=False",
+      "capture": {
+        "endC": "lastEndMin=([0-9.\\-]+)",
+        "realSC": "lastRealS=([0-9.\\-]+)"
+      }
+    },
+    {
+      "seq": 54,
+      "role": "h",
+      "cmd": "salestats ${ownerShop}",
+      "expect_result": "^OK salestats",
+      "capture": {
+        "postLive": "liveCustomers=(-?[0-9]+)",
+        "postEntries": "entries=(-?[0-9]+)",
+        "postDone": "completed=(-?[0-9]+)",
+        "postPend": "pending=(-?[0-9]+)",
+        "postUnproc": "unprocessed=(-?[0-9]+)"
+      },
+      "note": "end-of-skip shop state on the OWNER (report): completed and the entry table, the control-vs-full comparison's raw material."
+    },
+    {
+      "seq": 55,
+      "role": "h",
+      "cmd": "tilldupes ${ownerShop}",
+      "expect_result": "^OK tilldupes .* dupes=0 dupeRevenue=0\\.00 .* live=[0-9]",
+      "capture": {
+        "m1orders": "orders=([0-9]+)",
+        "m1dupes": "dupes=(-?[0-9]+)",
+        "m1rev": "dupeRevenue=([0-9.]+)",
+        "m1done": "liveCompleted=(-?[0-9]+)",
+        "m1live": "live=(-?[0-9]+)",
+        "m1cap": "cap=(-?[0-9]+)",
+        "m1paid": "paidRevenue=([0-9.]+)"
+      },
+      "derive": {
+        "m1liveLo": [
+          "m1live",
+          -1
+        ]
+      },
+      "expect_gt": {
+        "cap=(-?[0-9]+)": "${m1liveLo}"
+      },
+      "note": "THE MONEY AND FLOOD READING AT THE END. Asserted: till duplication GAINED over the skip is zero and live <= cap. Reported: paidRevenue and orders minus their step-28 baselines is the money this skip produced; liveCompleted minus its baseline is how much of it was rung up LIVE, and the `[Rest] occupied-shop ... set aside` lines are the ON-PAPER remainder."
+    },
+    {
+      "seq": 56,
+      "role": "h",
+      "cmd": "skippace",
+      "expect_result": "^OK skippace max=1 now=1 scaledBodies=0",
+      "capture": {
+        "endPace": "now=([0-9.]+)",
+        "endBodies": "scaledBodies=([0-9]+)",
+        "endAnim": "animScaled=([0-9]+)",
+        "endLocal": "localBodyPaced=(True|False)"
+      },
+      "note": "THE CONTROL'S RESTORE READING: with the clamp at 1 nothing was ever scaled, so scaledBodies=0 is trivially true and animScaled is CAPTURED FOR THE REPORT - it should read 0, and a non-zero would mean the clamp leaks."
+    },
+    {
+      "seq": 57,
+      "role": "c",
+      "cmd": "skippace",
+      "expect_result": "^OK skippace max=1 now=1 scaledBodies=0",
+      "capture": {
+        "endAnimC": "animScaled=([0-9]+)",
+        "endBodiesC": "scaledBodies=([0-9]+)"
+      },
+      "note": "THE CONTROL'S RESTORE READING: with the clamp at 1 nothing was ever scaled, so scaledBodies=0 is trivially true and animScaled is CAPTURED FOR THE REPORT - it should read 0, and a non-zero would mean the clamp leaks."
+    },
+    {
+      "seq": 58,
+      "role": "h",
+      "cmd": "perf",
+      "expect_result": "^OK perf",
+      "capture": {
+        "perfWorstH": "worstMs=([0-9]+)",
+        "perfFpsH": "fps=([0-9]+)"
+      },
+      "note": "worst frame on the OWNER - the machine that ran the sped-up floor. This is the cost side of the gate."
+    },
+    {
+      "seq": 59,
+      "role": "c",
+      "cmd": "perf",
+      "expect_result": "^OK perf",
+      "capture": {
+        "perfWorstC": "worstMs=([0-9]+)",
+        "perfFpsC": "fps=([0-9]+)"
+      },
+      "note": "worst frame on the FOLLOWER - the machine that chased the row stream at its skip-scaled interval."
+    },
+    {
+      "seq": 60,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 61,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 62,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding"
+    },
+    {
+      "seq": 63,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding",
+      "note": "fixture hygiene: both leave. NO save."
+    },
+    {
+      "seq": 64,
+      "role": "both",
+      "cmd": "mark TEST SKIPPACE-TILL-1 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
