@@ -1,0 +1,146 @@
+{
+  "id": "T-REPORTLOSS-SOLO",
+  "title": "[SOLO] H-REPORTLOSS-1 leg 1 - a failed bug-report upload is RETRIED instead of lost. The host files one report while the client is connected; the local report stub answers 503 twice, then 200. Asserts: attempt 1 FAILS immediately, attempt 2 FAILS about a minute later with a smaller bundle (no saves), attempt 3 SUCCEEDS about five minutes after attempt 1, and nothing is pending afterwards. Also asserts the save attach: exactly one .hsg for each of the 2 connected players, and the first bundle holds both plus the reporter's Player.log.",
+  "preconditions": "SOLO VARIANT (2026-09-23): the rig's client install is a different game build from the host (b3680 vs b3682 after a game update; sync-test-rig.ps1 -Check fails), so the client cannot join. The client instance is closed FIRST (it shares the bug-reports folder and would also run retries) and the host plays alone: the save attach is then 1 .hsg for 1 player and no peer logs are asked for. Fixture save1 (host melaus, Client1). OPERATOR SETUP OUTSIDE THE RUN (the driver cannot do it): tools/report_stub.py running on a port NOT used by any earlier run, mode `fail 2`; all three BigAmbitionsMP.cfg.*.json files carry \"BugReportRelayUrl\": \"http://127.0.0.1:<that port>/\" (restore the previous value after the run). A fresh port matters: a pending report left by an earlier run is abandoned at launch ('upload address changed') instead of spending the stub's two failures. Dev build with the bugreport + bugbudget levers (BAMP_DEV). The CLIENT is dropped right after attempt 1 on purpose: both instances share the bug-reports folder and both run the outbox retry, so with the client gone every retry line lands in the host's log.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[BugReport\\] (upload task|outbox pass|outbox launch pass|save store attach|save attach players|zip bundle failed|zip rebuild failed|bundle plan failed|report prune|prune ')",
+    "\\[BugReport\\] upload attempt bamp-bug",
+    "\\[BugReport\\] upload attempt [4-6]/6"
+  ],
+  "oracles_report": [
+    "\\[BugReport\\] Outbox:",
+    "\\[BugReport\\] Upload bundle:",
+    "\\[BugReport\\] upload attempt",
+    "\\[BugReport\\] Pruned"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "c",
+      "drop": true,
+      "note": "SOLO: close the client instance first (build mismatch - it cannot join; alive it would also run retries on the shared folder)"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "mark TEST REPORTLOSS START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "both worlds settle"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "bugbudget",
+      "expect_result": "^OK budgetKB=9216 pending=0 ",
+      "note": "PREMISE: the default 9 MiB budget is in force and NO report is pending before ours - so the stub's two 503s can only be spent on this run's report"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "bugreport t-reportloss retry leg",
+      "expect_result": "^OK report dir=.*bamp-bug-[0-9]{8}-[0-9]{6} uploadQueued=True",
+      "capture": {
+        "rid": "bamp-bug-([0-9]{8}-[0-9]{6})"
+      },
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BugReport\\] Save attach: 1 \\.hsg for 1 player\\(s\\)",
+          "within_s": 15
+        },
+        {
+          "role": "h",
+          "regex": "\\[BugReport\\] Upload bundle: bamp-bug-${rid}\\.zip \\([0-9]+ KB\\), attempt 1: .*hsg in=1 out=0, reporter Player\\.log included",
+          "within_s": 45
+        },
+        {
+          "role": "h",
+          "regex": "\\[BugReport\\] upload attempt 1/6 bamp-bug-${rid} bytes=[0-9]+ timeout=[0-9]+s -> FAIL 503 .*next=20[0-9-]+ ",
+          "within_s": 50
+        }
+      ],
+      "note": "Attempt 1 runs right away (after the peer-log wait) and the stub answers 503 (its first failure). Premises asserted here: the client IS connected (1 peer asked for logs) and exactly one save per connected player was attached (2 .hsg for 1 players) and all of it fit the default budget alongside the reporter's Player.log."
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "mark TEST REPORTLOSS waiting for retry 2",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BugReport\\] Upload bundle: bamp-bug-${rid}\\.zip \\([0-9]+ KB\\), attempt 2: .*hsg in=0 out=1, reporter Player\\.log included",
+          "within_s": 130
+        },
+        {
+          "role": "h",
+          "regex": "\\[BugReport\\] upload attempt 2/6 bamp-bug-${rid} bytes=[0-9]+ timeout=[0-9]+s -> FAIL 503 .*next=20[0-9-]+ ",
+          "within_s": 130
+        }
+      ],
+      "note": "retry 1 is due 1 minute after attempt 1 and runs on the next ~30 s heartbeat; it rebuilds the zip WITHOUT saves and the stub fails it (its second failure)"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mark TEST REPORTLOSS waiting for retry 3",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BugReport\\] Upload bundle: bamp-bug-${rid}\\.zip \\([0-9]+ KB\\), attempt 3: .*hsg in=0 out=1, reporter Player\\.log included",
+          "within_s": 330
+        },
+        {
+          "role": "h",
+          "regex": "\\[BugReport\\] upload attempt 3/6 bamp-bug-${rid} bytes=[0-9]+ timeout=[0-9]+s -> OK 200 in [0-9]+ms; next=none: sent",
+          "within_s": 330
+        }
+      ],
+      "note": "retry 2 is due 5 minutes after attempt 1 (4 after attempt 2); the stub now answers 200 - the report is delivered"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "bugbudget",
+      "expect_result": "^OK budgetKB=9216 pending=0 ",
+      "note": "nothing is left pending: the delivered report is marked sent"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "mark TEST REPORTLOSS END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

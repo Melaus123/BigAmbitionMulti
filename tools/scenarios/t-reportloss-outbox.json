@@ -1,0 +1,116 @@
+{
+  "id": "T-REPORTLOSS-OUTBOX",
+  "title": "H-REPORTLOSS-1 leg 2 - the upload budget and the outbox cap. With the stub failing every upload: (a) `bugbudget 1500` makes the host's report leave its saves out while keeping the reporter's Player.log; (b) five failed reports leave exactly 3 pending - the two oldest are dropped (and logged) as reports 4 and 5 are filed - the bug-reports folder stays under 30 MB, and a freshly launched instance reports `Outbox: 3 pending`.",
+  "preconditions": "Fixture save1 (host melaus, Client1). OPERATOR SETUP OUTSIDE THE RUN: tools/report_stub.py running on a port NOT used by any earlier run, mode `fail 999` (every upload fails); all three BigAmbitionsMP.cfg.*.json files carry \"BugReportRelayUrl\": \"http://127.0.0.1:<that port>/\" (restore the previous value after the run). Dev build with the bugreport + bugbudget levers (BAMP_DEV). Reports are filed one after another, each only after the previous one's attempt 1 has failed, so no folder is locked (in use) when the next report's prune runs; the five reports take about a minute, less than the 1-minute retry gap, so no retry holds a folder the prune must drop.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[BugReport\\] (upload task|outbox pass|outbox launch pass|save store attach|save attach players|zip bundle failed|zip rebuild failed|bundle plan failed|report prune|prune ')",
+    "\\[BugReport\\] upload attempt bamp-bug",
+    "\\[BugReport\\] upload attempt [0-9]/6 .* -> OK"
+  ],
+  "oracles_report": [
+    "\\[BugReport\\] Outbox:",
+    "\\[BugReport\\] Upload bundle:",
+    "\\[BugReport\\] upload attempt",
+    "\\[BugReport\\] Pruned"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 4, "role": "both", "cmd": "mark TEST REPORTLOSS-OUTBOX START", "expect_result": "OK MARK" },
+    { "seq": 5, "role": "h", "sleep_s": 25, "note": "both worlds settle" },
+    { "seq": 6, "role": "h", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 7, "role": "c", "cmd": "status", "expect_result": "settled=True" },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "bugbudget",
+      "expect_result": "^OK budgetKB=9216 pending=0 ",
+      "note": "PREMISE: default budget, and no report pending before this run's five"
+    },
+    { "seq": 9, "role": "h", "cmd": "bugbudget 1500", "expect_result": "^OK budgetKB=1500 " },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "bugreport t-reportloss budget leg",
+      "expect_result": "^OK report dir=.*bamp-bug-[0-9]{8}-[0-9]{6} uploadQueued=True",
+      "capture": { "r1": "bamp-bug-([0-9]{8}-[0-9]{6})" },
+      "expect_log": [
+        { "role": "h", "regex": "\\[BugReport\\] Save attach: 2 \\.hsg for 2 player\\(s\\)", "within_s": 15 },
+        { "role": "h", "regex": "\\[BugReport\\] Upload bundle: bamp-bug-${r1}\\.zip \\([0-9]+ KB\\), attempt 1: .*hsg in=0 out=2, reporter Player\\.log included; left out: .*\\.hsg \\(over budget", "within_s": 45 },
+        { "role": "h", "regex": "\\[BugReport\\] upload attempt 1/6 bamp-bug-${r1} bytes=[0-9]+ timeout=[0-9]+s -> FAIL 503 ", "within_s": 50 }
+      ],
+      "note": "BUDGET LEG: two saves WERE attached to the folder (premise), and at a 1500 KB budget both are left out as 'over budget' while the reporter's Player.log is included"
+    },
+    { "seq": 11, "role": "h", "cmd": "bugbudget 0", "expect_result": "^OK budgetKB=9216 pending=1 ", "note": "back to the default budget; report 1 is pending" },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "bugreport t-reportloss cap 2",
+      "expect_result": "uploadQueued=True",
+      "capture": { "r2": "bamp-bug-([0-9]{8}-[0-9]{6})" },
+      "expect_log": [
+        { "role": "h", "regex": "\\[BugReport\\] upload attempt 1/6 bamp-bug-${r2} bytes=[0-9]+ timeout=[0-9]+s -> FAIL 503 ", "within_s": 50 }
+      ]
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "bugreport t-reportloss cap 3",
+      "expect_result": "uploadQueued=True",
+      "capture": { "r3": "bamp-bug-([0-9]{8}-[0-9]{6})" },
+      "expect_log": [
+        { "role": "h", "regex": "\\[BugReport\\] upload attempt 1/6 bamp-bug-${r3} bytes=[0-9]+ timeout=[0-9]+s -> FAIL 503 ", "within_s": 50 }
+      ]
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "bugreport t-reportloss cap 4",
+      "expect_result": "uploadQueued=True",
+      "capture": { "r4": "bamp-bug-([0-9]{8}-[0-9]{6})" },
+      "expect_log": [
+        { "role": "h", "regex": "\\[BugReport\\] Outbox: dropped pending report bamp-bug-${r1} \\(cap 3", "within_s": 10 },
+        { "role": "h", "regex": "\\[BugReport\\] upload attempt 1/6 bamp-bug-${r4} bytes=[0-9]+ timeout=[0-9]+s -> FAIL 503 ", "within_s": 50 }
+      ],
+      "note": "four pending -> the OLDEST (report 1) is deleted and logged"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "bugreport t-reportloss cap 5",
+      "expect_result": "uploadQueued=True",
+      "capture": { "r5": "bamp-bug-([0-9]{8}-[0-9]{6})" },
+      "expect_log": [
+        { "role": "h", "regex": "\\[BugReport\\] Outbox: dropped pending report bamp-bug-${r2} \\(cap 3", "within_s": 10 },
+        { "role": "h", "regex": "\\[BugReport\\] upload attempt 1/6 bamp-bug-${r5} bytes=[0-9]+ timeout=[0-9]+s -> FAIL 503 ", "within_s": 50 }
+      ],
+      "note": "again: report 2 is now the oldest of four pending and goes"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "bugbudget",
+      "expect_result": "^OK budgetKB=9216 pending=3 reportsKB=([0-9]{1,4}|[12][0-9]{4})$",
+      "note": "exactly 3 pending, and the WHOLE bug-reports folder is under 30,000 KB (the regex accepts 0-29999)"
+    },
+    { "seq": 17, "role": "c", "drop": true, "note": "close the client so it can be relaunched" },
+    {
+      "seq": 18,
+      "role": "c",
+      "relaunch": true,
+      "expect_log": [
+        { "role": "c", "regex": "\\[BugReport\\] Outbox: 3 pending \\([0-9]+ KB\\), dropped none \\(cap 3\\)", "within_s": 30 }
+      ],
+      "note": "a freshly launched instance (same machine, same folder) reads the outbox: 3 pending, nothing more to drop"
+    },
+    { "seq": 19, "role": "h", "cmd": "mark TEST REPORTLOSS-OUTBOX END", "expect_result": "OK MARK" }
+  ]
+}

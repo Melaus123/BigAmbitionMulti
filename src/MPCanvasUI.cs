@@ -276,6 +276,7 @@ namespace BigAmbitionsMP
         private bool   _crashReportSending;       // an upload is in flight: block re-send + hold the status line
         private string _crashReportResult = "";   // "" = none; else the status line to display (submit/sent/failed)
         private float  _crashReportAutoCloseAt;    // >0 = unscaled time to auto-close the popup after a success
+        private string _crashReportDir = "";     // H-REPORTLOSS-1: the report this popup opening filed — a late retry result is shown only for it
         private bool   _crashReportSentOk;         // round-96: this popup opening already submitted successfully — block re-sends (field: one prompt submitted twice, 2s apart, in the gap between upload-success and auto-close)
         private TextMeshProUGUI? _crashReportTitleLbl;
         private TextMeshProUGUI? _crashReportBodyLbl;
@@ -382,6 +383,7 @@ namespace BigAmbitionsMP
             }
             catch { phase = "unknown"; }
             MPBugReport.Heartbeat(phase);
+            MPBugReport.OutboxTick();   // H-REPORTLOSS-1: retry undelivered bug reports whose next attempt is due
             TickDuplicateInstallWarning();
             TickPatchFailureWarning();
             TickSteamProbe();
@@ -6305,6 +6307,7 @@ namespace BigAmbitionsMP
             _crashReportAttachments.Clear();
             _bugReportTagIndex = 0;
             _crashReportSending = false; _crashReportResult = ""; _crashReportAutoCloseAt = 0f; _crashReportSentOk = false;
+            _crashReportDir = "";
             _crashReportPopupVisible = true;
             _crashReportFocus = true;
             _crashReportAutoFocusPending = true;
@@ -6402,8 +6405,9 @@ namespace BigAmbitionsMP
                 _crashReportResult = "Submitting report...";   // shown by RefreshCrashReportText; popup stays open
                 var result = MPBugReport.Create(prefix + _crashReportMessage, openFolder: false,
                     attachments: _crashReportAttachments, discordTagIds: SelectedDiscordForumTagIds(),
-                    onUploadComplete: (ok, folder) => GameStatePatcher.EnqueueOnMainThread(() => OnReportUploadDone(ok)),
+                    onUploadComplete: (ok, folder) => GameStatePatcher.EnqueueOnMainThread(() => OnReportUploadDone(ok, folder)),
                     includeCrashArtifacts: _crashReportIsCrash);   // Unity crash folder rides CRASH reports only
+                _crashReportDir = result.DirectoryPath;
                 if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
                 if (!result.DiscordUploadQueued)   // nothing to upload — report saved locally, done
                 {
@@ -6421,10 +6425,13 @@ namespace BigAmbitionsMP
             }
         }
 
-        // Main-thread callback when the async upload finishes (relay/Discord result).
-        private void OnReportUploadDone(bool ok)
+        // Main-thread callback when the async upload finishes (relay/Discord result). H-REPORTLOSS-1:
+        // also called when a LATER retry of the same report succeeds — the existing success text
+        // then replaces the failure text, but only while the popup still shows THAT report.
+        private void OnReportUploadDone(bool ok, string folder)
         {
             if (!_crashReportPopupVisible) return;   // user already closed the popup
+            if (!string.Equals(folder, _crashReportDir, StringComparison.OrdinalIgnoreCase)) return;   // an older report's late result
             _crashReportSending = false;
             if (ok)
             {
@@ -6443,6 +6450,7 @@ namespace BigAmbitionsMP
         {
             if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
             _crashReportSending = false; _crashReportResult = ""; _crashReportAutoCloseAt = 0f; _crashReportSentOk = false;
+            _crashReportDir = "";
             _crashReportPopupVisible = false;
             MPRestSync.PreReportNavBlockers = null;   // round-279: the snapshot dies with the popup
             if (_crashReportGO != null) _crashReportGO.SetActive(false);

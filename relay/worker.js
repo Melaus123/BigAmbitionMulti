@@ -20,8 +20,12 @@
 //                        per-IP rate limit (8 reports / 10 min). Without it,
 //                        rely on a Cloudflare rate-limiting rule instead.
 
-const MAX_BYTES = 25 * 1024 * 1024;   // Discord's upload ceiling
-const RL_MAX = 8;                      // reports per window per IP (when KV bound)
+// Relay size ceiling. 25 MiB by default: a 12 MB report was accepted by Discord on this
+// server (relay log 2026-09-23), so the webhook limit here is above 10 MiB. Set a MAX_BYTES
+// variable in the dashboard to change it. A report over the ceiling is refused here with a
+// clear reason instead of being forwarded for Discord to refuse.
+const DEFAULT_MAX_BYTES = 25 * 1024 * 1024;
+const RL_MAX = 8;                     // reports per window per IP (when KV bound)
 const RL_WINDOW_SECONDS = 600;
 
 export default {
@@ -40,9 +44,10 @@ export default {
     }
 
     // Cheap size guard before buffering.
+    const MAX_BYTES = Number(env.MAX_BYTES) > 0 ? Number(env.MAX_BYTES) : DEFAULT_MAX_BYTES;
     const declared = Number(request.headers.get("content-length") || "0");
     if (declared > MAX_BYTES) {
-      return new Response("payload too large", { status: 413 });
+      return new Response("payload too large: " + declared + " bytes, relay limit " + MAX_BYTES, { status: 413 });
     }
 
     // Optional per-IP rate limit (only if a KV namespace is bound as RL).
@@ -64,7 +69,7 @@ export default {
       return new Response("could not read body", { status: 400 });
     }
     if (body.byteLength > MAX_BYTES) {
-      return new Response("payload too large", { status: 413 });
+      return new Response("payload too large: " + body.byteLength + " bytes, relay limit " + MAX_BYTES, { status: 413 });
     }
 
     const contentType = request.headers.get("content-type") || "application/octet-stream";
@@ -79,9 +84,20 @@ export default {
       return new Response("relay upstream error: " + (e && e.message ? e.message : "unknown"), { status: 502 });
     }
 
-    // Pass Discord's status back so the mod can show success/failure. Don't echo
-    // the full upstream body (keeps the response small and leaks nothing).
+    // Pass Discord's status back so the mod can show success/failure. On a failure also
+    // pass a SHORT excerpt of Discord's error body (e.g. {"message":"Request entity too
+    // large","code":40005}) so the mod's log names the real reason, plus Retry-After on a
+    // rate limit. The excerpt is capped and anything shaped like a webhook address is
+    // blanked, so the secret can never leave through this path.
     const ok = upstream.status >= 200 && upstream.status < 300;
-    return new Response(ok ? "ok" : ("discord returned " + upstream.status), { status: upstream.status });
+    if (ok) return new Response("ok", { status: upstream.status });
+    let detail = "";
+    try {
+      detail = (await upstream.text()).slice(0, 300).replace(/https?:\/\/[^\s"']*webhooks\/[^\s"']*/gi, "[webhook]");
+    } catch { }
+    const headers = {};
+    const retryAfter = upstream.headers.get("retry-after");
+    if (retryAfter) headers["retry-after"] = retryAfter;
+    return new Response("discord returned " + upstream.status + (detail ? ": " + detail : ""), { status: upstream.status, headers });
   },
 };

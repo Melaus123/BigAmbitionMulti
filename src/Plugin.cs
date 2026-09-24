@@ -333,6 +333,7 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Colours] options registration: {ex.Message}"); }
             MPBugReport.MarkSessionStarted();
             MPBugReport.CachePaths();   // bug-report v2: persistentDataPath is main-thread-only; the peer-log responder runs off-thread
+            MPBugReport.OutboxOnLaunch();   // H-REPORTLOSS-1: log + enforce the undelivered-report outbox, one retry each at launch
 
             // Persistent host object for our UI component (Mono: custom
             // MonoBehaviours need no registration — AddComponent just works).

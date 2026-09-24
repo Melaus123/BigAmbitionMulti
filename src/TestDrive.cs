@@ -1019,12 +1019,24 @@ namespace BigAmbitionsMP
                 case "bugreport":
                 {
                     // Bug-report v2 (task #40) harness: file a real report through the full
-                    // pipeline (save-store attach + peer-log pull + zip). Point the config's
-                    // BugReportRelayUrl at an unreachable address first so nothing posts to
-                    // the live Discord — the zip still gets built before the upload fails.
+                    // pipeline (save-store attach + peer-log pull + zip + upload attempt 1).
+                    // Point the config's BugReportRelayUrl at the local stub (tools/report_stub.py)
+                    // or an unreachable address first so nothing posts to the live Discord — the
+                    // zip still gets built before the upload is tried.
                     string why = arg.Length > 0 ? arg : "testdrive report";
                     var rep = MPBugReport.Create("testdrive: " + why, openFolder: false);
                     return $"OK report dir={rep.DirectoryPath} uploadQueued={rep.DiscordUploadQueued}";
+                }
+
+                case "bugbudget":
+                {
+                    // H-REPORTLOSS-1: override the bug-report upload budget for THIS process
+                    // (KB; 0 = back to the 9 MiB default) so the planner's left-out path can be
+                    // exercised with a small world. No argument = read-only: the budget, the
+                    // number of pending (undelivered) reports and the bug-reports folder size.
+                    if (arg.Length == 0) return "OK " + MPBugReport.DevOutboxState();
+                    if (!long.TryParse(arg, out var budgetKb) || budgetKb < 0) return "ERR usage: bugbudget <KB> (0 = the default budget)";
+                    return "OK " + MPBugReport.DevSetBudgetKB(budgetKb);
                 }
 
                 case "energyflag":

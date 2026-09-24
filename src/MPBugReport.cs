@@ -115,6 +115,31 @@ namespace BigAmbitionsMP
     {
         private const int MaxCopiedLogBytes = 4 * 1024 * 1024;
         private const long MaxUserAttachmentBytes = 24L * 1024L * 1024L;
+
+        // ── H-REPORTLOSS-1 (user-approved 2026-09-23) ─────────────────────────────────────
+        // The confirmed loss: report 20260919-232955 (1.5 MB) hit the old 15 s timeout on its ONE
+        // upload attempt, and 11 s later the next report's prune deleted its folder. Every POST
+        // that reached the relay in 7 days was accepted, so the fix is on this side: a size
+        // budget with a priority order, a timeout that grows with the upload, and a small
+        // on-disk outbox that retries a failed report a few times instead of forgetting it.
+        /// <summary>Zip budget per upload. A SPEED choice, not a Discord limit (Discord took
+        /// everything up to 12 MB): a smaller upload finishes on a slow line.</summary>
+        private const long UploadBudgetBytes = 9L * 1024 * 1024;
+        private static long _devBudgetBytes = -1;   // TestDrive `bugbudget <KB>` (DEV builds only)
+        private static long CurrentBudgetBytes => _devBudgetBytes > 0 ? _devBudgetBytes : UploadBudgetBytes;
+        /// <summary>Room kept for bundle-index.txt, outbox.txt and the zip's own headers.</summary>
+        private const long BundleReserveBytes = 64L * 1024;
+        private const int MaxUploadAttempts = 6;
+        private const int MaxPendingReports = 3;
+        private const double MaxOutboxAgeDays = 7;
+        /// <summary>Minutes from one attempt to the next, after attempts 1, 2 and 3: attempt 2 at
+        /// +1 min, attempt 3 at +5 min and attempt 4 at +15 min (all counted from attempt 1).
+        /// Attempts 5 and 6 happen at later game launches (the launch pass), never on a timer.</summary>
+        private static readonly int[] RetryGapMinutes = { 1, 4, 10 };
+        /// <summary>M3: user attachments are EXEMPT from the budget (the popup promises they go up,
+        /// each up to 24 MB) but the whole POST must stay under the relay's 25 MiB ceiling; this
+        /// leaves room for the multipart envelope around the zip.</summary>
+        private const long UploadCeilingBytes = 25L * 1024 * 1024 - 256L * 1024;
         private static string _markerPath = "";
         private static string _pendingCrashSummary = "";
 
@@ -275,105 +300,445 @@ namespace BigAmbitionsMP
 
             string root = SafeRoot();
             Directory.CreateDirectory(root);
-            PruneOldReports(root);   // user directive 2026-08-16: only the last report is kept
 
             string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
             string dir = Path.Combine(root, "bamp-bug-" + stamp);
+            // L16: two reports in the same second must never share a folder.
+            for (int n = 2; Directory.Exists(dir); n++) dir = Path.Combine(root, "bamp-bug-" + stamp + "-" + n.ToString(CultureInfo.InvariantCulture));
             Directory.CreateDirectory(dir);
-            MarkReportBusy(dir);   // released in the terminal path below — the prune skips busy dirs
-
-            // Batch 14: callers already prefix the reason ("manual bug report: " / "previous
-            // crash: ", MPCanvasUI:5852) — re-prefixing here doubled it on every ring-dump
-            // header in the field ("manual bug report: manual bug report: <text>", 10 bundles).
-            string ring = MPLog.Dump(reason);
-            WriteDescription(Path.Combine(dir, "description.txt"), reason);
-            WriteReport(Path.Combine(dir, "report.md"), reason);
-            CopyPlayerLogs(dir);
-            WriteSaveStore(dir);   // bug-report v2 (task #40): active-session saves + full store listing
-            CopyIfExists(ring, Path.Combine(dir, "bamp-ring.log"), MaxCopiedLogBytes);
-            // Task #5: the actual crash evidence lives OUTSIDE Player.log — but only CRASH reports
-            // carry it (a stale Crash_* folder on an unrelated manual report is misleading noise).
-            if (includeCrashArtifacts) CollectUnityCrashArtifacts(dir);
-            CopyUserAttachments(dir, attachments);
-            WriteRedactedConfig(Path.Combine(dir, "config-redacted.json"));
-            WriteSubmitNotes(Path.Combine(dir, "README-submit.txt"));
-
-            var result = new BugReportResult { DirectoryPath = dir };
-
-            // Bug-report v2 (task #40): ask every connected peer for its logs. Third-party
-            // reports ("my friend crashed", bundle 20260811-225015) carried only the
-            // reporter's half of the evidence. Null when not in an MP session — menu
-            // reports proceed exactly as before.
-            string? peerGatherId = StartPeerLogGather(dir);
-
-            // Submit to the RELAY by default (it holds the Discord webhook server-side).  A direct
-            // webhook in config overrides it (maintainer local testing) and posts straight to Discord.
-            string directWebhook = MPConfig.BugReportDiscordWebhookUrlLive();
-            string target = !string.IsNullOrWhiteSpace(directWebhook) ? directWebhook : MPConfig.BugReportRelayUrlLive();
-            bool direct = !string.IsNullOrWhiteSpace(directWebhook);
-            if (!string.IsNullOrWhiteSpace(target))
-            {
-                result.DiscordUploadQueued = true;
-                string[] tags = CleanDiscordTagIds(discordTagIds);
-                Task.Run(() =>
-                {
-                    try
-                    {
-                        // Bounded wait: completes EARLY when every peer's last file lands; the
-                        // deadline is the failure path (peer offline/slow) and peer-logs.txt
-                        // says so honestly. The upload then ships whatever arrived.
-                        WaitForPeerLogs(peerGatherId);
-                        bool ok = UploadReport(target, direct, dir, reason, tags);
-                        try { onUploadComplete?.Invoke(ok, dir); } catch { }
-                    }
-                    finally { MarkReportDone(dir); }
-                });
-            }
-            else if (peerGatherId != null)
-                // No upload configured — still collect the peer logs into the local folder.
-                Task.Run(() => { try { WaitForPeerLogs(peerGatherId); } finally { MarkReportDone(dir); } });
-            else
-                MarkReportDone(dir);   // nothing async touches this folder — releasable immediately
-
-            Plugin.Logger.LogInfo($"[BugReport] Created report at {dir}");
-            if (openFolder) TryOpenFolder(dir);
-            return result;
-        }
-
-        /// <summary>User directive 2026-08-16: keep only the LAST report — folders now carry
-        /// saves + the zip (2–5MB each) and were never cleaned up. Runs as each NEW report is
-        /// created and deletes every other bamp-bug-* folder, EXCEPT any whose background work
-        /// (peer-log wait / upload) is still running — read LIVE from the busy registry at the
-        /// moment of deletion, never inferred from folder age (a timer here was called out and
-        /// replaced 2026-08-16: elapsed time is not a proxy for "upload finished"). A folder
-        /// left busy by a crashed process is not in the fresh registry and prunes normally.
-        /// Only exact-pattern folders are touched — the crash marker and anything a player
-        /// parked in the root survive.</summary>
-        private static void PruneOldReports(string root)
-        {
+            // H-REPORTLOSS-1: outbox.lock is held from here through the peer-log wait and upload
+            // attempt 1 (released in the background task's finally). It is the cross-process
+            // "in use" guard every prune and outbox pass respects - this process's and the other
+            // game instance's alike (the rig's instances share this folder).
+            FileStream? folderLock = TryOpenOutboxLock(dir);
+            bool lockHandedToTask = false;   // L14: released in the finally below unless a background task owns it
             try
             {
-                var rx = new System.Text.RegularExpressions.Regex(@"^bamp-bug-\d{8}-\d{6}$");
-                int pruned = 0;
-                foreach (var d in Directory.GetDirectories(root))
+
+                // Submit to the RELAY by default (it holds the Discord webhook server-side).  A direct
+                // webhook in config overrides it (maintainer local testing) and posts straight to Discord.
+                // H-REPORTLOSS-1: the target is RECORDED in outbox.json now - a retry never goes to a
+                // different address (a changed config abandons the report instead).
+                string target = CurrentUploadTarget(out _);
+                if (!string.IsNullOrWhiteSpace(target))
+                    WriteOutbox(dir, new OutboxRecord
+                    {
+                        State = "pending", Target = target, Created = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
+                        Content = $"{MyPluginInfo.SHORT_NAME} bug report: {Role()} / session {Blank(MPLog.SessionId)} / {reason}",
+                        ThreadName = DiscordThreadName(reason), Tags = CleanDiscordTagIds(discordTagIds),
+                    });
+                // User directive 2026-08-16 (only the latest report is kept whole) + H-REPORTLOSS-1
+                // (undelivered reports are kept as their zip, at most 3). Runs AFTER this folder
+                // exists, so the new report is the newest folder and is never touched.
+                PruneOldReports(root, out _, out _, out _);
+
+                // Batch 14: callers already prefix the reason ("manual bug report: " / "previous
+                // crash: ", MPCanvasUI:5852) — re-prefixing here doubled it on every ring-dump
+                // header in the field ("manual bug report: manual bug report: <text>", 10 bundles).
+                string ring = MPLog.Dump(reason);
+                WriteDescription(Path.Combine(dir, "description.txt"), reason);
+                WriteReport(Path.Combine(dir, "report.md"), reason);
+                CopyPlayerLogs(dir);
+                WriteSaveStore(dir);   // bug-report v2 (task #40) + H-REPORTLOSS-1: newest save per connected player + full store listing
+                CopyIfExists(ring, Path.Combine(dir, "bamp-ring.log"), MaxCopiedLogBytes);
+                // Task #5: the actual crash evidence lives OUTSIDE Player.log — but only CRASH reports
+                // carry it (a stale Crash_* folder on an unrelated manual report is misleading noise).
+                if (includeCrashArtifacts) CollectUnityCrashArtifacts(dir);
+                CopyUserAttachments(dir, attachments);
+                WriteRedactedConfig(Path.Combine(dir, "config-redacted.json"));
+                WriteSubmitNotes(Path.Combine(dir, "README-submit.txt"));
+
+                var result = new BugReportResult { DirectoryPath = dir };
+
+                // Bug-report v2 (task #40): ask every connected peer for its logs. Third-party
+                // reports ("my friend crashed", bundle 20260811-225015) carried only the
+                // reporter's half of the evidence. Null when not in an MP session — menu
+                // reports proceed exactly as before.
+                string? peerGatherId = StartPeerLogGather(dir);
+
+                if (!string.IsNullOrWhiteSpace(target))
                 {
-                    if (!rx.IsMatch(Path.GetFileName(d))) continue;
-                    if (IsReportBusy(d)) continue;   // live in-flight check — the event-driven guard
-                    try { Directory.Delete(d, recursive: true); pruned++; }
-                    catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] prune '{Path.GetFileName(d)}': {ex.Message}"); }
+                    result.DiscordUploadQueued = true;
+                    // A LATER successful retry reaches the caller too (the popup shows its existing
+                    // success text if it is still open on this report).
+                    if (onUploadComplete != null) _uploadWatchers[Path.GetFileName(dir)] = (dir, onUploadComplete);
+                    lockHandedToTask = true;
+                    Task.Run(() =>
+                    {
+                        bool ok = false;
+                        try
+                        {
+                            // Bounded wait: completes EARLY when every peer's last file lands; the
+                            // deadline is the failure path (peer offline/slow) and peer-logs.txt
+                            // says so honestly. The upload then ships whatever arrived.
+                            WaitForPeerLogs(peerGatherId);
+                            ok = RunUploadAttempt(dir, lockHeld: true, AttemptKind.First);   // attempt 1, immediately
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] upload task: {ex.Message}"); }
+                        finally { try { folderLock?.Dispose(); } catch { } }
+                        NotifyUploadWatcher(dir, ok, firstAttempt: true);
+                    });
                 }
-                if (pruned > 0) Plugin.Logger.LogInfo($"[BugReport] Pruned {pruned} old report folder(s) — only the latest report is kept.");
+                else if (peerGatherId != null)
+                {
+                    // No upload configured — still collect the peer logs into the local folder.
+                    lockHandedToTask = true;
+                    Task.Run(() => { try { WaitForPeerLogs(peerGatherId); } finally { try { folderLock?.Dispose(); } catch { } } });
+                }
+                // (otherwise nothing async touches this folder — the finally releases the lock now)
+
+                Plugin.Logger.LogInfo($"[BugReport] Created report at {dir}");
+                if (openFolder) TryOpenFolder(dir);
+                return result;
+            }
+            finally { if (!lockHandedToTask) try { folderLock?.Dispose(); } catch { } }
+        }
+
+        /// <summary>User directive 2026-08-16 kept only the LAST report (folders carry saves + the
+        /// zip). H-REPORTLOSS-1 (2026-09-23) keeps undelivered ones for retry: the NEWEST folder is
+        /// always kept whole; a PENDING report that is not the newest is cut down to its zip +
+        /// outbox.json + outbox.lock (the retry rebuilds from that zip); at most 3 pending reports
+        /// are kept in total - past that the oldest pending one is deleted and logged; delivered
+        /// (sent), given-up (abandoned) and pre-outbox folders that are not the newest are deleted
+        /// as before. A folder whose outbox.lock cannot be opened is in use RIGHT NOW (an upload
+        /// attempt or the peer-log wait, in this process or another) and is skipped - the lock is
+        /// read live, never inferred from folder age (a timer here was called out and replaced
+        /// 2026-08-16). Only exact-pattern folders are touched — the crash marker and anything a
+        /// player parked in the root survive.</summary>
+        private static void PruneOldReports(string root, out int pending, out long pendingBytes, out List<string> dropped)
+        {
+            pending = 0; pendingBytes = 0; dropped = new List<string>();
+            int pruned = 0, cut = 0;
+            try
+            {
+                var dirs = ReportDirsNewestFirst(root);
+                for (int i = 0; i < dirs.Count; i++)
+                {
+                    string d = dirs[i], name = Path.GetFileName(d);
+                    FileStream? lk = null;
+                    try
+                    {
+                        bool inUse = i > 0 && !TryLockForPrune(d, out lk);
+                        // L2: read AFTER the lock is ours (the newest / in-use folders are only counted, never touched).
+                        bool isPending = ReadOutbox(d)?.State == "pending";
+                        if (i == 0 || inUse)   // the newest folder is always kept; an in-use one is skipped
+                        {
+                            if (isPending) { pending++; pendingBytes += FolderBytes(d); }
+                            continue;
+                        }
+                        if (isPending && pending < MaxPendingReports)
+                        {
+                            pending++;
+                            if (CutToZip(d)) cut++;
+                            pendingBytes += FolderBytes(d);
+                            continue;
+                        }
+                        try { lk?.Dispose(); } catch { }
+                        lk = null;
+                        Directory.Delete(d, recursive: true);
+                        if (isPending)
+                        {
+                            dropped.Add(name);
+                            _uploadWatchers.TryRemove(name, out _);   // L9
+                            Plugin.Logger.LogWarning($"[BugReport] Outbox: dropped pending report {name} (cap {MaxPendingReports} undelivered reports).");
+                        }
+                        else pruned++;
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] prune '{name}': {ex.Message}"); }
+                    finally { try { lk?.Dispose(); } catch { } }
+                }
+                if (pruned > 0 || cut > 0)
+                    Plugin.Logger.LogInfo($"[BugReport] Pruned {pruned} old report folder(s); {pending} undelivered report(s) kept for retry ({cut} cut to their zip) — the newest report is always kept whole.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] report prune: {ex.Message}"); }
         }
 
-        // Busy registry: every report dir with background work still running (peer-log wait,
-        // upload stream). Registered at creation, released in the terminal path's finally —
-        // the prune reads this LIVE instead of guessing from timestamps.
-        private static readonly HashSet<string> _reportDirsInUse = new();
-        private static void MarkReportBusy(string dir) { lock (_reportDirsInUse) _reportDirsInUse.Add(dir); }
-        private static void MarkReportDone(string dir) { lock (_reportDirsInUse) _reportDirsInUse.Remove(dir); }
-        private static bool IsReportBusy(string dir)   { lock (_reportDirsInUse) return _reportDirsInUse.Contains(dir); }
+        private static readonly System.Text.RegularExpressions.Regex _reportDirRx =
+            new System.Text.RegularExpressions.Regex(@"^bamp-bug-\d{8}-\d{6}(-\d+)?$");   // L16: -2, -3 for same-second reports
+
+        /// <summary>Every bamp-bug-yyyyMMdd-HHmmss folder in the root, newest first (the name IS
+        /// the creation time, so an ordinal sort orders them).</summary>
+        private static List<string> ReportDirsNewestFirst(string root)
+        {
+            var list = new List<string>();
+            try
+            {
+                foreach (var d in Directory.GetDirectories(root))
+                    if (_reportDirRx.IsMatch(Path.GetFileName(d))) list.Add(d);
+            }
+            catch { }
+            list.Sort((a, b) => string.CompareOrdinal(Path.GetFileName(b), Path.GetFileName(a)));
+            return list;
+        }
+
+        /// <summary>Delete everything in a pending folder except its zip, outbox.json and
+        /// outbox.lock. A folder that has no zip yet (the process died before attempt 1 built
+        /// one) is left whole - cutting it would lose the report.</summary>
+        private static bool CutToZip(string d)
+        {
+            string zip = Path.Combine(d, Path.GetFileName(d) + ".zip");
+            if (!File.Exists(zip)) return false;
+            bool any = false;
+            foreach (var f in Directory.GetFiles(d))
+            {
+                string n = Path.GetFileName(f);
+                if (n.Equals(Path.GetFileName(zip), StringComparison.OrdinalIgnoreCase) || n == OutboxFile || n == OutboxLockFile) continue;
+                try { File.Delete(f); any = true; } catch { }
+            }
+            foreach (var sub in Directory.GetDirectories(d))
+                try { Directory.Delete(sub, recursive: true); any = true; } catch { }
+            return any;
+        }
+
+        private static long FolderBytes(string d)
+        {
+            long total = 0;
+            try { foreach (var f in Directory.GetFiles(d, "*", SearchOption.AllDirectories)) try { total += new FileInfo(f).Length; } catch { } }
+            catch { }
+            return total;
+        }
+
+        // ── Outbox (H-REPORTLOSS-1) ─────────────────────────────────────────────────────────
+        // Per report folder: outbox.json = {state pending|sent|abandoned, target (recorded at
+        // creation), attempts[{utc, bytes, timeout, result, seconds}], nextAt}; outbox.lock is
+        // held open (no sharing) for the length of an attempt - a cross-process guard, because
+        // two game instances on one machine share this folder.
+        private const string OutboxFile = "outbox.json";
+        private const string OutboxLockFile = "outbox.lock";
+
+        private sealed class OutboxAttempt
+        {
+            [JsonProperty("utc")] public string Utc = "";
+            [JsonProperty("bytes")] public long Bytes;
+            [JsonProperty("timeout")] public int Timeout;
+            [JsonProperty("result")] public string Result = "";
+            [JsonProperty("seconds")] public double Seconds;
+        }
+
+        private sealed class OutboxRecord
+        {
+            [JsonProperty("state")] public string State = "pending";
+            [JsonProperty("target")] public string Target = "";
+            [JsonProperty("created")] public string Created = "";
+            [JsonProperty("attempts")] public List<OutboxAttempt> Attempts = new();
+            [JsonProperty("nextAt")] public string? NextAt;
+            [JsonProperty("reason")] public string Reason = "";
+            // What the POST carries besides the zip - fixed at creation so a retry posts the same thread.
+            [JsonProperty("content")] public string Content = "";
+            [JsonProperty("threadName")] public string ThreadName = "";
+            [JsonProperty("tags")] public string[] Tags = Array.Empty<string>();
+        }
+
+        private static OutboxRecord? ReadOutbox(string dir)
+        {
+            try
+            {
+                string p = Path.Combine(dir, OutboxFile);
+                if (File.Exists(p))
+                {
+                    try { var ob = JsonConvert.DeserializeObject<OutboxRecord>(File.ReadAllText(p)); if (ob != null) return ob; } catch { }
+                }
+                // Re-check fold: a swap that failed after the old file was gone leaves the record only
+                // under its .tmp name - read it there rather than treat the report as unmanaged.
+                string t = p + ".tmp";
+                if (File.Exists(t)) return JsonConvert.DeserializeObject<OutboxRecord>(File.ReadAllText(t));
+                return null;
+            }
+            catch { return null; }
+        }
+
+        private static void WriteOutbox(string dir, OutboxRecord ob)
+        {
+            // L3: write a temp file, then swap it in, so a reader never sees a half-written outbox.json.
+            try { ReplaceFile(Path.Combine(dir, OutboxFile + ".tmp"), Path.Combine(dir, OutboxFile), JsonConvert.SerializeObject(ob, Formatting.Indented)); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] outbox write '{Path.GetFileName(dir)}': {ex.Message}"); }
+        }
+
+        /// <summary>Put <paramref name="tmp"/> (written from <paramref name="text"/> when given) in
+        /// place of <paramref name="target"/>: File.Replace when the target exists (atomic on the
+        /// same volume), else a Move. The old file is never deleted before the new one is in place.</summary>
+        private static void ReplaceFile(string tmp, string target, string? text = null)
+        {
+            if (text != null) File.WriteAllText(tmp, text);
+            if (!File.Exists(target)) { File.Move(tmp, target); return; }
+            try { File.Replace(tmp, target, null); }
+            catch
+            {
+                // Re-check fold: File.Replace can fail AFTER removing the target (Windows error 1176,
+                // e.g. antivirus holding the new file). Then the only copy is the .tmp - put it in place
+                // instead of letting the caller delete it.
+                if (!File.Exists(target) && File.Exists(tmp)) { File.Move(tmp, target); return; }
+                throw;
+            }
+        }
+
+        /// <summary>Open (creating it if needed) the folder's outbox.lock with NO sharing. Null =
+        /// another holder has it (an attempt in flight here or in the other instance).</summary>
+        private static FileStream? TryOpenOutboxLock(string dir)
+        {
+            try { return new FileStream(Path.Combine(dir, OutboxLockFile), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+            catch { return null; }
+        }
+
+        /// <summary>Prune side: a folder with no lock file (pre-outbox, or never uploaded) is free;
+        /// one whose lock cannot be opened is in use and must be skipped.</summary>
+        private static bool TryLockForPrune(string dir, out FileStream? lk)
+        {
+            lk = null;
+            if (!File.Exists(Path.Combine(dir, OutboxLockFile))) return true;
+            lk = TryOpenOutboxLock(dir);
+            return lk != null;
+        }
+
+        private static string CurrentUploadTarget(out bool direct)
+        {
+            string directWebhook = MPConfig.BugReportDiscordWebhookUrlLive();
+            direct = !string.IsNullOrWhiteSpace(directWebhook);
+            return direct ? directWebhook : MPConfig.BugReportRelayUrlLive();
+        }
+
+        private enum AttemptKind { First, Due, Launch, StopCheckOnly }
+
+        /// <summary>L4: may this pass try the report now? A timed retry needs nextAt reached. The
+        /// launch pass tries every pending report once, EXCEPT one whose next attempt is still in
+        /// the future (a Retry-After, or a failure moments ago) or whose last attempt is under 60 s
+        /// old; a report whose attempt 1 is in flight is excluded by its lock.</summary>
+        private static bool ReadyFor(OutboxRecord ob, bool launch)
+        {
+            if (!launch) return IsDue(ob);
+            if (!string.IsNullOrEmpty(ob.NextAt) && !IsDue(ob)) return false;
+            if (ob.Attempts.Count > 0
+                && DateTime.TryParse(ob.Attempts[ob.Attempts.Count - 1].Utc, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var last)
+                && (DateTime.UtcNow - last.ToUniversalTime()).TotalSeconds < 60) return false;
+            return true;
+        }
+
+        private static bool IsDue(OutboxRecord ob)
+            => !string.IsNullOrEmpty(ob.NextAt)
+               && DateTime.TryParse(ob.NextAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var at)
+               && at.ToUniversalTime() <= DateTime.UtcNow;
+
+        /// <summary>One upload at a time in this process - attempt 1 of a new report and the
+        /// outbox retries share it.</summary>
+        private static readonly SemaphoreSlim _uploadGate = new SemaphoreSlim(1, 1);
+        private static int _outboxPassRunning;   // 0/1: one outbox pass at a time in this process
+
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Dir, Action<bool, string> Callback)> _uploadWatchers = new();
+
+        /// <summary>Tell the report's creator (the popup) how its upload went: attempt 1's result
+        /// always, and later only a SUCCESSFUL retry (a failed retry changes nothing it shows).</summary>
+        private static void NotifyUploadWatcher(string dir, bool ok, bool firstAttempt)
+        {
+            try
+            {
+                string key = Path.GetFileName(dir);
+                if (!_uploadWatchers.TryGetValue(key, out var w)) return;
+                if (!firstAttempt && !ok) return;
+                if (ok || ReadOutbox(dir)?.State != "pending") _uploadWatchers.TryRemove(key, out _);
+                w.Callback(ok, w.Dir);
+            }
+            catch { }
+        }
+
+        /// <summary>Launch pass (Plugin init, beside MarkSessionStarted): enforce the pending cap,
+        /// log what is waiting, then give every pending report ONE attempt (one at a time).</summary>
+        public static void OutboxOnLaunch()
+        {
+            try
+            {
+                string root = SafeRoot();
+                if (!Directory.Exists(root)) return;
+                PruneOldReports(root, out int pending, out long bytes, out var dropped);
+                Plugin.Logger.LogInfo($"[BugReport] Outbox: {pending} pending ({bytes / 1024} KB), dropped {(dropped.Count == 0 ? "none" : string.Join(", ", dropped))} (cap {MaxPendingReports})");
+                if (pending > 0) StartOutboxPass(launch: true);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] outbox launch pass: {ex.Message}"); }
+        }
+
+        /// <summary>Recurring check from the ~30 s crash-marker heartbeat (MPCanvasUI): retries
+        /// every pending report whose nextAt has come. The folder scan runs off the main thread.</summary>
+        public static void OutboxTick()
+        {
+            try
+            {
+                if (Volatile.Read(ref _outboxPassRunning) != 0) return;
+                StartOutboxPass(launch: false);
+            }
+            catch { }
+        }
+
+        private static void StartOutboxPass(bool launch)
+        {
+            if (Interlocked.CompareExchange(ref _outboxPassRunning, 1, 0) != 0) return;
+            string root = SafeRoot();
+            Task.Run(() =>
+            {
+                try
+                {
+                    if (!Directory.Exists(root)) return;
+                    var dirs = ReportDirsNewestFirst(root);
+                    dirs.Reverse();   // oldest first
+                    foreach (var d in dirs)
+                    {
+                        var ob = ReadOutbox(d);
+                        if (ob == null || ob.State != "pending") continue;
+                        if (!ReadyFor(ob, launch))
+                        {
+                            // Not due yet - but at launch the STOP rules still apply now (a report whose
+                            // upload address changed, or that is too old, will never be sent: abandon it
+                            // at once instead of carrying it as pending until its timer comes round).
+                            if (launch) RunUploadAttempt(d, lockHeld: false, AttemptKind.StopCheckOnly);
+                            continue;
+                        }
+                        bool ok = RunUploadAttempt(d, lockHeld: false, launch ? AttemptKind.Launch : AttemptKind.Due);
+                        if (ok) NotifyUploadWatcher(d, true, firstAttempt: false);
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] outbox pass: {ex.Message}"); }
+                finally { Interlocked.Exchange(ref _outboxPassRunning, 0); }
+            });
+        }
+
+#if BAMP_DEV
+        /// <summary>TestDrive `bugbudget <KB>`: this process's upload budget (0 = the default).</summary>
+        internal static string DevSetBudgetKB(long kb)
+        {
+            _devBudgetBytes = kb > 0 ? kb * 1024 : -1;
+            return DevOutboxState();
+        }
+
+        /// <summary>TestDrive `bugbudget` (no argument): budget + outbox state + the size of the
+        /// whole bug-reports folder, read-only.</summary>
+        internal static string DevOutboxState()
+        {
+            int pending = 0; long total = 0; double minGap = -1;
+            try
+            {
+                string root = SafeRoot();
+                if (Directory.Exists(root))
+                {
+                    foreach (var d in ReportDirsNewestFirst(root))
+                    {
+                        var ob = ReadOutbox(d);
+                        if (ob == null || ob.State != "pending") continue;
+                        pending++;
+                        // retryGapS: the smallest distance between a pending report's last attempt and its
+                        // scheduled next one - a 429's Retry-After shows here as a gap of at least that long.
+                        if (ob.Attempts.Count > 0 && !string.IsNullOrEmpty(ob.NextAt)
+                            && DateTime.TryParse(ob.NextAt, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var at)
+                            && DateTime.TryParse(ob.Attempts[ob.Attempts.Count - 1].Utc, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var last))
+                        {
+                            double g = (at.ToUniversalTime() - last.ToUniversalTime()).TotalSeconds;
+                            if (minGap < 0 || g < minGap) minGap = g;
+                        }
+                    }
+                    total = FolderBytes(root);
+                }
+            }
+            catch { }
+            return $"budgetKB={CurrentBudgetBytes / 1024} pending={pending} retryGapS={(minGap < 0 ? -1 : (int)minGap)} reportsKB={total / 1024}";
+        }
+#endif
 
         private static string SafeRoot()
         {
@@ -685,21 +1050,22 @@ namespace BigAmbitionsMP
         // ── Bug-report v2 (task #40, user-directed 2026-08-15) ─────────────────────────────
         // Bundle 20260811-225015 (a 3-day rollback diagnosed by hand-correlating ~30k log
         // lines of save sizes across two sessions) is the template case: the evidence the
-        // logs only imply, the save store STATES. Attach the active session's saves (one
-        // .hsg per player — loadable first-hand on the rig) + a listing of EVERY copy in
-        // the lineage (size/time/day — where stale-copy bugs are visible for ~1KB), and
-        // pull connected peers' logs so third-party reports carry both halves.
+        // logs only imply, the save store STATES. Attach saves (loadable first-hand on the
+        // rig) + a listing of EVERY copy in the lineage (size/time/day — where stale-copy
+        // bugs are visible for ~1KB), and pull connected peers' logs so third-party reports
+        // carry both halves.
 
-        /// <summary>Total bytes of .hsg/.json save files attached per report. Saves are
-        /// already compressed — they add full weight to the zip (logs don't). The Discord
-        /// relay accepts 24MB; 6MB leaves room for logs and old multi-player worlds.</summary>
-        private const long SaveAttachBudgetBytes = 6L * 1024 * 1024;
-
-        /// <summary>Write save-store.md (every lineage copy: player, day, size, mtime) and
-        /// copy the ACTIVE session's files under saves/ — plus any copy whose manifest day
-        /// disagrees with the active session's by more than the ±1 midnight-straddle the
-        /// round-233 fence tolerates (those are exactly the stale/future copies rollback
-        /// bugs live in). Local file IO only: the host holds the store natively and
+        /// <summary>Write save-store.md (every lineage copy: player, day, size, mtime) and copy
+        /// under saves/ - H-REPORTLOSS-1 (2026-09-23) - ONE .hsg of each player who matters to
+        /// this report, chosen the way the load-time serve path chooses (the fenced, ranked
+        /// eligible copy across the lineage - M1): the reporter's, and that of each CONNECTED player (host reporting: MPServer.ConnectedStableIds(); client
+        /// reporting: the host via the manifest's IsHost slot, other clients only on an
+        /// unambiguous DisplayName match with the lobby roster), each with its .meta sidecar and
+        /// its session's manifest.bamp.json. The active-session-per-member set and the ANOMALY
+        /// copies are gone: the ACTIVE session is the manual base, not the newest -auto-N
+        /// (MPSaveCoordinator.cs:126), so it attached old saves, and saves were 76% of report
+        /// bytes. The listing still shows every copy - stale/mismatched copies stay visible
+        /// without uploading them. Local file IO only: the host holds the store natively and
         /// clients hold the mirrored copy, so this works even for menu reports.</summary>
         private static void WriteSaveStore(string dir)
         {
@@ -721,47 +1087,15 @@ namespace BigAmbitionsMP
                 sb.AppendLine("| session | player | day | .hsg bytes | written (UTC) | attached |");
                 sb.AppendLine("|---|---|---|---|---|---|");
 
-                long budget = SaveAttachBudgetBytes;
                 string savesDir = Path.Combine(dir, "saves");
-
-                // The anomaly reference: each member's day in the ACTIVE session. Day source
-                // is the game's own .hsg.meta sidecar — written by the SAME native Save() call
-                // as the .hsg, so it cannot lag the file it sits beside. The mod's manifest
-                // slot is the fallback only: field 150521 proved manifest days can run days
-                // behind the files (client '-auto' listed 24, the .hsg held 26), which both
-                // corrupted this column and minted false ANOMALY attachments.
-                var activeManifest = MPSaveManager.ReadManifest(session);
-                var activeDays = new Dictionary<string, int>();
-                if (activeManifest?.Slots != null)
-                    foreach (var s in activeManifest.Slots) activeDays[s.StableId] = s.Day;
-                string activeFolder = "";
-                try { activeFolder = MPSaveManager.MpSessionFolder(session); } catch { }
-                var activeDayFromMeta = new HashSet<string>();   // review F6: provenance of each reference day
-                if (!string.IsNullOrEmpty(activeFolder) && Directory.Exists(activeFolder))
-                    foreach (var md in Directory.GetDirectories(activeFolder))
-                    {
-                        string sid = Path.GetFileName(md);
-                        if (!sid.StartsWith("guid-") && !sid.StartsWith("steam-")) continue;
-                        int d = MetaDay(NewestHsgIn(md, out _));
-                        if (d >= 0) { activeDays[sid] = d; activeDayFromMeta.Add(sid); }
-                    }
+                var rows = new List<(string Hsg, string Line)>();
 
                 foreach (var s in MPSaveCoordinator.LineageSessions(session))
                 {
                     string folder = "";
                     try { folder = MPSaveManager.MpSessionFolder(s); } catch { }
                     if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder)) continue;
-                    bool isActive = s == session;
-                    var manifest = isActive ? activeManifest : MPSaveManager.ReadManifest(s);
-
-                    // Session-root json (manifest + ledgers) rides along for the active
-                    // session — without it the attached .hsg set isn't loadable.
-                    if (isActive)
-                        foreach (var j in Directory.GetFiles(folder, "*.json"))
-                        {
-                            long len = 0; try { len = new FileInfo(j).Length; } catch { }
-                            if (AttachSaveFile(j, Path.Combine(savesDir, s, Path.GetFileName(j)), budget)) budget -= len;
-                        }
+                    var manifest = MPSaveManager.ReadManifest(s);
 
                     foreach (var memberDir in Directory.GetDirectories(folder))
                     {
@@ -771,48 +1105,103 @@ namespace BigAmbitionsMP
                         if (hsg == null) continue;
                         var slot = manifest?.Slots?.Find(x => x.StableId == stable);
                         int manifestDay = slot?.Day ?? -1;
+                        // Day source is the game's own .hsg.meta sidecar — written by the SAME native
+                        // Save() call as the .hsg, so it cannot lag the file it sits beside. The mod's
+                        // manifest slot is the fallback only: field 150521 proved manifest days can run
+                        // days behind the files (client '-auto' listed 24, the .hsg held 26).
                         int metaDay = MetaDay(hsg);
                         int day = metaDay >= 0 ? metaDay : manifestDay;
                         string who = !string.IsNullOrEmpty(slot?.DisplayName) ? slot!.DisplayName : stable;
                         long bytes = 0; try { bytes = new FileInfo(hsg).Length; } catch { }
-
-                        bool anomaly = !isActive && day >= 0 && activeDays.TryGetValue(stable, out int ad) && Math.Abs(day - ad) > 1;
-                        string attachNote = "-";
-                        if (isActive || anomaly)
-                        {
-                            string dest = Path.Combine(savesDir, isActive ? s : "anomaly-" + s, stable, Path.GetFileName(hsg));
-                            if (AttachSaveFile(hsg, dest, budget))
-                            {
-                                budget -= bytes; attachNote = anomaly ? "ANOMALY-ATTACHED" : "yes";
-                                // Review F4: the day column is sidecar-dated — ship the sidecar beside its
-                                // save (~1KB, not counted against the budget) so the column is auditable
-                                // and the attached copy stays loadable through the native save scanner.
-                                try { string mp = hsg + ".meta"; if (File.Exists(mp)) AttachSaveFile(mp, dest + ".meta", long.MaxValue); } catch { }
-                            }
-                            else attachNote = "over size budget";
-                        }
-                        // Review F6: the anomaly compare is only trustworthy when BOTH days come from
-                        // the same source — flag mixed sidecar-vs-manifest rows so a mixed-source
-                        // ANOMALY flag is never read as a proven rollback.
-                        if (anomaly && (metaDay >= 0) != activeDayFromMeta.Contains(stable))
-                            attachNote += " (mixed day sources)";
                         // A manifest that disagrees with the sidecar is itself a defect worth
                         // seeing in every bundle — keep it visible instead of silently healing it.
                         string dayCell = day >= 0 ? day.ToString(CultureInfo.InvariantCulture) : "?";
                         if (metaDay >= 0 && manifestDay >= 0 && metaDay != manifestDay)
                             dayCell += $" (manifest says {manifestDay})";
-                        sb.AppendLine($"| {s} | {who} | {dayCell} | {bytes:N0} | {newest:yyyy-MM-dd HH:mm:ss} | {attachNote} |");
+                        rows.Add((hsg, $"| {s} | {who} | {dayCell} | {bytes:N0} | {newest:yyyy-MM-dd HH:mm:ss} |"));
                     }
                 }
+
+                var attached = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var players = PlayersToAttach(session, out string whoNote);
+                // M1: pick each player's copy exactly as the load-time SERVE path does (ResolveMemberSave):
+                // the ranked eligible copy across the lineage, fenced by the loaded world's day and by the
+                // rollback window - so after a load of an older slot (or a newer save-as fork of the same
+                // playthrough) the report carries the timeline the player is actually on, never an
+                // abandoned one. The listing above still shows every copy.
+                int fenceDay = -1;
+                try { fenceDay = MPSaveCoordinator.FenceDayFor(session); } catch { }
+                foreach (var sid in players)
+                {
+                    var best = MPSaveCoordinator.LineageNewestEligible(session, sid, fenceDay, allowUnknownDay: true, out _);
+                    if (best == null) continue;
+                    string pickSession = best.Value.srcSession;
+                    string? pickHsg = NewestHsgIn(best.Value.srcDir, out _);
+                    if (pickHsg == null) continue;
+                    string dest = Path.Combine(savesDir, pickSession, sid, Path.GetFileName(pickHsg));
+                    if (!AttachSaveFile(pickHsg, dest)) continue;
+                    attached.Add(pickHsg);
+                    // Review F4: the day column is sidecar-dated — ship the sidecar beside its save
+                    // so the column is auditable and the copy stays loadable through the native scanner.
+                    try { string mp = pickHsg + ".meta"; if (File.Exists(mp)) AttachSaveFile(mp, dest + ".meta"); } catch { }
+                    // The session's manifest rides along - without it the attached .hsg isn't loadable.
+                    try
+                    {
+                        string mf = Path.Combine(MPSaveManager.MpSessionFolder(pickSession), "manifest.bamp.json");
+                        string md = Path.Combine(savesDir, pickSession, "manifest.bamp.json");
+                        if (File.Exists(mf) && !File.Exists(md)) AttachSaveFile(mf, md);
+                    }
+                    catch { }
+                }
+                foreach (var r in rows) sb.AppendLine(r.Line + (attached.Contains(r.Hsg) ? " yes |" : " - |"));
                 sb.AppendLine();
-                sb.AppendLine("Rows without files are metadata only — stale/mismatched copies are visible without uploading them.");
+                sb.AppendLine($"Attached: the newest save of {whoNote}. Rows without files are metadata only — stale/mismatched copies are visible without uploading them.");
                 File.WriteAllText(Path.Combine(dir, "save-store.md"), sb.ToString());
+                Plugin.Logger.LogInfo($"[BugReport] Save attach: {attached.Count} .hsg for {players.Count} player(s) ({whoNote}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] save store attach: {ex.Message}"); }
         }
 
-        /// <summary>Newest .hsg in one member folder (path + UTC write time). Shared by the
-        /// active-day pre-pass and the row scan so the two can never pick different files.</summary>
+        /// <summary>Stable ids whose newest save this report carries: the reporter, plus the
+        /// players connected right now (see WriteSaveStore). A client cannot see stable ids of
+        /// other clients, so it matches lobby names against the manifest's DisplayName and skips
+        /// any name that more than one slot carries.</summary>
+        private static List<string> PlayersToAttach(string session, out string note)
+        {
+            var set = new List<string>();
+            note = "the reporter";
+            try
+            {
+                string me = MPConfig.StableId ?? "";
+                if (me.Length > 0) set.Add(me);
+                if (MPServer.IsRunning)
+                {
+                    foreach (var sid in MPServer.ConnectedStableIds())
+                        if (!string.IsNullOrEmpty(sid) && !set.Contains(sid)) set.Add(sid);
+                    note = "the reporter (host) and every connected player";
+                }
+                else if (MPClient.IsConnected)
+                {
+                    var slots = MPSaveManager.ReadManifest(session)?.Slots ?? new List<MpSlot>();
+                    var host = slots.Find(x => x.IsHost);
+                    if (host != null && !string.IsNullOrEmpty(host.StableId) && !set.Contains(host.StableId)) set.Add(host.StableId);
+                    var ambiguous = new List<string>();
+                    foreach (var name in MPClient.LobbyPlayers)
+                    {
+                        var sids = slots.Where(x => string.Equals(x.DisplayName, name, StringComparison.Ordinal) && !string.IsNullOrEmpty(x.StableId))
+                                        .Select(x => x.StableId).Distinct().ToList();
+                        if (sids.Count == 1) { if (!set.Contains(sids[0])) set.Add(sids[0]); }
+                        else if (sids.Count > 1) ambiguous.Add(name);
+                    }
+                    note = "the reporter (client), the host and name-matched connected players"
+                         + (ambiguous.Count > 0 ? $" (skipped ambiguous: {string.Join(", ", ambiguous)})" : "");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BugReport] save attach players: {ex.Message}"); }
+            return set;
+        }
+
+        /// <summary>Newest .hsg in one member folder (path + UTC write time).</summary>
         private static string? NewestHsgIn(string memberDir, out DateTime newestUtc)
         {
             newestUtc = DateTime.MinValue; string? best = null;
@@ -849,13 +1238,13 @@ namespace BigAmbitionsMP
             catch { return -1; }
         }
 
-        /// <summary>Copy one save file under the budget. Share-tolerant read (the .hsg may
-        /// be mid-rotation); any failure = not attached, the listing row says so.</summary>
-        private static bool AttachSaveFile(string source, string dest, long budgetLeft)
+        /// <summary>Copy one save file. Share-tolerant read (the .hsg may be mid-rotation); any
+        /// failure = not attached, the listing row says so. H-REPORTLOSS-1: no size budget here
+        /// any more - the upload planner puts saves LAST and leaves out whatever does not fit.</summary>
+        private static bool AttachSaveFile(string source, string dest)
         {
             try
             {
-                if (new FileInfo(source).Length > budgetLeft) return false;
                 Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                 using var src = File.Open(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                 using var dst = File.Create(dest);
@@ -1181,33 +1570,151 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
-        private static bool UploadReport(string url, bool direct, string dir, string reason, string[] discordTagIds)
+        /// <summary>One upload attempt for one report folder (H-REPORTLOSS-1). Attempt 1 runs from
+        /// Create (which already holds the folder lock); retries run from the outbox pass. Checks
+        /// the stop rules right before sending, rebuilds a smaller zip on a retry, POSTs once,
+        /// records the attempt in outbox.json and logs one line. True = delivered.</summary>
+        private static bool RunUploadAttempt(string dir, bool lockHeld, AttemptKind kind)
         {
+            FileStream? lk = null;
+            bool gated = false;
+            string name = Path.GetFileName(dir);
             try
             {
-                if (direct && !LooksLikeDiscordWebhook(url))
+                if (!lockHeld)
                 {
-                    Plugin.Logger.LogWarning("[BugReport] Direct webhook URL is not a Discord webhook; upload skipped.");
+                    lk = TryOpenOutboxLock(dir);
+                    if (lk == null) return false;   // another attempt (maybe the other instance's) has it
+                }
+                _uploadGate.Wait(); gated = true;
+                // L4: re-read under the lock + gate — another process (or pass) may have moved it on.
+                var ob = ReadOutbox(dir);
+                if (ob == null || ob.State != "pending") return ob?.State == "sent";
+                if ((kind == AttemptKind.Due || kind == AttemptKind.Launch) && !ReadyFor(ob, kind == AttemptKind.Launch)) return false;
+                int k = ob.Attempts.Count + 1;
+
+                string target = CurrentUploadTarget(out bool direct);
+                string stop = "";
+                if (ob.Attempts.Count >= MaxUploadAttempts) stop = $"{MaxUploadAttempts} attempts used";
+                else if (DateTime.TryParse(ob.Created, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var created)
+                         && (DateTime.UtcNow - created.ToUniversalTime()).TotalDays > MaxOutboxAgeDays) stop = "older than 7 days";
+                else if (!string.Equals(target, ob.Target, StringComparison.Ordinal)) stop = "the upload address changed since the report was made";
+                else if (direct && !LooksLikeDiscordWebhook(target)) stop = "direct webhook URL is not a Discord webhook";
+                if (stop.Length > 0)
+                {
+                    ob.State = "abandoned"; ob.NextAt = null; ob.Reason = stop;
+                    WriteOutbox(dir, ob);
+                    if (kind != AttemptKind.First) _uploadWatchers.TryRemove(name, out _);   // L9 (attempt 1's caller is told by NotifyUploadWatcher, which then drops it)
+                    Plugin.Logger.LogWarning($"[BugReport] Outbox: {name} abandoned before attempt {k}/{MaxUploadAttempts} - {stop}.");
                     return false;
                 }
+                if (kind == AttemptKind.StopCheckOnly) return false;   // not due: the stop rules were all this pass had to apply
 
+                // Built BEFORE the connection opens (task #40, user-directed 2026-08-16): a
+                // refused/failed connection still leaves the REDACTED zip in the report folder —
+                // the file an offline player should share manually (the loose files are raw by design).
+                string zip = BuildUploadZip(dir, k, out var looseFiles);
+                var r = PostReport(ob.Target, direct, zip, looseFiles, ob);
+
+                ob.Attempts.Add(new OutboxAttempt
+                {
+                    Utc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture), Bytes = r.Bytes, Timeout = r.TimeoutS,
+                    Result = r.Ok ? "OK " + r.StatusText : "FAIL " + r.StatusText + ": " + r.Message, Seconds = Math.Round(r.Ms / 1000.0, 1),
+                });
+                string next;
+                if (r.Ok) { ob.State = "sent"; ob.NextAt = null; next = "none: sent"; }
+                else if (r.Status == 400 || r.Status == 403) { ob.State = "abandoned"; ob.NextAt = null; ob.Reason = $"HTTP {r.Status} (final)"; next = $"none: HTTP {r.Status} is final"; }
+                else if (k >= MaxUploadAttempts) { ob.State = "abandoned"; ob.NextAt = null; ob.Reason = $"{MaxUploadAttempts} attempts used"; next = $"none: {MaxUploadAttempts} attempts used"; }
+                else if (k <= RetryGapMinutes.Length)
+                {
+                    DateTime at = DateTime.UtcNow.AddMinutes(RetryGapMinutes[k - 1]);
+                    if (r.RetryAfterS > 0 && DateTime.UtcNow.AddSeconds(r.RetryAfterS) > at) at = DateTime.UtcNow.AddSeconds(r.RetryAfterS);   // 429: honour Retry-After
+                    ob.NextAt = at.ToString("O", CultureInfo.InvariantCulture);
+                    next = at.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "Z";
+                }
+                else { ob.NextAt = null; next = "none: next game launch"; }
+                WriteOutbox(dir, ob);
+                if (ob.State == "abandoned" && kind != AttemptKind.First) _uploadWatchers.TryRemove(name, out _);   // L9 (attempt 1's caller is told by NotifyUploadWatcher, which then drops it)
+
+                string head = $"[BugReport] upload attempt {k}/{MaxUploadAttempts} {name} bytes={r.Bytes} timeout={r.TimeoutS}s -> ";
+                if (r.Ok) Plugin.Logger.LogInfo(head + $"OK {r.StatusText} in {r.Ms}ms; next={next}");
+                else Plugin.Logger.LogWarning(head + $"FAIL {r.StatusText} after {r.Ms}ms: {r.Message} body={r.Body}; next={next}");
+                return r.Ok;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[BugReport] upload attempt {name}: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                if (gated) _uploadGate.Release();
+                try { lk?.Dispose(); } catch { }
+            }
+        }
+
+        private sealed class UploadOutcome
+        {
+            public bool Ok;
+            public int Status;              // HTTP status, 0 when no response came back
+            public string StatusText = "";  // the status number, or the WebExceptionStatus name
+            public string Message = "";
+            public string Body = "";        // first 300 chars of an error response
+            public long Bytes;
+            public int TimeoutS;
+            public long Ms;
+            public int RetryAfterS;
+        }
+
+        /// <summary>The single POST of one attempt. Timeout = 20 s + 1 s per 64 KB, clamped to
+        /// 30..180 s (the old flat 15 s is what lost report 20260919-232955); ReadWriteTimeout
+        /// 60 s per read/write; the body length is computed first and sent unbuffered, so a big
+        /// report streams instead of being copied into memory.</summary>
+        private static UploadOutcome PostReport(string url, bool direct, string zip, List<string> looseFiles, OutboxRecord ob)
+        {
+            var o = new UploadOutcome();
+            var sw = Stopwatch.StartNew();
+            try
+            {
                 try { ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12; } catch { }
 
-                // One zip per report (2026-07-08) — the redaction already happened inside the
-                // bundle, and WriteFilePart streams .zip as binary. Loose files only as fallback.
-                // Built BEFORE the connection opens (task #40, user-directed 2026-08-16): a
-                // refused/failed connection then still leaves the REDACTED zip in the report
-                // folder — the file an offline player should share manually (the loose files
-                // are raw by design) — and the rig can verify the zip without a live relay.
-                string zip = BuildUploadZip(dir);
-
                 string boundary = "----BAMPBugReport" + Guid.NewGuid().ToString("N");
+                var payloadObj = new Dictionary<string, object>
+                {
+                    ["content"] = ob.Content,
+                    ["thread_name"] = ob.ThreadName
+                };
+                if (ob.Tags.Length > 0)
+                    payloadObj["applied_tags"] = ob.Tags;
+                var parts = new List<object>();   // byte[] (in memory) or string (a file streamed as-is)
+                AddStringPart(parts, boundary, "payload_json", JsonConvert.SerializeObject(payloadObj), "application/json");
+                // One zip per report (2026-07-08) — the redaction already happened inside the
+                // bundle, and the file part streams .zip as binary. Loose files only as fallback.
+                // M2: a POST with no file part would be recorded 'sent' while carrying nothing - refuse it.
+                if (zip.Length == 0 && looseFiles.Count == 0)
+                {
+                    o.StatusText = "NoFile";
+                    o.Message = "no zip and no loose files to send - POST refused, the report stays pending";
+                    o.Ms = sw.ElapsedMilliseconds;
+                    return o;
+                }
+                if (zip.Length > 0) AddFilePart(parts, boundary, "files[0]", zip);
+                else for (int i = 0; i < looseFiles.Count; i++) AddFilePart(parts, boundary, "files[" + i + "]", looseFiles[i]);
+                parts.Add(Ascii("--" + boundary + "--\r\n"));
+                long total = 0;
+                foreach (var p in parts) total += p is byte[] b ? b.Length : new FileInfo((string)p).Length;
+                o.Bytes = total;
+                o.TimeoutS = (int)Math.Min(180L, Math.Max(30L, 20L + total / 65536L));
+
                 var req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method = "POST";
                 req.UserAgent = "BigAmbitionsMP";
-                req.Timeout = 15000;
-                req.ReadWriteTimeout = 15000;
+                req.Timeout = o.TimeoutS * 1000;
+                req.ReadWriteTimeout = 60000;
                 req.ContentType = "multipart/form-data; boundary=" + boundary;
+                req.ContentLength = total;
+                req.AllowWriteStreamBuffering = false;
+                req.AllowAutoRedirect = false;   // L5: a 3xx is a FAIL, never a silent re-POST elsewhere
                 if (!direct)   // relay path — optional shared-key header (matches the Worker's RELAY_KEY)
                 {
                     string relayKey = MPConfig.BugReportRelayKeyLive();
@@ -1215,65 +1722,52 @@ namespace BigAmbitionsMP
                 }
 
                 using (var stream = req.GetRequestStream())
-                {
-                    string content = $"{MyPluginInfo.SHORT_NAME} bug report: {Role()} / session {Blank(MPLog.SessionId)} / {reason}";
-                    var payloadObj = new Dictionary<string, object>
+                    foreach (var p in parts)
                     {
-                        ["content"] = content,
-                        ["thread_name"] = DiscordThreadName(reason)
-                    };
-                    if (discordTagIds.Length > 0)
-                        payloadObj["applied_tags"] = discordTagIds;
-                    var payload = JsonConvert.SerializeObject(payloadObj);
-                    WriteStringPart(stream, boundary, "payload_json", payload, "application/json");
-
-                    if (zip.Length > 0)
-                    {
-                        WriteFilePart(stream, boundary, "files[0]", zip);
+                        if (p is byte[] b) WriteBytes(stream, b);
+                        else using (var f = File.Open((string)p, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) f.CopyTo(stream);
                     }
-                    else
-                    {
-                        int index = 0;
-                        foreach (var file in UploadFiles(dir))
-                        {
-                            WriteFilePart(stream, boundary, "files[" + index + "]", file);
-                            index++;
-                        }
-                    }
-
-                    WriteAscii(stream, "--" + boundary + "--\r\n");
-                }
 
                 using var resp = (HttpWebResponse)req.GetResponse();
-                Plugin.Logger.LogInfo($"[BugReport] Discord upload completed: {(int)resp.StatusCode} {resp.StatusCode}");
-                return true;
+                o.Status = (int)resp.StatusCode;
+                o.StatusText = o.Status.ToString(CultureInfo.InvariantCulture);
+                o.Ok = o.Status >= 200 && o.Status < 300;
+                if (!o.Ok) { o.Message = "not a success status (redirects are not followed)"; o.Body = ResponseHead(resp, 300); }
+            }
+            catch (WebException wex)
+            {
+                o.Message = wex.Message;
+                if (wex.Response is HttpWebResponse hr)
+                {
+                    o.Status = (int)hr.StatusCode;
+                    o.StatusText = o.Status.ToString(CultureInfo.InvariantCulture);
+                    try { int.TryParse(hr.Headers["Retry-After"], NumberStyles.Integer, CultureInfo.InvariantCulture, out o.RetryAfterS); } catch { }
+                    o.Body = ResponseHead(hr, 300);
+                    try { hr.Dispose(); } catch { }
+                }
+                else o.StatusText = wex.Status.ToString();
             }
             catch (Exception ex)
             {
-                Plugin.Logger.LogWarning($"[BugReport] Discord upload failed: {DiscordError(ex)}");
-                return false;
+                o.StatusText = ex.GetType().Name;
+                o.Message = ex.Message;
             }
+            o.Ms = sw.ElapsedMilliseconds;
+            return o;
         }
 
-        private static string DiscordError(Exception ex)
+        private static string ResponseHead(WebResponse resp, int max)
         {
             try
             {
-                if (ex is WebException web && web.Response != null)
-                {
-                    using var resp = web.Response;
-                    using var stream = resp.GetResponseStream();
-                    if (stream != null)
-                    using (var reader = new StreamReader(stream))
-                    {
-                        string body = reader.ReadToEnd();
-                        if (!string.IsNullOrWhiteSpace(body))
-                            return ex.Message + " body=" + body;
-                    }
-                }
+                using var s = resp.GetResponseStream();
+                if (s == null) return "";
+                using var reader = new StreamReader(s);
+                var buf = new char[max];
+                int n = reader.ReadBlock(buf, 0, max);
+                return new string(buf, 0, n).Replace('\r', ' ').Replace('\n', ' ');
             }
-            catch { }
-            return ex.Message;
+            catch { return ""; }
         }
 
         private static bool LooksLikeDiscordWebhook(string url)
@@ -1320,6 +1814,8 @@ namespace BigAmbitionsMP
             return name.Length == 0 ? MyPluginInfo.SHORT_NAME + " bug report" : name;
         }
 
+        /// <summary>Every file of a report folder that may go up - the bundle planner's candidate
+        /// list (it orders them by priority and applies the budget; H-REPORTLOSS-1).</summary>
         private static IEnumerable<string> UploadFiles(string dir)
         {
             foreach (var name in new[] { "description.txt", "report.md", "save-store.md", "peer-logs.txt", "Player.log", "Player-prev.log", "bamp-ring.log", "config-redacted.json" })
@@ -1354,86 +1850,311 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>Bundle the whole upload set into ONE zip (user directive 2026-07-08 — a single
-        /// file per Discord post instead of a spray of attachments). Text files (.log/.txt/.md/.json)
-        /// go through the same IPv4 redaction the loose-file upload applied — redaction must happen
-        /// BEFORE compression, a zip entry can't be scrubbed in flight. The local report folder keeps
-        /// the un-redacted originals, exactly as before. Returns "" on failure (caller falls back to
-        /// loose files so a zip bug can never lose a report).</summary>
-        private static string BuildUploadZip(string dir)
+        // ── Bundle planner (H-REPORTLOSS-1) ─────────────────────────────────────────────────
+        // Fill the budget in priority order, skipping an item that does not fit and moving on:
+        //   1 the reporter's Player.log (already head+tail capped at 4 MB)
+        //   2 small text files (description, report.md, save-store.md, peer-logs.txt, config,
+        //     plus the generated bundle-index.txt and outbox.txt)
+        //   3 peers' Player.logs   4 unity-crash files
+        //   5 Player-prev logs (own + peers) and bamp-ring.log
+        //   6 attachments (the per-file 24 MB skip at copy time stays)
+        //   7 saves - LAST, the first thing to be cut
+        // A RETRY sends less: attempt 2 drops the saves; attempt 3+ also drops attachments and
+        // the Player-prev logs. The reporter's Player.log is never dropped.
+        private sealed class BundleItem
         {
+            public string Rel = "";        // zip entry name (steam ids already aliased)
+            public int Priority;
+            public int Order;
+            public string? File;           // source on disk (raw; text is redacted when written)
+            public string? ZipEntry;       // or: an entry of the previous zip (already redacted)
+            public bool Text;
+            public long RawBytes;
+            public long PackedBytes;       // compressed size (estimate for text, raw size for binary)
+            public bool In;
+            public string Why = "";
+        }
+
+        private static int PriorityOf(string rel)
+        {
+            string r = rel.Replace('\\', '/');
+            if (r.Equals("Player.log", StringComparison.OrdinalIgnoreCase)) return 1;
+            if (r.StartsWith("saves/", StringComparison.OrdinalIgnoreCase)) return 7;
+            if (r.StartsWith("attachments/", StringComparison.OrdinalIgnoreCase)) return 6;
+            if (IsPrevLog(r) || r.Equals("bamp-ring.log", StringComparison.OrdinalIgnoreCase)) return 5;
+            if (r.StartsWith("unity-crash/", StringComparison.OrdinalIgnoreCase)) return 4;
+            if (r.StartsWith("peer/", StringComparison.OrdinalIgnoreCase)) return 3;
+            return 2;
+        }
+
+        private static bool IsPrevLog(string rel) => Path.GetFileName(rel).IndexOf("Player-prev", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        private static string RetryDropReason(BundleItem it, int attempt)
+        {
+            if (attempt >= 2 && it.Priority == 7) return "dropped on retry (attempt 2+ sends no saves)";
+            if (attempt >= 3 && (it.Priority == 6 || IsPrevLog(it.Rel))) return "dropped on retry (attempt 3+ sends no attachments or Player-prev logs)";
+            return "";
+        }
+
+        private static bool IsTextFile(string path)
+        {
+            string ext = Path.GetExtension(path);
+            return ext.Equals(".log", StringComparison.OrdinalIgnoreCase) || ext.Equals(".txt", StringComparison.OrdinalIgnoreCase)
+                || ext.Equals(".md", StringComparison.OrdinalIgnoreCase) || ext.Equals(".json", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static byte[] RedactedBytes(string path) => Encoding.UTF8.GetBytes(RedactSensitive(File.ReadAllText(path)));
+
+        /// <summary>Counts what a DeflateStream writes, so the planner learns a text file's packed
+        /// size without holding the compressed bytes.</summary>
+        private sealed class CountingStream : Stream
+        {
+            public long Count;
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => Count;
+            public override long Position { get => Count; set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => Count += count;
+        }
+
+        private static long PackedSize(byte[] data)
+        {
+            var cs = new CountingStream();
+            using (var ds = new System.IO.Compression.DeflateStream(cs, System.IO.Compression.CompressionLevel.Optimal, leaveOpen: true))
+                ds.Write(data, 0, data.Length);
+            return cs.Count;
+        }
+
+        /// <summary>The candidate list (from the report folder, or - for a folder already cut to
+        /// its zip - from that zip's entries), sorted by priority and marked in/out.</summary>
+        private static List<BundleItem> PlanBundle(string dir, int attempt, string? sourceZip)
+        {
+            var items = new List<BundleItem>();
+            if (sourceZip != null)
+            {
+                using var za = new System.IO.Compression.ZipArchive(File.OpenRead(sourceZip), System.IO.Compression.ZipArchiveMode.Read);
+                foreach (var e in za.Entries)
+                {
+                    if (e.FullName.EndsWith("/") || e.FullName == "bundle-index.txt" || e.FullName == "outbox.txt") continue;   // regenerated
+                    items.Add(new BundleItem { Rel = e.FullName, ZipEntry = e.FullName, RawBytes = e.Length, PackedBytes = e.CompressedLength });
+                }
+            }
+            else
+                foreach (var f in UploadFiles(dir))
+                {
+                    string rel = f.StartsWith(dir, StringComparison.OrdinalIgnoreCase)
+                               ? f.Substring(dir.Length).TrimStart('\\', '/').Replace('\\', '/')
+                               : Path.GetFileName(f);
+                    bool text = IsTextFile(f);
+                    long raw = new FileInfo(f).Length;
+                    items.Add(new BundleItem
+                    {
+                        Rel = RedactEntryName(rel), File = f, Text = text, RawBytes = raw,
+                        PackedBytes = text ? PackedSize(RedactedBytes(f)) : raw,   // saves/attachments are already compressed
+                    });
+                }
+            for (int i = 0; i < items.Count; i++) { items[i].Priority = PriorityOf(items[i].Rel); items[i].Order = i; }
+            items.Sort((a, b) => a.Priority != b.Priority ? a.Priority.CompareTo(b.Priority) : a.Order.CompareTo(b.Order));
+
+            long budget = CurrentBudgetBytes, used = BundleReserveBytes;
+            foreach (var it in items)
+            {
+                string drop = RetryDropReason(it, attempt);
+                if (drop.Length > 0) { it.Why = drop; continue; }
+                if (it.Priority == 6) continue;   // M3: attachments are placed below, outside the budget
+                long cost = it.PackedBytes + 256;   // + the entry's zip headers
+                if (used + cost > budget)
+                {
+                    it.Why = $"over budget ({it.PackedBytes / 1024} KB packed, {Math.Max(0L, budget - used) / 1024} KB of {budget / 1024} KB left)";
+                    continue;
+                }
+                used += cost;
+                it.In = true;
+            }
+            // M3: the popup promises attachments (each up to 24 MB) go up, so they are EXEMPT from the
+            // budget; only the relay's 25 MiB POST ceiling limits them. Smallest first, so whatever
+            // does not fit is exactly the largest ones.
+            long total = used;
+            foreach (var it in items.Where(x => x.Priority == 6 && x.Why.Length == 0).OrderBy(x => x.PackedBytes))
+            {
+                long cost = it.PackedBytes + 256;
+                if (total + cost > UploadCeilingBytes)
+                {
+                    it.Why = $"over the 25 MiB upload ceiling ({it.PackedBytes / 1024} KB; attachments are exempt from the {budget / 1024} KB budget, the largest are left out first)";
+                    continue;
+                }
+                total += cost;
+                it.In = true;
+            }
+            return items;
+        }
+
+        private static string BundleIndexText(string name, int attempt, List<BundleItem> plan)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"Bundle index - {name}, upload attempt {attempt}/{MaxUploadAttempts}, budget {CurrentBudgetBytes / 1024} KB. Priority order: Player.log, small text, peers' logs, crash files, Player-prev + ring logs, attachments, saves.");
+            sb.AppendLine("Included (bytes before compression):");
+            foreach (var it in plan) if (it.In) sb.AppendLine($"  {it.RawBytes,12}  {it.Rel}");
+            sb.AppendLine("Left out:");
+            int n = 0;
+            foreach (var it in plan) if (!it.In) { n++; sb.AppendLine($"  {it.RawBytes,12}  {it.Rel}  - {it.Why}"); }
+            if (n == 0) sb.AppendLine("  none");
+            return sb.ToString();
+        }
+
+        /// <summary>outbox.txt inside every zip: the reports on this machine still pending or given
+        /// up, with their attempt history (never the upload address).</summary>
+        private static string OutboxSummaryText(string root)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"Undelivered bug reports on this machine at {DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)}Z (pending = still being retried, abandoned = given up):");
+            int n = 0;
             try
             {
-                string zipPath = Path.Combine(dir, Path.GetFileName(dir) + ".zip");
-                using (var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write))
-                using (var zip = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+                foreach (var d in ReportDirsNewestFirst(root))
                 {
-                    foreach (var file in UploadFiles(dir))
+                    var ob = ReadOutbox(d);
+                    if (ob == null || (ob.State != "pending" && ob.State != "abandoned")) continue;
+                    n++;
+                    sb.AppendLine($"{Path.GetFileName(d)}  state={ob.State}  created={ob.Created}  next={(string.IsNullOrEmpty(ob.NextAt) ? "-" : ob.NextAt)}{(ob.Reason.Length > 0 ? "  reason=" + ob.Reason : "")}");
+                    for (int i = 0; i < ob.Attempts.Count; i++)
                     {
-                        // Preserve the one level of structure that matters (unity-crash/, attachments/).
-                        string rel = file.StartsWith(dir, StringComparison.OrdinalIgnoreCase)
-                                   ? file.Substring(dir.Length).TrimStart('\\', '/').Replace('\\', '/')
-                                   : Path.GetFileName(file);
-                        var entry = zip.CreateEntry(RedactEntryName(rel), System.IO.Compression.CompressionLevel.Optimal);
-                        using var es = entry.Open();
-                        string ext = Path.GetExtension(file);
-                        bool text = ext.Equals(".log", StringComparison.OrdinalIgnoreCase) || ext.Equals(".txt", StringComparison.OrdinalIgnoreCase)
-                                 || ext.Equals(".md", StringComparison.OrdinalIgnoreCase) || ext.Equals(".json", StringComparison.OrdinalIgnoreCase);
-                        if (text)
-                        {
-                            var bytes = Encoding.UTF8.GetBytes(RedactSensitive(File.ReadAllText(file)));
-                            es.Write(bytes, 0, bytes.Length);
-                        }
-                        else
-                        {
-                            using var src = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                            src.CopyTo(es);
-                        }
+                        var a = ob.Attempts[i];
+                        sb.AppendLine($"    attempt {i + 1}: {a.Utc}  bytes={a.Bytes}  timeout={a.Timeout}s  {a.Result}  ({a.Seconds.ToString("0.0", CultureInfo.InvariantCulture)}s)");
                     }
                 }
-                Plugin.Logger.LogInfo($"[BugReport] Upload bundle: {Path.GetFileName(zipPath)} ({new FileInfo(zipPath).Length / 1024} KB).");
+            }
+            catch { }
+            if (n == 0) sb.AppendLine("none");
+            return sb.ToString();
+        }
+
+        /// <summary>Bundle the planned upload set into ONE zip (user directive 2026-07-08 — a single
+        /// file per Discord post instead of a spray of attachments). Text files (.log/.txt/.md/.json)
+        /// go through the same redaction as the loose-file upload — redaction must happen BEFORE
+        /// compression, a zip entry can't be scrubbed in flight. The local report folder keeps the
+        /// un-redacted originals. H-REPORTLOSS-1: the planner decides what goes in (bundle-index.txt
+        /// in the zip lists every entry with its size and every left-out one with its reason); a
+        /// folder already cut to its zip is rebuilt from that zip. Returns "" on failure, with
+        /// <paramref name="loose"/> = the planned files in the same order (max 10) so a zip bug can
+        /// never lose a report.</summary>
+        private static string BuildUploadZip(string dir, int attempt, out List<string> loose)
+        {
+            loose = new List<string>();
+            string name = Path.GetFileName(dir);
+            string zipPath = Path.Combine(dir, name + ".zip");
+            bool fromZip = !File.Exists(Path.Combine(dir, "description.txt")) && File.Exists(zipPath);
+            List<BundleItem> plan;
+            try { plan = PlanBundle(dir, attempt, fromZip ? zipPath : null); }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[BugReport] bundle plan failed ({ex.Message}){(fromZip ? " — resending the previous bundle." : " — falling back to loose files.")}");
+                if (fromZip) return zipPath;
+                AddLooseCapped(loose, UploadFiles(dir));
+                return "";
+            }
+
+            string tmp = zipPath + ".tmp";
+            try
+            {
+                string index = BundleIndexText(name, attempt, plan);
+                string outboxTxt = OutboxSummaryText(Path.GetDirectoryName(dir) ?? dir);
+                using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write))
+                using (var zip = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+                {
+                    System.IO.Compression.ZipArchive? src = null;
+                    try
+                    {
+                        if (fromZip) src = new System.IO.Compression.ZipArchive(File.OpenRead(zipPath), System.IO.Compression.ZipArchiveMode.Read);
+                        foreach (var (entryName, body) in new[] { ("bundle-index.txt", index), ("outbox.txt", outboxTxt) })
+                        {
+                            var ge = zip.CreateEntry(entryName, System.IO.Compression.CompressionLevel.Optimal);
+                            using var gs = ge.Open();
+                            WriteBytes(gs, Encoding.UTF8.GetBytes(RedactSensitive(body)));
+                        }
+                        foreach (var it in plan)
+                        {
+                            if (!it.In) continue;
+                            var entry = zip.CreateEntry(it.Rel, System.IO.Compression.CompressionLevel.Optimal);
+                            using var es = entry.Open();
+                            if (it.ZipEntry != null)
+                            {
+                                var old = src?.GetEntry(it.ZipEntry);
+                                if (old != null) using (var os = old.Open()) os.CopyTo(es);
+                            }
+                            else if (it.File != null && it.Text) WriteBytes(es, RedactedBytes(it.File));
+                            else if (it.File != null)
+                                using (var fsrc = File.Open(it.File, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) fsrc.CopyTo(es);
+                        }
+                    }
+                    finally { src?.Dispose(); }
+                }
+                ReplaceFile(tmp, zipPath);   // M2: the previous zip is never deleted before the new one is in place
+
+                int nIn = plan.Count(x => x.In), nOut = plan.Count - nIn;
+                int hsgIn = plan.Count(x => x.In && x.Rel.EndsWith(".hsg", StringComparison.OrdinalIgnoreCase));
+                int hsgOut = plan.Count(x => !x.In && x.Rel.EndsWith(".hsg", StringComparison.OrdinalIgnoreCase));
+                bool logIn = plan.Any(x => x.In && x.Priority == 1);
+                var outs = plan.Where(x => !x.In).Select(x => $"{x.Rel} ({x.Why})").ToList();
+                string outList = outs.Count == 0 ? "" : "; left out: " + string.Join(", ", outs.Take(12)) + (outs.Count > 12 ? $" …+{outs.Count - 12} more" : "");
+                Plugin.Logger.LogInfo($"[BugReport] Upload bundle: {Path.GetFileName(zipPath)} ({new FileInfo(zipPath).Length / 1024} KB), attempt {attempt}: {nIn} in, {nOut} left out, hsg in={hsgIn} out={hsgOut}, reporter Player.log {(logIn ? "included" : "LEFT OUT")}{outList}.");
                 return zipPath;
             }
             catch (Exception ex)
             {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+                if (fromZip && File.Exists(zipPath))
+                {
+                    Plugin.Logger.LogWarning($"[BugReport] zip rebuild failed ({ex.Message}) — resending the previous bundle.");
+                    return zipPath;
+                }
                 Plugin.Logger.LogWarning($"[BugReport] zip bundle failed ({ex.Message}) — falling back to loose files.");
+                AddLooseCapped(loose, plan.Where(it => it.In && it.File != null).Select(it => it.File!));
                 return "";
             }
         }
 
-        private static void WriteStringPart(Stream stream, string boundary, string name, string value, string contentType)
+        /// <summary>Re-check fold: the loose-file fallback keeps the same two limits the zip path has -
+        /// at most 10 files (Discord's per-message count) and the relay's ceiling in RAW bytes (loose
+        /// files are not compressed), taken in priority order, skipping any that would not fit.</summary>
+        private static void AddLooseCapped(List<string> loose, IEnumerable<string> files)
         {
-            WriteAscii(stream, "--" + boundary + "\r\n");
-            WriteAscii(stream, $"Content-Disposition: form-data; name=\"{name}\"\r\n");
-            WriteAscii(stream, $"Content-Type: {contentType}\r\n\r\n");
-            WriteBytes(stream, Encoding.UTF8.GetBytes(value));
-            WriteAscii(stream, "\r\n");
+            const long cap = 25L * 1024 * 1024 - 256 * 1024;
+            long used = 0;
+            foreach (var f in files)
+            {
+                if (loose.Count >= 10) break;
+                long len = 0; try { len = new FileInfo(f).Length; } catch { continue; }
+                if (used + len > cap) continue;
+                loose.Add(f); used += len;
+            }
         }
 
-        private static void WriteFilePart(Stream stream, string boundary, string name, string path)
+        private static void AddStringPart(List<object> parts, string boundary, string name, string value, string contentType)
         {
-            WriteAscii(stream, "--" + boundary + "\r\n");
-            WriteAscii(stream, $"Content-Disposition: form-data; name=\"{name}\"; filename=\"{Path.GetFileName(path)}\"\r\n");
-            WriteAscii(stream, "Content-Type: application/octet-stream\r\n\r\n");
-            string ext = Path.GetExtension(path);
+            parts.Add(Ascii("--" + boundary + "\r\n" + $"Content-Disposition: form-data; name=\"{name}\"\r\n" + $"Content-Type: {contentType}\r\n\r\n"));
+            parts.Add(Encoding.UTF8.GetBytes(value));
+            parts.Add(Ascii("\r\n"));
+        }
+
+        private static void AddFilePart(List<object> parts, string boundary, string name, string path)
+        {
+            parts.Add(Ascii("--" + boundary + "\r\n" + $"Content-Disposition: form-data; name=\"{name}\"; filename=\"{Path.GetFileName(path)}\"\r\n" + "Content-Type: application/octet-stream\r\n\r\n"));
             // .md and .json added 2026-08-26: this loose-file path is the FALLBACK used when the zip
             // build fails, and it was redacting only .log/.txt — so report.md, config-redacted.json and
             // every saves/**/*.json went up raw. The zip path already covers all four extensions, and
             // IPs, account names and Steam IDs must be stripped on BOTH upload paths, not just the zip
             // one — a fallback that quietly publishes more than the normal path is the worst shape.
-            if (ext.Equals(".log", StringComparison.OrdinalIgnoreCase) || ext.Equals(".txt", StringComparison.OrdinalIgnoreCase)
-             || ext.Equals(".md", StringComparison.OrdinalIgnoreCase)  || ext.Equals(".json", StringComparison.OrdinalIgnoreCase))
-            {
-                // Redact IPv4 addresses from TEXT uploads so the host's public IP is never published to Discord
-                //   (the local report folder keeps the un-redacted originals). Maintainer decision 2026-06-16.
-                WriteBytes(stream, Encoding.UTF8.GetBytes(RedactSensitive(File.ReadAllText(path))));
-            }
-            else
-            {
-                using (var file = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                    file.CopyTo(stream);
-            }
-            WriteAscii(stream, "\r\n");
+            // (Redact IPv4 addresses from TEXT uploads so the host's public IP is never published to
+            // Discord; the local report folder keeps the un-redacted originals. Maintainer decision 2026-06-16.)
+            if (IsTextFile(path)) parts.Add(RedactedBytes(path));
+            else parts.Add(path);   // binary (.zip / .hsg / images) streams as-is
+            parts.Add(Ascii("\r\n"));
         }
 
         // Replace IPv4 addresses with a placeholder — hides the host's public IP from uploaded logs.
@@ -1499,7 +2220,7 @@ namespace BigAmbitionsMP
         internal static string RedactEntryName(string rel)
             => string.IsNullOrEmpty(rel) ? rel : _steamId.Replace(rel, m => m.Value.Replace(m.Groups[1].Value, "p" + SteamAlias(m.Groups[1].Value)));
 
-        private static void WriteAscii(Stream stream, string value) => WriteBytes(stream, Encoding.ASCII.GetBytes(value));
+        private static byte[] Ascii(string value) => Encoding.ASCII.GetBytes(value);
 
         private static void WriteBytes(Stream stream, byte[] bytes) => stream.Write(bytes, 0, bytes.Length);
     }

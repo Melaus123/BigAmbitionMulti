@@ -3094,7 +3094,7 @@ namespace BigAmbitionsMP
         /// thread-safe; the IL2CPP save scanner is main-thread-only and this runs on serve paths
         /// too.
         /// H-SERVE-1 r2: the first entry of LineageRankedEligible.</summary>
-        private static (string srcSession, string srcDir, DateTime when, int day, int age)? LineageNewestEligible(
+        internal static (string srcSession, string srcDir, DateTime when, int day, int age)? LineageNewestEligible(   // internal: MPBugReport's save attach (H-REPORTLOSS-1 M1)
             string aroundSession, string stableId, int maxDay, bool allowUnknownDay, out int abandonedRefused)
         {
             var l = LineageRankedEligible(aroundSession, stableId, maxDay, allowUnknownDay, out abandonedRefused);
@@ -3105,7 +3105,7 @@ namespace BigAmbitionsMP
         /// (the carry runs during a save, on the main thread), else the target session's manifest
         /// (max slot day; serve paths may run off-thread where the live clock is unreadable).
         /// -1 = no reference → the fence stands down (legacy behavior).</summary>
-        private static int FenceDayFor(string session)
+        internal static int FenceDayFor(string session)   // internal: MPBugReport's save attach (H-REPORTLOSS-1 M1)
         {
             try { int d = SaveGameManager.Current?.Day ?? -1; if (d >= 0) return d; } catch { }
             try
