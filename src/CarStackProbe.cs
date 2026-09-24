@@ -24,6 +24,12 @@ namespace BigAmbitionsMP
     ///     old local-car x ghost pair was caught around a skip): a pass on the skip's first frame and every 2 s
     ///     after, with the traffic mode, the Gley cars alive (ambient / service / routed), the ghosts present and
     ///     the worst frame since the previous pass.
+    ///   - H-CARSTACK-1 confirming test (2026-09-24): on the switch to ghost mode and on every handover pass, one
+    ///     HCARS line (local cars alive / in view / keepable = in view AND within the retire distance / gone since
+    ///     the last pass / the longest a car has survived / the arrival gate) and up to 12 HCAR lines, nearest first,
+    ///     one per local car (model, distance to the handover anchor, in-view verdict, keep/retire verdict, how long
+    ///     it has survived the handover, nearest ghost + dY). Own budget; handover passes also get their own pair
+    ///     budget for pairs that involve a traffic car (the session pair budget is spent by parked cars at load).
     ///   The two timed kinds share one session budget of summary lines (with or without pairs); once it AND the
     ///   pair budget are spent they skip their whole pass.
     ///
@@ -69,6 +75,11 @@ namespace BigAmbitionsMP
 
         internal static void NoteTrafficMode(string mode)
         {
+            try
+            {
+                if (mode == TrafficSync.ModeGhost) { ResetCarTrack(); LocalCars("switch-to-ghost", 0f); }
+            }
+            catch { }
             try { Pass("traffic-mode=" + (mode ?? "")); } catch { }
         }
 
@@ -90,11 +101,16 @@ namespace BigAmbitionsMP
             {
                 if (handover == null || handover == TrafficSync.HandoverNone) { _handoverSeen = TrafficSync.HandoverNone; return; }
                 float now = Time.unscaledTime;
-                if (handover != _handoverSeen) { _handoverSeen = handover; _nextHandoverPass = now; }   // a new handover: pass now
+                if (handover != _handoverSeen)   // a new handover: pass now
+                {
+                    _handoverSeen = handover; _nextHandoverPass = now;
+                    if (handover != TrafficSync.HandoverToGhost) ResetCarTrack();   // to-ghost was reset on the switch itself
+                }
                 if (now < _nextHandoverPass) return;
                 _nextHandoverPass = now + CadencePassSeconds;
-                if (CadenceSpent) return;
                 string trig = handover == TrafficSync.HandoverToGhost ? "handover-to-ghost" : "handover-to-local";
+                try { LocalCars(trig, now - beganAt); } catch { }
+                if (CadenceSpent && _hoPairsLogged >= HandoverPairBudget) return;
                 int local = 0, ghosts = 0;
                 try { local = TrafficSync.LocalAmbientCount(); } catch { }
                 try { ghosts = TrafficSync.ClientTrafficGhostCount; } catch { }
@@ -157,6 +173,86 @@ namespace BigAmbitionsMP
                      $" skipPass={_skipPasses} mode={tmode} gley={gley} ambient={ambient} service={service} routed={routed} ghosts={ghosts} worstFrameMs={worstMs:F0}", true);
             }
             catch { }
+        }
+
+        // ── H-CARSTACK-1 confirming test (2026-09-24): the per-car handover lines ──
+        private const int CarLinesPerPass    = 12;
+        private const int CarLineBudget      = 700;   // HCAR + HCARS lines per session
+        private const int HandoverPairBudget = 30;    // PAIR lines of handover passes that involve a traffic car
+        private static int _carLines, _hoPairsLogged, _carPass;
+        private static readonly Dictionary<int, float> _carFirstSeen = new Dictionary<int, float>();
+        private static HashSet<int> _carPrev = new HashSet<int>();
+        private static HashSet<int> _carNow  = new HashSet<int>();
+        private static readonly List<KeyValuePair<float, VehicleComponent>> _carRows = new List<KeyValuePair<float, VehicleComponent>>();
+
+        private static void ResetCarTrack() { _carFirstSeen.Clear(); _carPrev.Clear(); _carNow.Clear(); _carPass = 0; }
+
+        /// <summary>Walks the SAME local-car set TickGhostHandover judges (active, not routed, not a kept service car)
+        /// and prints what the handover sees. Read-only: nothing is removed, moved or re-flagged.</summary>
+        private static void LocalCars(string trig, float age)
+        {
+            if (_carLines >= CarLineBudget) return;
+            float now = Time.unscaledTime;
+            Vector3 me;
+            bool haveMe = TrafficSync.ProbeHandoverAnchor(out me);
+            float retire = TrafficSync.ProbeRetireDistance;
+            _carRows.Clear();
+            _carNow.Clear();
+            int alive = 0, inView = 0, keepable = 0;
+            float heldMax = 0f;
+            var list = TrafficManager.Instance?.trafficVehicles?.GetVehicleList();
+            if (list != null)
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var v = list[i];
+                    if (v == null || !v.gameObject.activeSelf) continue;
+                    if (v.presetPath != null) continue;
+                    if (ServiceCars.IsClientKept(v.gameObject)) continue;
+                    alive++;
+                    int id = v.gameObject.GetInstanceID();
+                    _carNow.Add(id);
+                    float first;
+                    if (!_carFirstSeen.TryGetValue(id, out first)) { first = now; _carFirstSeen[id] = now; }
+                    if (now - first > heldMax) heldMax = now - first;
+                    float d = haveMe ? Vector3.Distance(v.gameObject.transform.position, me) : -1f;
+                    bool iv = TrafficSync.ProbeLocalCarInView(v);
+                    if (iv) inView++;
+                    if (iv && d >= 0f && d <= retire) keepable++;
+                    _carRows.Add(new KeyValuePair<float, VehicleComponent>(d, v));
+                }
+            int gone = 0;
+            foreach (var id in _carPrev) if (!_carNow.Contains(id)) gone++;
+            var swap = _carPrev; _carPrev = _carNow; _carNow = swap;
+            _carPass++;
+            int ghosts = 0;
+            try { ghosts = TrafficSync.ClientTrafficGhostCount; } catch { }
+            _carLines++;
+            Plugin.Logger.LogWarning($"[CarStack] HCARS trig={trig} age={age:F1}s pass={_carPass} local={alive} inView={inView} keepable={keepable} " +
+                                     $"goneSincePrev={gone} heldMaxS={heldMax:F1} ghosts={ghosts} {TrafficSync.ProbeHandoverGate()} retireAt={retire:F0}m " +
+                                     $"anchor=({me.x:F0},{me.y:F1},{me.z:F0})");
+            _carRows.Sort((x, y) => x.Key.CompareTo(y.Key));
+            for (int i = 0; i < _carRows.Count && i < CarLinesPerPass && _carLines < CarLineBudget; i++)
+            {
+                var v = _carRows[i].Value;
+                float d = _carRows[i].Key;
+                try
+                {
+                    var p = v.gameObject.transform.position;
+                    int id = v.gameObject.GetInstanceID();
+                    float first;
+                    float held = _carFirstSeen.TryGetValue(id, out first) ? now - first : 0f;
+                    bool iv = TrafficSync.ProbeLocalCarInView(v);
+                    string gm;
+                    float gdy;
+                    float gd = TrafficSync.ProbeNearestGhost(p, out gm, out gdy);
+                    _carLines++;
+                    Plugin.Logger.LogWarning($"[CarStack] HCAR trig={trig} age={age:F1}s pass={_carPass} car#{id} '{v.gameObject.name}' at ({p.x:F1},{p.y:F2},{p.z:F1}) " +
+                                             $"d={d:F1}m inView={iv} verdict={(iv && d >= 0f && d <= retire ? "keep" : "retire")} heldS={held:F1} " +
+                                             $"nearestGhost={(gd < 0f ? "none" : gd.ToString("F1") + "m")} '{gm}' dYghost={gdy:F2}");
+                }
+                catch { }
+            }
+            _carRows.Clear();
         }
 
         // ── the pass ─────────────────────────────────────────────────────────
@@ -280,6 +376,7 @@ namespace BigAmbitionsMP
                 }
 
                 int pairs = 0;
+                bool hoPass = trigger.StartsWith("handover-") || trigger.StartsWith("traffic-mode=");
                 string mode = "";
                 try { mode = TrafficSync.ClientTrafficMode ?? ""; } catch { }
                 float sinceSkip = _skipEndedAt < 0f ? -1f : Time.unscaledTime - _skipEndedAt;
@@ -303,8 +400,10 @@ namespace BigAmbitionsMP
                                 if (a.GoId == b.GoId) continue;    // E: never pair an object with itself
                                 if (!a.B.Intersects(b.B)) continue;
                                 pairs++;
-                                if (_pairsLogged >= PairBudget) continue;
-                                _pairsLogged++;
+                                bool trafficPair = a.Kind == "gley-traffic" || a.Kind == "traffic-ghost" || b.Kind == "gley-traffic" || b.Kind == "traffic-ghost";
+                                if (hoPass && trafficPair && _hoPairsLogged < HandoverPairBudget) _hoPairsLogged++;   // H-CARSTACK-1: the handover's own pair budget
+                                else if (_pairsLogged >= PairBudget) continue;
+                                else _pairsLogged++;
                                 float dy = a.B.center.y - b.B.center.y;
                                 Plugin.Logger.LogWarning(
                                     $"[CarStack] PAIR {a.Kind}/'{a.Model}'#{a.Id} at {a.B.center} X {b.Kind}/'{b.Model}'#{b.Id} at {b.B.center} " +

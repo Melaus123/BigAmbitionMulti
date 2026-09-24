@@ -2792,6 +2792,54 @@ namespace BigAmbitionsMP
         }
         // PROBE-END: P-CARSTACK
 
+        // PROBE-START: P-CARSTACK  (read-only: the to-ghost handover's OWN anchor / in-view test / ghost table / arrival gate, for the per-car handover lines - H-CARSTACK-1 confirming test 2026-09-24)
+        internal static float ProbeRetireDistance => HandoverRetireDistance;
+        internal static bool ProbeLocalCarInView(VehicleComponent v) { try { return LocalCarInView(v); } catch { return false; } }
+        /// <summary>The same anchor TickGhostHandover measures from: the ride anchor while riding, else the player body.</summary>
+        internal static bool ProbeHandoverAnchor(out Vector3 me)
+        {
+            me = default;
+            try
+            {
+                var rideT = PassengerRide.RideAnchorTransform();
+                if (rideT != null) { me = rideT.position; return true; }
+                me = PlayerHelper.GetPosition();
+                return true;
+            }
+            catch { return false; }
+        }
+        /// <summary>Distance to the nearest traffic ghost (-1 when there is none), its model and p.y minus its y.</summary>
+        internal static float ProbeNearestGhost(Vector3 p, out string model, out float dy)
+        {
+            float best = float.MaxValue; model = ""; dy = 0f;
+            try
+            {
+                foreach (var kv in _ghosts)
+                {
+                    var go = kv.Value != null ? kv.Value.Go : null;
+                    if (go == null) continue;
+                    var gp = go.transform.position;
+                    float d2 = (gp - p).sqrMagnitude;
+                    if (d2 < best) { best = d2; model = kv.Value!.Model ?? ""; dy = p.y - gp.y; }
+                }
+            }
+            catch { }
+            return best == float.MaxValue ? -1f : Mathf.Sqrt(best);
+        }
+        /// <summary>TickGhostHandover's arrival gate, replayed: while it is "waiting" NO local car is removed at all.</summary>
+        internal static string ProbeHandoverGate()
+        {
+            try
+            {
+                float age = Time.unscaledTime - _handoverAt;
+                int want = ClientGameDensityRequest > 0 ? Math.Min((ClientGameDensityRequest + 1) / 2, 4) : 0;
+                bool waiting = want > 0 && _ghosts.Count < want && age < HandoverArrivalCeilingSeconds;
+                return $"gate={(waiting ? "waiting" : "open")} want={want} density={ClientGameDensityRequest}";
+            }
+            catch { return "gate=?"; }
+        }
+        // PROBE-END: P-CARSTACK
+
         public  static string ClientTrafficMode { get; private set; } = ModeGhost;
         /// <summary>True on a CLIENT that is running its OWN ambient traffic. Never true on the host (its traffic is
         /// its own by definition, and every rule this gates is client-side).</summary>
