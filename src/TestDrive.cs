@@ -70,6 +70,29 @@ namespace BigAmbitionsMP
         /// occupied building.</summary>
         internal static bool ForceRentDeny;
 
+        /// <summary>H-REFUSALMUTE-1 "rejectjoin" verb state - while true, the host refuses the NEXT join request
+        /// parked for approval (a mid-game Hello) through the approval popup's own Reject path
+        /// (MPServer.RejectPendingJoin: 'BAMP:rejected', and that player is banned until re-host), then the lever
+        /// turns itself off - and it is cleared when the host stops. A lobby join is accepted at once and never
+        /// parks, so it is not refused.</summary>
+        internal static bool RejectNextJoin;
+
+        private static void TickRejectJoin()
+        {
+            try
+            {
+                // Review L5: the lever dies with the server - a later re-host starts with it off.
+                if (!MPServer.IsRunning) { RejectNextJoin = false; Plugin.Logger.LogInfo("[TestDrive] rejectjoin: the host stopped - lever off."); return; }
+                var pending = MPServer.PendingJoinList;
+                if (pending == null || pending.Count == 0) return;
+                var (peerId, pid) = pending[0];
+                RejectNextJoin = false;
+                MPServer.RejectPendingJoin(peerId);
+                Plugin.Logger.LogWarning($"[TestDrive] rejectjoin: refused the join request from '{pid}' with 'BAMP:rejected' (the approval popup's Reject path - banned until re-host); lever off.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TestDrive] rejectjoin: {ex.Message}"); }
+        }
+
         /// <summary>"charconfirm" verb state — the autopilot that used to click past the
         /// character customizer was deleted with 4bc256a (T256 agent run hit the wall);
         /// this re-creates ONLY that piece: while armed, the tick watches for
@@ -87,6 +110,7 @@ namespace BigAmbitionsMP
                 _dir ??= Path.Combine(MPConfig.DataRootPath, "testdrive");
                 if (!Directory.Exists(_dir)) return;   // channel not armed — fully inert
                 if (ConfirmCustomizerArmed) TickCustomizerConfirm();
+                if (RejectNextJoin) TickRejectJoin();   // H-REFUSALMUTE-1: re-checks the pending joins every poll until one is refused
                 if (!_armedLogged)
                 {
                     _armedLogged = true;
@@ -977,6 +1001,16 @@ namespace BigAmbitionsMP
                     var pending = MPServer.PendingJoinList;
                     foreach (var (peerId, _) in pending) MPServer.AcceptPendingJoin(peerId);
                     return pending.Count == 0 ? "OK none pending" : $"OK accepted {pending.Count} pending join(s): {string.Join(", ", pending.ConvertAll(p => p.playerId))}";
+                }
+
+                case "rejectjoin":
+                {
+                    // H-REFUSALMUTE-1: arm/disarm the one-shot refusal of the next join request parked for approval.
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    string rj = arg.Trim().ToLowerInvariant();
+                    if (rj == "on")  { RejectNextJoin = true;  return "OK rejectjoin on - the next join request parked for approval is refused (BAMP:rejected)"; }
+                    if (rj == "off") { RejectNextJoin = false; return "OK rejectjoin off"; }
+                    return $"ERR usage: rejectjoin on|off (now {(RejectNextJoin ? "on" : "off")})";
                 }
 
                 case "join":

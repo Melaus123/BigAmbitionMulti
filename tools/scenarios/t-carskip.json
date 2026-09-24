@@ -1,0 +1,65 @@
+{
+  "id": "T-CARSKIP",
+  "title": "H-CARSTACK-1 LOG-ONLY probe - cars around a consensus TIME SKIP. Both players stand outdoors together on the save1 street (about 11 m apart, host traffic around them, client in ghost mode); a 3-game-hour consensus skip, then 25 s. The probe passes every 2 s on BOTH machines while the skip runs and for 20 s after it ends, logging the traffic mode, the Gley cars alive (ambient / service / routed), the ghosts present, the worst frame since the previous pass, and any overlapping PAIR. Asserts only the premise: the skip started (consensus) and ended (goal reached), and each machine logged at least 3 skip passes. Every PAIR line is reported, not judged. NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1; both spawn outdoors about 11 m apart). Dev build with the skipvote / skipstate / pause levers (BAMP_DEV).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "\\[CarStack\\] pass: "
+  ],
+  "oracles_report": [
+    "\\[CarStack\\] PAIR ",
+    "\\[CarStack\\] pass trigger=skip-",
+    "\\[CarStack\\] pass trigger=skip-ended",
+    "\\[Rest\\] CONSENSUS",
+    "\\[Rest\\] skip GOAL reached"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        { "role": "h", "regex": "\\[TrafficSync\\] snapshots on the (unreliable|reliable) lane \\(seq-guarded\\); identity re-send every 5s\\.", "within_s": 150 }
+      ]
+    },
+    { "seq": 4, "role": "h", "sleep_s": 60, "note": "both worlds load and settle; traffic fills in around the two players" },
+    { "seq": 5, "role": "both", "cmd": "mark TEST CARSKIP START", "expect_result": "OK MARK" },
+    { "seq": 6, "role": "h", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 7, "role": "c", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 8, "role": "c", "cmd": "traffic", "expect_result": "^OK traffic role=c .* mode=ghost ", "note": "PREMISE: the players are together, so the client runs the host's traffic (ghost mode); recorded: ghosts / local counts" },
+    { "seq": 9, "role": "h", "cmd": "pause off", "expect_result": "^OK" },
+    { "seq": 10, "role": "c", "cmd": "pause off", "expect_result": "^OK" },
+    { "seq": 11, "role": "h", "cmd": "skipvote +3h", "expect_result": "^OK skipvote goal=" },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "skipvote +3h",
+      "expect_result": "^OK skipvote goal=",
+      "expect_log": [
+        { "role": "h", "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)", "within_s": 60 },
+        { "role": "h", "regex": "\\[CarStack\\] pass trigger=skip-(active|tail) skipPass=1 mode=host ", "within_s": 60 },
+        { "role": "c", "regex": "\\[CarStack\\] pass trigger=skip-(active|tail) skipPass=1 mode=\\w+ ", "within_s": 60 },
+        { "role": "h", "regex": "\\[Rest\\] skip GOAL reached", "within_s": 60 },
+        { "role": "h", "regex": "\\[CarStack\\] pass trigger=skip-(active|tail) skipPass=3 ", "within_s": 60 },
+        { "role": "c", "regex": "\\[CarStack\\] pass trigger=skip-(active|tail) skipPass=3 ", "within_s": 60 }
+      ],
+      "note": "PREMISE: the second vote starts the consensus skip; it ends at its goal; each machine logs at least 3 skip passes (the first on the skip's first frame, then every 2 s through the skip and its 20 s tail)"
+    },
+    { "seq": 13, "role": "h", "sleep_s": 25, "note": "the 20 s tail after the skip ends" },
+    { "seq": 14, "role": "h", "cmd": "skipstate", "expect_result": "active=False" },
+    { "seq": 15, "role": "c", "cmd": "traffic", "expect_result": "^OK traffic role=c ", "note": "recorded only" },
+    { "seq": 16, "role": "h", "cmd": "skipvote off", "expect_result": "^OK skipvote goal=-" },
+    { "seq": 17, "role": "c", "cmd": "skipvote off", "expect_result": "^OK skipvote goal=-" },
+    { "seq": 18, "role": "both", "cmd": "mark TEST CARSKIP END", "expect_result": "OK MARK" }
+  ]
+}

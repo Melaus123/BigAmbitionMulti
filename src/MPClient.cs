@@ -174,7 +174,7 @@ namespace BigAmbitionsMP
 
             var t = new LnlClientTransport();
             t.Connected    += OnConnected;
-            t.Disconnected += OnDisconnected;
+            t.Disconnected += (r, x) => OnDisconnectedFrom(t, r, x);   // review M3: tagged with its sender
             t.Received     += OnReceive;
             _transport = t;
             if (!t.Connect(hostIp, port))
@@ -207,7 +207,7 @@ namespace BigAmbitionsMP
 
             var t = new SteamClientTransport();
             t.Connected    += OnConnected;
-            t.Disconnected += OnDisconnected;
+            t.Disconnected += (r, x) => OnDisconnectedFrom(t, r, x);   // review M3: tagged with its sender
             t.Received     += OnReceive;
             _transport = t;
             if (!t.Connect(hostSteamId))
@@ -303,10 +303,26 @@ namespace BigAmbitionsMP
             _joinWaitNextAt = 0f; _joinWaitLines = 0;
         }
 
-        private static void OnDisconnected(string reason, byte[] extra)
+        /// <summary>H-REFUSALMUTE-1 review M3: handlers are never unsubscribed, so an OLD transport's late report
+        /// (its reader thread stuck past Disconnect's 1 s join while the player reconnected) must not end the NEW
+        /// session - OnDisconnected would stop the new reader. A report from a transport that is not the current
+        /// one is ignored while a newer one is live; with no transport at all it goes through, as before.</summary>
+        private static void OnDisconnectedFrom(IClientTransport sender, string reason, byte[] extra)
+        {
+            var cur = _transport;
+            if (cur != null && !ReferenceEquals(cur, sender))
+            {
+                Plugin.Logger.LogInfo($"[Client] late disconnect report ({reason}) from a previous connection ignored - a newer connection is live.");
+                return;
+            }
+            OnDisconnected(reason, extra, sender);
+        }
+
+        private static void OnDisconnected(string reason, byte[] extra, IClientTransport? sender = null)
         {
             try { PaperworkSync.Reset(); } catch { }   // P3-A r3 (re-review r2 MINOR-1): per-world publisher state dies with the connection
-            // P3-B r4 C1 (CRASH CLASS): OnDisconnected runs on the NETWORK POLL thread, and Reset() is
+            // P3-B r4 C1 (CRASH CLASS): OnDisconnected runs on the NETWORK POLL thread (LiteNetLib's poll thread;
+            // for Steam the client transport's pump thread since H-REFUSALMUTE-1), and Reset() is
             // an UNDO - it mutates gi.DeliveryContracts, the four plan lists, movingServiceContracts,
             // the licensing lists, itemsOrderedThisWeekByImporter, gi.EmployeeInstances and the employee
             // dictionary. Off the main thread that is exactly the 0xc0000005 class MPSaveCoordinator
@@ -398,9 +414,12 @@ namespace BigAmbitionsMP
             // The connection is gone either way — stop the poll loop so
             // IsConnecting goes false (the UI was stuck showing "Connecting…"
             // forever after a ConnectionFailed).  StopPolling only (we're ON the
-            // poll thread); the transport itself is torn down by the next
+            // poll thread - both transports report from it; SteamClientTransport's
+            // Disconnect() would not join its own thread either); the transport itself is torn down by the next
             // Connect()'s guard, exactly as the pre-seam NetManager was.
-            _transport?.StopPolling();
+            // Re-check (M3 follow-up): stop the REPORTING transport, not whatever _transport holds by now -
+            // a Join clicked while this report was in flight must not have its new reader stopped.
+            (sender ?? _transport)?.StopPolling();
             bool voluntary = _voluntaryDisconnect;
             // Clean up all remote-player capsules on the main thread, and release
             // the startup hold — we must not stay frozen after losing the host.

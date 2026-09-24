@@ -1,0 +1,144 @@
+{
+  "id": "T-REFUSAL",
+  "title": "H-REFUSALMUTE-1 - a host REFUSAL reaches the client with its reason tag. The rig's join verb is DIRECT IP only, so this proves the LiteNetLib path is unchanged by the Steam-relay fix and exercises the new rejectjoin lever; the Steam relay path (tag frame on the ordered send path, deferred linger close, client reporting the close from its pump after draining) is REVIEW-VERIFIED ONLY. Leg 1: the host loads alone, arms rejectjoin, the client asks to join mid-game and is refused with 'BAMP:rejected' (the approval popup's Reject path, which bans until re-host). Leg 2: lever off, the client asks again and is refused at the Hello with 'BAMP:banned' - a second refusal path, again with its tag. NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1). Dev build with the rejectjoin lever (BAMP_DEV). The host loads BEFORE the client joins on purpose: only a mid-game join parks for approval, and only a parked join can be refused by the lever.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[SteamClient\\] peer closed",
+    "\\[SteamClient\\] disconnect (callback|handler):",
+    "\\[Client\\] disconnect-tag read:",
+    "\\[TestDrive\\] rejectjoin: (?!refused)"
+  ],
+  "oracles_report": [
+    "\\[Client\\] Disconnected from host:",
+    "\\[Client\\] disconnect reason tag:",
+    "\\[Server\\] host REJECTED mid-game join",
+    "\\[Server\\] Hello from BANNED",
+    "\\[TestDrive\\] rejectjoin:"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "note": "the host loads ALONE - a join that arrives after this parks for approval"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "the host's world loads and settles"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST REFUSAL START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True.*pendingJoins=0|pendingJoins=0.*settled=True",
+      "note": "PREMISE: the host is in a live world with nobody waiting"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "rejectjoin on",
+      "expect_result": "^OK rejectjoin on"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK Connect\\(127\\.0\\.0\\.1:7777\\)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] rejectjoin: refused the join request from '${clientPid}' with 'BAMP:rejected'",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] host REJECTED mid-game join: '${clientPid}'",
+          "within_s": 60
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] Disconnected from host: \\S+ after [0-9.]+s via ip ",
+          "within_s": 60
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:rejected' . \"Join REJECTED by host\"",
+          "within_s": 60
+        }
+      ],
+      "note": "PREMISE asserted by the first line: the join really PARKED for approval and the LEVER refused it. The client leg proves the direct-IP path still hands the tag to the disconnect handler (via ip)."
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "pendingJoins=0",
+      "note": "the refused request is gone from the approval list"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "rejectjoin off",
+      "expect_result": "^OK rejectjoin off"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "sleep_s": 5,
+      "note": "the client's first connection is fully gone"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK Connect\\(127\\.0\\.0\\.1:7777\\)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Hello from BANNED '${clientPid}' . disconnected\\.",
+          "within_s": 60
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:banned' . \"Banned until host re-hosts\"",
+          "within_s": 60
+        }
+      ],
+      "note": "second refusal path (the Hello-time ban check), with the lever OFF - the tag still arrives"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "pendingJoins=0"
+    },
+    {
+      "seq": 13,
+      "role": "both",
+      "cmd": "mark TEST REFUSAL END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

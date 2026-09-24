@@ -12,15 +12,23 @@ namespace BigAmbitionsMP
     //
     // Threading: connection-state callbacks dispatch from the game's main
     // thread (it pumps SteamClient.RunCallbacks); OnMessage fires from our
-    // Receive() pump thread.  Same handler contracts as the UDP transports —
+    // Receive() pump thread.  One exception since H-REFUSALMUTE-1: the CLIENT
+    // transport's Disconnected event fires from its pump thread (see
+    // SteamClientTransport.OnDisconnected), exactly as LiteNetLib's fires from
+    // its poll thread.  Same handler contracts as the UDP transports —
     // MPServer/MPClient handlers already marshal internally where needed.
     //
     // Close-reason tags: LiteNetLib carries the host's "BAMP:..." refusal tag
     // as disconnect DATA; Steam's ConnectionInfo exposes no debug string, so
     // SteamLink.Disconnect sends the tag as a CONTROL FRAME (0x02 'B' 'C' 'L'
     // prefix — an envelope serializes as JSON and can never start with 0x02)
-    // immediately before closing; the client transport stashes it and hands it
-    // to Disconnected(reason, extra) exactly like the UDP path.
+    // on the link's ordinary ORDERED send path, and the link is closed (linger)
+    // only once that frame has left the retry queue.  The client transport
+    // stashes the tag on its pump thread and reports the close from that same
+    // thread, after a Receive() that began AFTER the close has drained the
+    // inbox, then hands it to Disconnected(reason, extra) exactly like the UDP
+    // path (H-REFUSALMUTE-1: the close callback used to be reported straight
+    // from the main thread, before the pump had read the tag frame).
 
     /// <summary>T3 (2026-08 throughput audit #2): SteamNetworkingSockets supports multiple
     /// independently-ordered outbound streams per connection ("lanes") with priorities — exactly what
@@ -337,6 +345,7 @@ namespace BigAmbitionsMP
         public override void SendExpress(byte[] data)
         {
             if (data == null || data.Length == 0) return;
+            if (Volatile.Read(ref _closeRequested) != 0) { NoteSendWhileClosing(); return; }   // review M1: a closing link takes nothing new
             // NEVER fragment express.  A fragmented express message would interleave with
             // itself against the bulk lane on the wire and could only reassemble by luck;
             // worse, it would put ~400KB of "urgent" in front of the very traffic the lane
@@ -408,11 +417,29 @@ namespace BigAmbitionsMP
         /// <summary>Round-282b: the flushing close.  Disconnect(reason) already takes
         /// the round-91 linger path — Close(linger: true, 1000, tag) — which asks Steam
         /// to flush queued reliable data before the connection goes away; a bare Close()
-        /// discards it.  Marking the link dead afterwards stops the pump from re-offering
-        /// into a closing connection (and lets it release both queues).</summary>
+        /// discards it.  H-REFUSALMUTE-1 review M2: the quit path does NOT wait for the
+        /// pump - the process exits straight after - so once the tag frame is queued the
+        /// link is closed right here (linger lets Steam flush what it already holds). Re-check M2: the
+        /// tag must reach STEAM before that close - one flush of our retry queue first, and if the
+        /// queue is still not empty (a congested link) the small tag frame is handed to Steam
+        /// directly, as the pre-queue code did, so a busy link still carries the 'host quit' reason.</summary>
         public override bool CloseFlushing(byte[] reason)
         {
-            try { Disconnect(reason); Alive = false; return true; }
+            try
+            {
+                Disconnect(reason);
+                if (Volatile.Read(ref _closeDone) == 0 && reason != null && reason.Length > 0)
+                {
+                    try { FlushPending(); } catch { }
+                    int left; lock (_pending) left = _pending.Count;
+                    if (left > 0)
+                    {
+                        try { _conn.SendMessage(SteamFrames.WrapClose(reason), SendType.Reliable, _lanesOk ? SteamLanes.Gameplay : (ushort)0); }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamLink] quit tag direct send to {Describe}: {ex.Message}"); }
+                    }
+                }
+                CloseNow(true); Alive = false; return true;
+            }
             catch (Exception ex)
             { Plugin.Logger.LogWarning($"[SteamLink] flushing close for {Describe}: {ex.Message}"); return false; }
         }
@@ -420,6 +447,7 @@ namespace BigAmbitionsMP
         public override void SendPaced(byte[] data, string supersedeKey = "")
         {
             if (data == null || data.Length == 0) return;
+            if (Volatile.Read(ref _closeRequested) != 0) { NoteSendWhileClosing(); return; }   // review M1: a closing link takes nothing new
             try
             {
                 // Fragment ids come from the SAME counter the immediate lane uses, so a
@@ -456,6 +484,7 @@ namespace BigAmbitionsMP
 
         public override void Send(byte[] data, bool reliable)
         {
+            if (Volatile.Read(ref _closeRequested) != 0) { NoteSendWhileClosing(); return; }   // review M1: a closing link takes nothing new
             MPNetStats.NoteOut(data);   // T0: every wire send counts once, per recipient
 
             try
@@ -523,7 +552,9 @@ namespace BigAmbitionsMP
             if (_pending.Count == 0) return;
             lock (_pending)
             {
-                if (!Alive) { _pending.Clear(); _pendingBytes = 0; return; }
+                // H-REFUSALMUTE-1: a dead link drops its queue - unless a tagged close is still waiting on it
+                // (CloseFlushing marks the link dead straight after Disconnect), so the tag frame is not thrown away.
+                if (!Alive && !(_closing && Volatile.Read(ref _closeDone) == 0)) { _pending.Clear(); _pendingBytes = 0; return; }
                 while (_pending.Count > 0)
                 {
                     var (d, lane) = _pending.Peek();
@@ -548,32 +579,80 @@ namespace BigAmbitionsMP
             }
         }
 
+        // H-REFUSALMUTE-1: a tagged close is TWO steps. Disconnect(reason) puts the tag frame on the ordinary
+        // ordered send path (SendReliableRaw: behind anything already queued, and QUEUED itself when Steam refuses
+        // it - the old direct send dropped a refused tag) and marks the link closing; the Close happens once the
+        // retry queue is empty - inline when Steam took the frame at once, else from the host pump right after
+        // FlushPending. Review M1: from the moment the close is requested the link takes NO new sends (a peer that
+        // stays in the server's tables would otherwise keep refilling the queue the tag waits behind), and a close
+        // that has waited CloseWaitTicks on the queue is carried out anyway - the pump re-checks every pass, so it
+        // always ends. Review M2: the quit path (CloseFlushing) closes inline.
+        private volatile bool _closing;
+        private int _closeDone;        // 0 until Close ran - the main thread and the pump both try (Interlocked)
+        private int _closeRequested;   // one tag frame and one close per link
+        private string _closeText = "";
+        private long _closeRequestedTicks;
+        private static readonly long CloseWaitTicks = 3 * System.Diagnostics.Stopwatch.Frequency;   // re-check LOW: a MONOTONIC clock (Stopwatch ticks) - the wall clock can step backwards
+        private int _closeWaitLogged, _closeDropLogged;
+
+        private void NoteSendWhileClosing()
+        {
+            if (Interlocked.Exchange(ref _closeDropLogged, 1) == 0)
+                Plugin.Logger.LogInfo($"[SteamLink] {Describe} is closing ('{_closeText}') - further sends to it are dropped.");
+        }
+
         public override void Disconnect(byte[] reason)
         {
             try
             {
                 if (reason != null && reason.Length > 0)
                 {
-                    // Round-282c (verifier): the tag frame's Result was ignored — on a congested
-                    // link (exactly where the quit drain ends in STOPPED/TIMEOUT) Steam can refuse
-                    // it and the tag vanished silently.  The linger close still carries the tag in
-                    // its debug string, so the player message usually survives; the log now says
-                    // when the frame itself was lost.
-                    var tagResult = _conn.SendMessage(SteamFrames.WrapClose(reason), SendType.Reliable, _lanesOk ? SteamLanes.Gameplay : (ushort)0);   // review MIN-2
-                    if (tagResult != Result.OK)
-                        Plugin.Logger.LogWarning($"[SteamLink] close-tag frame to {Describe} refused ({tagResult}) — relying on the close debug-string fallback (round-282c).");
-                    // Round-91 (field 20260725-165954: a relay version-refusal reached the player as a
-                    // bare 'App_Min' and a wordless bounce to the menu): Close() WITHOUT linger discards
-                    // queued reliable data, so the close-tag frame above lost the race on the relay and
-                    // every refusal (version/kick/ban) arrived mute. linger=true flushes the frame first;
-                    // the tag also rides the close debug-string as belt-and-suspenders.
-                    string tag = ""; try { tag = System.Text.Encoding.UTF8.GetString(reason); } catch { }
-                    _conn.Close(true, 1000, tag);
+                    if (Interlocked.Exchange(ref _closeRequested, 1) == 1) return;
+                    Interlocked.Exchange(ref _closeRequestedTicks, System.Diagnostics.Stopwatch.GetTimestamp());   // before _closing: the pump reads the 3 s clock only once that is set
+                    try { _closeText = System.Text.Encoding.UTF8.GetString(reason); } catch { _closeText = ""; }
+                    try { SendReliableRaw(SteamFrames.WrapClose(reason), SteamLanes.Gameplay); }   // review MIN-2: never the express lane
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamLink] close-tag frame to {Describe}: {ex.Message}"); }
+                    _closing = true;
+                    TryFinishClose();
                     return;
                 }
-                _conn.Close();
+                CloseNow(false);
             }
             catch { }
+        }
+
+        /// <summary>H-REFUSALMUTE-1: close a closing link once its retry queue is empty - or, review M1, once the
+        /// close has waited CloseWaitTicks on it (logged once). Called inline by Disconnect and by the host pump
+        /// after FlushPending on every pass; runs the Close at most once.</summary>
+        internal void TryFinishClose()
+        {
+            try
+            {
+                if (!_closing || Volatile.Read(ref _closeDone) != 0) return;
+                int left; lock (_pending) left = _pending.Count;
+                if (left > 0)
+                {
+                    long waited = System.Diagnostics.Stopwatch.GetTimestamp() - Interlocked.Read(ref _closeRequestedTicks);
+                    if (waited < CloseWaitTicks) return;
+                    if (Interlocked.Exchange(ref _closeWaitLogged, 1) == 0)
+                        Plugin.Logger.LogWarning($"[SteamLink] tagged close of {Describe} ('{_closeText}') waited {waited / (double)System.Diagnostics.Stopwatch.Frequency:F1} s behind {left} queued message(s) - closing now; Steam flushes what it already holds.");
+                }
+                CloseNow(true);
+            }
+            catch { }
+        }
+
+        /// <summary>Review L3: the link is dead once closed, so FlushPending releases its queue instead of
+        /// re-offering into a closed connection.</summary>
+        private void CloseNow(bool linger)
+        {
+            if (Interlocked.Exchange(ref _closeDone, 1) == 1) return;
+            Alive = false;
+            // Round-91 (field 20260725-165954: a relay version-refusal reached the player as a bare 'App_Min'):
+            // Close() WITHOUT linger discards queued reliable data, so linger=true is what lets the tag frame
+            // reach the client. The debug string is for Steam's own diagnostics - the client never sees it.
+            if (linger) _conn.Close(true, 1000, _closeText);
+            else _conn.Close();
         }
     }
 
@@ -633,10 +712,13 @@ namespace BigAmbitionsMP
                 // message has to wait for the retry queue it was meant to overtake.
                 // Round-282: FlushPending next (retries own the backlog figure the
                 // paced gate reads), then release at most one paced chunk per link.
+                // H-REFUSALMUTE-1: a link that is closing (Disconnect with a reason tag)
+                // closes right after FlushPending, once its retry queue - the tag frame
+                // included - is empty.
                 // Per-link isolation: one sick peer must not stop the others draining.
                 foreach (var l in _links.Values)
                 {
-                    try { l.FlushExpress(); l.FlushPending(); l.FlushPaced(); }
+                    try { l.FlushExpress(); l.FlushPending(); l.TryFinishClose(); l.FlushPaced(); }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamHost] flush {l.Describe}: {ex.Message}"); }
                 }
                 Thread.Sleep(15);
@@ -665,6 +747,10 @@ namespace BigAmbitionsMP
                 link.Alive = false;
                 PeerDisconnected?.Invoke(link, info.EndReason.ToString());
             }
+            // Review L2: Facepunch's SocketManager closes the connection itself only when NO Interface is set -
+            // this class IS the interface, so without this every peer drop leaked one connection handle.
+            // Closing an already-closed handle is a harmless no-op.
+            try { connection.Close(); } catch { }
         }
 
         public void OnMessage(Connection connection, NetIdentity identity, IntPtr data, int size, long messageNum, long recvTime, int channel)
@@ -687,7 +773,12 @@ namespace BigAmbitionsMP
         private ConnectionManager? _mgr;
         private Thread? _pumpThread;
         private volatile bool _running;
-        private byte[] _closeTag = Array.Empty<byte>();   // stashed BAMP:... control frame
+        private volatile byte[] _closeTag = Array.Empty<byte>();   // stashed BAMP:... control frame (pump thread)
+        // H-REFUSALMUTE-1: OnDisconnected (main thread) only RECORDS the close; the pump reports it after a
+        // Receive that began after the close, so the tag frame still in the inbox is read first.
+        private volatile bool   _peerClosed;
+        private volatile string _peerCloseReason = "";
+        private int _closeReported;   // once per Connect (Interlocked)
 
         public event Action? Connected;
         public event Action<string, byte[]>? Disconnected;
@@ -703,6 +794,7 @@ namespace BigAmbitionsMP
                 { Plugin.Logger.LogWarning("[SteamClient] Steam client not valid — cannot relay-connect."); return false; }
                 try { SteamNetworkingUtils.InitRelayNetworkAccess(); Plugin.Logger.LogInfo($"[SteamClient] relay network status: {SteamNetworkingUtils.Status}."); } catch { }
                 _closeTag = Array.Empty<byte>();
+                _peerClosed = false; _peerCloseReason = ""; Interlocked.Exchange(ref _closeReported, 0);   // H-REFUSALMUTE-1
                 _mgr = SteamNetworkingSockets.ConnectRelay(hostId, 0, this);
                 _running = true;
                 _pumpThread = new Thread(PumpLoop) { IsBackground = true, Name = "BAMP-SteamClient" };
@@ -718,6 +810,9 @@ namespace BigAmbitionsMP
 
         public void Disconnect()
         {
+            // Review M3: a voluntary close never reports - otherwise a report still in flight (the pump stuck in a
+            // Receive for over the 1 s join below) could reach MPClient after the player has already reconnected.
+            Interlocked.Exchange(ref _closeReported, 1);
             _running = false;
             try { _mgr?.Close(); } catch { }
             if (_pumpThread != null && _pumpThread != Thread.CurrentThread) _pumpThread.Join(1000);
@@ -942,13 +1037,41 @@ namespace BigAmbitionsMP
         {
             while (_running)
             {
-                try { _mgr?.Receive(); }
+                // H-REFUSALMUTE-1: read the close flag BEFORE Receive. If it was already set, this Receive
+                // drains everything that arrived before the close (a peer-closed connection's inbox stays
+                // readable until we close it; Receive reads to the end), the tag frame included - only then
+                // is the close reported, once, from this thread.
+                bool closedBefore = _peerClosed;
+                int got = 0;
+                try { var m = _mgr; if (m != null) got = m.Receive(); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[SteamClient] Receive: {ex}"); }
+                if (closedBefore) { ReportClose(got); break; }
                 try { FlushExpress(); } catch { }  // round-283: express lane FIRST — it must overtake the retry queue
                 try { FlushPending(); } catch { }
                 try { FlushPaced(); } catch { }   // round-282: paced lane, after the retry flush
                 Thread.Sleep(15);
             }
+            // The loop can also end because StopPolling/Disconnect cleared _running after OnDisconnected saw
+            // this thread still running - a recorded close is reported here then (ReportClose runs once).
+            try { if (_peerClosed) ReportClose(0); } catch { }
+        }
+
+        /// <summary>H-REFUSALMUTE-1: hand the close to MPClient exactly once per Connect - from the pump after
+        /// its draining Receive, or straight from OnDisconnected when the pump is not running.</summary>
+        private void ReportClose(int drained)
+        {
+            if (Interlocked.Exchange(ref _closeReported, 1) == 1) return;
+            var tag = _closeTag ?? Array.Empty<byte>();
+            string reason = _peerCloseReason ?? "";
+            try
+            {
+                string tagText = "none";
+                if (tag.Length > 0) { try { tagText = System.Text.Encoding.UTF8.GetString(tag); } catch { tagText = "?"; } }
+                Plugin.Logger.LogInfo($"[SteamClient] peer closed ({reason}) - drained {drained} message(s) after the close; tag '{tagText}'");
+            }
+            catch { }
+            try { Disconnected?.Invoke(reason, tag); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamClient] disconnect handler: {ex.Message}"); }
         }
 
         // ── IConnectionManager ────────────────────────────────────────────────
@@ -965,7 +1088,19 @@ namespace BigAmbitionsMP
 
         public void OnDisconnected(ConnectionInfo info)
         {
-            Disconnected?.Invoke(info.EndReason.ToString(), _closeTag);
+            // H-REFUSALMUTE-1: main thread (SteamClient.RunCallbacks). Reporting from here raced the pump - the
+            // tag frame was often still in the inbox, MPClient stopped the pump, and the player read a bare
+            // 'App_Min'. Record only; the pump reports after draining. With no pump running (a voluntary leave
+            // already stopped it) there is nothing to drain, so report straight away as before.
+            try
+            {
+                _peerCloseReason = info.EndReason.ToString();
+                _peerClosed = true;
+                Thread.MemoryBarrier();   // the flag is visible before _running is read (the pump's exit check reads them the other way round)
+                var th = _pumpThread;
+                if (!_running || th == null || !th.IsAlive) ReportClose(0);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamClient] disconnect callback: {ex.Message}"); }
         }
 
         public void OnMessage(IntPtr data, int size, long messageNum, long recvTime, int channel)

@@ -10,13 +10,22 @@ namespace BigAmbitionsMP
     /// another. It CHANGES NOTHING: it walks tables the mod and the game already keep, measures
     /// bounds overlap, and prints what it found. Compiled into ALL configurations (a field report is
     /// where this is most likely to be seen), budgeted to 20 pair lines per session plus one summary
-    /// line per pass that found any.
+    /// line per pass that found any (and, within its own budget, per handover pass - see below).
     ///
-    /// TRIGGERS ARE EDGES, never a timer and never a frame:
+    /// TRIGGERS ARE EDGES, never a frame - plus ONE bounded cadence:
     ///   - the world settling (MPWorldReady.IsSettled false -> true), i.e. just after a load/join;
     ///   - a consensus skip ending (MPRestSync's own skip edge);
     ///   - a traffic-mode change taking force (TrafficSync.ApplyTrafficMode);
-    ///   - once per GAME HOUR while the local player is outdoors (the native hourly business tick).
+    ///   - once per GAME HOUR while the local player is outdoors (the native hourly business tick);
+    ///   - WHILE A TRAFFIC HANDOVER RUNS on a client (either direction; 2026-09-23 extension): a pass on the
+    ///     handover's first tick and every 2 s after, naming the direction, the seconds since it began, and how
+    ///     many local Gley cars and host ghosts are present. It ends with the handover (the 90 s in-view ceiling);
+    ///   - WHILE A TIME SKIP RUNS and for 20 s after it ends, on BOTH machines (H-CARSTACK-1, 2026-09-24: every
+    ///     old local-car x ghost pair was caught around a skip): a pass on the skip's first frame and every 2 s
+    ///     after, with the traffic mode, the Gley cars alive (ambient / service / routed), the ghosts present and
+    ///     the worst frame since the previous pass.
+    ///   The two timed kinds share one session budget of summary lines (with or without pairs); once it AND the
+    ///   pair budget are spent they skip their whole pass.
     ///
     /// REGISTRIES, existing ones only - no scene sweep:
     ///   - Helpers.VehicleHelper.AllPlayerVehicles (the game's own list of player cars, which on this
@@ -61,6 +70,93 @@ namespace BigAmbitionsMP
         internal static void NoteTrafficMode(string mode)
         {
             try { Pass("traffic-mode=" + (mode ?? "")); } catch { }
+        }
+
+        // 2026-09-23 extension: every logged local-car x ghost pair so far had the local car HIGHER, and a
+        // handover keeps in-view local cars beside kinematic ghosts for up to 90 s - watch that window.
+        private const float CadencePassSeconds = 2f;
+        private const int   CadenceLineBudget  = 150;   // review L1: summary lines of the TIMED passes (handover + skip), with or without pairs, per session
+        private static int    _cadenceLines;
+        private static string _handoverSeen = "none";
+        private static float  _nextHandoverPass;
+
+        /// <summary>Review L1: both budgets spent - a timed pass could print nothing, so it does no work at all.</summary>
+        private static bool CadenceSpent => _cadenceLines >= CadenceLineBudget && _pairsLogged >= PairBudget;
+
+        /// <summary>Client, every frame from TrafficSync.Tick (compare-and-return while no handover runs).</summary>
+        internal static void NoteHandover(string handover, float beganAt)
+        {
+            try
+            {
+                if (handover == null || handover == TrafficSync.HandoverNone) { _handoverSeen = TrafficSync.HandoverNone; return; }
+                float now = Time.unscaledTime;
+                if (handover != _handoverSeen) { _handoverSeen = handover; _nextHandoverPass = now; }   // a new handover: pass now
+                if (now < _nextHandoverPass) return;
+                _nextHandoverPass = now + CadencePassSeconds;
+                if (CadenceSpent) return;
+                string trig = handover == TrafficSync.HandoverToGhost ? "handover-to-ghost" : "handover-to-local";
+                int local = 0, ghosts = 0;
+                try { local = TrafficSync.LocalAmbientCount(); } catch { }
+                try { ghosts = TrafficSync.ClientTrafficGhostCount; } catch { }
+                Pass(trig, $" handoverAge={now - beganAt:F1}s localAlive={local} ghosts={ghosts}", true);
+            }
+            catch { }
+        }
+
+        // H-CARSTACK-1 (2026-09-24): the skip cadence. Every old local-car x ghost pair (and the gley x gley
+        // dY 1.42 one) was caught at trigger=skip-ended / hourly-outdoors, i.e. around TIME SKIPS - so watch the
+        // skip itself and its first 20 s after, on both machines.
+        private const float SkipTailSeconds = 20f;
+        private static bool  _skipCadenceWasActive;
+        private static float _skipTailUntil = -1f;
+        private static float _nextSkipPass;
+        private static float _worstFrameSincePass;
+        private static int   _skipPasses;
+
+        /// <summary>Every frame on BOTH machines, from TrafficSync.Tick. Outside a skip and its tail it is two
+        /// compares; inside, a pass every 2 s (the skip's first frame included).</summary>
+        internal static void NoteSkipCadence()
+        {
+            try
+            {
+                bool active = MPRestSync.SkipActive;
+                float now = Time.unscaledTime;
+                if (active && !_skipCadenceWasActive) { _nextSkipPass = now; _worstFrameSincePass = 0f; }   // a skip began: pass now
+                if (!active && _skipCadenceWasActive) _skipTailUntil = now + SkipTailSeconds;
+                _skipCadenceWasActive = active;
+                if (!active && now >= _skipTailUntil) return;
+                float dt = Time.unscaledDeltaTime;
+                if (dt > _worstFrameSincePass) _worstFrameSincePass = dt;
+                if (now < _nextSkipPass) return;
+                _nextSkipPass = now + CadencePassSeconds;
+                float worstMs = _worstFrameSincePass * 1000f;
+                _worstFrameSincePass = 0f;
+                if (CadenceSpent) return;
+                _skipPasses++;
+                string tmode = "?";
+                try { tmode = MPServer.IsRunning ? "host" : (TrafficSync.ClientTrafficMode ?? ""); } catch { }
+                int gley = 0, service = 0, routed = 0, ambient = 0;
+                try
+                {
+                    var list = TrafficManager.Instance?.trafficVehicles?.GetVehicleList();
+                    if (list != null)
+                        for (int i = 0; i < list.Count; i++)
+                        {
+                            var v = list[i];
+                            if (v == null || !v.gameObject.activeSelf) continue;
+                            gley++;
+                            if (ServiceCars.IsClientKept(v.gameObject)) service++;
+                            else if (v.presetPath != null) routed++;
+                            else ambient++;
+                        }
+                }
+                catch { }
+                int ghosts = 0;
+                try { ghosts = TrafficSync.ClientTrafficGhostCount; } catch { }
+                Pass(active ? "skip-active" : "skip-tail",
+                     $" skipPass={_skipPasses} mode={tmode} gley={gley} ambient={ambient} service={service} routed={routed} ghosts={ghosts} worstFrameMs={worstMs:F0}", true);
+            }
+            catch { }
         }
 
         // ── the pass ─────────────────────────────────────────────────────────
@@ -128,7 +224,10 @@ namespace BigAmbitionsMP
 
         private static long Key(int x, int z) { return ((long)x << 32) ^ (uint)z; }
 
-        internal static void Pass(string trigger)
+        /// <summary>extra: appended right after the trigger on every line of this pass. cadence: a TIMED pass - its
+        /// summary line is printed whether or not a pair was found (that is how it reports its counts), but only
+        /// while the timed-pass budget lasts (review L1: pairs or not).</summary>
+        internal static void Pass(string trigger, string extra = "", bool cadence = false)
         {
             try
             {
@@ -209,14 +308,16 @@ namespace BigAmbitionsMP
                                 float dy = a.B.center.y - b.B.center.y;
                                 Plugin.Logger.LogWarning(
                                     $"[CarStack] PAIR {a.Kind}/'{a.Model}'#{a.Id} at {a.B.center} X {b.Kind}/'{b.Model}'#{b.Id} at {b.B.center} " +
-                                    $"dY={dy:F2} trigger={trigger} traffic={mode} sinceSkipEnd={sinceSkip:F1}s perf[{perf}]");
+                                    $"dY={dy:F2} trigger={trigger}{extra} traffic={mode} sinceSkipEnd={sinceSkip:F1}s perf[{perf}]");
                             }
                         }
                 }
 
                 if (pairs > 0 && perf.Length == 0) { try { perf = MPPerf.Snapshot(false); } catch { } }
-                if (pairs > 0)
-                    Plugin.Logger.LogWarning($"[CarStack] pass trigger={trigger} bodies={_bodies.Count} registries={reached} " +
+                bool summary = cadence ? _cadenceLines < CadenceLineBudget : pairs > 0;
+                if (summary && cadence) _cadenceLines++;
+                if (summary)
+                    Plugin.Logger.LogWarning($"[CarStack] pass trigger={trigger}{extra} bodies={_bodies.Count} registries={reached} " +
                                              $"pairs={pairs} logged={_pairsLogged}/{PairBudget} traffic={mode} sinceSkipEnd={sinceSkip:F1}s perf[{perf}]");
                 _bodies.Clear();
                 _cells.Clear();

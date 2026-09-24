@@ -353,6 +353,10 @@ namespace BigAmbitionsMP
             {
                 if (SaveGameManager.Current == null) return;
 
+                // PROBE-START: P-CARSTACK  (log-only; H-CARSTACK-1: a pass every 2 s while a time skip runs and for 20 s after, both machines)
+                try { CarStackProbe.NoteSkipCadence(); } catch { }
+                // PROBE-END: P-CARSTACK
+
                 TickTaxiLiveCheck();   // F5: the ride's completion event can be missed — a live read closes the ride
 
                 if (MPServer.IsRunning)
@@ -417,6 +421,9 @@ namespace BigAmbitionsMP
                     if (Time.timeSinceLevelLoad > 5f)
                         SuppressLocalTraffic();
                     TickGhosts();
+                    // PROBE-START: P-CARSTACK  (log-only; a pass every 2 s while a traffic handover runs, either direction)
+                    try { CarStackProbe.NoteHandover(_handover, _handoverAt); } catch { }
+                    // PROBE-END: P-CARSTACK
                     // TRAFFIC-CONSIST T1 step 1: the publish rides the HOST'S OWN beat - 0.2 s (open question 1,
                     // decided 2026-09-18) - and PublishLeftovers itself holds the rule about when to send at all.
                     _publishTimer -= Time.unscaledDeltaTime;

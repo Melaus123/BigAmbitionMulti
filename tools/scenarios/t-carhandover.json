@@ -1,0 +1,150 @@
+{
+  "id": "T-CARHANDOVER",
+  "title": "P-CARSTACK extension (LOG-ONLY probe) - watch a client's LOCAL Gley cars beside the host's traffic GHOSTS while a traffic handover runs. The client walks far away (well past the 350 m traffic-apart ring) and runs its own traffic (local mode); then the HOST teleports onto the client, so the client's own cars are still around it, in view, when the host's ghosts arrive (ghost mode, the to-ghost handover that keeps in-view local cars up to 90 s). Hold 60 s. The probe logs a CarStack pass on the handover's first tick and every 2 s after, with the local-car and ghost counts; every PAIR line is reported with its dY. Nothing is asserted about the pairs themselves - the manager reads them. NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1; the two avatars spawn about 11 m apart, both outdoors). Dev build (the tp / traffic levers are BAMP_DEV only). The far point (999.7, 0, -99.4) is a real world-ready standing position seen in earlier rig logs, about 940 m from the save1 spawn.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "\\[CarStack\\] pass: ",
+    "\\[TrafficSync\\] .*(failed|exception|threw)"
+  ],
+  "oracles_report": [
+    "\\[CarStack\\] PAIR ",
+    "\\[CarStack\\] pass trigger=handover-",
+    "\\[TrafficSync\\] traffic mode: (local|ghost)",
+    "\\[TrafficSync\\] traffic mode for \\S+: "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TrafficSync\\] snapshots on the (unreliable|reliable) lane \\(seq-guarded\\); identity re-send every 5s\\.",
+          "within_s": 150
+        }
+      ]
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 75,
+      "note": "both worlds load and settle; the host evaluates a mode for the peer on its 0.2 s beat"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST CARHANDOVER START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "tp 999.7 0 -99.4",
+      "expect_result": "^OK tp \\d+ -?\\d+ -?\\d+",
+      "note": "PREMISE: the client is outdoors (tp refuses inside a building or a vehicle) and now far from the host; the ghosts around the far point retire at once (they are >70 m away), so the handover to local usually ends within the same beat - both lines are searched from THIS step's mark",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TrafficSync\\] traffic mode: local \\(seq \\d+\\) - this client is far from every other player",
+          "within_s": 60
+        },
+        {
+          "role": "c",
+          "regex": "\\[TrafficSync\\] traffic mode: local (\\(ghosts handed over in|- \\d+ ghost\\(s\\) still on screen)",
+          "within_s": 100
+        }
+      ]
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "sleep_s": 25,
+      "note": "the client's own Gley traffic fills in around it at the game's density"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=local local=[1-9]\\d* handover=none",
+      "note": "PREMISE: local mode really in force with local cars alive around the client"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "tp ${clientPid}",
+      "expect_result": "^OK tp -?\\d+ -?\\d+ -?\\d+",
+      "note": "the HOST comes to the client: the client's own cars stay where they are, in view, while the host's ghosts arrive",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TrafficSync\\] traffic mode: ghost \\(seq \\d+\\) - another player is near",
+          "within_s": 45
+        },
+        {
+          "role": "c",
+          "regex": "\\[CarStack\\] pass trigger=handover-to-ghost handoverAge=[0-9.]+s localAlive=\\d+ ghosts=\\d+ ",
+          "within_s": 45
+        }
+      ]
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "mark TEST CARHANDOVER together - holding 60 s",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "sleep_s": 60,
+      "note": "hold together: the handover keeps in-view local cars up to its 90 s ceiling; the probe passes every 2 s while it runs"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c ",
+      "note": "recorded only"
+    },
+    {
+      "seq": 15,
+      "role": "both",
+      "cmd": "mark TEST CARHANDOVER END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
