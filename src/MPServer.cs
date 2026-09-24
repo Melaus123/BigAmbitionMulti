@@ -1442,6 +1442,7 @@ namespace BigAmbitionsMP
             _peerNames.Clear();
             _peerBuild.Clear();       // round-281: per-peer build records die with the session, like _peerNames
             lock (_lastAccessSig) { _lastAccessSig.Clear(); _accessRebuiltLogged = 0; }   // batch 14: the [Access] line's signatures + its log budget are per session (never suppresses a push)
+            AccessSets.Reset();   // H-MERGERSTOCK-2: the access-input fingerprint is per session too (the next host tick re-pushes from scratch)
             StableIdByPlayer.Clear();
             StableIdByPlayer[MPConfig.PlayerId] = MPConfig.StableId; // host's own
             PlayerColours.Learn(MPConfig.PlayerId, PlayerColours.HostAssign(MPConfig.StableId));   // 2026-09-05 colours: the host holds a permanent slot too
@@ -1525,6 +1526,7 @@ namespace BigAmbitionsMP
             _peerNames.Clear();
             _peerBuild.Clear();       // round-281
             lock (_lastAccessSig) { _lastAccessSig.Clear(); _accessRebuiltLogged = 0; }   // batch 14: the [Access] line's signatures + its log budget are per session (never suppresses a push)
+            AccessSets.Reset();   // H-MERGERSTOCK-2: the access-input fingerprint is per session too (the next host tick re-pushes from scratch)
             _clients.Clear();
             MPSaveCoordinator.ConsumeDevHostLoadAs("session stop");   // round-285: the impersonation override dies with the session
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
@@ -6112,6 +6114,9 @@ namespace BigAmbitionsMP
             return sb.ToString();
         }
 
+        /// <summary>H-MERGERSTOCK-2: the connected players' ids (a snapshot) - one input of the AccessSets fingerprint.</summary>
+        internal static List<string> AccessPeerPids() => new List<string>(_peerNames.Values);
+
         /// <summary>Drop one player's remembered access signature (disconnect). Log bookkeeping only.</summary>
         private static void ForgetAccessCache(string pid)
         {
@@ -6129,16 +6134,10 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Access] sets rebuilt ({trigger}): {pid} enter={enter} helper={helper} manage={manage}");
         }
 
-        /// <summary>HOST: the building addressKeys <paramref name="clientPid"/> may ENTER as a granted housing
-        /// guest (AddressKeys) or WORK IN as a granted business helper (HelperAddressKeys). Clients can't
-        /// compute this (no building→owner map), so the host pushes it. Round-32: each address is classified
-        /// from the host's registry — a BUSINESS address is unlocked by the Business grant, everything else
-        /// (homes, empty buildings, unknown) by the Housing grant.</summary>
-        private static PermissionBuildingAccessPayload BuildBuildingAccessFor(string clientPid)
+        /// <summary>H-MERGERSTOCK-2: address -> business type over every registration. Built ONCE per refresh and
+        /// shared by every player's payload (it used to be rebuilt for each player the refresh pushed to).</summary>
+        private static Dictionary<string, string> BuildBizTypeTable()
         {
-            var pay = new PermissionBuildingAccessPayload();
-            if (string.IsNullOrEmpty(clientPid)) return pay;
-
             var bizType = new Dictionary<string, string>();
             try
             {
@@ -6155,8 +6154,22 @@ namespace BigAmbitionsMP
                     }
             }
             catch { }
-            bool IsBiz(string a) => bizType.TryGetValue(a, out var bt)
-                && !string.IsNullOrEmpty(bt) && bt != "ba:businesstype_empty";
+            return bizType;
+        }
+
+        /// <summary>HOST: the building addressKeys <paramref name="clientPid"/> may ENTER as a granted housing
+        /// guest (AddressKeys) or WORK IN as a granted business helper (HelperAddressKeys). Clients can't
+        /// compute this (no building→owner map), so the host pushes it. Round-32: each address is classified
+        /// from the host's registry — a BUSINESS address is unlocked by the Business grant, everything else
+        /// (homes, empty buildings, unknown) by the Housing grant.</summary>
+        private static PermissionBuildingAccessPayload BuildBuildingAccessFor(string clientPid, Dictionary<string, string>? bizTypeTable = null)
+        {
+            var pay = new PermissionBuildingAccessPayload();
+            if (string.IsNullOrEmpty(clientPid)) return pay;
+
+            // H-MERGERSTOCK-2: the caller passes the table it built ONCE for the whole refresh.
+            var bizType = bizTypeTable ?? BuildBizTypeTable();
+            bool IsBiz(string a) => bizType.TryGetValue(a, out var bt) && AccessSets.CountsAsBusiness(bt);
 
             var keys = new HashSet<string>(); var helper = new HashSet<string>(); var manage = new HashSet<string>();
             void Consider(string addr, string owner, bool operatorLedger)
@@ -6211,13 +6224,17 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Always pushes. Returns the payload when it DIFFERS from the last one pushed to this player
-        /// (for the [Access] line), null when it is identical or the send failed.</summary>
-        private static PermissionBuildingAccessPayload? SendBuildingAccessTo(MPLink peer, string clientPid)
+        /// (for the [Access] line), null when it is identical or the send failed; <paramref name="failed"/> tells those
+        /// two apart (H-MERGERSTOCK-2: a failed push makes the AccessSets backstop retry on its next tick).
+        /// <paramref name="bizType"/> is the refresh's shared business-type table (null = build one here).</summary>
+        private static PermissionBuildingAccessPayload? SendBuildingAccessTo(MPLink peer, string clientPid,
+            Dictionary<string, string>? bizType, out bool failed)
         {
+            failed = false;
             if (peer == null) return null;
             try
             {
-                var pay = BuildBuildingAccessFor(clientPid);
+                var pay = BuildBuildingAccessFor(clientPid, bizType);
                 Send(peer, MessageEnvelope.Create(MessageType.PermissionBuildingAccess, "host", pay));
                 // Shared-shop slice 3: the benches of the owners whose shops this player may manage — deliberately AFTER
                 // the access push and inside its try: if the push fails, no bench is shipped that the client could not scope.
@@ -6233,7 +6250,7 @@ namespace BigAmbitionsMP
                 }
                 return changed ? pay : null;
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendBuildingAccessTo: {ex.Message}"); return null; }
+            catch (Exception ex) { failed = true; Plugin.Logger.LogWarning($"[Server] SendBuildingAccessTo: {ex.Message}"); return null; }
         }
 
         /// <summary>HOST: push every connected client (and set the host's own) which buildings they may enter
@@ -6241,20 +6258,26 @@ namespace BigAmbitionsMP
         /// input to the sets themselves: the business TYPE arriving from a client, the join ledger re-key.
         /// <paramref name="trigger"/> names such a late input for the [Access] line; the plain
         /// grant/rent/vacate/buy/takeover callers pass nothing and stay silent. Every call pushes to everyone;
-        /// the late-input triggers fire only on a real type/tenant change or a join re-key.</summary>
-        public static void RefreshBuildingAccess(string trigger = "")
+        /// the late-input triggers fire only on a real type/tenant change or a join re-key.
+        /// H-MERGERSTOCK-2: AccessSets.Tick (trigger "inputs") is the once-a-second BACKSTOP for every input that
+        /// changes with no call here; the direct calls stay for their instant effect. Returns false when a push
+        /// failed (or the refresh threw), so the backstop keeps its old fingerprint and retries next tick.</summary>
+        public static bool RefreshBuildingAccess(string trigger = "")
         {
-            if (!_running) return;
+            if (!_running) return false;
+            bool allSent = true;
             try
             {
+                var bizType = BuildBizTypeTable();   // H-MERGERSTOCK-2: once per refresh, not once per player
                 foreach (var pid in new List<string>(_peerNames.Values))
                 {
                     var pr = PeerForPlayer(pid);
                     if (pr == null) continue;
-                    var sent = SendBuildingAccessTo(pr, pid);
+                    var sent = SendBuildingAccessTo(pr, pid, bizType, out bool failed);
+                    if (failed) allSent = false;
                     if (sent != null) NoteAccessRebuilt(trigger, pid, sent.AddressKeys.Count, sent.HelperAddressKeys.Count, sent.SharedManageKeys.Count);
                 }
-                var own = BuildBuildingAccessFor(MPConfig.PlayerId);
+                var own = BuildBuildingAccessFor(MPConfig.PlayerId, bizType);
                 // The host's OWN copy is always re-set too (a scene load empties it - review HIGH-1); the signature
                 // only decides whether the [Access] line is written.
                 string ownSig = AccessSig(own);
@@ -6276,7 +6299,8 @@ namespace BigAmbitionsMP
                 try { GameStatePatcher.EnqueueOnMainThread(() => ReplaySharedPoolsTo(MPConfig.PlayerId, ownManage)); } catch { }
                 GameStatePatcher.EnqueueOnMainThread(HousingMapCues.RefreshSharedPois);   // recolour the host's own shared-residence POIs (reciprocal sharing)
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RefreshBuildingAccess: {ex.Message}"); }
+            catch (Exception ex) { allSent = false; Plugin.Logger.LogWarning($"[Server] RefreshBuildingAccess: {ex.Message}"); }
+            return allSent;
         }
 
         private static void SendOwnGrantsTo(MPLink peer, string ownerStable)

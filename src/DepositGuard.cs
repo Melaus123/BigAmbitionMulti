@@ -36,6 +36,11 @@ namespace BigAmbitionsMP
         // TILL-PUT-1: ids we have already announced a routed deposit for (one INFO line per station).
         private static readonly System.Collections.Generic.HashSet<string> _routedLogged = new System.Collections.Generic.HashSet<string>();
 
+        /// <summary>H-MERGERSTOCK-2: set by StorageSync while it copies an OWNER-CONFIRMED put onto this machine's
+        /// replica. That copy runs the same native merge, but it is the mod's own write, not a visitor's deposit -
+        /// without this it was logged as a false 'UNROUTED'.</summary>
+        [ThreadStatic] internal static int EchoDepth;
+
         /// <summary>TILL-PUT-1 — returns TRUE to let the native primitive run, FALSE when this deposit has
         /// been ROUTED to the owner instead (the caller's prefix then skips the local merge).</summary>
         internal static bool Check(string via, ItemInstance? dest, CargoInstance? inc)
@@ -43,6 +48,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (dest == null) return true;
+                if (EchoDepth > 0) return true;   // the confirmed-put echo (StorageSync.EchoBuildingReplica)
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return true;
                 var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                 if (reg == null) return true;

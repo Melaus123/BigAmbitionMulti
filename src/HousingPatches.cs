@@ -89,14 +89,12 @@ namespace BigAmbitionsMP
         /// <summary>Round-32: the local player is inside a business they hold a HELPER grant for. Kept apart
         /// from LocalGuestHere — a business helper must NOT inherit the blanket residence flips (the CTA/
         /// overlay wraps would pass the native owner-gates on shelf stock, register work, and the management
-        /// computer with NO routing behind them, mutating the replica). Helper gates opt in one by one.</summary>
+        /// computer with NO routing behind them, mutating the replica). Helper gates opt in one by one.
+        /// H-MERGERSTOCK-2: answered by BusinessHelperRoute.HelperHere, so the merger-flip fallback (a partner's
+        /// flipped BUSINESS whose host push is late or missing) reaches every LocalHelperHere gate as well.</summary>
         internal static bool LocalHelperHere()
         {
-            try
-            {
-                var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
-                return reg != null && GrantSync.IsHelperBusiness(GameStateReader.AddressKey(reg));
-            }
+            try { return BusinessHelperRoute.HelperHere(out _); }
             catch { return false; }
         }
 

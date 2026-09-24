@@ -92,7 +92,7 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
-        // ── Reconcile (MAIN THREAD, 1 Hz from MPCanvasUI.Update) ─────────────
+        // ── Reconcile (MAIN THREAD, 1 Hz from MPCanvasUI.Update; also drives the host's AccessSets backstop) ─────────────
         private static float _nextHostPush;
 
         public static void Tick()
@@ -104,6 +104,7 @@ namespace BigAmbitionsMP
             try { CompanyFeed.Tick(); } catch { }     // P4b: the same edge for the shared transaction feed - a departed owner's rows go from the registry
             try { CampaignMirror.Tick(); } catch { }  // H-MERGERCAMPAIGN-1: and for the mirrored recruitment campaigns
             try { ImportTransfer.Tick(); } catch { }  // H-MERGERIMPORT-1 F2: re-offer a PAID, unacknowledged import line (session-settled edge + once per game hour)
+            try { AccessSets.Tick(); } catch { }      // H-MERGERSTOCK-2: HOST - the access sets' input backstop (rebuilds on ANY input change, merged or not)
             if (_veilDepth > 0)
             {
                 // DIAG [FlipProbe] (2026-07-07, host stuck-flip: no 'flip OFF' after dissolve): a

@@ -1,0 +1,377 @@
+{
+  "id": "T-ACCESSSETS",
+  "title": "H-MERGERSTOCK-2: the host's per-player access sets rebuild on ANY input change (AccessSets backstop), and a merged partner's till deposit routes to the owner even when the helper push is missing (HelperAt's merger-flip fallback). Leg 1: the HOST rents an EMPTY retail unit and stamps its business type AFTERWARDS - nothing but the backstop refreshes on that - and the client's helper set must grow within seconds. Leg 2: in the host's own clothing store the client's pushed helper entry is DROPPED (the missed push, synthesized) and a native hand deposit into the till must still route to the owner, who applies it. Leg 3: a partner's flipped HOME (a flat the host rents) never reads helper=True. NO save.",
+  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger true so tools/regress.py resets it with --keep-merger). Host melaus owns the clothing store in vars.ownerShop; the fixture loads Client1 inside a building, so both exit first. Dev build with the H-MERGERSTOCK-2 levers: `forrent <buildingtype>` filter, `helperstate [addr [drop]]`, `deposit <addr> [amount|probe]`, plus rent / settype / itemcount / stockof / enterbuilding / exitbuilding / mergestatus. WHY THE DEPOSIT IS NOT IN THE RENTED UNIT: a freshly rented building holds only its delivery spot and hand-truck spawner (the `rent` lever reports exactly those) - there is no till or shelf to deposit into, and no lever can furnish one. So leg 1 proves the REBUILD on the exact field premise (empty rental, type set later) and leg 2 proves the DEPOSIT on the fallback bundle 145749 needed, in a shop that has stations. Run 2 (2026-09-24) found EVERY station in the fixture store full (tills 1000/1000 paper bags, racks 50/50), so the OWNER first frees 50 on one till (`stationroom`, in memory) and the client's `deposit probe` names the station/item before the owner's stock of that item is read. fx-hq1 has NO partner home flipped on the client (run 1: homes=0), so leg 3 rents a flat on the host (type empty) to give the negative a real partner residence. NOTHING is saved. ORACLE NOTE (run 3, 2026-09-24): after the owner confirms the routed put, the client mirrors it onto its own replica through StorageSync.EchoBuildingReplica -> PutIntoSingleSlot -> ItemInstance.MergeCargo, and DepositGuard logs that echo as UNROUTED (helper=True, the echo cargo is not the hands) although it is the mod's own confirmed replica write. The absent-oracle lets ONLY that echo path through; it stays visible as a report oracle.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "ownerShop": "20 ba:street_fifthavenue",
+    "newType": "ba:businesstype_fastfoodrestaurant"
+  },
+  "oracles_absent": [
+    "HarmonyException",
+    "Patching exception",
+    "(?<!swallowed )NullReferenceException",
+    "\\[DepositGuard\\] UNROUTED native MergeCargo [^\n]*@'20 ba:street_fifthavenue'(?![^\n]*StorageSync\\.EchoBuildingReplica)",
+    "\\[Access\\] backstop"
+  ],
+  "oracles_report": [
+    "\\[Access\\] sets rebuilt",
+    "\\[Grant\\] helper businesses",
+    "\\[DepositGuard\\]",
+    "\\[Business\\] helper station refill",
+    "\\[BStore\\] owner applied PUT",
+    "\\[Cargo\\] REMOTE REDUCE",
+    "\\[DepositGuard\\] UNROUTED"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST ACCESSSETS START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 35,
+      "note": "both worlds settle; the first backstop tick has pushed once"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "fx-hq1 loads a player inside a building"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "note": "PREMISE: the pair is merged and the client holds the host's buildings flipped"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "helperstate ${ownerShop}",
+      "expect_result": "^OK helperstate .*pushed=True helper=True flipped=True books=False",
+      "note": "PREMISE for leg 2: on the client the host's store is a flipped partner business it does not book, and the host's push names it"
+    },
+    {
+      "seq": 14,
+      "role": "both",
+      "cmd": "mark TEST ACCESSSETS RENT-EMPTY",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "forrent retail",
+      "expect_result": "^OK [1-9][0-9]* for-rent: ",
+      "capture": {
+        "newShop": "for-rent: ([^|]+?)(?: \\||$)"
+      },
+      "note": "a free RETAIL unit (not a flat), discovered at runtime"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "rent ${newShop}",
+      "expect_result": "^OK RentBuilding invoked"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "sleep_s": 4,
+      "note": "the rent's own refresh and the next backstop tick settle"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "itemcount ${newShop}",
+      "expect_result": "rented=True name='' type='(ba:businesstype_empty)?'$",
+      "note": "PREMISE (the field's): the host rents it with NO business type"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "helperstate",
+      "expect_result": "^OK helperstate ",
+      "capture": {
+        "pushedBefore": "pushed=([0-9]+)"
+      },
+      "note": "the client's helper-set size before the type change"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "helperstate ${newShop}",
+      "expect_result": "pushed=False helper=False ",
+      "note": "PREMISE: an empty-typed unit is nobody's helper business yet"
+    },
+    {
+      "seq": 21,
+      "role": "both",
+      "cmd": "mark TEST ACCESSSETS TYPE-AFTER",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "settype ${newShop} ${newType}",
+      "expect_result": "^OK settype .* now='${newType}' rented=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Access\\] sets rebuilt \\(inputs\\): ${clientPid} ",
+          "within_s": 3
+        },
+        {
+          "role": "c",
+          "regex": "\\[Grant\\] helper businesses: [0-9]+ \\(was ${pushedBefore}\\)",
+          "within_s": 6
+        }
+      ],
+      "note": "THE FIX (A): the host's OWN type change calls no refresh anywhere - only the AccessSets backstop can rebuild the sets, within ~1 s"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "helperstate ${newShop}",
+      "expect_result": "pushed=True helper=True ",
+      "expect_gt": {
+        "count=([0-9]+)": "${pushedBefore}"
+      },
+      "note": "the client's helper set now names the unit and has grown"
+    },
+    {
+      "seq": 24,
+      "role": "both",
+      "cmd": "mark TEST ACCESSSETS DEPOSIT",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "enterbuilding ${ownerShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${ownerShop}'",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "sleep_s": 8,
+      "note": "the interior loads and syncs"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "stationroom ${ownerShop} 50",
+      "expect_result": "^OK stationroom ",
+      "note": "ROOM, made on the OWNER: run 2 found every till (1000/1000 bags) and rack (50/50) in this store full, so no deposit could land anywhere. The owner takes 50 off one till and pushes the interior"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "sleep_s": 4,
+      "note": "the owner's interior push reaches the client's replica"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "deposit ${ownerShop} probe",
+      "expect_result": "^OK deposit probe ",
+      "capture": {
+        "depItem": "item=(\\S+)",
+        "depStation": "station='([^']*)'"
+      },
+      "note": "PREMISE: a single-slot station with room exists in the owner's store on the client's replica; names the item the owner check reads"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "stockof ${ownerShop}",
+      "expect_result": "^OK stockof",
+      "capture": {
+        "ownerBefore": "${depItem}:([0-9]+)"
+      },
+      "note": "the OWNER's total of that item before the deposit (economy/stock figures are read on the owner)"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "cmd": "helperstate ${ownerShop} drop",
+      "expect_result": "pushed=False helper=True flipped=True books=False .*dropped=True",
+      "note": "THE MISSED PUSH, synthesized on the client only: the host's helper entry for the store is gone; HelperAt must still answer True through the flip + live business type (B)"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "deposit ${ownerShop} 50",
+      "expect_result": "^OK deposit .*item=${depItem} .*pushed=False helper=True .*routed=True",
+      "capture": {
+        "depAmt": "amount=([0-9]+)"
+      },
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Business\\] helper station refill ${depAmt}.${depItem} @'${ownerShop}'",
+          "within_s": 5
+        },
+        {
+          "role": "c",
+          "regex": "\\[DepositGuard\\] helper deposit into '[^']*' @${ownerShop} routed to the owner",
+          "within_s": 5
+        },
+        {
+          "role": "h",
+          "regex": "\\[BStore\\] owner applied PUT ${depAmt}.${depItem} on '${ownerShop}'",
+          "within_s": 10
+        }
+      ],
+      "note": "a native MergeCargo hand deposit: ROUTED to the owner (local slot unchanged, no UNROUTED line) and the OWNER applies it"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "stockof ${ownerShop}",
+      "expect_result": "^OK stockof",
+      "expect_gt": {
+        "${depItem}:([0-9]+)": "${ownerBefore}"
+      },
+      "note": "the goods are on the OWNER's station"
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "helperstate ${ownerShop}",
+      "expect_result": "hands=empty",
+      "abort_on_fail": false,
+      "note": "the owner's OK consumed the client's held box (nothing left in hand to duplicate)"
+    },
+    {
+      "seq": 36,
+      "role": "both",
+      "cmd": "mark TEST ACCESSSETS HOMES",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "cmd": "forrent residential",
+      "expect_result": "^OK [1-9][0-9]* for-rent: ",
+      "capture": {
+        "flat": "for-rent: ([^|]+?)(?: \\||$)"
+      }
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "rent ${flat}",
+      "expect_result": "^OK RentBuilding invoked"
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "sleep_s": 14,
+      "note": "the host's 10 s merger push carries the flat to the client's flip table"
+    },
+    {
+      "seq": 40,
+      "role": "c",
+      "cmd": "helperstate ${flat}",
+      "expect_result": "pushed=False helper=False flipped=True books=False type='(ba:businesstype_empty)?' ",
+      "note": "NEGATIVE: a partner's flipped HOME is never a helper business (flipped=True is the premise)"
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "helperstate",
+      "expect_result": "homes=[1-9][0-9]* homesHelper=0 ",
+      "note": "NEGATIVE, census: every flipped partner home on the client reads helper=False"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "helperstate",
+      "expect_result": "homesHelper=0 ",
+      "abort_on_fail": false,
+      "note": "NEGATIVE, the other direction (the client's homes as flipped on the host; homes may be 0 on this fixture)"
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 44,
+      "role": "both",
+      "cmd": "mark TEST ACCESSSETS END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

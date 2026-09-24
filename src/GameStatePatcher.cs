@@ -3776,7 +3776,10 @@ namespace BigAmbitionsMP
                 // and capacity, GenerateItemsWithoutStockTasks writes the owner's to-do list, and the
                 // security recompute writes reg.securityLevel — none of which a visitor may author.
                 bool ownerHere  = false;
-                try { ownerHere = reg.RentedByPlayer; } catch { }
+                // H-MERGERSTOCK-2 (build read): the machine that BOOKS this shop gets the owner pass - not the raw
+                // flag, which a merger-flipped partner shop also reads True (a member then wrote the owner's to-do
+                // list and security level on its own replica). A stand-in for an absent owner books it.
+                try { ownerHere = MergerFlip.BooksHere(reg); } catch { }
                 bool helperHere = false;
                 if (!ownerHere) { try { helperHere = BusinessHelperRoute.HelperHere(out var ha) && ha == addressKey; } catch { } }
                 if (!ownerHere && !helperHere) return;
@@ -6113,7 +6116,8 @@ namespace BigAmbitionsMP
                 // the host's per-player access sets are computed from, and nothing used to re-run them - a merged
                 // partner's shop stayed "not a business" to BuildBuildingAccessFor, so the helper set stayed empty
                 // and every mop/stock gate reading GrantSync.IsHelperBusiness was shut until an unrelated rent.
-                // Fires only on a REAL change (never on a bare name/sign/hours push); the refresh is change-detected.
+                // Fires only on a REAL change (never on a bare name/sign/hours push). The refresh itself pushes to
+                // everyone; AccessSets.Tick (H-MERGERSTOCK-2) is the backstop for inputs no event reports.
                 try
                 {
                     if (MPServer.IsRunning

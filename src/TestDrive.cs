@@ -373,6 +373,9 @@ namespace BigAmbitionsMP
                 case "forrent":
                 {
                     // Round-260 helper: list up to 8 for-rent addresses on this machine.
+                    // H-MERGERSTOCK-2: optional building-type filter - `forrent retail` lists only ba:buildingtype_retail
+                    // premises, so a run that stamps a business type on what it rents picks a shop unit, not a flat.
+                    string frType = arg.Length > 0 ? "ba:buildingtype_" + arg.Trim().ToLowerInvariant() : "";
                     var found = new StringBuilder(); int nFound = 0;
                     try
                     {
@@ -383,6 +386,11 @@ namespace BigAmbitionsMP
                                 if (r2 == null) continue;
                                 bool ok2 = false; try { ok2 = r2.AvailableForRent && !r2.RentedByPlayer; } catch { }
                                 if (!ok2) continue;
+                                if (frType.Length > 0)
+                                {
+                                    string fbt = ""; try { fbt = Helpers.BuildingHelper.GetBuilding(r2.Address)?.BuildingType ?? ""; } catch { }
+                                    if (fbt != frType) continue;
+                                }
                                 if (nFound++ > 0) found.Append(" | ");
                                 found.Append(GameStateReader.AddressKey(r2));
                                 if (nFound >= 8) break;
@@ -1355,6 +1363,70 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { return $"ERR tp: the player's position is unreadable ({ex.Message})"; }
                     if ((at - target).sqrMagnitude > 4f) return $"ERR tp: player still at {at.x:F0} {at.y:F0} {at.z:F0}";
                     return $"OK tp {at.x:F0} {at.y:F0} {at.z:F0}";
+                }
+
+                case "tproad":
+                {
+                    // H-CARSTACK-1 confirming test (2026-09-24, ADDED lever): 'tp', but the target is snapped to the NEAREST
+                    // Gley traffic waypoint (by x/z) to the given point - i.e. onto a road lane Gley itself drives - and the
+                    // player is turned to face along that lane. The waypoint table is the one the running manager uses
+                    // (densityManager.gridManager.currentSceneData, as TrafficSync.PositionInGrid reads it - never
+                    // CurrentSceneData.GetSceneInstance(), which can CREATE a scene object). Same teleport as 'tp'.
+                    var rq = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (rq.Length != 2
+                        || !float.TryParse(rq[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float rx)
+                        || !float.TryParse(rq[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float rz))
+                        return "ERR usage: tproad <x> <z>";
+                    try { if (BuildingManager.IsInsideBuilding) return "ERR inside a building"; } catch { }
+                    try { if (Helpers.VehicleHelper.IsInsideVehicle()) return "ERR in a vehicle"; } catch { }
+
+                    UnityEngine.Vector3 wpPos = default, wpDir = UnityEngine.Vector3.zero;
+                    int wpIdx = -1;
+                    float bestD2 = float.MaxValue;
+                    try
+                    {
+                        var rtm = GleyTrafficSystem.TrafficManager.HasInstance ? GleyTrafficSystem.TrafficManager.Instance : null;
+                        var wps = rtm?.densityManager?.gridManager?.currentSceneData?.allWaypoints;
+                        if (wps == null || wps.Length == 0) return "ERR tproad: no Gley waypoint table";
+                        for (int i = 0; i < wps.Length; i++)
+                        {
+                            var w = wps[i];
+                            if (w == null || w.temporaryDisabled) continue;
+                            float ddx = w.position.x - rx, ddz = w.position.z - rz;
+                            float d2 = ddx * ddx + ddz * ddz;
+                            if (d2 < bestD2) { bestD2 = d2; wpPos = w.position; wpIdx = i; }
+                        }
+                        if (wpIdx >= 0)
+                        {
+                            var nb = wps[wpIdx].neighbors;
+                            if (nb != null && nb.Count > 0 && nb[0] >= 0 && nb[0] < wps.Length && wps[nb[0]] != null)
+                                wpDir = wps[nb[0]].position - wpPos;
+                        }
+                    }
+                    catch (Exception ex) { return $"ERR tproad: {ex.Message}"; }
+                    if (wpIdx < 0) return "ERR tproad: no usable waypoint";
+
+                    UnityEngine.GameObject? rprobe = null;
+                    try
+                    {
+                        rprobe = new UnityEngine.GameObject("BAMP_TpRoadTarget");
+                        rprobe.transform.position = wpPos;
+                        wpDir.y = 0f;
+                        var rpc = Helpers.PlayerHelper.PlayerController;
+                        rprobe.transform.rotation = wpDir.sqrMagnitude > 0.01f ? UnityEngine.Quaternion.LookRotation(wpDir.normalized)
+                                                  : (rpc != null ? rpc.transform.rotation : UnityEngine.Quaternion.identity);
+                        Helpers.PlayerHelper.Teleport(rprobe.transform);
+                        Plugin.Logger.LogInfo($"[TestDrive] tproad -> waypoint {wpIdx} ({wpPos.x:F0}, {wpPos.y:F0}, {wpPos.z:F0}), {UnityEngine.Mathf.Sqrt(bestD2):F1} m from ({rx:F0}, {rz:F0}).");
+                    }
+                    catch (Exception ex) { return $"ERR tproad: {ex.Message}"; }
+                    finally { try { if (rprobe != null) UnityEngine.Object.Destroy(rprobe); } catch { } }
+
+                    UnityEngine.Vector3 rat;
+                    try { rat = Helpers.PlayerHelper.GetPosition(); }
+                    catch (Exception ex) { return $"ERR tproad: the player's position is unreadable ({ex.Message})"; }
+                    float miss = new UnityEngine.Vector2(rat.x - wpPos.x, rat.z - wpPos.z).magnitude;
+                    if (miss > 6f) return $"ERR tproad: player at {rat.x:F1} {rat.y:F1} {rat.z:F1}, waypoint {wpIdx} at {wpPos.x:F1} {wpPos.y:F1} {wpPos.z:F1} (miss {miss:F1} m)";
+                    return $"OK tproad {rat.x:F1} {rat.y:F1} {rat.z:F1} wp={wpIdx} snap={UnityEngine.Mathf.Sqrt(bestD2):F1} miss={miss:F1}";
                 }
 
                 case "enterbuilding":
@@ -3243,6 +3315,177 @@ namespace BigAmbitionsMP
                     // mutate and the urgent feed that follows it. Read-only.
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
                     return CompanyPlans.TestDriveList(arg);
+                }
+
+                case "helperstate":
+                {
+                    // H-MERGERSTOCK-2 rig lever (DEV). What THIS machine believes about business-HELPER access.
+                    //   helperstate                      census over every merger-FLIPPED registration here: how many are
+                    //                                    businesses / homes and how many of each read helper=True (a home
+                    //                                    must never read True - HelperAt's live-type gate)
+                    //   helperstate <num> <street>       one address: the host-pushed set, the full HelperAt answer, the
+                    //                                    flip, BooksHere, the live type, the set's size, what is in the hands
+                    //   helperstate <num> <street> drop  ALSO removes that address from the host-pushed helper set on THIS
+                    //                                    machine only, in memory - a missed/late push, synthesized, so a run
+                    //                                    can show the flip fallback carrying a deposit on its own. The next
+                    //                                    host push restores it.
+                    var hk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    var hregs = SaveGameManager.Current?.BuildingRegistrations;
+                    if (hregs == null) return "ERR no save loaded";
+                    if (hk.Length == 0)
+                    {
+                        int hf = 0, hb = 0, hbH = 0, hh = 0, hhH = 0;
+                        var hkeys = new StringBuilder();
+                        foreach (var hr in hregs)
+                        {
+                            if (hr == null) continue;
+                            string hkey = ""; try { hkey = GameStateReader.AddressKey(hr); } catch { }
+                            if (!MergerFlip.IsFlipped(hkey)) continue;
+                            hf++;
+                            string ht = ""; try { ht = hr.businessTypeName ?? ""; } catch { }
+                            bool hhelp = BusinessHelperRoute.HelperAt(hr, out _);
+                            if (AccessSets.CountsAsBusiness(ht)) { hb++; if (hhelp) hbH++; }
+                            else
+                            {
+                                hh++; if (hhelp) hhH++;
+                                if (hh <= 3) { if (hkeys.Length > 0) hkeys.Append('|'); hkeys.Append(hkey); }
+                            }
+                        }
+                        return $"OK helperstate flipped={hf} biz={hb} bizHelper={hbH} homes={hh} homesHelper={hhH} pushed={GrantSync.HelperBusinessCount} homeKeys=[{hkeys}]";
+                    }
+                    if (hk.Length < 2 || hk.Length > 3) return "ERR usage: helperstate [<num> <ba:street_x> [drop]]";
+                    var hreg = GameStatePatcher.FindRegistration(hk[0] + " " + hk[1]);
+                    if (hreg == null) return $"ERR no registration for '{hk[0]} {hk[1]}'";
+                    string hkey2 = hk[0] + " " + hk[1]; try { hkey2 = GameStateReader.AddressKey(hreg); } catch { }
+                    string hdrop = "";
+                    if (hk.Length == 3)
+                    {
+                        if (!string.Equals(hk[2], "drop", StringComparison.OrdinalIgnoreCase)) return "ERR usage: helperstate [<num> <ba:street_x> [drop]]";
+                        var hkeep = new System.Collections.Generic.List<string>();
+                        foreach (var hr2 in hregs)
+                        {
+                            if (hr2 == null) continue;
+                            string k2 = ""; try { k2 = GameStateReader.AddressKey(hr2); } catch { }
+                            if (k2.Length > 0 && k2 != hkey2 && GrantSync.IsHelperBusiness(k2)) hkeep.Add(k2);
+                        }
+                        GrantSync.SetHelperBusinesses(hkeep);
+                        hdrop = " dropped=True";
+                    }
+                    string htype = ""; try { htype = hreg.businessTypeName ?? ""; } catch { }
+                    string hands = "empty";
+                    try
+                    {
+                        var hi = Helpers.PlayerHelper.ItemInstanceInHands;
+                        if (hi != null)
+                        {
+                            int hn = 0; string hname = hi.itemName ?? "";
+                            if (hi.cargoInstances != null)
+                                foreach (var hc in hi.cargoInstances) if (hc != null) { hn += hc.amount; hname = hc.itemName ?? hname; }
+                            hands = $"{hname}x{hn}";
+                        }
+                    }
+                    catch { }
+                    return $"OK helperstate addr='{hkey2}' pushed={GrantSync.IsHelperBusiness(hkey2)} helper={BusinessHelperRoute.HelperAt(hreg, out _)} flipped={MergerFlip.IsFlipped(hkey2)} books={MergerFlip.BooksHere(hreg)} type='{htype}' count={GrantSync.HelperBusinessCount} hands={hands}{hdrop}";
+                }
+
+                case "stationroom":
+                {
+                    // H-MERGERSTOCK-2 rig lever (DEV), OWNER side. `stationroom <num> <ba:street_x> <n>` - takes <n> units
+                    // off the first TILL (single-slot PointOfSale with a named stock holding at least <n>) at an address
+                    // THIS machine books, in memory, then pushes the interior to everyone inside - so a partner's
+                    // `deposit` has room (run 2 found every till and rack in the fx-hq1 store full: 1000/1000, 50/50).
+                    // The units simply vanish; the scenario that uses this never saves.
+                    var rk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (rk.Length != 3 || !int.TryParse(rk[2], out var rn) || rn <= 0) return "ERR usage: stationroom <num> <ba:street_x> <n>";
+                    var rreg2 = GameStatePatcher.FindRegistration(rk[0] + " " + rk[1]);
+                    if (rreg2 == null) return $"ERR no registration for '{rk[0]} {rk[1]}'";
+                    string rkey = GameStateReader.AddressKey(rreg2);
+                    if (!MergerFlip.BooksHere(rreg2)) return $"ERR '{rkey}' is not booked on this machine (owner side only)";
+                    if (rreg2.itemInstances != null)
+                        foreach (var rkv in rreg2.itemInstances)
+                        {
+                            var rii = rkv.Value;
+                            if (rii?.cargoInstances == null || rii.cargoInstances.Count != 1 || rii.ItemCached == null) continue;
+                            if ((rii.ItemCached.type & BigAmbitions.Items.ItemType.PointOfSale) == 0) continue;
+                            var rs0 = rii.cargoInstances[0];
+                            if (rs0 == null || string.IsNullOrEmpty(rs0.itemName) || rs0.amount < rn) continue;
+                            int rbefore = rs0.amount;
+                            rs0.amount = rbefore - rn;
+                            try { InteriorSync.PushOwnedBuildingNow(rkey); } catch { }
+                            return $"OK stationroom addr='{rkey}' station='{rii.itemName}' id={rii.id} item={rs0.itemName} {rbefore}->{rs0.amount}";
+                        }
+                    return $"ERR no till holding at least {rn} at '{rkey}'";
+                }
+
+                case "deposit":
+                {
+                    // H-MERGERSTOCK-2 rig lever (DEV). `deposit <num> <ba:street_x> [amount|probe]` - a hand deposit into
+                    // a single-slot stock STATION (a till, or a one-slot display) driven through the game's OWN primitives:
+                    // the native `getitem` console command (ItemHelper.Command_GetItem) puts <amount> (default 20, clamped
+                    // to the station's room) of the station's stock item into EMPTY hands, then the native 3-argument
+                    // ItemInstance.MergeCargo moves it onto the station's one stock slot - the exact primitive DepositGuard
+                    // guards (bundle 145749's 'UNROUTED native MergeCargo'). The local player must be STANDING in <addr>.
+                    // The station is the first single-slot item with a named stock, room and a live controller, a
+                    // PointOfSale (till) preferred - run 1 found no till with room in the fixture store. `probe` only
+                    // names the station and its item (so a run can read the owner's stock of that item first).
+                    // localAfter == localBefore means the guard ROUTED the put to the owner and skipped the native
+                    // merge; the owner's OK later empties the hands (`helperstate <addr>` hands=). The goods are
+                    // conjured, so this lever is Dev-only like the rest of this file.
+                    var dk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    int damt = 20;
+                    bool dprobe = dk.Length == 3 && string.Equals(dk[2], "probe", StringComparison.OrdinalIgnoreCase);
+                    if (dk.Length < 2 || dk.Length > 3 || (dk.Length == 3 && !dprobe && (!int.TryParse(dk[2], out damt) || damt <= 0)))
+                        return "ERR usage: deposit <num> <ba:street_x> [amount|probe]";
+                    var dreg = GameStatePatcher.FindRegistration(dk[0] + " " + dk[1]);
+                    if (dreg == null) return $"ERR no registration for '{dk[0]} {dk[1]}'";
+                    string dkey = GameStateReader.AddressKey(dreg);
+                    var dcur = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                    string dcurKey = ""; try { if (dcur != null) dcurKey = GameStateReader.AddressKey(dcur); } catch { }
+                    if (dcurKey != dkey) return $"ERR standing in '{dcurKey}', not '{dkey}' (enterbuilding first)";
+                    if (Helpers.PlayerHelper.IsHoldingItem) return "ERR hands are not empty";
+                    if (Helpers.PlayerHelper.IsUsingVehicle) return "ERR in a vehicle";
+                    BigAmbitions.Items.ItemInstance? dst = null;
+                    BigAmbitions.Items.CargoInstance? dslot = null;
+                    int dspace = 0;
+                    bool dtill = false;
+                    var dcensus = new StringBuilder();
+                    int dseen = 0;
+                    if (dreg.itemInstances != null)
+                        foreach (var dkv in dreg.itemInstances)
+                        {
+                            try
+                            {
+                                var dii = dkv.Value;
+                                if (dii?.cargoInstances == null || dii.cargoInstances.Count != 1 || dii.ItemCached == null) continue;
+                                var ds0 = dii.cargoInstances[0];
+                                if (ds0 == null || string.IsNullOrEmpty(ds0.itemName)) continue;
+                                bool isTill = (dii.ItemCached.type & BigAmbitions.Items.ItemType.PointOfSale) != 0;
+                                int dcap = 0; try { dcap = ds0.GetMaxStockCapacity(dii); } catch { }
+                                int droom = dcap > 0 ? dcap - ds0.amount : 0;
+                                bool dctrl = ItemHelper.GetItemControllerByID(dii.id) != null;   // the guard's route needs the live controller
+                                if (dseen++ < 6) dcensus.Append($"{dii.itemName}:{(isTill ? "till" : "slot")}:{ds0.itemName}:{ds0.amount}/{dcap}:ctrl={dctrl};");
+                                if (droom <= 0 || !dctrl) continue;
+                                if (dst != null && (dtill || !isTill)) continue;   // keep the first; a till beats a display
+                                dst = dii; dslot = ds0; dspace = droom; dtill = isTill;
+                            }
+                            catch { }
+                        }
+                    if (dst == null || dslot == null) return $"ERR no single-slot station with a named stock, room and a controller at '{dkey}' (seen {dseen}: {dcensus})";
+                    int dn = Math.Min(damt, dspace);
+                    string ditem = dslot.itemName;
+                    if (dprobe) return $"OK deposit probe addr='{dkey}' station='{dst.itemName}' till={dtill} item={ditem} room={dspace}";
+                    ItemHelper.Command_GetItem(ditem, dn);
+                    BigAmbitions.Items.CargoInstance? dsrc = null;
+                    var dheld = Helpers.PlayerHelper.ItemInstanceInHands;
+                    if (dheld?.cargoInstances != null)
+                        foreach (var dc in dheld.cargoInstances) if (dc != null && dc.itemName == ditem) { dsrc = dc; break; }
+                    if (dsrc == null) return $"ERR getitem put nothing matching '{ditem}' in the hands";
+                    bool dpushed = GrantSync.IsHelperBusiness(dkey);
+                    bool dhelper = BusinessHelperRoute.HelperHere(out _);
+                    int dbefore = dslot.amount;
+                    dst.MergeCargo(fromCargoInstance: dsrc, toCargoInstance: dslot, amount: dsrc.amount);
+                    int dafter = dslot.amount;
+                    return $"OK deposit addr='{dkey}' station='{dst.itemName}' id={dst.id} item={ditem} amount={dn} pushed={dpushed} helper={dhelper} localBefore={dbefore} localAfter={dafter} heldAfter={dsrc.amount} routed={dafter == dbefore}";
                 }
 
                 case "grants":

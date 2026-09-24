@@ -20,17 +20,41 @@ namespace BigAmbitionsMP
     internal static class BusinessHelperRoute
     {
         /// <summary>The local player stands in a business they hold a HELPER grant for (never true for
-        /// the owner, never true in residences).</summary>
+        /// the owner, never true in residences). HousingFurniture.LocalHelperHere reads this too.</summary>
         internal static bool HelperHere(out string addr)
         {
             addr = "";
             try
             {
+                return HelperAt(InstanceBehavior<BuildingManager>.Instance?.buildingRegistration, out addr);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>HelperHere for any registration. TRUE when the host-pushed helper set names the address, OR
+        /// (H-MERGERSTOCK-2) when it is a merger-FLIPPED partner shop that this machine does not book and whose LIVE
+        /// business type is a business - so a push that is late or missing (bundle 145749: the host set the shop's
+        /// type after renting it, and no refresh followed) can no longer turn a partner's till into an UNROUTED
+        /// replica write. The flip table also holds partners' HOMES: the live-type gate keeps helper behaviour out of
+        /// them. BooksHere keeps a stand-in for an absent owner booking locally. The host's own helper list keeps
+        /// counting merger membership exactly as before.</summary>
+        internal static bool HelperAt(BuildingRegistration? reg, out string addr)
+        {
+            addr = "";
+            try
+            {
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return false;
-                var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                 if (reg == null) return false;
                 addr = GameStateReader.AddressKey(reg);
-                return GrantSync.IsHelperBusiness(addr);
+                // Review MEDIUM-1: the machine STANDING IN for an absent owner books this shop - it is never a
+                // helper here, whatever the host-sent list says (a merged owner's shop is in every member's
+                // list). Not BooksHere: inside a HousingFurniture.Enter scope the rented flag is raised, so
+                // BooksHere would read true for an ordinary permission helper.
+                if (MergerAbsence.SimulatesHere(addr)) return false;
+                if (GrantSync.IsHelperBusiness(addr)) return true;
+                if (!MergerFlip.IsFlipped(addr)) return false;          // inert without a merger (empty flip table)
+                if (MergerFlip.BooksHere(reg)) return false;             // this machine is the single writer here
+                return AccessSets.CountsAsBusiness(reg.businessTypeName);
             }
             catch { return false; }
         }

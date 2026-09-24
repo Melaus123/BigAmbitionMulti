@@ -1217,7 +1217,9 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[VStore] mirror {res.Op.ToUpperInvariant()} {res.Amount}×{res.ItemName} on '{res.VehicleId}' FAILED owner-side ({res.Reason}) — replica reverts on next re-sync.");
                     return;
                 }
-                EchoBuildingReplica(res);   // instant repaint for the actor (user-approved 2026-08-25); self-gating, display-only
+                DepositGuard.EchoDepth++;
+                try { EchoBuildingReplica(res); }   // instant repaint for the actor (user-approved 2026-08-25); self-gating, display-only
+                finally { DepositGuard.EchoDepth--; }   // H-MERGERSTOCK-2: the echo is not a visitor deposit
                 if (res.Op == OpTake)       OnTakeResult(res);
                 else if (res.Op == OpPut)   OnPutResult(res);
                 else if (res.Op == OpSetStock)
