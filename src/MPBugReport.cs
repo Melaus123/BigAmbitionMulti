@@ -797,7 +797,7 @@ namespace BigAmbitionsMP
             sb.AppendLine($"Session: {Blank(MPLog.SessionId)}");
             sb.AppendLine($"PlayerId: {Blank(MPConfig.PlayerId)}");
             sb.AppendLine($"StableIdKind: {StableIdKind()}");
-            sb.AppendLine($"Port: {MPConfig.Port}");
+            sb.AppendLine($"Port: {MPConfig.Port}{(MPServer.BoundPort > 0 && MPServer.BoundPort != MPConfig.Port ? $" (hosting on {MPServer.BoundPort})" : "")}");   // H-HOSTPORT-1
             sb.AppendLine($"LobbyPlayers: {string.Join(", ", LobbyPlayers())}");
             sb.AppendLine($"ConnectedClients: {(MPServer.IsRunning ? MPServer.ConnectedCount.ToString(CultureInfo.InvariantCulture) : "n/a")}");
             sb.AppendLine($"ClientConnected: {MPClient.IsConnected}");

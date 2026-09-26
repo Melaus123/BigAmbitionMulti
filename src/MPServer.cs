@@ -1455,18 +1455,28 @@ namespace BigAmbitionsMP
             CashByStableId.Clear();   // owners/cash; the load path re-seeds from the manifest
             _characterNamesByPlayerId.Clear();   // per-session: a returning player must not collide with a stale name
             _clientSelfStats.Clear();            // …or stale self-reported stats (feeds rival-fairness targeting)
-            var t = new LnlHostTransport();
-            t.PeerConnected    += OnPeerConnected;
-            t.PeerDisconnected += OnPeerDisconnected;
-            t.Received         += OnReceive;
-            _transport = t;
-
-            if (!t.Start(port))
+            // H-HOSTPORT-1 (bundle 20260924-001424): a busy UDP port used to end hosting right here - BEFORE the
+            // Steam listener below, which needs no UDP port. Now: the configured port, then the next ten; the first
+            // that binds hosts. If none binds, the session still hosts through Steam (invites / Steam joins).
+            BoundPort = 0;
+            LnlHostTransport? t = null, lastTried = null;
+            int lastPort = port;
+            for (int q = port; q <= port + HostPortFallbacks && q <= 65535; q++)
             {
-                Plugin.Logger.LogError($"[Server] Failed to start on port {port}");
-                _transport = null;
-                return false;
+                var cand = new LnlHostTransport();
+                cand.PeerConnected    += OnPeerConnected;
+                cand.PeerDisconnected += OnPeerDisconnected;
+                cand.Received         += OnReceive;
+                lastPort = q;
+                if (cand.Start(q)) { t = cand; BoundPort = q; break; }
+                try { cand.Stop(); } catch { }   // never started: releases nothing, keeps no thread
+                lastTried = cand;
             }
+            if (t != null && BoundPort != port)
+                Plugin.Logger.LogWarning($"[Server] port {port} in use - hosting on {BoundPort}");
+            // Steam-only: _transport keeps the never-started UDP transport so the broadcast paths (which gate on
+            // _transport != null as "a session is hosted") still reach the Steam peers; it has no UDP peers.
+            _transport = t ?? lastTried;
 
             // Steam relay listener BESIDE UDP (slice 2): same three handlers — the
             // seam makes relay peers indistinguishable above the transport.  Steam
@@ -1481,15 +1491,34 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] Steam relay listener: {ex.Message} — UDP only."); _steamTransport = null; }
 
+            if (t == null)
+            {
+                if (_steamTransport == null)
+                {
+                    Plugin.Logger.LogError($"[Server] Failed to start on port {port} (tried {port}-{lastPort}; no Steam listener either)");
+                    try { _transport?.Stop(); } catch { }
+                    _transport = null;
+                    return false;
+                }
+                Plugin.Logger.LogWarning($"[Server] no UDP port could be bound ({port}-{lastPort} all in use) - hosting STEAM-ONLY: Steam invites and Steam joins work, direct-IP joins cannot.");
+            }
+
             _running = true;
             ResetJoinControl();   // fresh hosting session — bans lift, pending requests drop
             MPSteamPresence.AdvertiseHosting();   // friends see Join Game / can be invited (no-op without Steam)
 
-            Plugin.Logger.LogInfo($"[Server] Listening on port {port}");
+            if (BoundPort > 0) Plugin.Logger.LogInfo($"[Server] Listening on port {BoundPort}");
+            else Plugin.Logger.LogInfo("[Server] Listening via Steam only (no UDP port).");
             MPNet.FetchPublicIpAsync();                          // public IP for the lobby "Show IP"
-            MPNet.TryForwardAsync(port, MPConfig.LocalLanIp());  // best-effort UPnP open of UDP <port> (fails safe)
+            if (BoundPort > 0) MPNet.TryForwardAsync(BoundPort, MPConfig.LocalLanIp());  // best-effort UPnP open of the BOUND UDP port (fails safe)
             return true;
         }
+
+        /// <summary>H-HOSTPORT-1: the UDP port this hosted session actually listens on - the configured one, or the
+        /// first free one of the next <see cref="HostPortFallbacks"/>; 0 = Steam-only (no UDP port bound). Meaningful
+        /// while <see cref="IsRunning"/>; MPConfig.Port stays the configured port (never persisted from a fallback).</summary>
+        public static int BoundPort { get; private set; }
+        internal const int HostPortFallbacks = 10;
 
         public static void Stop()
         {

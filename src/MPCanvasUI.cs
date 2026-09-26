@@ -5767,7 +5767,8 @@ namespace BigAmbitionsMP
                     if (!_showIp) info = "Others join at:   ••••••••   (hidden)";
                     else
                     {
-                        int port = MPConfig.Port;
+                        // H-HOSTPORT-1: the port actually bound (a busy configured port falls back to the next free one).
+                        int port = MPServer.BoundPort > 0 ? MPServer.BoundPort : MPConfig.Port;
                         string pub = MPNet.PublicIp;
                         // LAN line (user request 2026-07-04): same-network players join with the LAN ip —
                         // no port-forwarding needed for them. Shown alongside whatever internet line applies.
@@ -7857,13 +7858,18 @@ namespace BigAmbitionsMP
             if (string.IsNullOrWhiteSpace(_name))
             { SetStatus("Enter a player name.", true); return; }
             MPConfig.SetRuntime(_name.Trim(), null, p);
+            // H-HOSTPORT-1: the failure text also goes to the lobby's info strip (the lobby opens right after this
+            // and the status line is not on it) - the strip showed the generic "Not connected ... Leave and retry."
             if (!MPServer.Start(p))
-            { SetStatus($"Hosting FAILED on port {p} (port in use?).", true); return; }
+            { SetStatus($"Hosting FAILED on port {p} (port in use?).", true); PostLobbyNotice($"Hosting FAILED on port {p} (port in use?).", 60f); return; }
             // Needs/morale tuning applies for EVERY hosted session (a LOADED game
             // never runs BuildGameVariables) — the heartbeat then carries it to
             // all clients, so the whole session runs the host's percents.
             MPNeedsTuning.Apply(_hostSettings, "host settings");
-            SetStatus($"Hosting on port {p} — waiting for players.", false);
+            // H-HOSTPORT-1: the port actually bound (a busy configured port falls through to the next free one);
+            // Steam-only (no UDP port at all) shows the existing failure text - hosting runs, IP joins cannot.
+            if (MPServer.BoundPort > 0) SetStatus($"Hosting on port {MPServer.BoundPort} — waiting for players.", false);
+            else { SetStatus($"Hosting FAILED on port {p} (port in use?).", true); PostLobbyNotice($"Hosting FAILED on port {p} (port in use?).", 60f); }
         }
 
         private void OnJoin()

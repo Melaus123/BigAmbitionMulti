@@ -274,7 +274,11 @@ namespace BigAmbitionsMP
             try { _lanesOk = _conn.ConfigureConnectionLanes(SteamLanes.Priorities, SteamLanes.Weights) == Result.OK; }
             catch { _lanesOk = false; }
             if (!_lanesOk) Plugin.Logger.LogWarning($"[SteamLink] connection lanes unavailable for {who} — single-lane sends (pre-T3 behaviour).");
+            // H-STEAMNET-1: per-connection config override + the direct/relayed status line (connect, 30 s checks, close).
+            Watch = new SteamNetConfig.LinkWatch(conn, $"steam:{who}", () => { lock (_pending) return _pendingBytes; });
+            try { Watch.OnConnected(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamNet] link watch for {who}: {ex.Message}"); }
         }
+        internal readonly SteamNetConfig.LinkWatch Watch;   // H-STEAMNET-1
         public override int Id => _id;
         public override bool IsAlive => Alive;
         public override string Describe => $"steam:{_who}";
@@ -648,6 +652,7 @@ namespace BigAmbitionsMP
         {
             if (Interlocked.Exchange(ref _closeDone, 1) == 1) return;
             Alive = false;
+            try { Watch.OnClose(linger ? "closing (tagged)" : "closing"); } catch { }   // H-STEAMNET-1: last status line while the handle is still open
             // Round-91 (field 20260725-165954: a relay version-refusal reached the player as a bare 'App_Min'):
             // Close() WITHOUT linger discards queued reliable data, so linger=true is what lets the tag frame
             // reach the client. The debug string is for Steam's own diagnostics - the client never sees it.
@@ -682,6 +687,7 @@ namespace BigAmbitionsMP
                 // route asynchronously and is a no-op when already available.
                 try { SteamNetworkingUtils.InitRelayNetworkAccess(); Plugin.Logger.LogInfo($"[SteamHost] relay network status: {SteamNetworkingUtils.Status}."); } catch { }
                 _links.Clear();
+                SteamNetConfig.EnsureApplied("host relay listener start");   // H-STEAMNET-1: config BEFORE the socket exists (no-op once applied at startup)
                 _socket = SteamNetworkingSockets.CreateRelaySocket(0, this);
                 _running = true;
                 _pumpThread = new Thread(PumpLoop) { IsBackground = true, Name = "BAMP-SteamHost" };
@@ -696,6 +702,9 @@ namespace BigAmbitionsMP
         public void Stop()
         {
             _running = false;
+            // Review LOW-3 (H-STEAMNET-1): the library's Close() does not call back per connection, so each link's
+            // status reporter is closed here - else it stays in the static live list until the game restarts.
+            try { foreach (var l in _links.Values) { try { l.Watch.OnClose("host stop"); } catch { } } } catch { }
             try { _socket?.Close(); } catch { }
             if (_pumpThread != null && _pumpThread != Thread.CurrentThread) _pumpThread.Join(1000);
             _socket = null;
@@ -718,7 +727,7 @@ namespace BigAmbitionsMP
                 // Per-link isolation: one sick peer must not stop the others draining.
                 foreach (var l in _links.Values)
                 {
-                    try { l.FlushExpress(); l.FlushPending(); l.TryFinishClose(); l.FlushPaced(); }
+                    try { l.FlushExpress(); l.FlushPending(); l.TryFinishClose(); l.FlushPaced(); l.Watch.Tick(); }   // H-STEAMNET-1: Tick samples every 30 s only
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamHost] flush {l.Describe}: {ex.Message}"); }
                 }
                 Thread.Sleep(15);
@@ -744,6 +753,7 @@ namespace BigAmbitionsMP
         {
             if (_links.TryRemove(connection.Id, out var link))
             {
+                try { link.Watch.OnClose(info.EndReason.ToString()); } catch { }   // H-STEAMNET-1
                 link.Alive = false;
                 PeerDisconnected?.Invoke(link, info.EndReason.ToString());
             }
@@ -779,6 +789,8 @@ namespace BigAmbitionsMP
         private volatile bool   _peerClosed;
         private volatile string _peerCloseReason = "";
         private int _closeReported;   // once per Connect (Interlocked)
+        private volatile SteamNetConfig.LinkWatch? _watch;   // H-STEAMNET-1: status reporter of the live connection
+        private string _watchWho = "host";
 
         public event Action? Connected;
         public event Action<string, byte[]>? Disconnected;
@@ -795,6 +807,8 @@ namespace BigAmbitionsMP
                 try { SteamNetworkingUtils.InitRelayNetworkAccess(); Plugin.Logger.LogInfo($"[SteamClient] relay network status: {SteamNetworkingUtils.Status}."); } catch { }
                 _closeTag = Array.Empty<byte>();
                 _peerClosed = false; _peerCloseReason = ""; Interlocked.Exchange(ref _closeReported, 0);   // H-REFUSALMUTE-1
+                _watch = null; _watchWho = $"host:{hostId}";   // H-STEAMNET-1
+                SteamNetConfig.EnsureApplied("client relay connect");   // H-STEAMNET-1: config BEFORE the connection exists (no-op once applied at startup)
                 _mgr = SteamNetworkingSockets.ConnectRelay(hostId, 0, this);
                 _running = true;
                 _pumpThread = new Thread(PumpLoop) { IsBackground = true, Name = "BAMP-SteamClient" };
@@ -814,6 +828,7 @@ namespace BigAmbitionsMP
             // Receive for over the 1 s join below) could reach MPClient after the player has already reconnected.
             Interlocked.Exchange(ref _closeReported, 1);
             _running = false;
+            try { _watch?.OnClose("local disconnect"); } catch { }   // H-STEAMNET-1
             try { _mgr?.Close(); } catch { }
             if (_pumpThread != null && _pumpThread != Thread.CurrentThread) _pumpThread.Join(1000);
             _mgr = null;
@@ -1049,6 +1064,7 @@ namespace BigAmbitionsMP
                 try { FlushExpress(); } catch { }  // round-283: express lane FIRST — it must overtake the retry queue
                 try { FlushPending(); } catch { }
                 try { FlushPaced(); } catch { }   // round-282: paced lane, after the retry flush
+                try { _watch?.Tick(); } catch { }   // H-STEAMNET-1: samples every 30 s only
                 Thread.Sleep(15);
             }
             // The loop can also end because StopPolling/Disconnect cleared _running after OnDisconnected saw
@@ -1083,6 +1099,13 @@ namespace BigAmbitionsMP
             try { var m = _mgr; _lanesOk = m != null && m.Connection.ConfigureConnectionLanes(SteamLanes.Priorities, SteamLanes.Weights) == Result.OK; }
             catch { _lanesOk = false; }
             if (!_lanesOk) Plugin.Logger.LogWarning("[SteamClient] connection lanes unavailable — single-lane sends (pre-T3 behaviour).");
+            // H-STEAMNET-1: per-connection config override + the direct/relayed status line (connect, 30 s checks, close).
+            try
+            {
+                var wm = _mgr;
+                if (wm != null) { _watch = new SteamNetConfig.LinkWatch(wm.Connection, _watchWho, () => { lock (_pending) return _pendingBytes; }); _watch.OnConnected(); }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamNet] link watch for the host: {ex.Message}"); }
             Connected?.Invoke();
         }
 
@@ -1092,6 +1115,7 @@ namespace BigAmbitionsMP
             // tag frame was often still in the inbox, MPClient stopped the pump, and the player read a bare
             // 'App_Min'. Record only; the pump reports after draining. With no pump running (a voluntary leave
             // already stopped it) there is nothing to drain, so report straight away as before.
+            try { _watch?.OnClose(info.EndReason.ToString()); } catch { }   // H-STEAMNET-1
             try
             {
                 _peerCloseReason = info.EndReason.ToString();

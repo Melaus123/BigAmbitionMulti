@@ -1,0 +1,102 @@
+{
+  "id": "T-STEAMNET-HOSTPORT",
+  "title": "H-HOSTPORT-1 - a busy host port no longer ends hosting. A dummy UDP socket (python, SO_EXCLUSIVEADDRUSE on 0.0.0.0:7777) is held by the operator BEFORE the host launches; the host's 'host' (configured 7777) must fall through to 7778 and log it, the Steam relay listener must still start, and the client joins BY IP to 127.0.0.1:7778. The Steam-only branch (all 11 ports busy) and the lobby text are REVIEW-VERIFIED ONLY. Also re-checks the H-STEAMNET-1 startup config on both instances.",
+  "preconditions": "OPERATOR: start the port blocker BEFORE this run and keep it alive until the run ends, e.g. python -c \"import socket,time;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.setsockopt(socket.SOL_SOCKET,socket.SO_EXCLUSIVEADDRUSE,1);s.bind(('0.0.0.0',7777));print('holding 7777',flush=True);time.sleep(900)\". UDP 7778 free. Step 2 is the premise check: WITHOUT the blocker the host binds 7777 and the step FAILS (no vacuous pass). Dev build.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "\\[Server\\] Failed to start on port",
+    "\\[Server\\] no UDP port could be bound",
+    "\\[SteamNet\\] config not applied yet",
+    "\\[SteamNet\\] config: .*WANTED"
+  ],
+  "oracles_report": [
+    "\\[Server\\] port \\d+ in use",
+    "\\[Server\\] Listening",
+    "\\[SteamNet\\] config: ",
+    "\\[UI\\] Hosting"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "both",
+      "cmd": "mark TEST HOSTPORT START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK server started",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] port 7777 in use - hosting on 7778",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[SteamHost\\] relay listener up",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Listening on port 7778$",
+          "within_s": 30
+        }
+      ],
+      "note": "PREMISE asserted by the first line: 7777 really was busy (the blocker holds it) and the host moved to the next port"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "server=True"
+    },
+    {
+      "seq": 4,
+      "role": "c",
+      "cmd": "join 127.0.0.1:7778",
+      "expect_result": "^OK Connect\\(127\\.0\\.0\\.1:7778\\)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] connection request from 127\\.0\\.0\\.1:\\d+",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] '${clientPid}' joined lobby\\.",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 5,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "clientConn=True"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "steamnet",
+      "expect_result": "^OK steamnet config:\\ ICE=6\\ sendRate=1048576\\-16777216\\ sendBuffer=8388608\\ applied=True\\ at='startup'\\ links=0$"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "steamnet",
+      "expect_result": "^OK steamnet config:\\ ICE=6\\ sendRate=1048576\\-16777216\\ sendBuffer=8388608\\ applied=True\\ at='startup'\\ links=0$"
+    },
+    {
+      "seq": 8,
+      "role": "both",
+      "cmd": "mark TEST HOSTPORT END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

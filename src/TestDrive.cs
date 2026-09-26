@@ -1021,6 +1021,15 @@ namespace BigAmbitionsMP
                     return $"ERR usage: rejectjoin on|off (now {(RejectNextJoin ? "on" : "off")})";
                 }
 
+                case "steamnet":
+                {
+                    // H-STEAMNET-1 DEV lever: the effective Steam networking config and every live Steam link's
+                    // status line (each also logged as '[SteamNet] link ... (on demand)'). Either role.
+                    string sn = SteamNetConfig.DescribeForLever();
+                    Plugin.Logger.LogInfo($"[TestDrive] steamnet: {sn}");
+                    return "OK steamnet " + sn;
+                }
+
                 case "join":
                 {
                     if (MPClient.IsConnected) return "OK already connected";
