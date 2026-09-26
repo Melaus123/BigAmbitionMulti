@@ -84,13 +84,13 @@
       "seq": 6,
       "role": "h",
       "cmd": "steamnet",
-      "expect_result": "^OK steamnet config:\\ ICE=6\\ sendRate=1048576\\-16777216\\ sendBuffer=8388608\\ applied=True\\ at='startup'\\ links=0$"
+      "expect_result": "^OK steamnet config:\\ ICE=-1\\ sendRate=262144\\-262144\\ sendBuffer=524288\\ applied=True\\ at='startup'\\ links=0$"
     },
     {
       "seq": 7,
       "role": "c",
       "cmd": "steamnet",
-      "expect_result": "^OK steamnet config:\\ ICE=6\\ sendRate=1048576\\-16777216\\ sendBuffer=8388608\\ applied=True\\ at='startup'\\ links=0$"
+      "expect_result": "^OK steamnet config:\\ ICE=-1\\ sendRate=262144\\-262144\\ sendBuffer=524288\\ applied=True\\ at='startup'\\ links=0$"
     },
     {
       "seq": 8,

@@ -14,10 +14,11 @@ namespace BigAmbitionsMP
     /// 1. GLOBAL networking config, set once before any Steam socket is created (a startup watcher applies it the
     ///    first time Steam is valid; the host listener start and the client connect call EnsureApplied again as a
     ///    guard, a no-op once applied):
-    ///    - P2P_Transport_ICE_Enable = Private | Public: the library tries a DIRECT UDP path (NAT punch-through,
-    ///      signalled through Steam) and keeps the relay as its own fallback. Set through Facepunch's INTERNAL
-    ///      ISteamNetworkingUtils.SetConfigValue (reflection) - Facepunch has no public ICE setter.
-    ///    - SendRateMin / SendRateMax / SendBufferSize raised - public SteamNetworkingUtils properties.
+    ///    - P2P_Transport_ICE_Enable = -1 (Default): the library follows each PLAYER's own Steam IP-sharing setting
+    ///      (user decision 2026-09-26); set through Facepunch's INTERNAL ISteamNetworkingUtils.SetConfigValue
+    ///      (reflection) - Facepunch has no public ICE setter.
+    ///    - SendRateMin = SendRateMax = 256 KB/s and SendBufferSize at the default 512 KB until the per-connection
+    ///      rate controller (H-STEAMNET-2) exists - public SteamNetworkingUtils properties.
     ///    Every value is read back after it is set and the effective values are logged beside the defaults.
     /// 2. The same rate/buffer values on each connection (connection-scope SetConfigValue, reflection), read back.
     /// 3. A per-link status line - direct or relayed, ping, the library's current send rate, queued bytes - at
@@ -27,14 +28,23 @@ namespace BigAmbitionsMP
     internal static class SteamNetConfig
     {
         // ── targets (brief H-STEAMNET-1) ─────────────────────────────────────
-        internal const int IceWanted         = 2 | 4;              // k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Private | _Public
+        // User decision 2026-09-26: RESPECT each player's own Steam 'direct connections (IP sharing)' setting.
+        // -1 = k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Default: the library follows the player's choice;
+        // players who allow it get the direct NAT-punched path, anyone who chose otherwise stays on the relay.
+        internal const int IceWanted         = -1;
         // Manager decision 2026-09-26: 512 KB/s, not 1 MB/s. If the library holds the rate AT the minimum (no
         // bandwidth estimation - unverified), a 1 MB/s floor would overrun slow home uplinks (~8 Mbit/s) and force
         // resends; 512 KB/s (~4 Mbit/s) still doubles the 256 KB/s default. The per-link 'rate=' line in a real
         // two-account session settles whether the rate adapts up toward SendRateMax.
-        internal const int SendRateMinWanted = 512 * 1024;
-        internal const int SendRateMaxWanted = 16 * 1024 * 1024;   // 16 MB/s
-        internal const int SendBufferWanted  = 8 * 1024 * 1024;    // 8 MB
+        // User decision 2026-09-26: back to Valve's 256 KB/s until the mod sets each connection's rate itself
+        // (Valve: the library does no bandwidth estimation; min = max = a fixed rate) - never worse than the release.
+        internal const int SendRateMinWanted = 256 * 1024;
+        // Design read 2026-09-26 (Valve snp.cpp SNP_ClampSendRate): with min != max the library FREEZES a rate from
+        // the connect-time ping (never updated), so max = min until the per-connection controller (H-STEAMNET-2) exists.
+        internal const int SendRateMaxWanted = 256 * 1024;
+        // Review MEDIUM: 8 MB at a fixed 256 KB/s is ~32 s of queue ahead of every message (and invisible to the mod's
+        // own backlog warnings until Steam refuses). Steam's default until the controller scales it with the rate.
+        internal const int SendBufferWanted  = 512 * 1024;
 
         // Facepunch's internal enums (verified in the shipped Facepunch.Steamworks.Win64.dll):
         // Steamworks.NetConfig, Steamworks.NetConfigScope, Steamworks.NetConfigType, Steamworks.NetConfigResult.

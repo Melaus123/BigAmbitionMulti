@@ -210,7 +210,8 @@ namespace BigAmbitionsMP
         /// Assigns the lowest free passenger seat (1 = front shotgun, 2..N = rear), so seating
         /// fills front-passenger-first then rear. On failure sets <paramref name="reason"/>
         /// (shown to the requester, e.g. the "door locked" popup). The owner is rejected (they
-        /// drive their own car natively) and a locked vehicle refuses new boards.</summary>
+        /// drive their own car natively) unless another player - a client OR the host - is driving
+        /// it (MPServer.IsCarDriven), and a locked vehicle refuses new boards.</summary>
         public static bool HostCanBoard(string vehicleId, string requesterPid, out int seat, out string reason)
         {
             seat = -1;
@@ -218,6 +219,7 @@ namespace BigAmbitionsMP
             string owner = OwnerOf(vehicleId);
             if (string.IsNullOrEmpty(owner))   { reason = "vehicle unknown"; return false; }
             // The OWNER may board their OWN car only while a borrower is driving it (else they'd just drive it).
+            // H-OWNERRIDE-HOSTDRIVER-1: IsCarDriven covers a HOST driver too (MPServer.BroadcastVehicleDrive records it).
             bool ownerRidingDriven = (owner == requesterPid) && MPServer.IsCarDriven(vehicleId);
             if (owner == requesterPid && !ownerRidingDriven) { reason = "your own vehicle"; return false; }
             if (IsLocked(vehicleId) && !GrantSync.IsGranted(owner, requesterPid) && !ownerRidingDriven) { reason = "door locked"; return false; }   // a granted player (or the owner of a driven car) holds a key

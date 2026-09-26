@@ -32,14 +32,14 @@
       "seq": 2,
       "role": "h",
       "cmd": "steamnet",
-      "expect_result": "^OK steamnet config:\\ ICE=6\\ sendRate=1048576\\-16777216\\ sendBuffer=8388608\\ applied=True\\ at='startup'\\ links=0$",
+      "expect_result": "^OK steamnet config:\\ ICE=-1\\ sendRate=262144\\-262144\\ sendBuffer=524288\\ applied=True\\ at='startup'\\ links=0$",
       "note": "PREMISE + proof: read-back values, applied by the startup watcher (at='startup'), before any host/join"
     },
     {
       "seq": 3,
       "role": "c",
       "cmd": "steamnet",
-      "expect_result": "^OK steamnet config:\\ ICE=6\\ sendRate=1048576\\-16777216\\ sendBuffer=8388608\\ applied=True\\ at='startup'\\ links=0$"
+      "expect_result": "^OK steamnet config:\\ ICE=-1\\ sendRate=262144\\-262144\\ sendBuffer=524288\\ applied=True\\ at='startup'\\ links=0$"
     },
     {
       "seq": 4,
@@ -83,11 +83,11 @@
       "seq": 7,
       "role": "h",
       "cmd": "steamnet",
-      "expect_result": "^OK steamnet config:\\ ICE=6\\ sendRate=1048576\\-16777216\\ sendBuffer=8388608\\ applied=True\\ at='startup'\\ links=0$",
+      "expect_result": "^OK steamnet config:\\ ICE=-1\\ sendRate=262144\\-262144\\ sendBuffer=524288\\ applied=True\\ at='startup'\\ links=0$",
       "expect_log": [
         {
           "role": "h",
-          "regex": "\\[TestDrive\\] steamnet: config: ICE=6 ",
+          "regex": "\\[TestDrive\\] steamnet: config: ICE=-1 ",
           "within_s": 10
         }
       ],
@@ -97,7 +97,7 @@
       "seq": 8,
       "role": "c",
       "cmd": "steamnet",
-      "expect_result": "^OK steamnet config:\\ ICE=6\\ sendRate=1048576\\-16777216\\ sendBuffer=8388608\\ applied=True\\ at='startup'\\ links=0$"
+      "expect_result": "^OK steamnet config:\\ ICE=-1\\ sendRate=262144\\-262144\\ sendBuffer=524288\\ applied=True\\ at='startup'\\ links=0$"
     },
     {
       "seq": 9,

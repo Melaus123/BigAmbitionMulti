@@ -373,6 +373,53 @@ namespace BigAmbitionsMP
             return n;
         }
 
+        /// <summary>H-GHOSTPIN-1 (2026-09-26): THE one place a ghost is hidden or shown. The KEPT map pin (4d R2) is not
+        /// a child of the ghost - CityMap.AddPoi parents it under the map's POI layer, and the game's own per-frame loop
+        /// (PermanentPointsOfInterest.HandlePermanentPOIs) shows it whenever its 'hidden' flag is false and it is in
+        /// range or the city map is open - so SetActive on the ghost alone left an icon on the map and in the world with
+        /// no vehicle under it. The pin now follows the ghost through the game's own PointOfInterest.SetHidden, the flag
+        /// that loop honours. A pin that throws is dropped from the record (the old destroyed-pin handling).</summary>
+        private static int _ghostPinLogged;
+        private static void SetGhostShown(string vid, RemoteVehicle rv, bool show)
+        {
+            if (rv?.Go == null) return;
+            rv.Go.SetActive(show);
+            if (rv.Poi == null) return;
+            try
+            {
+                rv.Poi.SetHidden(!show);
+                if (_ghostPinLogged < 60)
+                {
+                    _ghostPinLogged++;
+                    Plugin.Logger.LogInfo($"[Pins] kept pin {vid} {(show ? "shown" : "hidden")} with its ghost (owner '{rv.OwnerId}').");
+                }
+            }
+            catch (Exception ex) { rv.Poi = null; Plugin.Logger.LogWarning($"[Pins] kept pin {vid}: {ex.Message} - pin dropped."); }
+        }
+
+        /// <summary>DEV rig readout (TestDrive 'pinstate', H-GHOSTPIN-1): per kept pin, is its ghost active and is the pin
+        /// NOT flagged hidden. The flag is what the game reads: PermanentPointsOfInterest.HandlePermanentPOIs re-derives
+        /// the pin object's active state every frame from it plus range (street view 100 m, or the city map open), so
+        /// activeSelf alone would read a far-away shown ghost's pin as 'off' (rig run T-GHOSTPIN-20260926-124858).</summary>
+        internal static System.Collections.Generic.List<(string vid, string owner, bool ghostOn, bool pinOn)> KeptPinStates()
+        {
+            var list = new System.Collections.Generic.List<(string, string, bool, bool)>();
+            try
+            {
+                foreach (var kv in _remoteVehicles)
+                {
+                    var rv = kv.Value;
+                    if (rv?.Poi == null) continue;
+                    bool g = rv.Go != null && rv.Go.activeSelf;
+                    bool pn = false;
+                    try { pn = !rv.Poi.hidden; } catch { }
+                    list.Add((kv.Key, rv.OwnerId ?? "", g, pn));
+                }
+            }
+            catch { }
+            return list;
+        }
+
         /// <summary>MERGER PHASE 4d (R6): the partner map pins kept alive here — (vehicleId, owner).</summary>
         public static System.Collections.Generic.List<(string vid, string owner)> KeptPins()
         {
@@ -980,7 +1027,7 @@ namespace BigAmbitionsMP
                         else maskVeh = myBldg.Length > 0 && IsHandCartType(e.TypeName ?? "");             // '' + viewer indoors → hide (carts only)
                         if (rv.Go.activeSelf == maskVeh)
                         {
-                            rv.Go.SetActive(!maskVeh);
+                            SetGhostShown(e.VehicleId, rv, !maskVeh);   // H-GHOSTPIN-1: the kept pin hides/shows with the ghost
                             // Review 2026-08-24 (ROOT of field 20260821-180203, "cart stuck in hands"):
                             // SetActive(false) fires native VehicleController.OnDisable → Unregister-
                             // PlayerVehicle, and registration happens ONLY in Awake — so a hidden-then-
@@ -2179,6 +2226,8 @@ namespace BigAmbitionsMP
         // to everyone else). Reverts on exit (Released) or a ~1.5 s timeout (driver disconnect).
         private static string _drivingRealVid = "";   // REAL id of the proxy I'm currently driving ("" = none)
         private static string _drivingOwner   = "";
+        /// <summary>DEV rig readout (TestDrive 'ride'): REAL id of the borrowed car this machine is streaming ("" = none).</summary>
+        internal static string DrivingRealVid => _drivingRealVid;
         // H-CARCOND-1 trace [VehCond]: 40 lines per session, shared by the sender and receiver halves.
         private static int   _vehCondLogged      = 0;
         private static float _lastStreamedDamage = -1f;

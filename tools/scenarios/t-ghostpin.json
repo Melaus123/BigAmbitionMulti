@@ -1,0 +1,186 @@
+{
+  "id": "T-GHOSTPIN",
+  "title": "H-GHOSTPIN-1 (bundles 20260923-023346, likely -175437): a hidden vehicle ghost must not leave its kept map pin behind. Merge the pair (the host keeps a pin for every drivable partner ghost). Run 1 (T-GHOSTPIN-20260926-124858) found 4 of the client's 5 kept-pin ghosts already HIDDEN outdoors by the building-tag rule (tagged for a building the viewer is not in), among them the hand truck tagged '56 ba:street_fifthavenue'. ASSERT: outdoors that hand truck's ghost is hidden AND its pin is flagged hidden; the host walks INTO 56 Fifth Avenue -> the ghost is shown and its pin returns; walks back out -> both hidden again; every kept pin matches its ghost throughout. Ends dissolved; NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1; Client1's hand truck vars.cartVid parked with the tag vars.cartBldg). Dev build with the 'pinstate' readout: OK pinstate n=<kept pins> hidden=<kept-pin ghosts hidden> mismatched=<pins whose hidden flag differs from their ghost> [vid:owner:ghost=on|off:pin=on|off,...]; pin = NOT PointOfInterest.hidden, the flag the game's per-frame permanent-POI loop honours (activeSelf also folds in the 100 m range, so a far shown ghost's pin reads inactive - run 1). Evidence line: [Pins] kept pin <vid> hidden|shown with its ghost.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "cartBldg": "56 ba:street_fifthavenue",
+    "cartVid": "+53844e+HUeuWFvCZfzpZQ==",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "\\[Pins\\] kept pin \\S+: .* - pin dropped"
+  ],
+  "oracles_report": [
+    "\\[Pins\\] ",
+    "\\[InteriorMask\\] ghost "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "both worlds load and settle"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST GHOSTPIN START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the client's ghosts respawn drivable on the host with KEPT pins"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "pinstate",
+      "expect_result": "^OK pinstate n=[1-9]\\d* hidden=[1-9]\\d* mismatched=0 .*${cartVid}:${clientPid}:ghost=off:pin=off",
+      "note": "PREMISE: kept pins exist and the hand-truck ghost is hidden outdoors (tag = another building). THE FIX: its pin is hidden with it, and no pin differs from its ghost"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "enterbuilding ${cartBldg}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] enterbuilding '${cartBldg}' . OK",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Pins\\] kept pin ${cartVid} shown with its ghost \\(owner '${clientPid}'\\)",
+          "within_s": 40
+        }
+      ]
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "pinstate",
+      "expect_result": "^OK pinstate n=[1-9]\\d* hidden=\\d+ mismatched=0 .*${cartVid}:${clientPid}:ghost=on:pin=on",
+      "note": "inside the cart's building: the ghost is shown and its pin returns with it"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Pins\\] kept pin ${cartVid} hidden with its ghost \\(owner '${clientPid}'\\)",
+          "within_s": 40
+        }
+      ]
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "pinstate",
+      "expect_result": "^OK pinstate n=[1-9]\\d* hidden=[1-9]\\d* mismatched=0 .*${cartVid}:${clientPid}:ghost=off:pin=off",
+      "note": "outdoors again: the ghost is hidden and its pin with it"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 24,
+      "role": "both",
+      "cmd": "mark TEST GHOSTPIN END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

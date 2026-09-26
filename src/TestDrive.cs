@@ -3497,6 +3497,156 @@ namespace BigAmbitionsMP
                     return $"OK deposit addr='{dkey}' station='{dst.itemName}' id={dst.id} item={ditem} amount={dn} pushed={dpushed} helper={dhelper} localBefore={dbefore} localAfter={dafter} heldAfter={dsrc.amount} routed={dafter == dbefore}";
                 }
 
+                case "drive":
+                {
+                    // H-OWNERRIDE-HOSTDRIVER-1 rig lever (DEV, WRITES the local player's position). `drive <ownerPid> [vehicleId]`:
+                    // the LOCAL player takes the wheel of a DRIVABLE proxy of that player's car (a granted key or a merger) -
+                    // teleported beside it with the game's own Teleport (as 'tp'), then the car's own DriveVehicle(), the
+                    // native enter a click runs (walk to the driver door, EnterVehicle). Without a vehicle id it picks an
+                    // ACTIVE car with at least one passenger seat. The drive stream then starts from VehicleManager.TickDriveSync;
+                    // 'ride' reads it back (driving='<vid>').
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    var da = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (da.Length < 1 || da.Length > 2) return "ERR usage: drive <ownerPid> [vehicleId]";
+                    try { if (BuildingManager.IsInsideBuilding) return "ERR inside a building"; } catch { }
+                    try { if (Helpers.VehicleHelper.IsInsideVehicle()) return "ERR in a vehicle"; } catch { }
+                    if (PassengerSync.IsRiding(MPConfig.PlayerId)) return "ERR riding";
+                    VehicleController? dvc = null; string dvid = "", dtype = "";
+                    try
+                    {
+                        var dlist = Helpers.VehicleHelper.AllPlayerVehicles;
+                        if (dlist != null)
+                            for (int i = 0; i < dlist.Count; i++)
+                            {
+                                var vc = dlist[i]; var inst = vc != null ? vc.vehicleInstance : null;
+                                if (inst == null || string.IsNullOrEmpty(inst.id)) continue;
+                                if (!inst.id.StartsWith("BAMP_", StringComparison.Ordinal) || inst.id.StartsWith("BAMP_TESTRIG", StringComparison.Ordinal)) continue;
+                                if (vc == null || !vc.gameObject.activeInHierarchy) continue;
+                                string real = inst.id.Substring(5);
+                                if (VehicleManager.OwnerIdFor(real) != da[0]) continue;
+                                if (da.Length == 2 && real != da[1]) continue;
+                                string tn = VehicleManager.TypeNameFor(real);
+                                if (da.Length == 1 && (VehicleManager.IsHandCartType(tn) || PassengerSync.PassengerSeatsForType(tn) < 1)) continue;
+                                dvc = vc; dvid = real; dtype = tn; break;
+                            }
+                    }
+                    catch (Exception ex) { return $"ERR drive: {ex.Message}"; }
+                    if (dvc == null) return $"ERR no drivable car of '{da[0]}' here";
+                    string dterr = TeleportBeside(dvc.transform);
+                    if (dterr.Length > 0) return "ERR drive: " + dterr;
+                    try { dvc.DriveVehicle(); }
+                    catch (Exception ex) { return $"ERR drive: DriveVehicle threw {ex.Message}"; }
+                    Plugin.Logger.LogInfo($"[TestDrive] drive: DriveVehicle on '{dvid}' ({dtype}, owner '{da[0]}').");
+                    return $"OK drive vid={dvid} owner={da[0]} type={dtype} queued";
+                }
+
+                case "board":
+                {
+                    // H-OWNERRIDE-HOSTDRIVER-1 rig lever (DEV, WRITES the local player's position). `board <vehicleId>`: ask
+                    // for a seat the way a click does, after a teleport beside the car. On the OWNER's own car this runs the
+                    // car's own DriveVehicle(), which Patch_VehicleController_DriveVehicle_OwnerRide (PassengerLockButton.cs)
+                    // turns into a passenger board while another player drives it - the field path of the bug. On anyone
+                    // else's car it is PassengerRide.RequestBoard (what the ghost click ends in).
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    string bvid = arg.Trim();
+                    if (bvid.Length == 0 || bvid.Contains(" ")) return "ERR usage: board <vehicleId>";
+                    try { if (BuildingManager.IsInsideBuilding) return "ERR inside a building"; } catch { }
+                    try { if (Helpers.VehicleHelper.IsInsideVehicle()) return "ERR in a vehicle"; } catch { }
+                    VehicleController? own = null;
+                    try
+                    {
+                        var blist = Helpers.VehicleHelper.AllPlayerVehicles;
+                        if (blist != null)
+                            for (int i = 0; i < blist.Count; i++)
+                            {
+                                var vc = blist[i];
+                                if (vc != null && vc.vehicleInstance != null && vc.vehicleInstance.id == bvid) { own = vc; break; }
+                            }
+                    }
+                    catch { }
+                    UnityEngine.Transform? bt = own != null ? own.transform : VehicleManager.GhostTransform(bvid);
+                    if (bt == null) return $"ERR no car '{bvid}' here";
+                    string bterr = TeleportBeside(bt);
+                    if (bterr.Length > 0) return "ERR board: " + bterr;
+                    bool bdriven = VehicleManager.IsDrivenRemotely(bvid);
+                    try
+                    {
+                        if (own != null) own.DriveVehicle();
+                        else PassengerRide.RequestBoard(bvid);
+                    }
+                    catch (Exception ex) { return $"ERR board: {ex.Message}"; }
+                    return $"OK board vid={bvid} own={own != null} drivenRemotely={bdriven} requested";
+                }
+
+                case "ride":
+                {
+                    // H-OWNERRIDE-HOSTDRIVER-1 rig readout (read-only): this machine's ride and drive state.
+                    // local/seat = PassengerSync's local ride mirror; driving = the borrowed car this machine streams;
+                    // riders = every seat as vid:seat:pid; driven (HOST only) = MPServer's live driven-car records vid:driver.
+                    if (arg.Length > 0) return "ERR usage: ride";
+                    var rl = new System.Collections.Generic.List<string>();
+                    try
+                    {
+                        foreach (var rvid in PassengerSync.OccupiedVehicleIds())
+                        {
+                            var rs = PassengerSync.RidersOf(rvid);
+                            if (rs != null) foreach (var kv in rs) rl.Add($"{rvid}:{kv.Key}:{kv.Value}");
+                        }
+                        rl.Sort(StringComparer.Ordinal);
+                    }
+                    catch { }
+                    string rsb = $"OK ride local='{PassengerSync.LocalRidingVehicleId}' seat={PassengerSync.LocalSeat} driving='{VehicleManager.DrivingRealVid}' riders=[{string.Join(",", rl)}]";
+                    if (MPServer.IsRunning) rsb += $" driven=[{MPServer.DrivenCarsDigest()}]";
+                    return rsb;
+                }
+
+                case "exitride":
+                {
+                    // H-OWNERRIDE-HOSTDRIVER-1 rig lever (DEV). A passenger leaves through PassengerRide.RequestExit (the
+                    // Exit button's call); a driver leaves through the car's own ExitVehicle() (the Park button's call,
+                    // ItemPanelUI.ClickPark), which ends the drive stream with a Released.
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    if (PassengerSync.IsRiding(MPConfig.PlayerId))
+                    {
+                        string was = PassengerSync.LocalRidingVehicleId;
+                        try { PassengerRide.RequestExit(); } catch (Exception ex) { return $"ERR exitride: {ex.Message}"; }
+                        return $"OK exitride rider vid={was}";
+                    }
+                    try
+                    {
+                        var elist = Helpers.VehicleHelper.AllPlayerVehicles;
+                        if (elist != null)
+                            for (int i = 0; i < elist.Count; i++)
+                            {
+                                var vc = elist[i];
+                                if (vc == null || !vc.controlledByPlayer) continue;
+                                string evid = vc.vehicleInstance != null ? vc.vehicleInstance.id : "";
+                                vc.ExitVehicle();
+                                return $"OK exitride driver vid={evid}";
+                            }
+                    }
+                    catch (Exception ex) { return $"ERR exitride: {ex.Message}"; }
+                    return "ERR not in a car";
+                }
+
+                case "pinstate":
+                {
+                    // H-GHOSTPIN-1 rig readout (read-only). Per KEPT partner pin: is its ghost active, is the pin drawn.
+                    // hidden = kept-pin ghosts currently hidden; mismatched = pins whose state differs from their ghost's.
+                    if (arg.Length > 0) return "ERR usage: pinstate";
+                    var ps = VehicleManager.KeptPinStates();
+                    int phid = 0, pmis = 0;
+                    var pl = new System.Collections.Generic.List<string>();
+                    foreach (var s in ps)
+                    {
+                        if (!s.ghostOn) phid++;
+                        if (s.ghostOn != s.pinOn) pmis++;
+                        pl.Add($"{s.vid}:{s.owner}:ghost={(s.ghostOn ? "on" : "off")}:pin={(s.pinOn ? "on" : "off")}");
+                    }
+                    pl.Sort(StringComparer.Ordinal);
+                    return $"OK pinstate n={ps.Count} hidden={phid} mismatched={pmis} [{string.Join(",", pl)}]";
+                }
+
                 case "grants":
                 {
                     // HO-1c L3 rig lever. The STORED grant table as this machine holds it (owner->grantee:kind),
@@ -3565,6 +3715,24 @@ namespace BigAmbitionsMP
                 default:
                     return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|walletdump|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|hrtag|hrplanof|planown|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg|negotiations|dissolvecheck|dissolverun)";
             }
+        }
+
+        /// <summary>'drive'/'board' (H-OWNERRIDE-HOSTDRIVER-1): put the LOCAL player 3 m to the side of a car with the
+        /// game's own teleport, exactly as 'tp' does (a temporary GameObject carries the target). "" on success.</summary>
+        private static string TeleportBeside(UnityEngine.Transform car)
+        {
+            UnityEngine.GameObject? probe = null;
+            try
+            {
+                probe = new UnityEngine.GameObject("BAMP_TpTarget");
+                probe.transform.position = car.position + car.right * 3f;
+                var pc = Helpers.PlayerHelper.PlayerController;
+                probe.transform.rotation = pc != null ? pc.transform.rotation : UnityEngine.Quaternion.identity;
+                Helpers.PlayerHelper.Teleport(probe.transform);
+                return "";
+            }
+            catch (Exception ex) { return "teleport: " + ex.Message; }
+            finally { try { if (probe != null) UnityEngine.Object.Destroy(probe); } catch { } }
         }
 
         /// <summary>Single quote for the key list above - an escaped char literal inside an

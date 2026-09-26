@@ -1,0 +1,300 @@
+{
+  "id": "T-OWNERRIDE",
+  "title": "H-OWNERRIDE-HOSTDRIVER-1 (user-approved; bundles 20260926-164551, -165557): when the HOST drives a member's car, the car's OWNER can board it as a passenger. Merge the pair (every car becomes drivable both ways), the host takes the wheel of one of the client's cars ('drive'), then the client clicks its own car the way the field did ('board' runs the car's own DriveVehicle, which the owner-ride patch turns into a passenger board). ASSERT: the ride starts on BOTH machines (client local ride + host seat table). Then the REVERSE still works: the client drives one of the host's cars and the host boards. Ends dissolved; NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1; both own cars). Dev build with the H-OWNERRIDE levers: drive <ownerPid> [vid] (teleport beside a drivable proxy + native DriveVehicle), board <vid> (teleport beside + own car: native DriveVehicle -> owner-ride patch; else PassengerRide.RequestBoard), ride (local ride / driving / riders / host driven records), exitride (RequestExit as a rider, ExitVehicle as a driver). The merger makes every partner car drivable (GrantSync.IsGranted unions MergedRuntime).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "\\[Drive\\] owner-ride guard: ",
+    "\\[Drive\\] host drive record: ",
+    "\\[Drive\\] TickDriveSync: "
+  ],
+  "oracles_report": [
+    "\\[Drive\\] ",
+    "\\[Ride\\] ",
+    "\\[TestDrive\\] drive: "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "both worlds load and settle"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST OWNERRIDE START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "ghosts respawn drivable on both machines after the membership edge"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "drive ${clientPid}",
+      "expect_result": "^OK drive vid=\\S+ owner=${clientPid} ",
+      "capture": {
+        "cvid": "^OK drive vid=(\\S+) "
+      },
+      "note": "PREMISE: the host holds a drivable proxy of one of the client's cars and takes its wheel",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Drive\\] host is driving '${cvid}' \\(owner '${clientPid}'\\) - recorded as driven",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "sleep_s": 12,
+      "note": "walk to the driver door + native EnterVehicle; the drive stream starts"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "ride",
+      "expect_result": "^OK ride local='' seat=-1 driving='${cvid}' .* driven=\\[[^\\]]*${cvid}:${hostPid}",
+      "note": "PREMISE: the host IS driving the client's car, and (the fix) the host's own drive is recorded as driven"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "board ${cvid}",
+      "expect_result": "^OK board vid=${cvid} own=True drivenRemotely=True requested",
+      "note": "PREMISE: on the client this is its OWN car and it sees it driven remotely - the field click path",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Drive\\] owner DriveVehicle on driven car '${cvid}' . passenger board",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "sleep_s": 6
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "ride",
+      "expect_result": "^OK ride local='${cvid}' seat=1 .*riders=\\[[^\\]]*${cvid}:1:${clientPid}",
+      "note": "THE FIX (client side): the owner's ride started - before the fix the host refused 'your own vehicle'"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "ride",
+      "expect_result": "^OK ride .*riders=\\[[^\\]]*${cvid}:1:${clientPid}",
+      "note": "THE FIX (host side): the host's seat table holds the owner in seat 1 of the car the host drives"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "exitride",
+      "expect_result": "^OK exitride rider vid=${cvid}"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "sleep_s": 4
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "exitride",
+      "expect_result": "^OK exitride driver vid=BAMP_${cvid}",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Drive\\] host released '${cvid}' \\(owner '${clientPid}'\\) - no longer recorded as driven",
+          "within_s": 15
+        }
+      ]
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "ride",
+      "expect_result": "^OK ride local='' seat=-1 driving='' riders=\\[\\] driven=\\[\\]",
+      "note": "the release cleared the host's own drive record; nobody is seated"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "drive ${hostPid}",
+      "expect_result": "^OK drive vid=\\S+ owner=${hostPid} ",
+      "capture": {
+        "hvid": "^OK drive vid=(\\S+) "
+      },
+      "note": "REVERSE: the client takes the wheel of one of the host's cars"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "ride",
+      "expect_result": "^OK ride local='' seat=-1 driving='${hvid}' ",
+      "note": "PREMISE: the client is driving the host's car"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "board ${hvid}",
+      "expect_result": "^OK board vid=${hvid} own=True drivenRemotely=True requested",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Drive\\] owner DriveVehicle on driven car '${hvid}' . passenger board",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "sleep_s": 6
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "ride",
+      "expect_result": "^OK ride local='${hvid}' seat=1 .*riders=\\[[^\\]]*${hvid}:1:${hostPid}.* driven=\\[[^\\]]*${hvid}:${clientPid}",
+      "note": "REVERSE still works (host side): the host rides its own car the client drives"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "ride",
+      "expect_result": "^OK ride .*riders=\\[[^\\]]*${hvid}:1:${hostPid}",
+      "note": "REVERSE (client side)"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "exitride",
+      "expect_result": "^OK exitride rider vid=${hvid}"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "sleep_s": 4
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "exitride",
+      "expect_result": "^OK exitride driver vid=BAMP_${hvid}"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 40,
+      "role": "both",
+      "cmd": "mark TEST OWNERRIDE END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

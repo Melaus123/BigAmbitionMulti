@@ -1504,6 +1504,8 @@ namespace BigAmbitionsMP
             }
 
             _running = true;
+            _drivenCars.Clear();   // H-OWNERRIDE-HOSTDRIVER-1: no drive record outlives its hosting session
+            _pMergeReqLines = 0;   // P-MERGEREQ: the probe's line budget is per hosting session
             ResetJoinControl();   // fresh hosting session — bans lift, pending requests drop
             MPSteamPresence.AdvertiseHosting();   // friends see Join Game / can be invited (no-op without Steam)
 
@@ -2181,6 +2183,7 @@ namespace BigAmbitionsMP
                     var mreq = env.GetPayload<MergerRequestPayload>();
                     if (mreq != null)
                         GameStatePatcher.EnqueueOnMainThread(() => HostMergerAction(mreq.Action, mreq.TargetPid, senderPid));
+                    else PMergeReq($"dropped a MergerRequest from '{senderPid}': the payload did not read");   // P-MERGEREQ
                     break;
                 }
 
@@ -5730,7 +5733,10 @@ namespace BigAmbitionsMP
         }
 
         // Cars currently being driven by a borrower (vehicleId → last VehicleDrive time) so HostCanBoard lets
-        // the OWNER ride their own car as a passenger while it's borrowed.
+        // the OWNER ride their own car as a passenger while it's borrowed. H-OWNERRIDE-HOSTDRIVER-1 (2026-09-26):
+        // a CLIENT borrower is recorded by HandleVehicleDrive below; the HOST's own drive of another player's car
+        // is recorded by BroadcastVehicleDrive (the host's stream never arrives here as a message) - before that
+        // fix the owner's board request was refused as 'your own vehicle' whenever the HOST was the driver.
         // Round-232b: driver-aware + thread-safe (the grace check below reads it on the POLL thread;
         // Environment.TickCount instead of Time.unscaledTime because Unity time is main-thread-only).
         private sealed class DrivenRec { public string Driver = ""; public int TickMs; }
@@ -5762,11 +5768,51 @@ namespace BigAmbitionsMP
             Broadcast(MessageEnvelope.Create(MessageType.VehicleDrive, MPConfig.PlayerId, p));   // to all (the driver ignores its echo)
         }
 
-        /// <summary>Host-as-driver: broadcast the pose of a borrowed car the host is driving.</summary>
+        /// <summary>Host-as-driver: broadcast the pose of a borrowed car the host is driving, and record the drive in
+        /// _drivenCars exactly as HandleVehicleDrive records a client's (H-OWNERRIDE-HOSTDRIVER-1), so the car's OWNER
+        /// may board it as a passenger. Released clears the record; a stream that stops without a release goes stale
+        /// after IsCarDriven's 2 s window, and a new hosting session starts with the table cleared.</summary>
         public static void BroadcastVehicleDrive(VehicleDrivePayload p)
         {
             if (!_running || p == null) return;
+            try
+            {
+                if (!string.IsNullOrEmpty(p.VehicleId) && p.DriverId == MPConfig.PlayerId)
+                {
+                    if (p.Released)
+                    {
+                        if (_drivenCars.TryGetValue(p.VehicleId, out var mine) && mine.Driver == MPConfig.PlayerId)
+                        {
+                            _drivenCars.TryRemove(p.VehicleId, out _);
+                            Plugin.Logger.LogInfo($"[Drive] host released '{p.VehicleId}' (owner '{p.OwnerId}') - no longer recorded as driven.");
+                        }
+                    }
+                    else
+                    {
+                        bool fresh = !_drivenCars.TryGetValue(p.VehicleId, out var had) || had.Driver != MPConfig.PlayerId
+                                     || unchecked(Environment.TickCount - had.TickMs) >= 2000;
+                        _drivenCars[p.VehicleId] = new DrivenRec { Driver = MPConfig.PlayerId, TickMs = Environment.TickCount };
+                        if (fresh)
+                            Plugin.Logger.LogInfo($"[Drive] host is driving '{p.VehicleId}' (owner '{p.OwnerId}') - recorded as driven, so its owner may ride as a passenger.");
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] host drive record: {ex.Message}"); }
             Broadcast(MessageEnvelope.Create(MessageType.VehicleDrive, MPConfig.PlayerId, p));
+        }
+
+        /// <summary>DEV rig readout (TestDrive 'ride'): the LIVE driven-car records as vid:driver, sorted.</summary>
+        internal static string DrivenCarsDigest()
+        {
+            var l = new List<string>();
+            try
+            {
+                foreach (var kv in _drivenCars)
+                    if (kv.Value != null && unchecked(Environment.TickCount - kv.Value.TickMs) < 2000) l.Add(kv.Key + ":" + kv.Value.Driver);
+                l.Sort(StringComparer.Ordinal);
+            }
+            catch { }
+            return string.Join(",", l);
         }
 
         // ── Passenger (ride shotgun) — host-authoritative ─────────────────────
@@ -6614,20 +6660,43 @@ namespace BigAmbitionsMP
             return _mergerPendingByTarget.ContainsKey(actorPid) ? actorPid : "";
         }
 
+        // PROBE-START: P-MERGEREQ (LOG-ONLY, pre-approved; bundle 20260923-140828: ~20 merger messages from a client
+        // left ONE line on the host). Every request is named on arrival and every branch that used to drop it (or
+        // answer it) without a host line says why. Budgeted per hosting session (reset where _running is set).
+        private static int _pMergeReqLines;
+        private const int PMergeReqBudget = 150;
+        private static void PMergeReq(string line)
+        {
+            try
+            {
+                int n = System.Threading.Interlocked.Increment(ref _pMergeReqLines);
+                if (n > PMergeReqBudget) return;
+                Plugin.Logger.LogInfo("[P-MERGEREQ] " + line + (n == PMergeReqBudget ? " (probe budget reached - no more P-MERGEREQ lines this session)" : ""));
+            }
+            catch { }
+        }
+        private static void PMergeReqDrop(string action, string actorPid, string targetPid, string reason)
+            => PMergeReq($"dropped '{action}' from '{actorPid}' target='{targetPid}': {reason}");
+        // PROBE-END: P-MERGEREQ
+
+        private static string Clip64(string? s) => string.IsNullOrEmpty(s) ? (s ?? "") : (s!.Length <= 64 ? s : s.Substring(0, 64) + "…");
+
         public static void HostMergerAction(string action, string targetPid, string actorPid)
         {
-            if (!_running || string.IsNullOrEmpty(actorPid)) return;
+            PMergeReq($"request '{Clip64(action)}' from '{actorPid}' target='{Clip64(targetPid)}'");   // P-MERGEREQ (client-supplied text clipped)
+            if (!_running || string.IsNullOrEmpty(actorPid)) { PMergeReqDrop(action, actorPid, targetPid, !_running ? "the server is not running" : "no actor id"); return; }
             long now = TickMs64;   // monotonic ms (net48 has no Environment.TickCount64)
 
             switch (action)
             {
                 case "propose":
                 {
-                    if (string.IsNullOrEmpty(targetPid) || targetPid == actorPid) return;
-                    if (!IsOnlinePid(targetPid)) return;                             // target must be CONNECTED (a stable handle outlives a departure)
+                    if (string.IsNullOrEmpty(targetPid) || targetPid == actorPid)
+                    { PMergeReqDrop(action, actorPid, targetPid, string.IsNullOrEmpty(targetPid) ? "empty target" : "the target is the proposer"); return; }
+                    if (!IsOnlinePid(targetPid)) { PMergeReqDrop(action, actorPid, targetPid, "the target is not online"); return; }   // target must be CONNECTED (a stable handle outlives a departure)
                     string gActor = MergerSync.GroupOfStable(StableOfPid(actorPid));
                     string gTgt   = MergerSync.GroupOfStable(StableOfPid(targetPid));
-                    if (gActor != "" && gActor == gTgt) return;                      // D4-1: already the SAME company
+                    if (gActor != "" && gActor == gTgt) { PMergeReqDrop(action, actorPid, targetPid, "already the same company"); return; }   // D4-1: already the SAME company
                     string tkey = gTgt != "" ? gTgt : targetPid;                     // TARGET KEY: their company, else them
                     if (_mergerPendingByTarget.TryGetValue(tkey, out var held) && held?.From != actorPid)
                     {   // r2 (review #2; wording approved 2026-09-11): SOMEONE ELSE's offer is pending on that side - say why nothing happens
@@ -6635,6 +6704,7 @@ namespace BigAmbitionsMP
                         var busy = new MergerRequestPayload { Action = "busy", FromPid = targetPid };
                         if (actorPid == MPConfig.PlayerId) PassengerHud.Toast("They already have an offer pending.");   // r4: toast only - no chip to clear
                         else SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", busy));
+                        PMergeReqDrop(action, actorPid, targetPid, "answered 'busy' - another offer is pending on that side");
                         return;
                     }
                     if (_mergerCooldown.TryGetValue(actorPid + "|" + tkey, out var next) && now < next)
@@ -6642,6 +6712,7 @@ namespace BigAmbitionsMP
                         var cool = new MergerRequestPayload { Action = "cooldown", FromPid = targetPid };
                         if (actorPid == MPConfig.PlayerId) PassengerHud.Toast("Wait a minute before proposing to them again.");   // r4: toast only - the chip follows the broadcast table, not this call
                         else SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerRequest, "host", cool));
+                        PMergeReqDrop(action, actorPid, targetPid, "answered 'cooldown' - a withdrawn/declined offer to that side is too recent");
                         return;
                     }
                     // r5 (user decision 2026-09-11): a new offer REPLACES the proposer's existing one - and re-offering the
@@ -6675,7 +6746,7 @@ namespace BigAmbitionsMP
                 {
                     string tgt = "";
                     foreach (var kv in _mergerPendingByTarget) if (kv.Value?.From == actorPid) { tgt = kv.Key; break; }
-                    if (tgt == "") return;
+                    if (tgt == "") { PMergeReqDrop(action, actorPid, targetPid, "withdraw without an offer of theirs"); return; }
                     _mergerPendingByTarget.Remove(tgt);
                     _mergerCooldown[actorPid + "|" + tgt] = now + MergerReproposeCooldownMs;
                     Plugin.Logger.LogInfo($"[Merger] '{actorPid}' withdrew the proposal to '{tgt}'.");
@@ -6689,10 +6760,10 @@ namespace BigAmbitionsMP
                 {
                     // D4-2: ANY member of the target company may answer — the offer is keyed by their group.
                     string akey = PendingKeyFor(actorPid);
-                    if (akey == "" || !_mergerPendingByTarget.TryGetValue(akey, out var aoff)) return;
+                    if (akey == "" || !_mergerPendingByTarget.TryGetValue(akey, out var aoff)) { PMergeReqDrop(action, actorPid, targetPid, "accept without a pending offer"); return; }
                     string fromPid = aoff?.From ?? "";
                     string a = StableOfPid(fromPid), b = StableOfPid(actorPid);
-                    if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return;   // someone left mid-consent (r6: table untouched - the departure prune retires the entry with a broadcast)
+                    if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) { PMergeReqDrop(action, actorPid, targetPid, $"missing player id (proposer '{fromPid}' stable='{a}', answerer stable='{b}')"); return; }   // someone left mid-consent (r6: table untouched - the departure prune retires the entry with a broadcast)
                     _mergerPendingByTarget.Remove(akey);
                     string gA = MergerSync.GroupOfStable(a), gB = MergerSync.GroupOfStable(b);
                     // Phase 1-A (2026-09-10, D4-3): the phase-0 'target already in a company' refusal is REPLACED by
@@ -6805,7 +6876,7 @@ namespace BigAmbitionsMP
                 {
                     // D4-2: any member of the target company may decline for it.
                     string dkey = PendingKeyFor(actorPid);
-                    if (dkey == "" || !_mergerPendingByTarget.TryGetValue(dkey, out var doff)) return;
+                    if (dkey == "" || !_mergerPendingByTarget.TryGetValue(dkey, out var doff)) { PMergeReqDrop(action, actorPid, targetPid, "decline without a pending offer"); return; }
                     string fromPid = doff?.From ?? "";
                     _mergerPendingByTarget.Remove(dkey);
                     _mergerCooldown[fromPid + "|" + dkey] = now + MergerReproposeCooldownMs;
@@ -6823,7 +6894,7 @@ namespace BigAmbitionsMP
                 {
                     string s = StableOfPid(actorPid);
                     string g0 = MergerSync.GroupOfStable(s);
-                    if (string.IsNullOrEmpty(s) || g0 == "") return;
+                    if (string.IsNullOrEmpty(s) || g0 == "") { PMergeReqDrop(action, actorPid, targetPid, string.IsNullOrEmpty(s) ? "leave with no stable id" : "leave while not in a company"); return; }
 
                     // Slice 4 — settle the shared wallet BEFORE membership changes. Equal split: the
                     // leaver takes balance / memberCount; a dissolving pair's REMAINING member takes
@@ -6991,6 +7062,9 @@ namespace BigAmbitionsMP
                     RefreshGrantsAndBroadcast();
                     break;
                 }
+                default:
+                    PMergeReqDrop(action, actorPid, targetPid, "unknown action");   // P-MERGEREQ
+                    break;
             }
         }
 

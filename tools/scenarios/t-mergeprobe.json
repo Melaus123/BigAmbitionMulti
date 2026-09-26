@@ -1,0 +1,82 @@
+{
+  "id": "T-MERGEPROBE",
+  "title": "P-MERGEREQ (LOG-ONLY probe, pre-approved; bundle 20260923-140828: ~20 merger messages from a client left one host line). The client sends each merger request the host used to drop (or answer) without a host line, once, through the existing 'merge' lever; ASSERT the host names every request on arrival and prints the reason for each drop. Then the pair merges and the client proposes to its own company (same-company drop). Ends dissolved; NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1, not merged). Not reachable through the 'merge' lever (it refuses them before sending) and so not exercised here: empty target, unknown action, no actor id / server not running, and 'missing player id' at accept (the proposer must drop between offer and answer).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "offlinePid": "Nobody9",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException"
+  ],
+  "oracles_report": [
+    "\\[P-MERGEREQ\\] ",
+    "\\[Merger\\] "
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 4, "role": "h", "sleep_s": 60, "note": "both worlds load and settle" },
+    { "seq": 5, "role": "both", "cmd": "mark TEST MERGEPROBE START", "expect_result": "OK MARK" },
+    { "seq": 6, "role": "c", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 7, "role": "h", "cmd": "mergestatus", "expect_result": "member=False", "note": "PREMISE: not merged" },
+    {
+      "seq": 8, "role": "c", "cmd": "merge leave", "expect_result": "OK merge leave sent",
+      "expect_log": [
+        { "role": "h", "regex": "\\[P-MERGEREQ\\] request 'leave' from '${clientPid}' target=''", "within_s": 10 },
+        { "role": "h", "regex": "\\[P-MERGEREQ\\] dropped 'leave' from '${clientPid}' target='': leave while not in a company", "within_s": 10 }
+      ]
+    },
+    {
+      "seq": 9, "role": "c", "cmd": "merge accept", "expect_result": "OK merge accept sent",
+      "expect_log": [ { "role": "h", "regex": "\\[P-MERGEREQ\\] dropped 'accept' from '${clientPid}' target='': accept without a pending offer", "within_s": 10 } ]
+    },
+    {
+      "seq": 10, "role": "c", "cmd": "merge decline", "expect_result": "OK merge decline sent",
+      "expect_log": [ { "role": "h", "regex": "\\[P-MERGEREQ\\] dropped 'decline' from '${clientPid}' target='': decline without a pending offer", "within_s": 10 } ]
+    },
+    {
+      "seq": 11, "role": "c", "cmd": "merge unpropose", "expect_result": "OK merge unpropose sent",
+      "expect_log": [ { "role": "h", "regex": "\\[P-MERGEREQ\\] dropped 'unpropose' from '${clientPid}' target='': withdraw without an offer of theirs", "within_s": 10 } ]
+    },
+    {
+      "seq": 12, "role": "c", "cmd": "merge propose ${clientPid}", "expect_result": "OK merge propose sent",
+      "expect_log": [ { "role": "h", "regex": "\\[P-MERGEREQ\\] dropped 'propose' from '${clientPid}' target='${clientPid}': the target is the proposer", "within_s": 10 } ]
+    },
+    {
+      "seq": 13, "role": "c", "cmd": "merge propose ${offlinePid}", "expect_result": "OK merge propose sent",
+      "expect_log": [ { "role": "h", "regex": "\\[P-MERGEREQ\\] dropped 'propose' from '${clientPid}' target='${offlinePid}': the target is not online", "within_s": 10 } ]
+    },
+    {
+      "seq": 14, "role": "c", "cmd": "merge propose ${hostPid}", "expect_result": "OK merge propose sent",
+      "expect_log": [ { "role": "h", "regex": "\\[Merger\\] '${clientPid}' proposes a merger to '${hostPid}'\\.", "within_s": 10 } ]
+    },
+    {
+      "seq": 15, "role": "c", "cmd": "merge unpropose", "expect_result": "OK merge unpropose sent",
+      "expect_log": [ { "role": "h", "regex": "\\[Merger\\] '${clientPid}' withdrew the proposal to '${hostPid}'\\.", "within_s": 10 } ]
+    },
+    {
+      "seq": 16, "role": "c", "cmd": "merge propose ${hostPid}", "expect_result": "OK merge propose sent",
+      "note": "inside the withdraw cooldown",
+      "expect_log": [ { "role": "h", "regex": "\\[P-MERGEREQ\\] dropped 'propose' from '${clientPid}' target='${hostPid}': answered 'cooldown'", "within_s": 10 } ]
+    },
+    { "seq": 17, "role": "h", "cmd": "merge propose ${clientPid}", "expect_result": "OK merge propose sent" },
+    { "seq": 18, "role": "h", "sleep_s": 1 },
+    { "seq": 19, "role": "c", "cmd": "merge accept", "expect_result": "OK merge accept sent" },
+    { "seq": 20, "role": "h", "sleep_s": 3 },
+    { "seq": 21, "role": "h", "cmd": "mergestatus", "expect_result": "member=True", "note": "PREMISE for the same-company drop" },
+    {
+      "seq": 22, "role": "c", "cmd": "merge propose ${hostPid}", "expect_result": "OK merge propose sent",
+      "expect_log": [ { "role": "h", "regex": "\\[P-MERGEREQ\\] dropped 'propose' from '${clientPid}' target='${hostPid}': already the same company", "within_s": 10 } ]
+    },
+    { "seq": 23, "role": "c", "cmd": "merge leave", "expect_result": "OK merge leave sent", "note": "FIXTURE HYGIENE: end dissolved" },
+    { "seq": 24, "role": "h", "sleep_s": 5 },
+    { "seq": 25, "role": "h", "cmd": "mergestatus", "expect_result": "member=False" },
+    { "seq": 26, "role": "both", "cmd": "mark TEST MERGEPROBE END", "expect_result": "OK MARK" }
+  ]
+}

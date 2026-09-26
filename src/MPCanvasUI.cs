@@ -5764,7 +5764,10 @@ namespace BigAmbitionsMP
                 string info;
                 if (host)
                 {
-                    if (!_showIp) info = "Others join at:   ••••••••   (hidden)";
+                    // H-HOSTPORT-1 (wording approved by the user 2026-09-26): Steam-only hosting - no UDP port bound.
+                    if (MPServer.IsRunning && MPServer.BoundPort <= 0)
+                        info = $"Others join at:   Steam invites only (ports {MPConfig.Port}–{Math.Min(MPConfig.Port + 10, 65535)} are in use)";
+                    else if (!_showIp) info = "Others join at:   ••••••••   (hidden)";
                     else
                     {
                         // H-HOSTPORT-1: the port actually bound (a busy configured port falls back to the next free one).
@@ -7867,9 +7870,9 @@ namespace BigAmbitionsMP
             // all clients, so the whole session runs the host's percents.
             MPNeedsTuning.Apply(_hostSettings, "host settings");
             // H-HOSTPORT-1: the port actually bound (a busy configured port falls through to the next free one);
-            // Steam-only (no UDP port at all) shows the existing failure text - hosting runs, IP joins cannot.
+            // Steam-only (no UDP port at all): wording approved by the user 2026-09-26 - informs, no suggestions.
             if (MPServer.BoundPort > 0) SetStatus($"Hosting on port {MPServer.BoundPort} — waiting for players.", false);
-            else { SetStatus($"Hosting FAILED on port {p} (port in use?).", true); PostLobbyNotice($"Hosting FAILED on port {p} (port in use?).", 60f); }
+            else { string so = $"Hosting through Steam only: ports {p}–{Math.Min(p + 10, 65535)} are already in use."; SetStatus(so, false); PostLobbyNotice(so, 60f); }
         }
 
         private void OnJoin()
