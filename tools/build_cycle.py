@@ -64,7 +64,7 @@ def changed_src_files():
 # GAME UPDATE CHECK (user decision 2026-09-18): the decompile the mod is read and reviewed against was made from
 # ONE Steam build. When Steam has moved on, every hook and every line number in the notes may be stale - say so loudly.
 # Update BOTH values after re-decompiling (see .modding/01-environment.md "AFTER A GAME UPDATE").
-DECOMPILE_BUILDID = "25343755"          # C:\code\cpp2il\mono-1.0-update0916 (Steam update of 2026-09-16, game Build 3680)
+DECOMPILE_BUILDID = "25482473"          # C:\code\cpp2il\mono-1.0-update0923 (Steam update of 2026-09-23, game Build 3682)
 STEAM_MANIFEST = r"C:\Program Files (x86)\Steam\steamapps\appmanifest_1331550.acf"
 
 
