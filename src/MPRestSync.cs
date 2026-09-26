@@ -428,7 +428,7 @@ namespace BigAmbitionsMP
             goalMinutes = Math.Ceiling(goalMinutes / 5.0) * 5.0;
             _localGoal = goalMinutes;
             _localVoteActive = true;
-            if (Seated) EnsureActivityCovers(goalMinutes);   // game must not auto-stand us mid-vote; a loiterer has no activity to extend
+            if (Seated) EnsureActivityCovers(goalMinutes);   // game must not auto-stand us mid-vote (a work shift excepted: H-SHIFTEND-1); a loiterer has no activity to extend
             string act = Seated ? ActivityName : "loitering";
             SendVote(true, goalMinutes, act);
             Plugin.Logger.LogInfo($"[Rest] skip request ON: until {Fmt(goalMinutes)} ({act}).");
@@ -633,7 +633,9 @@ namespace BigAmbitionsMP
         /// WRITES THE ACTIVITY'S OWN DURATION FIELD (the *_minutesTo*** int) —
         /// the slider API (ChangeSliderValue) silently no-ops with the native
         /// panel hidden, which is why players kept auto-standing and skips
-        /// self-cancelled the moment they started.</summary>
+        /// self-cancelled the moment they started.
+        /// H-SHIFTEND-1 (2026-09-26): a WorkActivity is EXEMPT — neither its minutes field nor its _finishTime is
+        /// touched; the game ends the shift itself at the shift end, like single-player.</summary>
         public static void EnsureActivityCovers(double goalMinutes)
         {
             try
@@ -652,6 +654,40 @@ namespace BigAmbitionsMP
                     if (sm != null && Convert.ToInt32(sm.Invoke(act, null)) == (int)PlayerActivityState.NotStarted) return;
                 }
                 catch { if (ActivityState == (int)PlayerActivityState.NotStarted) return; }
+                // H-SHIFTEND-1 (2026-09-26, user-approved): a WORK shift is left to the game. WorkActivity.Perform
+                // (WorkActivity.cs:133-147 on the 0923 decompile) ends the shift only when its _finishTime is past;
+                // SetTimeToWork (:231-247) sets that to the opening slot's end (owner) / the job shift's end (hired).
+                // Topping it up (minutes field + PushFinishTime) meant a shift in MP never ended by itself: an owner
+                // stayed on the register after closing, a hired job's Finish (:164-183) paid every extra hour. So
+                // neither field is touched for a WorkActivity; every other activity keeps the top-up below. During a
+                // skip that crosses the shift end, the game's Finish stands the player up and the existing
+                // '[Rest] vote OFF (stood up)' path drops his vote.
+                if (act is global::PlayerActivity.WorkActivity)
+                {
+                    try
+                    {
+                        if (!ReferenceEquals(_workExemptLoggedAct, act))
+                        {
+                            _workExemptLoggedAct = act;
+                            string end = "?";
+                            try
+                            {
+                                _workFinishField ??= HarmonyLib.AccessTools.Field(typeof(global::PlayerActivity.WorkActivity), "_finishTime");
+                                if (_workFinishField?.GetValue(act) is BigAmbitions.DayNightCycle.Timestamp ts)
+                                {
+                                    double fm = ts.GetTotalMinutes();
+                                    double r = fm - Math.Floor(fm / 1440.0) * 1440.0;
+                                    int hh = (int)(r / 60.0), mm = (int)(r - hh * 60.0);
+                                    end = $"{hh:D2}:{mm:D2}";
+                                }
+                            }
+                            catch { end = "?"; }
+                            Plugin.Logger.LogInfo($"[Rest] work activity - finish left to the game (shift end {end})");
+                        }
+                    }
+                    catch { }
+                    return;
+                }
                 double need = goalMinutes - NowMinutes();
                 if (!TryRemainingActivityMinutes(out int rem))
                 {
@@ -702,6 +738,8 @@ namespace BigAmbitionsMP
         }
         private static readonly Dictionary<Type, System.Reflection.MemberInfo?> _durProps = new();
         private static int _remUnknown;   // review MINOR-4: counted, rate-limited
+        private static object? _workExemptLoggedAct;                          // H-SHIFTEND-1: log once per sit
+        private static System.Reflection.FieldInfo? _workFinishField;         // H-SHIFTEND-1: shift end, log only
 
         // 1.0 update 2026-09-01 (field 20260901-192731, user-approved): Rest/Sleep/Work/Study now ALSO finish
         // when a private `Timestamp _finishTime`, captured at start, falls into the past — Perform() checks
@@ -713,6 +751,8 @@ namespace BigAmbitionsMP
         // path alone governs, exactly as before. A null value is the game's own "no clock finish" (Rest while
         // watching a show) and is left alone. Timestamp.GetTotalMinutes = (Day*24+Hour)*60+Minute — the same
         // basis as NowMinutes()/goalMinutes, and the (float totalMinutes) constructor splits it back.
+        // H-SHIFTEND-1 (2026-09-26): WorkActivity no longer reaches here — EnsureActivityCovers returns before the
+        // push for it, so the game's own shift end stands (Rest/Sleep/Study keep the push).
         private static readonly Dictionary<Type, System.Reflection.FieldInfo?> _finishFields = new();
         private static object? _lastFinishPushedAct;
         private static void PushFinishTime(object act, Type t, double goalMinutes)
@@ -1152,6 +1192,8 @@ namespace BigAmbitionsMP
             // Sitting is INDEFINITE: the game's default duration (30 min) was
             // auto-standing players while they pondered the dock ("the window
             // auto-closed").  Top the activity up so only X / walking ends it.
+            // H-SHIFTEND-1 (2026-09-26): EXCEPT a work shift — EnsureActivityCovers
+            // leaves a WorkActivity alone, so the game ends it at the shift end.
             if (Seated)
             {
                 double need = _localVoteActive ? Math.Max(30, _localGoal - NowMinutes()) : 30;

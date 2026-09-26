@@ -3844,6 +3844,23 @@ namespace BigAmbitionsMP
             }
             catch { }
             sb.Append($" armed={_workArmed}");
+            // H-SHIFTEND-1 test support (2026-09-26): the current work activity's private _finishTime (the game's
+            // shift end, hh:mm; '?' = none / unreadable). Inserted before shiftOn; existing regexes use '.*' here.
+            try
+            {
+                string fin = "?";
+                var wact3 = CurrentWorkActivity(out _, out _);
+                var ff = wact3 != null ? HarmonyLib.AccessTools.Field(typeof(PlayerActivity.WorkActivity), "_finishTime") : null;
+                if (ff != null && ff.GetValue(wact3) is BigAmbitions.DayNightCycle.Timestamp fts)
+                {
+                    double fm = fts.GetTotalMinutes();
+                    double r = fm - Math.Floor(fm / 1440.0) * 1440.0;
+                    int hh = (int)(r / 60.0), mm = (int)(r - hh * 60.0);
+                    fin = $"{hh:D2}:{mm:D2}";
+                }
+                sb.Append($" finish={fin}");
+            }
+            catch { sb.Append(" finish=?"); }
             // Review F2 test support (2026-09-26), appended so older regexes still match: shiftOn = the game's
             // private WorkActivity.IsJobShiftActive() on the current work activity ('?' = none / not askable);
             // openHours/closeHour = today's opening-hour slots of the building the player is in (-1 = none).

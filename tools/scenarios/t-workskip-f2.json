@@ -1,7 +1,7 @@
 {
- "id": "T-WORKSKIP-E2",
- "title": "WORKSKIP leg (e2): solo host WORKS the register of his own UNSTAFFED clothing store; one mod skip aimed PAST the shop's closing hour -> the GAME ends the shift at closing (H-SHIFTEND-1), the stand-up drops his vote and the skip stops there.",
- "preconditions": "MEASUREMENT ONLY (bug 20260926-213955, H-WORKFF-1 part 2). Reporter fixture fx-hq1 (vars.keepMerger true, as every fx-hq1 scenario), SOLO: the client is dropped before the host hosts. Shop = the host's clothing store vars.shop (Crown Clothing). THE PLAYER IS THE ONLY CASHIER: all 14 fixture shifts cleared with `shiftclear` before entering and asserted by schedcount; then the DEV lever `work on` seats the host at the nearest register by the game's own click path, asserted with `work state` (working=True = the current PlayerActivity is a WorkActivity in state Running and the player is the station's employee). Same start as part 1: setup skip outdoors to 08:45, enter, `clock 09:59`, window opens hour 10 (asserted). NOTHING IS SAVED. E2 (review F1+F2, 2026-09-26): copy of b2 whose ONE skip goes to <closeHour>:30, closeHour = the latest ending hour of today's opening-hour slots of Crown Clothing read live by `work state` (the fixture save is binary; the lever reads the same table the game's IsJobShiftActive reads). (Before H-SHIFTEND-1 the shift outlived closing and the goal took the ' (shift over)' stand-up path; superseded below.) H-SHIFTEND-1 (2026-09-26): the mod no longer tops up a WorkActivity (minutes field / _finishTime), so WorkActivity.Perform ends the shift itself at the shift end (16:00) INSIDE the skip: the game's Finish stands the player up -> '[Rest] vote OFF (stood up)' -> '[Rest] skip STOPPED (a vote dropped)'. The skip ends at or just after 16:00, NOT at the 16:30 goal.",
+ "id": "T-WORKSKIP-F2",
+ "title": "WORKSKIP leg (f2): solo host WORKS the register of his own UNSTAFFED clothing store, NO skip: clock to 15:50, 1x past 16:00 -> the GAME ends the shift by itself at closing (H-SHIFTEND-1).",
+ "preconditions": "MEASUREMENT ONLY (bug 20260926-213955, H-WORKFF-1 part 2). Reporter fixture fx-hq1 (vars.keepMerger true, as every fx-hq1 scenario), SOLO: the client is dropped before the host hosts. Shop = the host's clothing store vars.shop (Crown Clothing). THE PLAYER IS THE ONLY CASHIER: all 14 fixture shifts cleared with `shiftclear` before entering and asserted by schedcount; then the DEV lever `work on` seats the host at the nearest register by the game's own click path, asserted with `work state` (working=True = the current PlayerActivity is a WorkActivity in state Running and the player is the station's employee). Same start as part 1: setup skip outdoors to 08:45, enter, `clock 09:59`, window opens hour 10 (asserted). NOTHING IS SAVED. F2 (H-SHIFTEND-1, 2026-09-26): same start as e2 up to the window-start reads; then NO skip - `clock 15:50` and the game runs at 1x past the shop's closing (16:00). The mod leaves the WorkActivity's finish to the game, so WorkActivity.Perform finishes the shift itself: '[Rest] seated -> False' and working=False by ~16:02; the new log line '[Rest] work activity - finish left to the game (shift end 16:00)' is asserted once per sit. `work state` now also prints finish=<hh:mm> (the game's _finishTime).",
  "instances": 2,
  "vars": {
   "clientPid": "Client1",
@@ -51,7 +51,7 @@
   {
    "seq": 4,
    "role": "h",
-   "cmd": "mark TEST T-WORKSKIP-B2 START",
+   "cmd": "mark TEST T-WORKSKIP-F2 START",
    "expect_result": "OK MARK"
   },
   {
@@ -388,223 +388,83 @@
   {
    "seq": 41,
    "role": "h",
-   "cmd": "mark TEST SKIP",
+   "cmd": "mark TEST NOSKIP",
    "expect_result": "OK MARK"
   },
   {
    "seq": 42,
    "role": "h",
-   "cmd": "skipvote ${closeHour}:30",
-   "expect_result": "^OK skipvote goal=",
-   "expect_log": [
-    {
-     "role": "h",
-     "regex": "\\[Rest\\] CONSENSUS \\(1/1\\)",
-     "within_s": 30
-    },
-    {
-     "role": "h",
-     "regex": "\\[Rest\\] vote OFF \\(stood up\\)\\.",
-     "within_s": 150
-    },
-    {
-     "role": "h",
-     "regex": "\\[Rest\\] skip STOPPED \\(a vote dropped\\)\\.",
-     "within_s": 30
-    }
-   ],
-   "note": "ONE solo mod skip ~10:04 -> closeHour:30 WHILE THE PLAYER WORKS THE REGISTER. H-SHIFTEND-1: the game ends the shift at closeHour:00 inside the skip (its Finish stands him up) -> the mod's existing '(stood up)' vote-OFF -> the skip stops (asserted by both log lines)"
+   "cmd": "clock 15:50",
+   "expect_result": "^OK clock",
+   "note": "jump to 15:50 through the game's own tick path; the shift end (16:00) is NOT crossed by the jump"
   },
   {
    "seq": 43,
    "role": "h",
-   "sleep_s": 8
+   "sleep_s": 3
   },
   {
    "seq": 44,
    "role": "h",
-   "cmd": "skipstate",
-   "expect_result": "active=False.*lastEndMin=657[6-8]\\d(\\.|\\s|$)",
+   "cmd": "work state",
+   "expect_result": "^OK work working=True activity=WorkActivity state=Running .*playerAtStation=[1-9].* finish=16:00 shiftOn=True ",
    "capture": {
-    "sGoal": "lastGoalMin=([0-9.\\-]+)",
-    "sEnd": "lastEndMin=([0-9.\\-]+)",
-    "sRealS": "lastRealS=([0-9.\\-]+)"
+    "c0Finish": "finish=(\\S+)",
+    "c0WState": " state=(\\w+)"
    },
-   "note": "ASSERT (H-SHIFTEND-1): the skip STOPPED between 16:00 and 16:29 of day 45 (65760..65789), i.e. at the game's shift end, not at the 16:30 goal (65790); exact end captured as sEnd"
+   "note": "ASSERT: still working just before closing; the game's own _finishTime is 16:00 (not pushed by the mod)"
   },
   {
    "seq": 45,
    "role": "h",
-   "cmd": "skipvote off",
-   "expect_result": "^OK skipvote goal=-"
+   "cmd": "skipstate",
+   "expect_result": "^OK skipstate active=False",
+   "capture": {
+    "c0NowMin": "nowMin=([0-9.]+)"
+   },
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Rest\\] seated → False",
+     "within_s": 45
+    }
+   ],
+   "note": "clock at read 'c0' (~15:53, NO skip); then WAIT at 1x for the game's own Finish to stand him up"
   },
   {
    "seq": 46,
    "role": "h",
-   "cmd": "work state",
-   "abort_on_fail": false,
-   "expect_result": "^OK work working=False ",
+   "cmd": "skipstate",
+   "expect_result": "^OK skipstate active=False .*now=Day \\d+ \\S 16:0[0-4]",
    "capture": {
-    "postWorking": "working=(\\w+)",
-    "postWState": " state=(\\w+)",
-    "postAtStation": "playerAtStation=(-?\\d+)"
+    "endNowMin": "nowMin=([0-9.]+)"
    },
-   "note": "ASSERT (H-SHIFTEND-1): the game's own shift end stood him up - no longer working"
+   "note": "ASSERT: the shift ended by itself by ~16:02 (read right after the stand-up line; 16:00..16:04 allowed for command overhead)"
   },
   {
    "seq": 47,
    "role": "h",
-   "cmd": "skipstate",
-   "expect_result": "^OK skipstate",
+   "cmd": "work state",
+   "expect_result": "^OK work working=False ",
    "capture": {
-    "h11NowMin": "nowMin=([0-9.]+)"
+    "postWorking": "working=(\\w+)",
+    "postActivity": "activity=(\\w+)",
+    "postWState": " state=(\\w+)",
+    "postAtStation": "playerAtStation=(-?\\d+)",
+    "postFinish": "finish=(\\S+)"
    },
-   "note": "clock at read 'h11': just after the skip stopped, ~16:0x"
+   "note": "ASSERT: no longer working - the game's own finish (no vote, no skip, no mod stand-up)"
   },
   {
    "seq": 48,
-   "role": "h",
-   "cmd": "shopday ${shop}",
-   "expect_result": "^OK shopday",
-   "capture": {
-    "h11SdDay": "day=(\\d+)",
-    "h11SdHour": "hour=(\\d+)",
-    "h11Entries": "entries=(\\d+)",
-    "h11Due": "due=(\\d+)",
-    "h11Window": "window=(\\d+)",
-    "h11Bodies": "bodies=(\\d+)",
-    "h11Live": " live=(-?\\d+)",
-    "h11CompleteOrders": "completeOrders=(\\d+)",
-    "h11LivePays": "livePays=(-?\\d+)",
-    "h11UnpaidExits": "unpaidExits=(\\d+)",
-    "h11PaperHours": "paperHours=(\\d+)",
-    "h11PaperCand": "paperCandidates=(\\d+)",
-    "h11PaperOrders": "paperOrders=(\\d+)",
-    "h11CapDrops": "capDrops=(\\d+)",
-    "h11TillOrders": "tillOrders=(\\d+)",
-    "h11TillDistinct": "tillDistinct=(\\d+)",
-    "h11PaidRevenue": "paidRevenue=([0-9.]+)",
-    "h11HandBacks": "handBacks=(\\d+)",
-    "h11HbRevenue": "hbRevenue=([0-9.]+)",
-    "h11IdDue": "idDue=(\\d+)",
-    "h11IdBilled": "idBilled=(\\d+)",
-    "h11IdFloor": "idFloor=(\\d+)",
-    "h11IdNosale": "idNosale=(\\d+)",
-    "h11IdCapDrop": "idCapDrop=(\\d+)",
-    "h11IdUnbilled": "idUnbilled=(\\d+)",
-    "h11IdNoPass": "idNoPass=(\\d+)"
-   }
-  },
-  {
-   "seq": 49,
-   "role": "h",
-   "cmd": "tilldupes ${shop}",
-   "expect_result": "dupes=0",
-   "abort_on_fail": false,
-   "capture": {
-    "h11TdOrders": "orders=(\\d+)",
-    "h11TdDistinct": "distinct=(\\d+)",
-    "h11TdDupes": "dupes=(-?\\d+)",
-    "h11TdLiveCompleted": "liveCompleted=(-?\\d+)",
-    "h11TdTdRev": "paidRevenue=([0-9.]+)"
-   },
-   "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
-  },
-  {
-   "seq": 50,
-   "role": "h",
-   "sleep_s": 30,
-   "note": "DRAIN at 1x: bodies mid-checkout finish"
-  },
-  {
-   "seq": 51,
-   "role": "h",
-   "cmd": "skipstate",
-   "expect_result": "^OK skipstate",
-   "capture": {
-    "finNowMin": "nowMin=([0-9.]+)"
-   },
-   "note": "clock at read 'fin': after the 30 s drain"
-  },
-  {
-   "seq": 52,
-   "role": "h",
-   "cmd": "shopday ${shop}",
-   "expect_result": "^OK shopday",
-   "capture": {
-    "finSdDay": "day=(\\d+)",
-    "finSdHour": "hour=(\\d+)",
-    "finEntries": "entries=(\\d+)",
-    "finDue": "due=(\\d+)",
-    "finWindow": "window=(\\d+)",
-    "finBodies": "bodies=(\\d+)",
-    "finLive": " live=(-?\\d+)",
-    "finCompleteOrders": "completeOrders=(\\d+)",
-    "finLivePays": "livePays=(-?\\d+)",
-    "finUnpaidExits": "unpaidExits=(\\d+)",
-    "finPaperHours": "paperHours=(\\d+)",
-    "finPaperCand": "paperCandidates=(\\d+)",
-    "finPaperOrders": "paperOrders=(\\d+)",
-    "finCapDrops": "capDrops=(\\d+)",
-    "finTillOrders": "tillOrders=(\\d+)",
-    "finTillDistinct": "tillDistinct=(\\d+)",
-    "finPaidRevenue": "paidRevenue=([0-9.]+)",
-    "finHandBacks": "handBacks=(\\d+)",
-    "finHbRevenue": "hbRevenue=([0-9.]+)",
-    "finIdDue": "idDue=(\\d+)",
-    "finIdBilled": "idBilled=(\\d+)",
-    "finIdFloor": "idFloor=(\\d+)",
-    "finIdNosale": "idNosale=(\\d+)",
-    "finIdCapDrop": "idCapDrop=(\\d+)",
-    "finIdUnbilled": "idUnbilled=(\\d+)",
-    "finIdNoPass": "idNoPass=(\\d+)"
-   }
-  },
-  {
-   "seq": 53,
-   "role": "h",
-   "cmd": "tilldupes ${shop}",
-   "expect_result": "dupes=0",
-   "abort_on_fail": false,
-   "capture": {
-    "finTdOrders": "orders=(\\d+)",
-    "finTdDistinct": "distinct=(\\d+)",
-    "finTdDupes": "dupes=(-?\\d+)",
-    "finTdLiveCompleted": "liveCompleted=(-?\\d+)",
-    "finTdTdRev": "paidRevenue=([0-9.]+)"
-   },
-   "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
-  },
-  {
-   "seq": 54,
-   "role": "h",
-   "cmd": "shopday ${shop}",
-   "expect_result": "window=[1-9]",
-   "note": "PREMISE: customers really were due in the window"
-  },
-  {
-   "seq": 55,
    "role": "h",
    "cmd": "skippace",
    "expect_result": "^OK skippace max=1000 now=1 scaledBodies=0"
   },
   {
-   "seq": 56,
+   "seq": 49,
    "role": "h",
-   "cmd": "work state",
-   "abort_on_fail": false,
-   "expect_result": "^OK work ",
-   "capture": {
-    "endWorking": "working=(\\w+)",
-    "endWState": " state=(\\w+)",
-    "endAtStation": "playerAtStation=(-?\\d+)"
-   },
-   "note": "report: working state at the end (expected working=False)"
-  },
-  {
-   "seq": 57,
-   "role": "h",
-   "cmd": "mark TEST T-WORKSKIP-B2 END",
+   "cmd": "mark TEST T-WORKSKIP-F2 END",
    "expect_result": "OK MARK"
   }
  ],
