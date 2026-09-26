@@ -1,7 +1,7 @@
 {
- "id": "T-WORKSKIP-B2",
- "title": "WORKSKIP leg (b2): solo host WORKS the register of his own UNSTAFFED clothing store; one mod skip over hours 10 and 11, then 1x.",
- "preconditions": "MEASUREMENT ONLY (bug 20260926-213955, H-WORKFF-1 part 2). Reporter fixture fx-hq1 (vars.keepMerger true, as every fx-hq1 scenario), SOLO: the client is dropped before the host hosts. Shop = the host's clothing store vars.shop (Crown Clothing). THE PLAYER IS THE ONLY CASHIER: all 14 fixture shifts cleared with `shiftclear` before entering and asserted by schedcount; then the DEV lever `work on` seats the host at the nearest register by the game's own click path, asserted with `work state` (working=True = the current PlayerActivity is a WorkActivity in state Running and the player is the station's employee). Same start as part 1: setup skip outdoors to 08:45, enter, `clock 09:59`, window opens hour 10 (asserted). NOTHING IS SAVED.",
+ "id": "T-WORKSKIP-E2",
+ "title": "WORKSKIP leg (e2): solo host WORKS the register of his own UNSTAFFED clothing store; one mod skip PAST the shop's closing hour -> at the goal the shift is over, so he is stood up (review F1+F2).",
+ "preconditions": "MEASUREMENT ONLY (bug 20260926-213955, H-WORKFF-1 part 2). Reporter fixture fx-hq1 (vars.keepMerger true, as every fx-hq1 scenario), SOLO: the client is dropped before the host hosts. Shop = the host's clothing store vars.shop (Crown Clothing). THE PLAYER IS THE ONLY CASHIER: all 14 fixture shifts cleared with `shiftclear` before entering and asserted by schedcount; then the DEV lever `work on` seats the host at the nearest register by the game's own click path, asserted with `work state` (working=True = the current PlayerActivity is a WorkActivity in state Running and the player is the station's employee). Same start as part 1: setup skip outdoors to 08:45, enter, `clock 09:59`, window opens hour 10 (asserted). NOTHING IS SAVED. E2 (review F1+F2, 2026-09-26): copy of b2 whose ONE skip goes to <closeHour>:30, closeHour = the latest ending hour of today's opening-hour slots of Crown Clothing read live by `work state` (the fixture save is binary; the lever reads the same table the game's IsJobShiftActive reads). At the goal the game's private IsJobShiftActive() is false, so the worker takes the old stand-up path with ' (shift over)' - asserted by its log line and working=False after.",
  "instances": 2,
  "vars": {
   "clientPid": "Client1",
@@ -373,13 +373,15 @@
    "seq": 40,
    "role": "h",
    "cmd": "work state",
-   "expect_result": "^OK work working=True activity=WorkActivity state=Running .*playerAtStation=[1-9]",
+   "expect_result": "^OK work working=True activity=WorkActivity state=Running .*playerAtStation=[1-9].* shiftOn=True openHours=\\S+ closeHour=(1[1-9]|2[0-3])$",
    "capture": {
     "w0Working": "working=(\\w+)",
     "w0WState": " state=(\\w+)",
-    "w0AtStation": "playerAtStation=(-?\\d+)"
+    "w0AtStation": "playerAtStation=(-?\\d+)",
+    "closeHour": "closeHour=(\\d+)",
+    "openHours": "openHours=(\\S+)"
    },
-   "note": "ASSERT: still working at the window start (before any skip)"
+   "note": "ASSERT: still working at the window start, the game's IsJobShiftActive() is true, and the shop closes later today (11..23) - closeHour captured for the skip goal"
   },
   {
    "seq": 41,
@@ -390,7 +392,7 @@
   {
    "seq": 42,
    "role": "h",
-   "cmd": "skipvote 12:00",
+   "cmd": "skipvote ${closeHour}:30",
    "expect_result": "^OK skipvote goal=",
    "expect_log": [
     {
@@ -400,11 +402,11 @@
     },
     {
      "role": "h",
-     "regex": "\\[Rest\\] vote OFF \\(goal time reached\\) - working, stays at the station \\(shift on\\)\\.",
-     "within_s": 60
+     "regex": "\\[Rest\\] vote OFF \\(goal time reached\\) \\S+ standing up \\(shift over\\)\\.",
+     "within_s": 150
     }
    ],
-   "note": "ONE solo mod skip ~10:04 -> 12:00 WHILE THE PLAYER WORKS THE REGISTER: hour 10 closes INSIDE the skip, the skip ends on the 12:00 roll. H-WORKSTAND-1: at the goal the vote goes OFF but the WORKER stays at the station (asserted by its log line)"
+   "note": "ONE solo mod skip ~10:04 -> closeHour:30 WHILE THE PLAYER WORKS THE REGISTER: the shop's closing hour passes INSIDE the skip. Review F1+F2: at the goal the game's IsJobShiftActive() is false, so the worker is stood up by the old path (asserted by its '(shift over)' log line)"
   },
   {
    "seq": 43,
@@ -433,13 +435,13 @@
    "role": "h",
    "cmd": "work state",
    "abort_on_fail": false,
-   "expect_result": "^OK work working=True activity=WorkActivity state=Running .*playerAtStation=[1-9]",
+   "expect_result": "^OK work working=False ",
    "capture": {
     "postWorking": "working=(\\w+)",
     "postWState": " state=(\\w+)",
     "postAtStation": "playerAtStation=(-?\\d+)"
    },
-   "note": "ASSERT (H-WORKSTAND-1): the skip's end did NOT stand him up - still working the register (no abort: the run keeps measuring either way)"
+   "note": "ASSERT (review F1+F2): the shift was over at the goal, so the skip's end STOOD HIM UP - no longer working (no abort: the run keeps measuring either way)"
   },
   {
    "seq": 47,
@@ -449,7 +451,7 @@
    "capture": {
     "h11NowMin": "nowMin=([0-9.]+)"
    },
-   "note": "clock at read 'h11': just after the skip, ~12:00"
+   "note": "clock at read 'h11': just after the skip, ~closeHour:30"
   },
   {
    "seq": 48,
@@ -503,36 +505,11 @@
   {
    "seq": 50,
    "role": "h",
-   "cmd": "work on",
-   "abort_on_fail": false,
-   "expect_result": "^ERR .*an activity is already open \\(WorkActivity",
-   "note": "H-WORKSTAND-1: he is still working, so the lever refuses ('an activity is already open') - asserted; a queued re-seat here would mean the skip stood him up"
-  },
-  {
-   "seq": 51,
-   "role": "h",
-   "sleep_s": 3
-  },
-  {
-   "seq": 52,
-   "role": "h",
-   "cmd": "work state",
-   "expect_result": "^OK work working=True activity=WorkActivity state=Running .*playerAtStation=[1-9]",
-   "capture": {
-    "rsWorking": "working=(\\w+)",
-    "rsWState": " state=(\\w+)",
-    "rsAtStation": "playerAtStation=(-?\\d+)"
-   },
-   "note": "ASSERT: working again for the 1x tail"
-  },
-  {
-   "seq": 53,
-   "role": "h",
    "sleep_s": 30,
    "note": "DRAIN at 1x: bodies mid-checkout finish"
   },
   {
-   "seq": 54,
+   "seq": 51,
    "role": "h",
    "cmd": "skipstate",
    "expect_result": "^OK skipstate",
@@ -542,7 +519,7 @@
    "note": "clock at read 'fin': after the 30 s drain"
   },
   {
-   "seq": 55,
+   "seq": 52,
    "role": "h",
    "cmd": "shopday ${shop}",
    "expect_result": "^OK shopday",
@@ -576,7 +553,7 @@
    }
   },
   {
-   "seq": 56,
+   "seq": 53,
    "role": "h",
    "cmd": "tilldupes ${shop}",
    "expect_result": "dupes=0",
@@ -591,20 +568,20 @@
    "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
   },
   {
-   "seq": 57,
+   "seq": 54,
    "role": "h",
    "cmd": "shopday ${shop}",
    "expect_result": "window=[1-9]",
    "note": "PREMISE: customers really were due in the window"
   },
   {
-   "seq": 58,
+   "seq": 55,
    "role": "h",
    "cmd": "skippace",
    "expect_result": "^OK skippace max=1000 now=1 scaledBodies=0"
   },
   {
-   "seq": 59,
+   "seq": 56,
    "role": "h",
    "cmd": "work state",
    "abort_on_fail": false,
@@ -614,18 +591,10 @@
     "endWState": " state=(\\w+)",
     "endAtStation": "playerAtStation=(-?\\d+)"
    },
-   "note": "report: still working at the end"
+   "note": "report: working state at the end (expected working=False)"
   },
   {
-   "seq": 60,
-   "role": "h",
-   "cmd": "work off",
-   "abort_on_fail": false,
-   "expect_result": "^OK work off",
-   "note": "the panel's StopWork button"
-  },
-  {
-   "seq": 61,
+   "seq": 57,
    "role": "h",
    "cmd": "mark TEST T-WORKSKIP-B2 END",
    "expect_result": "OK MARK"

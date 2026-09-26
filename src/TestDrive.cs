@@ -3844,6 +3844,44 @@ namespace BigAmbitionsMP
             }
             catch { }
             sb.Append($" armed={_workArmed}");
+            // Review F2 test support (2026-09-26), appended so older regexes still match: shiftOn = the game's
+            // private WorkActivity.IsJobShiftActive() on the current work activity ('?' = none / not askable);
+            // openHours/closeHour = today's opening-hour slots of the building the player is in (-1 = none).
+            try
+            {
+                string so = "?";
+                var wact2 = CurrentWorkActivity(out _, out _);
+                if (wact2 != null)
+                {
+                    var mi = HarmonyLib.AccessTools.Method(typeof(PlayerActivity.WorkActivity), "IsJobShiftActive");
+                    if (mi != null && mi.Invoke(wact2, null) is bool on) so = on.ToString();
+                }
+                sb.Append($" shiftOn={so}");
+            }
+            catch { sb.Append(" shiftOn=?"); }
+            try
+            {
+                var hs = new StringBuilder();
+                int close = -1;
+                var bm2 = InstanceBehavior<BuildingManager>.Instance;
+                if (BuildingManager.IsInsideBuilding && bm2?.buildingRegistration?.scheduleDays != null)
+                {
+                    var dow = TimeHelper.GetDayOfWeek();
+                    foreach (var sd in bm2.buildingRegistration.scheduleDays)
+                    {
+                        if (sd == null || sd.day != dow || sd.openingHourSlots == null) continue;
+                        foreach (var sl in sd.openingHourSlots)
+                        {
+                            if (sl == null) continue;
+                            if (hs.Length > 0) hs.Append(',');
+                            hs.Append(sl.startingHour).Append('-').Append(sl.endingHour);
+                            if (sl.endingHour > close) close = sl.endingHour;
+                        }
+                    }
+                }
+                sb.Append($" openHours={(hs.Length > 0 ? hs.ToString() : "none")} closeHour={close}");
+            }
+            catch { sb.Append(" openHours=? closeHour=-1"); }
             return sb.ToString();
         }
 
@@ -4036,8 +4074,17 @@ namespace BigAmbitionsMP
                 UI.Elements.ButtonInfo? stop = null;
                 var btns = wact.GetButtons();
                 if (btns != null) foreach (var b in btns) if (b != null && b.name == "StopWork") { stop = b; break; }
-                if (stop?.onClick != null) stop.onClick(); else wact.Finish();
-                Plugin.Logger.LogInfo($"[DEV] work off (was {st}; via {(stop?.onClick != null ? "the StopWork button" : "WorkActivity.Finish()")})");
+                // Review F3 (2026-09-26): a WorkActivity that is NOT started (NotStarted: the panel shows only
+                // Cancel, WorkActivity.GetButtons :430-431) is left by the game's own CancelWork button, not Finish().
+                UI.Elements.ButtonInfo? cancel = null;
+                bool started = st == PlayerActivityState.Started || st == PlayerActivityState.Running;
+                if (stop?.onClick == null && !started && btns != null)
+                    foreach (var b in btns) if (b != null && b.name == "CancelWork") { cancel = b; break; }
+                string via;
+                if (stop?.onClick != null) { stop.onClick(); via = "the StopWork button"; }
+                else if (cancel?.onClick != null) { cancel.onClick(); via = "the CancelWork button"; }
+                else { wact.Finish(); via = "WorkActivity.Finish()"; }
+                Plugin.Logger.LogInfo($"[DEV] work off (was {st}; via {via})");
                 return $"OK work off (was {st})";
             }
             catch (Exception ex)

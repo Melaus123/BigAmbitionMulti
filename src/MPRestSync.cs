@@ -1173,14 +1173,80 @@ namespace BigAmbitionsMP
                 {
                     _localVoteActive = false;
                     SendVote(false, 0, "");
-                    Plugin.Logger.LogInfo($"[Rest] vote OFF (goal time reached){(Seated ? " — standing up" : "")}.");
-                    // Review MINOR-3: a loiterer has nothing to stand from — the old unconditional
-                    // call routed into a STALE CancelButtonIndex from the last seat.
-                    if (Seated) StandUp();   // wake at the chosen time, like vanilla — movement restored
+                    // H-WORKSTAND-1 (2026-09-26): a player WORKING a station — any EmployeeStationController
+                    // click that starts the game's WorkActivity (register, hairdresser chair, DJ booth, ticket
+                    // booth, coat check, desk...) — is NOT stood up at the goal: the vote still goes OFF, the
+                    // shift goes on (standing him up left the till dead, run T-WORKSKIP-B2-20260926-144732).
+                    // Read from the game's own current activity TYPE, not a name. Resting seats (bench, bed,
+                    // anything not a WorkActivity) keep the wake-up below.
+                    // Review F1+F2 (2026-09-26): a worker stays ONLY when all hold - Seated; the game's current
+                    // activity IS a WorkActivity; its GetState() is Running or Started (the game's own "is working"
+                    // test, PlayerHelper.IsPlayerWorkingAtRegistration); and the shift is still on by the game's
+                    // private WorkActivity.IsJobShiftActive() (reflection, cached; any failure -> treated as over
+                    // -> the old stand-up, logged once). Everything else keeps the old stand-up path unchanged.
+                    bool working = false, shiftOn = false, shiftKnown = false;
+                    try
+                    {
+                        var wa = Seated ? GetCurrentActivity().act as global::PlayerActivity.WorkActivity : null;
+                        if (wa != null)
+                        {
+                            var wst = wa.GetState();
+                            if (wst == global::PlayerActivityState.Running || wst == global::PlayerActivityState.Started)
+                            {
+                                working = true;
+                                shiftKnown = TryIsJobShiftActive(wa, out shiftOn);
+                            }
+                        }
+                    }
+                    catch { working = false; shiftOn = false; shiftKnown = false; }
+                    if (working && shiftKnown && shiftOn)
+                    {
+                        Plugin.Logger.LogInfo("[Rest] vote OFF (goal time reached) - working, stays at the station (shift on).");
+                    }
+                    else
+                    {
+                        string shiftNote = (working && shiftKnown) ? " (shift over)" : "";
+                        Plugin.Logger.LogInfo($"[Rest] vote OFF (goal time reached){(Seated ? " — standing up" : "")}{shiftNote}.");
+                        // Review MINOR-3: a loiterer has nothing to stand from — the old unconditional
+                        // call routed into a STALE CancelButtonIndex from the last seat.
+                        if (Seated) StandUp();   // wake a RESTING player at the chosen time, like vanilla — movement restored
+                    }
                 }
             }
 
             if (MPServer.IsRunning) HostTick();
+        }
+
+        // Review F2 (2026-09-26): the game's private WorkActivity.IsJobShiftActive() (WorkActivity.cs:249-268 on
+        // the 0923 decompile) - in the player's own building: an opening-hour slot of today covers the current
+        // hour; elsewhere: a job work shift of today covers it. Returns false when it could not be asked
+        // (method gone, exception) - the caller then takes the old stand-up path; the reason is logged once.
+        private static System.Reflection.MethodInfo? _isJobShiftActiveMi;
+        private static bool _isJobShiftActiveLooked, _isJobShiftActiveWarned;
+        private static bool TryIsJobShiftActive(global::PlayerActivity.WorkActivity wa, out bool on)
+        {
+            on = false;
+            try
+            {
+                if (!_isJobShiftActiveLooked)
+                {
+                    _isJobShiftActiveLooked = true;
+                    _isJobShiftActiveMi = HarmonyLib.AccessTools.Method(typeof(global::PlayerActivity.WorkActivity), "IsJobShiftActive");
+                }
+                if (_isJobShiftActiveMi == null)
+                {
+                    if (!_isJobShiftActiveWarned) { _isJobShiftActiveWarned = true; Plugin.Logger.LogWarning("[Rest] WorkActivity.IsJobShiftActive not found - a worker is stood up at the goal as before."); }
+                    return false;
+                }
+                on = _isJobShiftActiveMi.Invoke(wa, null) is bool b && b;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                on = false;
+                if (!_isJobShiftActiveWarned) { _isJobShiftActiveWarned = true; Plugin.Logger.LogWarning($"[Rest] WorkActivity.IsJobShiftActive failed ({(ex.InnerException ?? ex).Message}) - a worker is stood up at the goal as before."); }
+                return false;
+            }
         }
 
         private static void UpdateSeated()

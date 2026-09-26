@@ -74,35 +74,72 @@
    "seq": 8,
    "role": "h",
    "cmd": "status",
-   "expect_result": "settled=True"
+   "abort_on_fail": false,
+   "note": "settle poll (report-only): the load can still be running here (run T-WORKSKIP-A2-20260926-145240 read loading=True then rawTrueFor=0.0s at 5 s)"
   },
   {
    "seq": 9,
+   "role": "h",
+   "sleep_s": 5
+  },
+  {
+   "seq": 10,
+   "role": "h",
+   "cmd": "status",
+   "abort_on_fail": false,
+   "note": "settle poll (report-only): the load can still be running here (run T-WORKSKIP-A2-20260926-145240 read loading=True then rawTrueFor=0.0s at 5 s)"
+  },
+  {
+   "seq": 11,
+   "role": "h",
+   "sleep_s": 10
+  },
+  {
+   "seq": 12,
+   "role": "h",
+   "cmd": "status",
+   "abort_on_fail": false,
+   "note": "settle poll (report-only): the load can still be running here (run T-WORKSKIP-A2-20260926-145240 read loading=True then rawTrueFor=0.0s at 5 s)"
+  },
+  {
+   "seq": 13,
+   "role": "h",
+   "sleep_s": 10
+  },
+  {
+   "seq": 14,
+   "role": "h",
+   "cmd": "status",
+   "expect_result": "settled=True",
+   "note": "ASSERT settled, bounded: ~30 s of polling after the first read (rigrun has no retry-until primitive, so the ladder always runs its full length)"
+  },
+  {
+   "seq": 15,
    "role": "h",
    "cmd": "pause off",
    "expect_result": "^OK"
   },
   {
-   "seq": 10,
+   "seq": 16,
    "role": "h",
    "cmd": "exitbuilding",
    "abort_on_fail": false,
    "note": "report-only: an outdoor player only warns"
   },
   {
-   "seq": 11,
+   "seq": 17,
    "role": "h",
    "sleep_s": 8
   },
   {
-   "seq": 12,
+   "seq": 18,
    "role": "h",
    "cmd": "skiprate",
    "expect_result": "^OK skiprate rate=50 ",
    "note": "the SHIPPED rate, read not set"
   },
   {
-   "seq": 13,
+   "seq": 19,
    "role": "h",
    "cmd": "regstate ${shop}",
    "expect_result": "^OK rented=True ",
@@ -112,7 +149,7 @@
    "note": "the host's own clothing store"
   },
   {
-   "seq": 14,
+   "seq": 20,
    "role": "h",
    "cmd": "skipvote 08:45",
    "expect_result": "^OK skipvote goal=",
@@ -126,31 +163,31 @@
    "note": "SETUP skip, OUTDOORS, solo (1/1): 17:38 -> 08:45 next day (~18 real s at rate 50). Identical in every leg."
   },
   {
-   "seq": 15,
+   "seq": 21,
    "role": "h",
    "sleep_s": 35
   },
   {
-   "seq": 16,
+   "seq": 22,
    "role": "h",
    "cmd": "skipstate",
    "expect_result": "active=False"
   },
   {
-   "seq": 17,
+   "seq": 23,
    "role": "h",
    "cmd": "skipvote off",
    "expect_result": "^OK skipvote goal=-"
   },
   {
-   "seq": 18,
+   "seq": 24,
    "role": "h",
    "cmd": "exitride",
    "abort_on_fail": false,
    "note": "the fixture host PUSHES A FLATBED (run T-WORKSKIP-A2-20260926-144113: it followed him inside); let go of it OUTDOORS (VehicleController.ExitVehicle, existing lever) so he walks in empty-handed"
   },
   {
-   "seq": 19,
+   "seq": 25,
    "role": "h",
    "cmd": "shiftclear ${shop} 1",
    "abort_on_fail": false,
@@ -160,7 +197,7 @@
    }
   },
   {
-   "seq": 20,
+   "seq": 26,
    "role": "h",
    "cmd": "shiftclear ${shop} 2",
    "abort_on_fail": false,
@@ -170,7 +207,7 @@
    }
   },
   {
-   "seq": 21,
+   "seq": 27,
    "role": "h",
    "cmd": "shiftclear ${shop} 3",
    "abort_on_fail": false,
@@ -180,7 +217,7 @@
    }
   },
   {
-   "seq": 22,
+   "seq": 28,
    "role": "h",
    "cmd": "shiftclear ${shop} 4",
    "abort_on_fail": false,
@@ -190,7 +227,7 @@
    }
   },
   {
-   "seq": 23,
+   "seq": 29,
    "role": "h",
    "cmd": "shiftclear ${shop} 5",
    "abort_on_fail": false,
@@ -200,7 +237,7 @@
    }
   },
   {
-   "seq": 24,
+   "seq": 30,
    "role": "h",
    "cmd": "shiftclear ${shop} 6",
    "abort_on_fail": false,
@@ -210,7 +247,7 @@
    }
   },
   {
-   "seq": 25,
+   "seq": 31,
    "role": "h",
    "cmd": "shiftclear ${shop} 7",
    "abort_on_fail": false,
@@ -220,34 +257,34 @@
    }
   },
   {
-   "seq": 26,
+   "seq": 32,
    "role": "h",
    "cmd": "schedcount ${shop}",
    "expect_result": "^OK schedcount \\S+ \\S+ d1=(0|-1) d2=(0|-1) d3=(0|-1) d4=(0|-1) d5=(0|-1) d6=(0|-1) d7=(0|-1) ",
    "note": "PREMISE: all 14 fixture shifts gone - no scheduled cashier on any day (asserted)"
   },
   {
-   "seq": 27,
+   "seq": 33,
    "role": "h",
    "cmd": "enterbuilding ${shop}",
    "expect_result": "^OK enterbuilding",
    "note": "THE HOST ENTERS HIS OWN SHOP"
   },
   {
-   "seq": 28,
+   "seq": 34,
    "role": "h",
    "sleep_s": 25,
    "note": "interior settles at 1x"
   },
   {
-   "seq": 29,
+   "seq": 35,
    "role": "h",
    "cmd": "shopday ${shop}",
    "expect_result": "pending=[1-9]",
    "note": "PREMISE: shoppers are still due today at this shop"
   },
   {
-   "seq": 30,
+   "seq": 36,
    "role": "h",
    "cmd": "work state",
    "abort_on_fail": false,
@@ -260,7 +297,7 @@
    "note": "report: before the lever (expected working=False)"
   },
   {
-   "seq": 31,
+   "seq": 37,
    "role": "h",
    "cmd": "work on",
    "expect_result": "^OK work on queued at ",
@@ -274,12 +311,12 @@
    "note": "DEV lever: the game's own register click path (EmployeeStationController.Work -> WorkActivity; the mod's dock auto-presses Start)"
   },
   {
-   "seq": 32,
+   "seq": 38,
    "role": "h",
    "sleep_s": 3
   },
   {
-   "seq": 33,
+   "seq": 39,
    "role": "h",
    "cmd": "work state",
    "expect_result": "^OK work working=True activity=WorkActivity state=Running .*playerAtStation=[1-9]",
@@ -291,27 +328,27 @@
    "note": "ASSERT: the player is the register's employee, WorkActivity Running"
   },
   {
-   "seq": 34,
+   "seq": 40,
    "role": "h",
    "cmd": "clock 09:59",
    "expect_result": "^OK clock",
    "note": "ALIGN every leg to the same minute; no hour is crossed by this jump"
   },
   {
-   "seq": 35,
+   "seq": 41,
    "role": "h",
    "sleep_s": 3,
    "note": "the 09->10 roll happens live at 1x (identical in every leg)"
   },
   {
-   "seq": 36,
+   "seq": 42,
    "role": "h",
    "cmd": "shopday reset",
    "expect_result": "^OK shopday reset day=\\d+ hour=10$",
    "note": "WINDOW OPENS in hour 10 - asserted"
   },
   {
-   "seq": 37,
+   "seq": 43,
    "role": "h",
    "cmd": "skipstate",
    "expect_result": "^OK skipstate",
@@ -321,7 +358,7 @@
    "note": "clock at read 'w0': window start, ~10:02"
   },
   {
-   "seq": 38,
+   "seq": 44,
    "role": "h",
    "cmd": "shopday ${shop}",
    "expect_result": "^OK shopday",
@@ -355,7 +392,7 @@
    }
   },
   {
-   "seq": 39,
+   "seq": 45,
    "role": "h",
    "cmd": "tilldupes ${shop}",
    "expect_result": "dupes=0",
@@ -370,7 +407,7 @@
    "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
   },
   {
-   "seq": 40,
+   "seq": 46,
    "role": "h",
    "cmd": "work state",
    "expect_result": "^OK work working=True activity=WorkActivity state=Running .*playerAtStation=[1-9]",
@@ -382,13 +419,13 @@
    "note": "ASSERT: still working at the window start (before any skip)"
   },
   {
-   "seq": 41,
+   "seq": 47,
    "role": "h",
    "sleep_s": 60,
    "note": "1x through the rest of hour 10"
   },
   {
-   "seq": 42,
+   "seq": 48,
    "role": "h",
    "cmd": "skipstate",
    "expect_result": "^OK skipstate",
@@ -398,7 +435,7 @@
    "note": "clock at read 'h10': ~11:0x, hour 10 closed at 1x"
   },
   {
-   "seq": 43,
+   "seq": 49,
    "role": "h",
    "cmd": "shopday ${shop}",
    "expect_result": "^OK shopday",
@@ -432,7 +469,7 @@
    }
   },
   {
-   "seq": 44,
+   "seq": 50,
    "role": "h",
    "cmd": "tilldupes ${shop}",
    "expect_result": "dupes=0",
@@ -447,7 +484,7 @@
    "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
   },
   {
-   "seq": 45,
+   "seq": 51,
    "role": "h",
    "cmd": "work state",
    "abort_on_fail": false,
@@ -460,13 +497,13 @@
    "note": "report: working through hour 10 at 1x"
   },
   {
-   "seq": 46,
+   "seq": 52,
    "role": "h",
    "sleep_s": 57,
    "note": "1x through hour 11"
   },
   {
-   "seq": 47,
+   "seq": 53,
    "role": "h",
    "cmd": "skipstate",
    "expect_result": "^OK skipstate",
@@ -476,7 +513,7 @@
    "note": "clock at read 'h11': ~12:0x, hour 11 closed at 1x"
   },
   {
-   "seq": 48,
+   "seq": 54,
    "role": "h",
    "cmd": "shopday ${shop}",
    "expect_result": "^OK shopday",
@@ -510,7 +547,7 @@
    }
   },
   {
-   "seq": 49,
+   "seq": 55,
    "role": "h",
    "cmd": "tilldupes ${shop}",
    "expect_result": "dupes=0",
@@ -525,7 +562,7 @@
    "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
   },
   {
-   "seq": 50,
+   "seq": 56,
    "role": "h",
    "cmd": "work state",
    "abort_on_fail": false,
@@ -538,13 +575,13 @@
    "note": "report: working through hour 11 at 1x"
   },
   {
-   "seq": 51,
+   "seq": 57,
    "role": "h",
    "sleep_s": 30,
    "note": "DRAIN at 1x: bodies mid-checkout finish"
   },
   {
-   "seq": 52,
+   "seq": 58,
    "role": "h",
    "cmd": "skipstate",
    "expect_result": "^OK skipstate",
@@ -554,7 +591,7 @@
    "note": "clock at read 'fin': after the 30 s drain"
   },
   {
-   "seq": 53,
+   "seq": 59,
    "role": "h",
    "cmd": "shopday ${shop}",
    "expect_result": "^OK shopday",
@@ -588,7 +625,7 @@
    }
   },
   {
-   "seq": 54,
+   "seq": 60,
    "role": "h",
    "cmd": "tilldupes ${shop}",
    "expect_result": "dupes=0",
@@ -603,20 +640,20 @@
    "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
   },
   {
-   "seq": 55,
+   "seq": 61,
    "role": "h",
    "cmd": "shopday ${shop}",
    "expect_result": "window=[1-9]",
    "note": "PREMISE: customers really were due in the window"
   },
   {
-   "seq": 56,
+   "seq": 62,
    "role": "h",
    "cmd": "skippace",
    "expect_result": "^OK skippace max=1000 now=1 scaledBodies=0"
   },
   {
-   "seq": 57,
+   "seq": 63,
    "role": "h",
    "cmd": "work state",
    "abort_on_fail": false,
@@ -629,7 +666,7 @@
    "note": "report: still working at the end"
   },
   {
-   "seq": 58,
+   "seq": 64,
    "role": "h",
    "cmd": "work off",
    "abort_on_fail": false,
@@ -637,7 +674,7 @@
    "note": "the panel's StopWork button"
   },
   {
-   "seq": 59,
+   "seq": 65,
    "role": "h",
    "cmd": "mark TEST T-WORKSKIP-A2 END",
    "expect_result": "OK MARK"

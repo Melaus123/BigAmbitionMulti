@@ -397,9 +397,14 @@
      "role": "h",
      "regex": "\\[Rest\\] CONSENSUS \\(1/1\\)",
      "within_s": 30
+    },
+    {
+     "role": "h",
+     "regex": "\\[Rest\\] vote OFF \\(goal time reached\\) - working, stays at the station \\(shift on\\)\\.",
+     "within_s": 60
     }
    ],
-   "note": "ONE solo mod skip ~10:04 -> 11:30 WHILE THE PLAYER WORKS THE REGISTER: crosses the 11:00 roll, ends MID hour 11"
+   "note": "ONE solo mod skip ~10:04 -> 11:30 WHILE THE PLAYER WORKS THE REGISTER: crosses the 11:00 roll, ends MID hour 11. H-WORKSTAND-1: at the goal the vote goes OFF but the WORKER stays at the station (asserted by its log line)"
   },
   {
    "seq": 43,
@@ -428,13 +433,13 @@
    "role": "h",
    "cmd": "work state",
    "abort_on_fail": false,
-   "expect_result": "^OK work ",
+   "expect_result": "^OK work working=True activity=WorkActivity state=Running .*playerAtStation=[1-9]",
    "capture": {
     "postWorking": "working=(\\w+)",
     "postWState": " state=(\\w+)",
     "postAtStation": "playerAtStation=(-?\\d+)"
    },
-   "note": "STAND-UP CHECK (report): did the skip end his work?"
+   "note": "ASSERT (H-WORKSTAND-1): the skip's end did NOT stand him up - still working the register (no abort: the run keeps measuring either way)"
   },
   {
    "seq": 47,
@@ -500,8 +505,8 @@
    "role": "h",
    "cmd": "work on",
    "abort_on_fail": false,
-   "expect_result": "^OK work on queued at ",
-   "note": "RE-SEAT only if the skip stood him up (while still working this reports ERR 'an activity is already open' - expected)"
+   "expect_result": "^ERR .*an activity is already open \\(WorkActivity",
+   "note": "H-WORKSTAND-1: he is still working, so the lever refuses ('an activity is already open') - asserted; a queued re-seat here would mean the skip stood him up"
   },
   {
    "seq": 51,
