@@ -322,6 +322,10 @@ namespace BigAmbitionsMP
                 var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                 if (reg == null) return false;
                 addr = GameStateReader.AddressKey(reg);
+                // Review HIGH (stand-in routing): the machine STANDING IN for an absent owner books this shop -
+                // its own fridge/shelf moves are native here. Routing them made the host send the op back to
+                // this machine, which applied it and then echoed it a second time.
+                if (MergerAbsence.SimulatesHere(addr)) return false;
                 // Residence guest OR business helper (round-32) — every consumer of this predicate is a
                 // cargo-mutation route/block, which is exactly what a helper needs owner-routed too.
                 if (!GrantSync.CanEnterGranted(addr) && !GrantSync.IsHelperBusiness(addr)) return false;   // owner / non-guest → native

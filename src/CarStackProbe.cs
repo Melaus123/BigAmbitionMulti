@@ -32,6 +32,17 @@ namespace BigAmbitionsMP
     ///     budget for pairs that involve a traffic car (the session pair budget is spent by parked cars at load).
     ///   The two timed kinds share one session budget of summary lines (with or without pairs); once it AND the
     ///   pair budget are spent they skip their whole pass.
+    ///   - LIFT/TILT signal (2026-09-26, pre-approved, log-only): the pair metric is weak - dY compares transform
+    ///     PIVOTS, which differ by model (trucks ~2.1, cars ~0.8), and bounds pairs include touching neighbours. So
+    ///     EVERY pass also measures, for each body within 120 m of the local player (at most 120 per pass - moving
+    ///     cars first (Gley traffic, traffic ghosts, remote player cars), then parked and own cars, each nearest
+    ///     first: run 1 of t-carhandover2 had ~160 bodies in range and registry order spent the rays on parked cars), how high
+    ///     its pivot sits above the ground straight under it (one downward ray from above the car; the car's own
+    ///     and every other listed car's colliders and triggers are skipped) minus that MODEL's usual height (the
+    ///     median of its last 21 samples this session, this pass included; needs 3 before a lift is judged), and
+    ///     its pitch/roll plus its tilt against the ground normal. `LIFTED` = more than 0.3 m above the usual height
+    ///     or tilted more than 10 degrees against the ground, naming the nearest other car. One `LIFT` summary per
+    ///     pass + at most 10 `LIFTED` lines, worst first; own session budgets.
     ///
     /// REGISTRIES, existing ones only - no scene sweep:
     ///   - Helpers.VehicleHelper.AllPlayerVehicles (the game's own list of player cars, which on this
@@ -261,6 +272,7 @@ namespace BigAmbitionsMP
             public string Kind, Model, Id;
             public int GoId;        // E (fold 3): the GAME OBJECT's instance id - the identity that decides "same car"
             public Bounds B;
+            public GameObject Go;   // LIFT/TILT: the body itself (transform + the ray's own-collider skip)
         }
 
         private static readonly List<Body> _bodies = new List<Body>();
@@ -281,7 +293,7 @@ namespace BigAmbitionsMP
                 if (!_seenGos.Add(goId)) return;        // already taken from an earlier registry
                 Bounds b;
                 if (!TryBounds(go, out b)) return;
-                _bodies.Add(new Body { Kind = kind, Model = model ?? "", Id = id ?? "", GoId = goId, B = b });
+                _bodies.Add(new Body { Kind = kind, Model = model ?? "", Id = id ?? "", GoId = goId, B = b, Go = go });
             }
             catch { }
         }
@@ -418,11 +430,202 @@ namespace BigAmbitionsMP
                 if (summary)
                     Plugin.Logger.LogWarning($"[CarStack] pass trigger={trigger}{extra} bodies={_bodies.Count} registries={reached} " +
                                              $"pairs={pairs} logged={_pairsLogged}/{PairBudget} traffic={mode} sinceSkipEnd={sinceSkip:F1}s perf[{perf}]");
+                try { LiftPass(trigger, extra); } catch (System.Exception lex) { try { Plugin.Logger.LogWarning($"[CarStack] lift: {lex.Message}"); } catch { } }
                 _bodies.Clear();
                 _cells.Clear();
                 _seenGos.Clear();
             }
             catch (System.Exception ex) { try { Plugin.Logger.LogWarning($"[CarStack] pass: {ex.Message}"); } catch { } }
+        }
+
+        // ── LIFT/TILT signal (2026-09-26, log-only; see the class comment) ──
+        private const float LiftRange         = 120f;   // metres from the local player (horizontal)
+        private const float LiftFlagMetres    = 0.3f;   // above the model's usual height
+        private const float TiltFlagDegrees   = 10f;    // against the ground normal
+        private const int   LiftCarsPerPass   = 120;    // rays per pass (moving cars first, then nearest)
+        private const int   LiftDetailPerPass = 10;
+        private const int   LiftSummaryBudget = 400;    // LIFT lines per session
+        private const int   LiftDetailBudget  = 500;    // LIFTED lines per session
+        private const int   ModelWindow       = 21;     // samples kept per model
+        private const int   ModelMinSamples   = 3;      // before a lift is judged
+        private static int _liftSummaries, _liftDetails;
+        private static readonly Dictionary<string, List<float>> _modelHeights = new Dictionary<string, List<float>>();
+        private static readonly List<float> _medianScratch = new List<float>();
+        private static readonly RaycastHit[] _liftHits = new RaycastHit[24];
+        private static readonly HashSet<int> _carGos = new HashSet<int>();
+        private static readonly List<KeyValuePair<float, int>> _liftOrder = new List<KeyValuePair<float, int>>();   // (priority key, body index)
+
+        private struct LiftRow
+        {
+            public int Body, Samples;
+            public float H, Usual, Lift, Clear, Pitch, Roll, TiltG;
+            public bool Lifted, Tilted;
+            public string Ground;
+        }
+        private static readonly List<LiftRow> _liftRows = new List<LiftRow>();
+
+        private static string ModelKey(string model)
+        {
+            string m = model ?? "";
+            int k = m.IndexOf("(Clone)", System.StringComparison.Ordinal);
+            if (k >= 0) m = m.Substring(0, k);
+            return m.Trim();
+        }
+
+        /// <summary>Is this collider part of any body the pass listed (walks up to 12 parents)?</summary>
+        private static bool OnListedCar(Transform t)
+        {
+            for (int i = 0; t != null && i < 12; i++, t = t.parent)
+                if (_carGos.Contains(t.gameObject.GetInstanceID())) return true;
+            return false;
+        }
+
+        private static float MedianOf(List<float> src)
+        {
+            _medianScratch.Clear();
+            _medianScratch.AddRange(src);
+            _medianScratch.Sort();
+            int n = _medianScratch.Count;
+            if (n == 0) return 0f;
+            return (n & 1) == 1 ? _medianScratch[n / 2] : 0.5f * (_medianScratch[n / 2 - 1] + _medianScratch[n / 2]);
+        }
+
+        private static void LiftPass(string trigger, string extra)
+        {
+            if (_liftSummaries >= LiftSummaryBudget || _bodies.Count == 0) return;
+            Vector3 me;
+            if (!TrafficSync.ProbeHandoverAnchor(out me)) return;
+            _liftRows.Clear();
+            _carGos.Clear();
+            for (int i = 0; i < _bodies.Count; i++) _carGos.Add(_bodies[i].GoId);
+            int inRange = 0, probed = 0, noGround = 0;
+            float r2 = LiftRange * LiftRange;
+            // Order: moving cars (anything not parked and not a player-vehicle row) before the rest, each nearest first;
+            // the key is the squared distance, plus a big offset for the second group.
+            _liftOrder.Clear();
+            for (int i = 0; i < _bodies.Count; i++)
+            {
+                var bd = _bodies[i];
+                if (bd.Go == null) continue;
+                Vector3 c = bd.B.center;
+                float dx = c.x - me.x, dz = c.z - me.z;
+                float d2 = dx * dx + dz * dz;
+                if (d2 > r2) continue;
+                bool still = bd.Kind == "player-vehicle" || bd.Kind.StartsWith("parked");
+                _liftOrder.Add(new KeyValuePair<float, int>(d2 + (still ? 1e7f : 0f), i));
+            }
+            inRange = _liftOrder.Count;
+            _liftOrder.Sort((x, y) => x.Key.CompareTo(y.Key));
+            for (int oi = 0; oi < _liftOrder.Count && probed < LiftCarsPerPass; oi++)
+            {
+                int i = _liftOrder[oi].Value;
+                var bd = _bodies[i];
+                try
+                {
+                    probed++;
+                    var tr = bd.Go.transform;
+                    Vector3 pos = tr.position;
+                    var origin = new Vector3(pos.x, bd.B.max.y + 2f, pos.z);
+                    int n = Physics.RaycastNonAlloc(origin, Vector3.down, _liftHits, 80f, ~(1 << 2), QueryTriggerInteraction.Ignore);   // review LOW: not the 'Ignore Raycast' layer
+                    int best = -1;
+                    float bestD = float.MaxValue;
+                    for (int k = 0; k < n && k < _liftHits.Length; k++)
+                    {
+                        var col = _liftHits[k].collider;
+                        if (col == null || OnListedCar(col.transform)) continue;
+                        if (_liftHits[k].distance < bestD) { bestD = _liftHits[k].distance; best = k; }
+                    }
+                    if (best < 0) { noGround++; continue; }
+                    var hit = _liftHits[best];
+                    float h = pos.y - hit.point.y;
+                    string mk = ModelKey(bd.Model);
+                    List<float> win;
+                    if (!_modelHeights.TryGetValue(mk, out win)) { win = new List<float>(); _modelHeights[mk] = win; }
+                    win.Add(h);
+                    if (win.Count > ModelWindow) win.RemoveAt(0);
+                    Vector3 f = tr.forward, rt = tr.right;
+                    string gname = "";
+                    try { gname = LayerMask.LayerToName(hit.collider.gameObject.layer) + ":" + hit.collider.gameObject.name; } catch { }
+                    _liftRows.Add(new LiftRow
+                    {
+                        Body  = i,
+                        H     = h,
+                        Clear = bd.B.min.y - hit.point.y,
+                        Pitch = Mathf.Asin(Mathf.Clamp(f.y, -1f, 1f)) * Mathf.Rad2Deg,
+                        Roll  = Mathf.Asin(Mathf.Clamp(rt.y, -1f, 1f)) * Mathf.Rad2Deg,
+                        TiltG = Vector3.Angle(tr.up, hit.normal),
+                        Ground = gname,
+                    });
+                }
+                catch { }
+            }
+            _liftOrder.Clear();
+            // judge after every sample of this pass is in its model's window
+            int lifted = 0, tilted = 0, flagged = 0;
+            float worstLift = 0f, worstTilt = 0f;
+            for (int i = 0; i < _liftRows.Count; i++)
+            {
+                var row = _liftRows[i];
+                List<float> win;
+                if (_modelHeights.TryGetValue(ModelKey(_bodies[row.Body].Model), out win) && win.Count >= ModelMinSamples)
+                {
+                    row.Samples = win.Count;
+                    row.Usual = MedianOf(win);
+                    row.Lift = row.H - row.Usual;
+                    row.Lifted = row.Lift > LiftFlagMetres;
+                }
+                else { row.Samples = win != null ? win.Count : 0; row.Usual = float.NaN; row.Lift = float.NaN; }
+                row.Tilted = row.TiltG > TiltFlagDegrees;
+                if (row.Lifted) lifted++;
+                if (row.Tilted) tilted++;
+                if (row.Lifted || row.Tilted) flagged++;
+                if (!float.IsNaN(row.Lift) && row.Lift > worstLift) worstLift = row.Lift;
+                if (row.TiltG > worstTilt) worstTilt = row.TiltG;
+                _liftRows[i] = row;
+            }
+            _liftSummaries++;
+            Plugin.Logger.LogWarning($"[CarStack] LIFT trigger={trigger}{extra} inRange={inRange} probed={probed} noGround={noGround} " +
+                                     $"flagged={flagged} lifted={lifted} tilted={tilted} worstLift={worstLift:F2}m worstTiltG={worstTilt:F1} " +
+                                     $"models={_modelHeights.Count} budget={_liftSummaries}/{LiftSummaryBudget}");
+            if (flagged == 0 || _liftDetails >= LiftDetailBudget) { _liftRows.Clear(); return; }
+            // worst first: the larger of (lift in metres x 10) and (tilt in degrees) - both read as 'x times the flag'
+            _liftRows.Sort((a, b) =>
+            {
+                float sa = Mathf.Max(float.IsNaN(a.Lift) ? 0f : a.Lift / LiftFlagMetres, a.TiltG / TiltFlagDegrees);
+                float sb = Mathf.Max(float.IsNaN(b.Lift) ? 0f : b.Lift / LiftFlagMetres, b.TiltG / TiltFlagDegrees);
+                return sb.CompareTo(sa);
+            });
+            int shown = 0;
+            for (int i = 0; i < _liftRows.Count && shown < LiftDetailPerPass && _liftDetails < LiftDetailBudget; i++)
+            {
+                var row = _liftRows[i];
+                if (!row.Lifted && !row.Tilted) continue;
+                try
+                {
+                    var a = _bodies[row.Body];
+                    Vector3 p = a.Go != null ? a.Go.transform.position : a.B.center;
+                    int nb = -1;
+                    float nd = float.MaxValue;
+                    for (int j = 0; j < _bodies.Count; j++)
+                    {
+                        if (j == row.Body || _bodies[j].GoId == a.GoId) continue;
+                        float d = Vector3.Distance(a.B.center, _bodies[j].B.center);
+                        if (d < nd) { nd = d; nb = j; }
+                    }
+                    string near = nb < 0 ? "none"
+                        : $"{_bodies[nb].Kind}/'{_bodies[nb].Model}'#{_bodies[nb].Id} d={nd:F1}m dYcentre={a.B.center.y - _bodies[nb].B.center.y:F2}";
+                    string why = row.Lifted && row.Tilted ? "lift+tilt" : (row.Lifted ? "lift" : "tilt");
+                    string lift = float.IsNaN(row.Lift) ? $"n/a(samples={row.Samples})" : $"{row.Lift:+0.00;-0.00}m";
+                    string usual = float.IsNaN(row.Usual) ? "n/a" : row.Usual.ToString("F2");
+                    shown++;
+                    _liftDetails++;
+                    Plugin.Logger.LogWarning($"[CarStack] LIFTED why={why} {a.Kind}/'{a.Model}'#{a.Id} at ({p.x:F1},{p.y:F2},{p.z:F1}) lift={lift} " +
+                                             $"h={row.H:F2} usual={usual} n={row.Samples} clear={row.Clear:F2} pitch={row.Pitch:F1} roll={row.Roll:F1} " +
+                                             $"tiltG={row.TiltG:F1} ground='{row.Ground}' nearest={near} trigger={trigger}{extra}");
+                }
+                catch { }
+            }
+            _liftRows.Clear();
         }
     }
 

@@ -23,7 +23,9 @@ namespace BigAmbitionsMP
     ///   - the connected player list.
     /// A changed fingerprint calls the existing RefreshBuildingAccess("inputs") (which still pushes to everyone and
     /// writes the budgeted "[Access] sets rebuilt (inputs): ..." line when someone's sets really changed). A failed push
-    /// leaves the fingerprint unchanged, so the next tick retries. The direct refresh calls all stay (instant effect);
+    /// leaves the fingerprint unchanged, so the next tick retries - at most RetryCap times per fingerprint (review L3: one
+    /// player whose send keeps failing must not make the host re-push to EVERYONE every second); after that the
+    /// fingerprint is taken as done (logged once) and the next REAL input change pushes again. The direct refresh calls all stay (instant effect);
     /// this tick is what makes a missed input impossible rather than merely unlikely.
     /// </summary>
     internal static class AccessSets
@@ -37,6 +39,10 @@ namespace BigAmbitionsMP
         private static int     _regsCount = -1;
         private static readonly Dictionary<string, BuildingRegistration> _regByAddr = new Dictionary<string, BuildingRegistration>(StringComparer.Ordinal);
         private static int _warned;            // warning budget, 10 per session
+        private const int RetryCap = 3;        // review L3: retries of ONE fingerprint after its first failed push
+        private static string _failSig = "";   // the fingerprint whose push is failing
+        private static int _failRetries;       // retries spent on _failSig
+        private static int _gaveUpLogged;      // "gave up" lines this session (cap 20)
 
         /// <summary>The ONE rule for "this business type counts as a business" - the access builder, this fingerprint
         /// and BusinessHelperRoute.HelperAt all read it, so they can never disagree. Empty / "empty" = not a business
@@ -47,7 +53,7 @@ namespace BigAmbitionsMP
         /// <summary>Session boundary (lobby arm / session stop - where MPServer clears its access signatures).</summary>
         internal static void Reset()
         {
-            _lastSig = ""; _regsRef = null; _regsCount = -1; _warned = 0;
+            _lastSig = ""; _regsRef = null; _regsCount = -1; _warned = 0; _failSig = ""; _failRetries = 0; _gaveUpLogged = 0;
             try { _regByAddr.Clear(); } catch { }
         }
 
@@ -65,7 +71,17 @@ namespace BigAmbitionsMP
                 RefreshRegMap(regs);
                 string sig = Fingerprint();
                 if (sig == _lastSig) return;
-                if (MPServer.RefreshBuildingAccess("inputs")) _lastSig = sig;   // failed push -> keep the old one, retry next tick
+                if (MPServer.RefreshBuildingAccess("inputs")) { _lastSig = sig; _failSig = ""; _failRetries = 0; return; }
+                // Failed push -> keep the old fingerprint and retry next tick, but at most RetryCap times for THIS
+                // fingerprint (review L3); then take it as done and wait for the next real input change.
+                if (sig != _failSig) { _failSig = sig; _failRetries = 0; }
+                else _failRetries++;
+                if (_failRetries >= RetryCap)
+                {
+                    _lastSig = sig;
+                    if (_gaveUpLogged++ < 20)   // once per fingerprint, and a session cap on top
+                        Plugin.Logger.LogWarning($"[Access] backstop refresh still did not reach everyone after {RetryCap} retries - waiting for the next input change.");
+                }
                 else if (_warned++ < 10) Plugin.Logger.LogWarning("[Access] backstop refresh did not reach everyone - retrying next tick.");
             }
             catch (Exception ex)

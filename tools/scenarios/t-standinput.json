@@ -1,0 +1,78 @@
+{
+  "id": "T-STANDINPUT",
+  "title": "H-MERGERSTOCK-2 follow-up (review MEDIUM-2): a deposit into an ABSENT merged owner's shop is applied by the machine standing in for that owner. Three members (melaus + Client1 from the fixture, Client2 grown in); Client1 drops, the host stands in (a member host always simulates), and the THIRD member Client2 hand-deposits into Client1's fast food. Before the fix the host forwarded the op to the offline owner, SendHubTo logged 'not connected' and dropped it - the depositor kept the goods and nothing landed. NO save.",
+  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger true so tools/regress.py resets it with --keep-merger). Client1 owns the fast food at vars.shop (11 ba:street_tenthavenue - a staffed till, per t-shopday-paper-till). The third instance (role d, PlayerId Client2) has no slot in fx-hq1 and joins as a NEW player (charconfirm armed before hostload). Dev build with merge / mergestatus / absence / regstate / helperstate / stationroom / deposit / stockof / enterbuilding / exitbuilding. The host is a company member, so HostReconcileAbsence designates the HOST as the stand-in (MPServer ~:823) - this run proves the host-applies branch of RouteStorageOpForAbsentOwner; the forward-to-a-client-stand-in branch needs a company the host is NOT in plus a fourth member (three clients) and is not exercised here.",
+  "instances": 3,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "dPid": "Client2",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "shop": "11 ba:street_tenthavenue"
+  },
+  "oracles_absent": [
+    "HarmonyException",
+    "Patching exception",
+    "(?<!swallowed )NullReferenceException",
+    "\\[Store\\] storage op for offline owner .* dropped - no stand-in",
+    "\\[Store\\] RouteStorageOpForAbsentOwner:"
+  ],
+  "oracles_report": [
+    "\\[Server\\] hub message: 'Client1' not connected",
+    "\\[Store\\] storage op for offline owner",
+    "\\[DepositGuard\\]",
+    "\\[BStore\\] owner applied PUT",
+    "\\[Absence\\]",
+    "\\[Access\\] backstop"
+  ],
+  "steps": [
+    {"seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK"},
+    {"seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK"},
+    {"seq": 3, "role": "d", "cmd": "join", "expect_result": "^OK"},
+    {"seq": 4, "role": "d", "cmd": "charconfirm", "expect_result": "^OK armed", "note": "Client2 has no slot in fx-hq1: the character screen appears on load"},
+    {"seq": 5, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK", "expect_log": [
+      {"role": "h", "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)", "within_s": 300},
+      {"role": "h", "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady", "within_s": 60}]},
+    {"seq": 6, "role": "all", "cmd": "mark TEST STANDINPUT START", "expect_result": "OK MARK"},
+    {"seq": 7, "role": "h", "sleep_s": 20, "note": "the worlds settle and the merger push crosses"},
+    {"seq": 8, "role": "c", "cmd": "exitbuilding", "abort_on_fail": false, "note": "fx-hq1 loads Client1 inside a building"},
+    {"seq": 9, "role": "h", "cmd": "exitbuilding", "abort_on_fail": false},
+    {"seq": 10, "role": "h", "cmd": "mergestatus", "expect_result": "member=True.*flipped=[1-9]", "note": "PREMISE: the fixture pair is merged"},
+    {"seq": 11, "role": "h", "cmd": "merge propose ${dPid}", "expect_result": "OK merge propose sent"},
+    {"seq": 12, "role": "h", "sleep_s": 1},
+    {"seq": 13, "role": "h", "cmd": "offers", "expect_result": "pending=\\[${dPid}<-${hostPid}\\]"},
+    {"seq": 14, "role": "d", "cmd": "merge accept", "expect_result": "OK merge accept sent", "expect_log": [
+      {"role": "h", "regex": "\\[BAMP\\] \\[Merger\\] (GROWN|FORMED) group", "within_s": 20}]},
+    {"seq": 15, "role": "h", "sleep_s": 14, "note": "the 10 s merger push flips the company's buildings onto the newcomer"},
+    {"seq": 16, "role": "d", "cmd": "mergestatus", "expect_result": "member=True.*flipped=[1-9]", "note": "PREMISE: the THIRD member is in the company"},
+    {"seq": 17, "role": "c", "cmd": "regstate ${shop}", "expect_result": "^OK rented=True .*flipped=False", "note": "PREMISE: the shop is Client1's own (the owner who will drop)"},
+    {"seq": 18, "role": "d", "cmd": "regstate ${shop}", "expect_result": "^OK rented=True .*flipped=True", "note": "PREMISE: on the depositor it is a flipped partner shop"},
+    {"seq": 19, "role": "h", "cmd": "absence", "expect_result": "^OK absence marks=\\[\\] simulating_here=\\[\\]", "note": "nobody is absent yet"},
+    {"seq": 20, "role": "h", "cmd": "mark pre-drop baseline", "expect_result": "OK MARK"},
+    {"seq": 21, "role": "c", "drop": true, "note": "THE OWNER DROPS; the member host designates itself and stands in", "expect_log": [
+      {"role": "h", "regex": "\\[Absence\\] simulating '${shop}' for '${clientPid}'", "within_s": 90}]},
+    {"seq": 22, "role": "h", "cmd": "absence", "expect_result": "^OK absence marks=\\[${clientPid}->${hostPid}( ownerBack=\\d)?: .*${shop}.*\\] simulating_here=\\[.*${shop}", "note": "PREMISE: the owner is offline, the host is its stand-in and books this shop"},
+    {"seq": 23, "role": "all", "cmd": "mark TEST STANDINPUT DEPOSIT", "expect_result": "OK MARK"},
+    {"seq": 24, "role": "d", "cmd": "exitbuilding", "abort_on_fail": false},
+    {"seq": 25, "role": "d", "cmd": "enterbuilding ${shop}", "expect_result": "^OK enterbuilding", "expect_log": [
+      {"role": "d", "regex": "\\[TestDrive\\] enterbuilding '${shop}'", "within_s": 40}]},
+    {"seq": 26, "role": "d", "sleep_s": 10, "note": "the interior loads and syncs"},
+    {"seq": 27, "role": "h", "cmd": "stationroom ${shop} 50", "abort_on_fail": false, "note": "ROOM, made on the STAND-IN (it books the shop): takes 50 off one till and pushes the interior. Report-only - the deposit probe below is the premise"},
+    {"seq": 28, "role": "d", "sleep_s": 4},
+    {"seq": 29, "role": "d", "cmd": "helperstate ${shop}", "expect_result": "helper=True flipped=True books=False", "note": "PREMISE: on the depositor the absent owner's shop is a flipped partner business it does not book, so a deposit routes"},
+    {"seq": 30, "role": "d", "cmd": "deposit ${shop} probe", "expect_result": "^OK deposit probe ", "capture": {"depItem": "item=(\\S+)"}, "note": "PREMISE: a single-slot station with room exists on the depositor's replica"},
+    {"seq": 31, "role": "h", "cmd": "stockof ${shop}", "expect_result": "^OK stockof", "capture": {"standBefore": "${depItem}:([0-9]+)"}, "note": "the STAND-IN's total of that item before the deposit"},
+    {"seq": 32, "role": "d", "cmd": "deposit ${shop} 50", "expect_result": "^OK deposit .*item=${depItem} .*helper=True .*routed=True", "capture": {"depAmt": "amount=([0-9]+)"}, "expect_log": [
+      {"role": "d", "regex": "\\[DepositGuard\\] helper deposit into '[^']*' @${shop} routed to the owner", "within_s": 5},
+      {"role": "h", "regex": "\\[Store\\] storage op for offline owner '${clientPid}' at '${shop}' applied here - this host stands in for them\\.", "within_s": 10},
+      {"role": "h", "regex": "\\[BStore\\] owner applied PUT ${depAmt}.${depItem} on '${shop}'.* for '${dPid}'", "within_s": 10}],
+      "note": "THE FIX: the op for the OFFLINE owner is applied by the stand-in (before: 'hub message: Client1 not connected' and nothing)"},
+    {"seq": 33, "role": "h", "sleep_s": 3},
+    {"seq": 34, "role": "h", "cmd": "stockof ${shop}", "expect_result": "^OK stockof", "expect_gt": {"${depItem}:([0-9]+)": "${standBefore}"}, "note": "the goods are on the STAND-IN's station"},
+    {"seq": 35, "role": "d", "cmd": "helperstate ${shop}", "expect_result": "hands=empty", "note": "the stand-in's OK consumed the depositor's held goods"},
+    {"seq": 36, "role": "d", "cmd": "exitbuilding", "abort_on_fail": false},
+    {"seq": 37, "role": "d", "cmd": "merge leave", "expect_result": "OK merge leave sent", "abort_on_fail": false, "note": "FIXTURE HYGIENE: the newcomer leaves; the fixture pair stays as it was loaded. Nothing is saved"},
+    {"seq": 38, "role": "all", "cmd": "mark TEST STANDINPUT END", "expect_result": "OK MARK"}
+  ]
+}

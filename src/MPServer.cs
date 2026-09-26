@@ -1443,6 +1443,7 @@ namespace BigAmbitionsMP
             _peerBuild.Clear();       // round-281: per-peer build records die with the session, like _peerNames
             lock (_lastAccessSig) { _lastAccessSig.Clear(); _accessRebuiltLogged = 0; }   // batch 14: the [Access] line's signatures + its log budget are per session (never suppresses a push)
             AccessSets.Reset();   // H-MERGERSTOCK-2: the access-input fingerprint is per session too (the next host tick re-pushes from scratch)
+            lock (_storeNoStandInLogged) { _storeNoStandInLogged.Clear(); _storeStandInLogged.Clear(); }   // review LOW: per-session log sets
             StableIdByPlayer.Clear();
             StableIdByPlayer[MPConfig.PlayerId] = MPConfig.StableId; // host's own
             PlayerColours.Learn(MPConfig.PlayerId, PlayerColours.HostAssign(MPConfig.StableId));   // 2026-09-05 colours: the host holds a permanent slot too
@@ -1527,6 +1528,7 @@ namespace BigAmbitionsMP
             _peerBuild.Clear();       // round-281
             lock (_lastAccessSig) { _lastAccessSig.Clear(); _accessRebuiltLogged = 0; }   // batch 14: the [Access] line's signatures + its log budget are per session (never suppresses a push)
             AccessSets.Reset();   // H-MERGERSTOCK-2: the access-input fingerprint is per session too (the next host tick re-pushes from scratch)
+            lock (_storeNoStandInLogged) { _storeNoStandInLogged.Clear(); _storeStandInLogged.Clear(); }   // review LOW: per-session log sets
             _clients.Clear();
             MPSaveCoordinator.ConsumeDevHostLoadAs("session stop");   // round-285: the impersonation override dies with the session
             lock (_startupLock) { _inGamePlayers.Clear(); _worldReadyPlayers.Clear(); _fenceExcused.Clear(); _peerPhase.Clear(); _peerPhaseSeq.Clear(); _gateHeal.Clear(); _fenceArmedAtMs = TickMs64; _hostSnapshotsReady = false; _startupReleased = false; _pausedByDisconnect = false; _deliberatePause = false; }
@@ -4051,7 +4053,9 @@ namespace BigAmbitionsMP
         /// PassengerSync.OwnerOf (populated by every fleet broadcast). Building ops are grant-gated
         /// here AND re-verified on the owner (the vehicle lock/grant gate stays owner-side —
         /// container-inherent, unchanged). Owner==host → apply on the main thread and answer the
-        /// accessor directly; else forward to the owner's machine.</summary>
+        /// accessor directly; a BUILDING whose owner is OFFLINE → RouteStorageOpForAbsentOwner on the
+        /// main thread (the machine standing in for that owner applies it; H-MERGERSTOCK-2 follow-up);
+        /// else forward to the owner's machine.</summary>
         public static void HandleStorageOp(StorageOpPayload req, string senderPid)
         {
             try
@@ -4092,12 +4096,74 @@ namespace BigAmbitionsMP
                         else SendHubTo(res.PlayerId, MessageType.StorageRes, res);
                     });
                 }
+                else if (req.Container != "vehicle" && !IsOnlinePid(ownerPid))
+                {
+                    // H-MERGERSTOCK-2 follow-up (review MEDIUM-2): the building's owner is OFFLINE (a merged
+                    // partner who dropped). SendHubTo would log 'not connected' and drop the op - the depositor
+                    // kept the goods and the deposit silently did nothing. The machine STANDING IN for that
+                    // owner books the shop; the absence table is a plain Dictionary owned by the MAIN thread,
+                    // so the stand-in is looked up there. (A vehicle op keeps the old path below.)
+                    GameStatePatcher.EnqueueOnMainThread(() => RouteStorageOpForAbsentOwner(req, ownerPid));
+                }
                 else
                 {
                     SendHubTo(ownerPid, MessageType.StorageOp, req);   // forward to the owner's machine to apply
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Store] HandleStorageOp: {ex.Message}"); }
+        }
+
+        // MAIN THREAD only (like MergerAbsence.Marks): addresses already logged, so a repeated op logs once.
+        private static readonly HashSet<string> _storeNoStandInLogged = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly HashSet<string> _storeStandInLogged   = new HashSet<string>(StringComparer.Ordinal);   // "<addr>|<stand-in pid>"
+
+        /// <summary>H-MERGERSTOCK-2 follow-up (review MEDIUM-2), HOST, MAIN THREAD. A building storage op whose
+        /// owner is offline goes to the machine STANDING IN for that owner: the absence mark whose Addresses hold
+        /// the address and whose SimulatorPid is set. The host itself -> applied here exactly as the host-owner
+        /// branch of HandleStorageOp does (StorageSync.OwnerApply, verdict to the accessor); a connected client ->
+        /// the StorageOp is forwarded there (MPClient's StorageOp case runs the same OwnerApply and answers through
+        /// HandleStorageRes). Nobody standing in -> dropped with ONE log line per address. Log-only: no player text,
+        /// no wire change (the forwarded payload is the accessor's own StorageOp).</summary>
+        private static void RouteStorageOpForAbsentOwner(StorageOpPayload req, string ownerPid)
+        {
+            try
+            {
+                if (!_running || req == null) return;
+                string addr = req.AddressKey ?? "";
+                if (IsOnlinePid(ownerPid)) { SendHubTo(ownerPid, MessageType.StorageOp, req); return; }   // the owner came back meanwhile
+                string sim = "";
+                foreach (var kv in MergerAbsence.Marks)
+                {
+                    var m = kv.Value;
+                    if (m == null || string.IsNullOrEmpty(m.SimulatorPid) || m.Addresses == null) continue;
+                    bool hit = false;   // review LOW: case-insensitive, as the stand-in's own address table is
+                    foreach (var a in m.Addresses) if (string.Equals(a, addr, StringComparison.OrdinalIgnoreCase)) { hit = true; break; }
+                    if (!hit) continue;
+                    sim = m.SimulatorPid;
+                    break;
+                }
+                if (sim.Length > 0 && sim == MPConfig.PlayerId)
+                {
+                    _storeNoStandInLogged.Remove(addr);
+                    if (_storeStandInLogged.Add(addr + "|" + sim))
+                        Plugin.Logger.LogInfo($"[Store] storage op for offline owner '{ownerPid}' at '{addr}' applied here - this host stands in for them.");
+                    var res = StorageSync.OwnerApply(req);
+                    if (res.PlayerId == MPConfig.PlayerId) StorageSync.OnResult(res);   // host is also the accessor
+                    else SendHubTo(res.PlayerId, MessageType.StorageRes, res);
+                    return;
+                }
+                if (sim.Length > 0 && IsOnlinePid(sim))
+                {
+                    _storeNoStandInLogged.Remove(addr);
+                    if (_storeStandInLogged.Add(addr + "|" + sim))
+                        Plugin.Logger.LogInfo($"[Store] storage op for offline owner '{ownerPid}' at '{addr}' routed to the stand-in '{sim}'.");
+                    SendHubTo(sim, MessageType.StorageOp, req);
+                    return;
+                }
+                if (_storeNoStandInLogged.Add(addr))
+                    Plugin.Logger.LogWarning($"[Store] storage op for offline owner '{ownerPid}' at '{addr}' dropped - no stand-in");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Store] RouteStorageOpForAbsentOwner: {ex.Message}"); }
         }
 
         /// <summary>v17 trunk detail broker — the same routing shape as HandleStorageOp's vehicle

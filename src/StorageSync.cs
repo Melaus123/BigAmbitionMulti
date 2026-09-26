@@ -522,15 +522,35 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>H-MERGERSTOCK-2 follow-up: does the ABSENT owner this machine stands in for at the
+        /// op's address grant the requester a Housing or Business key? False off a stand-in shop.</summary>
+        private static bool StandInGranted(StorageOpPayload req)
+        {
+            try
+            {
+                string absent = MergerAbsence.OwnerSimulatedFor(req.AddressKey ?? "");
+                if (string.IsNullOrEmpty(absent) || absent == MPConfig.PlayerId) return false;
+                return GrantSync.IsGranted(GrantKind.Housing, absent, req.PlayerId)
+                    || GrantSync.IsGranted(GrantKind.Business, absent, req.PlayerId);
+            }
+            catch { return false; }
+        }
+
         private static void OwnerApplyBuilding(StorageOpPayload req, StorageResPayload res)
         {
             // Grant backstop (the host already gated; re-verify on the authoritative machine).
             // Housing OR Business (round-32): the gates only ever OFFER these ops in buildings the
             // requester holds the matching grant for, so kind-precision here buys nothing — either
             // key from this owner authorizes cargo ops on this owner's buildings.
+            // H-MERGERSTOCK-2 follow-up: this machine can also be the STAND-IN for an absent merged
+            // owner (MergerAbsence.SimulatesHere - the host routes that owner's ops here). There the
+            // building's owner is the absent player, not this one, so their keys count too: a
+            // co-member already passes through the merger union in IsGranted, a helper holding a
+            // direct key from the absent owner would otherwise be refused 'denied'.
             if (req.PlayerId != MPConfig.PlayerId
                 && !GrantSync.IsGranted(GrantKind.Housing, MPConfig.PlayerId, req.PlayerId)
-                && !GrantSync.IsGranted(GrantKind.Business, MPConfig.PlayerId, req.PlayerId))
+                && !GrantSync.IsGranted(GrantKind.Business, MPConfig.PlayerId, req.PlayerId)
+                && !StandInGranted(req))
             { res.Reason = "denied"; return; }
 
             var gi = SaveGameManager.Current;
@@ -1279,7 +1299,9 @@ namespace BigAmbitionsMP
                 // cargo authority shield trusts (field-proven); its known transient (guests read
                 // RentedByPlayer=true inside HousingFurniture.Enter) errs toward SKIPPING an echo —
                 // a display-only miss the push heals, never a double apply.
-                if (MergerFlip.TrulyMine(reg))
+                // Review HIGH (stand-in routing): BooksHere, not TrulyMine - a STAND-IN books the absent owner's
+                // shop, applied the op itself and must not echo it again (TrulyMine is false there).
+                if (MergerFlip.BooksHere(reg))
                 {
                     // WARNING deliberately (review NEW-3): on a CLIENT this line is the MAJOR-1
                     // tripwire — it fires only when owner-resolution and the grant sets disagreed,
