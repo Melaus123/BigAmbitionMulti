@@ -1,0 +1,108 @@
+{
+  "id": "T-STEAMRATE",
+  "title": "H-STEAMNET-2 - the per-connection Steam rate controller is present and IDLE on the rig: the DEV lever 'steamrate' reports rateControl=on (settings key SteamRateControl absent = on) and links=0 before hosting and while hosting with a direct-IP client (the IP link is LiteNetLib, not a Steam connection), and the global Steam config is still 256K/256K/512 KB. The controller's real behaviour (1 s samples, rises/back-offs, per-connection min = max, read-back, logging) is UNIT-TESTED with synthetic links (tools/unit-tests/steamrate-tests.ps1) and REVIEW-VERIFIED until a real two-account Steam session. NO save, no world load.",
+  "preconditions": "Dev build with SteamRateController (BAMP_DEV levers 'steamrate' and 'steamnet'). Steam valid on BOTH instances. UDP 7777 FREE.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "\\[SteamNet\\] rate .* controller DISABLED",
+    "\\[SteamNet\\] rate .* sample: ",
+    "\\[SteamNet\\] config: .*WANTED",
+    "\\[SteamNet\\] config not applied yet",
+    "\\[Server\\] port \\d+ in use"
+  ],
+  "oracles_report": [
+    "\\[SteamNet\\] config: ",
+    "\\[SteamNet\\] rate ",
+    "\\[TestDrive\\] steamrate: "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "both",
+      "cmd": "mark TEST STEAMRATE START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "steamrate",
+      "expect_result": "^OK steamrate rateControl=on links=0$",
+      "note": "PREMISE: the settings key is absent on the rig, so the controller is on; no Steam link exists yet"
+    },
+    {
+      "seq": 3,
+      "role": "c",
+      "cmd": "steamrate",
+      "expect_result": "^OK steamrate rateControl=on links=0$"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK server started",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[SteamHost\\] relay listener up",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 5,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK Connect\\(127\\.0\\.0\\.1:7777\\)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] '${clientPid}' joined lobby\\.",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "clientConn=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "steamrate",
+      "expect_result": "^OK steamrate rateControl=on links=0$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] steamrate: rateControl=on links=0",
+          "within_s": 10
+        }
+      ],
+      "note": "hosting with an IP client: the controller stays idle - no Steam connection, no samples, no rate lines"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "steamrate",
+      "expect_result": "^OK steamrate rateControl=on links=0$"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "steamnet",
+      "expect_result": "^OK steamnet config:\\ ICE=-1\\ sendRate=262144\\-262144\\ sendBuffer=524288\\ applied=True\\ at='startup'\\ links=0$",
+      "note": "the GLOBAL config is unchanged by H-STEAMNET-2 (256K/256K/512 KB)"
+    },
+    {
+      "seq": 10,
+      "role": "both",
+      "cmd": "mark TEST STEAMRATE END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

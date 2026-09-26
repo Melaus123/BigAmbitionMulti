@@ -1030,6 +1030,16 @@ namespace BigAmbitionsMP
                     return "OK steamnet " + sn;
                 }
 
+                case "steamrate":
+                {
+                    // H-STEAMNET-2 DEV lever: the SteamRateControl setting and every live Steam link's rate-controller
+                    // state (rate, learned ceiling, buffer, base ping, delivery, counters). Either role.
+                    string sr;
+                    try { sr = SteamNetConfig.DescribeRateForLever(); } catch (Exception ex) { return "ERR steamrate: " + ex.Message; }
+                    Plugin.Logger.LogInfo($"[TestDrive] steamrate: {sr}");
+                    return "OK steamrate " + sr;
+                }
+
                 case "join":
                 {
                     if (MPClient.IsConnected) return "OK already connected";

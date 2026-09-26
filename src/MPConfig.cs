@@ -207,6 +207,21 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        /// <summary>H-STEAMNET-2: settings-file key "SteamRateControl" (no UI), read live at each new Steam
+        /// connection. Default (absent) true = each Steam connection's send rate is set by the mod's per-connection
+        /// controller; false/0/no/off pins every Steam connection at 256 KB/s (the pre-controller behaviour).</summary>
+        public static bool SteamRateControlLive()
+        {
+            try
+            {
+                string v = GetLiveString("SteamRateControl").Trim();
+                if (v.Length == 0) return true;
+                return !(v.Equals("false", StringComparison.OrdinalIgnoreCase) || v == "0"
+                         || v.Equals("no", StringComparison.OrdinalIgnoreCase) || v.Equals("off", StringComparison.OrdinalIgnoreCase));
+            }
+            catch { return true; }
+        }
+
         private static string GetLiveString(string key)
         {
             try

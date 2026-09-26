@@ -8,8 +8,12 @@ Usage:  python C:\\code\\BigAmbitionsMP\\tools\\readout.py [--patterns FILE] [LO
 Defaults: patterns = C:\\code\\BigAmbitionsMP\\.modding\\readout-patterns.txt;
           logs = the rig's Player.log and Player-instance2.log.
 Patterns file: one per line  LABEL | regex   (lines starting with # are comments).
+  A LABEL starting with '*' lists EVERY matching line (not just the count and the first one).
+LOG may also be a bug-report bundle (.zip: its *.log files and peer-logs.txt are read), a folder (every
+  .zip and .log under it, recursively) or a wildcard - so one call reads all bundles at once, e.g.
+  python tools\\readout.py "C:\\path\\to\\bundles"
 """
-import os, re, sys
+import glob, os, re, sys, zipfile
 
 DEFAULT_PATTERNS = r"C:\code\BigAmbitionsMP\.modding\readout-patterns.txt"
 GAME_DIR = r"C:\Users\allsc\AppData\LocalLow\Hovgaard Games\Big Ambitions"
@@ -28,9 +32,44 @@ def load_patterns(path):
     return pats
 
 
-def scan(log_path, pats):
-    lines = open(log_path, "rb").read().decode("utf-8", "replace").splitlines()
-    hits = {label: [0, None] for label, _ in pats}
+def expand_logs(args):
+    """(display name, loader) per log: plain files, bundle zips (their logs), folders, wildcards."""
+    out = []
+
+    def add_zip(zp):
+        try:
+            with zipfile.ZipFile(zp) as z:
+                for n in z.namelist():
+                    b = n.rsplit("/", 1)[-1].lower()
+                    if b.endswith(".log") or b == "peer-logs.txt":
+                        out.append((f"{zp}!{n}", lambda zp=zp, n=n: zipfile.ZipFile(zp).read(n)))
+        except Exception as ex:
+            out.append((f"{zp}: unreadable zip ({ex})", None))
+
+    def add(path):
+        if os.path.isdir(path):
+            for root, _dirs, files in os.walk(path):
+                for f in sorted(files):
+                    fp = os.path.join(root, f)
+                    if f.lower().endswith(".zip"):
+                        add_zip(fp)
+                    elif f.lower().endswith(".log") or f.lower() == "peer-logs.txt":
+                        out.append((fp, lambda fp=fp: open(fp, "rb").read()))
+        elif path.lower().endswith(".zip") and os.path.exists(path):
+            add_zip(path)
+        else:
+            out.append((path, (lambda fp=path: open(fp, "rb").read()) if os.path.exists(path) else None))
+
+    for a in args:
+        matches = sorted(glob.glob(a)) if any(c in a for c in "*?[") else [a]
+        for m in matches or [a]:
+            add(m)
+    return out
+
+
+def scan(data, pats):
+    lines = data.decode("utf-8", "replace").splitlines()
+    hits = {label: [0, None, []] for label, _ in pats}
     generic = {"Exception": [0, None], "Patch summary": [0, None], "mod load line": [0, None],
                "PROBE": [], "warning-shaped mod lines": {}}
     warn_rx = re.compile(r"\[BAMP\] \[[A-Za-z]+\] [^:]{3,60}: ")
@@ -41,6 +80,8 @@ def scan(log_path, pats):
                 h[0] += 1
                 if h[1] is None:
                     h[1] = (i, line.strip()[:MAXLEN])
+                if label.startswith("*"):
+                    h[2].append((i, line.strip()[:MAXLEN * 2]))
         if "Exception" in line:
             generic["Exception"][0] += 1
             if generic["Exception"][1] is None:
@@ -75,17 +116,22 @@ def main():
         k = args.index("--patterns"); pat_path = args[k + 1]; del args[k:k + 2]
     logs = args or DEFAULT_LOGS
     pats = load_patterns(pat_path)
-    for log in logs:
-        if not os.path.exists(log):
+    for log, load in expand_logs(logs):
+        if load is None:
             print(f"## {log}: MISSING"); continue
-        n, hits, generic = scan(log, pats)
+        n, hits, generic = scan(load(), pats)
         print(f"## {log}  ({n} lines)")
         for key in ("mod load line", "Patch summary", "Exception"):
             c, first = generic[key]
             print(f"  [{key}] count={c}" + (f"  first L{first[0]}: {first[1]}" if first else ""))
         print("  -- patterns:")
         for label, _ in pats:
-            c, first = hits[label]
+            c, first, every = hits[label]
+            if label.startswith("*"):
+                print(f"  {label}: {c}")
+                for i, text in every:
+                    print(f"     L{i}: {text}")
+                continue
             print(f"  {label}: {c}" + (f"  L{first[0]}: {first[1]}" if first else ""))
         print(f"  -- PROBE lines: {len(generic['PROBE'])}")
         seen = set()

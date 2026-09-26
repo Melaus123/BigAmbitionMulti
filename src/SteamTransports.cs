@@ -275,7 +275,8 @@ namespace BigAmbitionsMP
             catch { _lanesOk = false; }
             if (!_lanesOk) Plugin.Logger.LogWarning($"[SteamLink] connection lanes unavailable for {who} — single-lane sends (pre-T3 behaviour).");
             // H-STEAMNET-1: per-connection config override + the direct/relayed status line (connect, 30 s checks, close).
-            Watch = new SteamNetConfig.LinkWatch(conn, $"steam:{who}", () => { lock (_pending) return _pendingBytes; });
+            // H-STEAMNET-2: the mod's backlog for the rate controller = retry queue + paced queue.
+            Watch = new SteamNetConfig.LinkWatch(conn, $"steam:{who}", () => { long b; lock (_pending) b = _pendingBytes; return b + _paced.Bytes; }, () => _lanesOk);
             try { Watch.OnConnected(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamNet] link watch for {who}: {ex.Message}"); }
         }
         internal readonly SteamNetConfig.LinkWatch Watch;   // H-STEAMNET-1
@@ -378,7 +379,7 @@ namespace BigAmbitionsMP
             Result r;
             try { r = _conn.SendMessage(d, SendType.Reliable, _lanesOk ? SteamLanes.Express : (ushort)0); }
             catch { return false; }
-            if (r == Result.OK) return true;
+            if (r == Result.OK) { Watch.NoteAccepted(d.Length); return true; }   // H-STEAMNET-2: accepted bytes
             if (_expressRefusalsLogged++ < 8)
                 Plugin.Logger.LogWarning($"[SteamLink] express send to {Describe} refused: {r} ({d.Length}B) — "
                     + $"held in the express queue, which the pump drains before the retry and paced lanes.");
@@ -438,7 +439,7 @@ namespace BigAmbitionsMP
                     int left; lock (_pending) left = _pending.Count;
                     if (left > 0)
                     {
-                        try { _conn.SendMessage(SteamFrames.WrapClose(reason), SendType.Reliable, _lanesOk ? SteamLanes.Gameplay : (ushort)0); }
+                        try { var tf = SteamFrames.WrapClose(reason); if (_conn.SendMessage(tf, SendType.Reliable, _lanesOk ? SteamLanes.Gameplay : (ushort)0) == Result.OK) Watch.NoteAccepted(tf.Length); }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamLink] quit tag direct send to {Describe}: {ex.Message}"); }
                     }
                 }
@@ -526,6 +527,7 @@ namespace BigAmbitionsMP
             lock (_pending)
                 if (_pending.Count > 0) { EnqueueLocked(data, lane); return; }   // keep order behind pending
             var r = _conn.SendMessage(data, SendType.Reliable, _lanesOk ? lane : (ushort)0);
+            if (r == Result.OK) Watch.NoteAccepted(data.Length);   // H-STEAMNET-2: accepted bytes
             if (r != Result.OK)
             {
                 if (_refusalsLogged++ < 8)
@@ -566,6 +568,7 @@ namespace BigAmbitionsMP
                     try { r = _conn.SendMessage(d, SendType.Reliable, _lanesOk ? lane : (ushort)0); }
                     catch { return; }
                     if (r != Result.OK) return;   // still refused — next pump retries
+                    Watch.NoteAccepted(d.Length);   // H-STEAMNET-2: accepted bytes
                     _pending.Dequeue(); _pendingBytes -= d.Length;
                     _retrySummed++; _retrySummedBytes += d.Length;
                     if (System.DateTime.UtcNow.Ticks >= _retryLogNextTicks)
@@ -727,7 +730,7 @@ namespace BigAmbitionsMP
                 // Per-link isolation: one sick peer must not stop the others draining.
                 foreach (var l in _links.Values)
                 {
-                    try { l.FlushExpress(); l.FlushPending(); l.TryFinishClose(); l.FlushPaced(); l.Watch.Tick(); }   // H-STEAMNET-1: Tick samples every 30 s only
+                    try { l.FlushExpress(); l.FlushPending(); l.TryFinishClose(); l.FlushPaced(); l.Watch.Tick(); }   // H-STEAMNET-2: 1 s rate-controller samples; the status line is still checked every 30 s
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamHost] flush {l.Describe}: {ex.Message}"); }
                 }
                 Thread.Sleep(15);
@@ -903,7 +906,7 @@ namespace BigAmbitionsMP
             Result r;
             try { r = mgr.Connection.SendMessage(d, SendType.Reliable); }
             catch { return false; }
-            if (r == Result.OK) return true;
+            if (r == Result.OK) { _watch?.NoteAccepted(d.Length); return true; }   // H-STEAMNET-2: accepted bytes
             if (_expressRefusalsLogged++ < 8)
                 Plugin.Logger.LogWarning($"[SteamClient] express send refused: {r} ({d.Length}B) — held in the "
                     + $"express queue, which the pump drains before the retry and paced lanes.");
@@ -994,6 +997,7 @@ namespace BigAmbitionsMP
             lock (_pending)
                 if (_pending.Count > 0) { EnqueueLocked(data, lane); return; }   // keep order behind pending
             var r = mgr.Connection.SendMessage(data, SendType.Reliable, _lanesOk ? lane : (ushort)0);
+            if (r == Result.OK) _watch?.NoteAccepted(data.Length);   // H-STEAMNET-2: accepted bytes
             if (r != Result.OK)
             {
                 if (_refusalsLogged++ < 8)
@@ -1031,6 +1035,7 @@ namespace BigAmbitionsMP
                     try { r = mgr.Connection.SendMessage(d, SendType.Reliable, _lanesOk ? lane : (ushort)0); }
                     catch { return; }
                     if (r != Result.OK) return;   // still refused — next pump retries
+                    _watch?.NoteAccepted(d.Length);   // H-STEAMNET-2: accepted bytes
                     _pending.Dequeue(); _pendingBytes -= d.Length;
                     _retrySummed++; _retrySummedBytes += d.Length;
                     if (System.DateTime.UtcNow.Ticks >= _retryLogNextTicks)
@@ -1064,7 +1069,7 @@ namespace BigAmbitionsMP
                 try { FlushExpress(); } catch { }  // round-283: express lane FIRST — it must overtake the retry queue
                 try { FlushPending(); } catch { }
                 try { FlushPaced(); } catch { }   // round-282: paced lane, after the retry flush
-                try { _watch?.Tick(); } catch { }   // H-STEAMNET-1: samples every 30 s only
+                try { _watch?.Tick(); } catch { }   // H-STEAMNET-2: 1 s rate-controller samples; status line checked every 30 s
                 Thread.Sleep(15);
             }
             // The loop can also end because StopPolling/Disconnect cleared _running after OnDisconnected saw
@@ -1103,7 +1108,8 @@ namespace BigAmbitionsMP
             try
             {
                 var wm = _mgr;
-                if (wm != null) { _watch = new SteamNetConfig.LinkWatch(wm.Connection, _watchWho, () => { lock (_pending) return _pendingBytes; }); _watch.OnConnected(); }
+                // H-STEAMNET-2: the mod's backlog for the rate controller = retry queue + paced queue.
+                if (wm != null) { _watch = new SteamNetConfig.LinkWatch(wm.Connection, _watchWho, () => { long b; lock (_pending) b = _pendingBytes; return b + _paced.Bytes; }, () => _lanesOk); _watch.OnConnected(); }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamNet] link watch for the host: {ex.Message}"); }
             Connected?.Invoke();

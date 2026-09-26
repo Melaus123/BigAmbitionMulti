@@ -849,6 +849,18 @@ namespace BigAmbitionsMP
             sb.AppendLine($"OS: {Environment.OSVersion}");
             sb.AppendLine($"64BitProcess: {Environment.Is64BitProcess}");
             sb.AppendLine();
+            // A1 (H-STEAMNET-2 fold, 2026-09-26): every live Steam link (path, ping, rate, the controller's target,
+            // learned ceiling, delivery, back-offs, peak, floorSec, ctl) and the last 8 closed links' close lines.
+            // Steam ids are left as they are here; the upload's existing redaction still blanks IPs.
+            sb.AppendLine("## Steam connections");
+            try
+            {
+                var steamLines = SteamNetConfig.DescribeForReport();
+                if (steamLines.Count == 0) sb.AppendLine("none");
+                else foreach (var l in steamLines) sb.AppendLine("- " + l);
+            }
+            catch (Exception ex) { sb.AppendLine($"(read failed: {ex.GetType().Name}: {ex.Message})"); }
+            sb.AppendLine();
             sb.AppendLine("## Notes");
             sb.AppendLine("- Add what you were doing when the bug happened.");
             sb.AppendLine("- If another player was connected, attach their report too.");
