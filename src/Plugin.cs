@@ -342,6 +342,9 @@ namespace BigAmbitionsMP
             UnityEngine.Object.DontDestroyOnLoad(_uiHost);
             _uiHost.AddComponent<MPCanvasUI>();
 
+#if BAMP_DEV
+            RigSaveRoot.Apply();   // RIG-SAVEROOT: dev rig only (BAMP_RIG_SAVEROOT) - must precede EnsureVersionCached below
+#endif
             // PROTON-1: resolve and cache the game's save version folder BEFORE a single one
             // of our patches is applied.  Field bundle bamp-bug-20260907-115848 (Linux/Proton):
             // SaveGamePathHelper.CurrentVersionFolderPath() answered correctly at startup and

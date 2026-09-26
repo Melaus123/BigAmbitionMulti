@@ -27,6 +27,12 @@ Rules this script encodes (from .modding/08-testdrive.md - the notes win over an
   * teardown via CloseMainWindow (WM_CLOSE), not taskkill /f - it exercises the real quit path;
     taskkill by PID is the fallback only. Never kill by image name (that kills both instances).
   * focus by WINDOW HANDLE, never PID/title, and only for the ONE sanctioned boot-focus flick.
+  * SAVE ROOT (RIG-SAVEROOT, 2026-09-26): every run exports BAMP_RIG_SAVEROOT=<LocalLow>\\...\\BAMP_RigSaves
+    before launching, so each DEV instance keeps its whole save root in BAMP_RigSaves\\<role> instead of the
+    Steam-Cloud-synced SaveGames (src/RigSaveRoot.cs). Before launch the fixture is re-copied there from
+    SaveGames (tools/fixture_reset.py prepare + reset - SaveGames is only read), and SaveGames is snapshotted
+    before launch and compared after teardown: a change is reported, and FAILS a scenario that declares
+    "savegames_untouched": true.
 """
 
 import argparse
@@ -43,6 +49,8 @@ import sys
 import time
 
 ROOT = r"C:\code\BigAmbitionsMP"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import fixture_reset                          # RIG-SAVEROOT: prepare + reset of the rig's own save roots
 LOCALLOW = r"C:\Users\allsc\AppData\LocalLow\Hovgaard Games\Big Ambitions"
 DEPLOYED = os.path.join(LOCALLOW, r"ModsLocal\BigAmbitionsMP\BigAmbitionsMP.dll")
 CHANNEL = os.path.join(LOCALLOW, r"BigAmbitionsMP\testdrive")
@@ -54,6 +62,9 @@ LOGS = {"h": os.path.join(LOCALLOW, "Player.log"),
 LAUNCHER = os.path.join(ROOT, r"local\launch-mp-test.bat")
 RUNS = os.path.join(ROOT, r".modding\work\runs")   # LOCAL-FOLDER-1: local\ holds only the user's launch .bat files
 GAME_EXE = "Big Ambitions.exe"
+SAVEGAMES = os.path.join(LOCALLOW, "SaveGames")          # Steam-Cloud synced - the rig must never write here
+RIG_SAVEROOT = os.path.join(LOCALLOW, "BAMP_RigSaves")   # = fixture_reset.RIG; one sub-folder per role
+RIG_SAVEROOT_ENV = "BAMP_RIG_SAVEROOT"                   # read by src/RigSaveRoot.cs (DEV builds)
 
 ARMED_RE = {r: re.compile(r"\[BAMP\] \[TestDrive\] channel ARMED \(dev build, role '%s'\)" % r) for r in ROLES}
 RESULT_TIMEOUT_S = 60.0
@@ -133,6 +144,24 @@ def build_running():
         if re.search(r"\bbuild\b|\bmsbuild\.dll\b", low):
             return "a dotnet build is running: %s" % line.strip()[:120]
     return None
+
+
+def tree_snapshot(top):
+    """{relative path: (size, mtime_ns)} for every file under `top` (RIG-SAVEROOT before/after check)."""
+    out = {}
+    for dp, dn, fn in os.walk(top):
+        for f in fn:
+            fp = os.path.join(dp, f)
+            try:
+                st = os.stat(fp)
+            except OSError:
+                continue
+            out[os.path.relpath(fp, top)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+def newest(snap):
+    return stamp(max(v[1] for v in snap.values()) / 1e9) if snap else "(empty)"
 
 
 # ---------------------------------------------------------------- log reading
@@ -478,6 +507,49 @@ class Run:
         self.head = head_commit()
         return problems
 
+    def prepare_saves(self):
+        """RIG-SAVEROOT: rebuild the rig's own save roots from the fixture, point the launch at them, and
+        snapshot SaveGames. Returns an error string, or None."""
+        v = self.vars
+        session = str(v.get("session", "save1"))
+        pt = str(v.get("playthrough") or "*")
+        keep = str(v.get("keepMerger", "")).strip().lower() in ("1", "true", "yes")
+        lines = []
+        try:
+            n = fixture_reset.prepare(session, pt, log=lines.append)
+            dirty, _, seen = fixture_reset.reset(session, pt, check=False, keep_merger=keep, log=lines.append)
+        except Exception as e:
+            return "rig save root preparation failed: %s: %s" % (type(e).__name__, e)
+        for l in lines:
+            say("fixture: " + l)
+        os.environ[RIG_SAVEROOT_ENV] = RIG_SAVEROOT       # inherited by the launcher, its bats and every relaunch
+        self.notes.append("save root: %s=%s (fixture '%s': %d session folder(s) copied from SaveGames, "
+                          "%d manifest(s) in the rig root, %d reset)" % (RIG_SAVEROOT_ENV, RIG_SAVEROOT, session,
+                                                                         n, seen, dirty))
+        self.sg_before = tree_snapshot(SAVEGAMES)
+        self.notes.append("SaveGames before launch: %d file(s), newest %s" % (len(self.sg_before), newest(self.sg_before)))
+        return None
+
+    def savegames_check(self):
+        """Compare SaveGames with the pre-launch snapshot. One oracle row: FAIL when the scenario declares
+        "savegames_untouched": true and anything changed, else REPORT."""
+        before = getattr(self, "sg_before", None)
+        if before is None:
+            return []
+        after = tree_snapshot(SAVEGAMES)
+        added = sorted(set(after) - set(before))
+        gone = sorted(set(before) - set(after))
+        changed = sorted(k for k in set(after) & set(before) if after[k] != before[k])
+        self.notes.append("SaveGames after teardown: %d file(s), newest %s" % (len(after), newest(after)))
+        if not (added or gone or changed):
+            return [("REPORT", "SaveGames UNTOUCHED: %d file(s) before and after, newest %s both times"
+                     % (len(after), newest(after)))]
+        kind = "FAIL" if self.sc.get("savegames_untouched") else "REPORT"
+        sample = (["+" + a for a in added] + ["-" + g for g in gone] + ["~" + c for c in changed])[:5]
+        return [(kind, "SaveGames CHANGED: %d added, %d removed, %d modified (files %d -> %d, newest %s -> %s): %s"
+                 % (len(added), len(gone), len(changed), len(before), len(after), newest(before), newest(after),
+                    "; ".join(sample)))]
+
     def arm_channel(self):
         os.makedirs(CHANNEL, exist_ok=True)
         stale = [f for f in os.listdir(CHANNEL) if f.endswith(".cmd") or f.endswith(".result")]
@@ -756,8 +828,17 @@ class Run:
         return ok_all
 
     def oracles(self):
-        """Whole-log absence greps (FAIL if present) + the notes' passive greps (report only)."""
+        """Whole-log absence greps (FAIL if present) + presence greps (FAIL if absent) + the notes' passive
+        greps (report only). oracles_present entries are a regex (every active role must show it) or
+        {"role": r, "regex": ...} for one role; they cover start-up lines no step's mark can bracket."""
         out = []
+        for ent in self.sc.get("oracles_present") or []:
+            pat = ent["regex"] if isinstance(ent, dict) else ent
+            for role in ([ent["role"]] if isinstance(ent, dict) and ent.get("role") else self.active):
+                hits = [l.strip()[:200] for l in read_text_from(LOGS[role], self.run_start_off[role]).splitlines()
+                        if re.search(pat, l)]
+                out.append(("REPORT", "%s: present /%s/ x%d -> %s" % (ROLE_NAME[role], pat, len(hits), hits[0]))
+                           if hits else ("FAIL", "%s: /%s/ never appeared (oracles_present)" % (ROLE_NAME[role], pat)))
         for pat in self.sc.get("oracles_absent") or []:
             for role in self.active:
                 hits = [l.strip()[:200] for l in read_text_from(LOGS[role], self.run_start_off[role]).splitlines()
@@ -839,6 +920,11 @@ def dry_run(sc, args):
     print("  must be supplied (--var / --session): %s" %
           (", ".join(n for n in names if n not in captured and n not in supplied) or "(none)"))
     print("oracles ABSENT (FAIL if present): %s" % ", ".join(sc.get("oracles_absent") or []) or "(none)")
+    print("oracles PRESENT (FAIL if absent): %s" % ", ".join(
+        ("%s:%s" % (e.get("role", "*"), e["regex"])) if isinstance(e, dict) else e
+        for e in (sc.get("oracles_present") or [])) or "(none)")
+    if sc.get("savegames_untouched"):
+        print("savegames_untouched: SaveGames must be byte-for-byte unchanged (size + mtime) after teardown")
     print("oracles REPORT-only: %s" % ", ".join(sc.get("oracles_report") or []) or "(none)")
     print("\n%d steps. DRY RUN - nothing launched, no channel touched." % len(sc["steps"]))
     return 0
@@ -989,15 +1075,20 @@ def main():
         r.write_report(0, len(sc["steps"]), [], blocked=problems)
         return 1
     say("pre-flight OK - HEAD %s, deployed md5 %s, DEV markers %d" % (r.head, r.deployed_md5, r.markers))
+    perr = r.prepare_saves()
+    if perr:
+        say("REFUSED: " + perr)
+        r.write_report(0, len(sc["steps"]), [], blocked=[perr])
+        return 1
     r.arm_channel()
     r.launch()
     for role in r.active:
         err = r.wait_armed(role)
         if err:
             say("FAIL " + err)
-            r.write_report(0, len(sc["steps"]), [], blocked=[err])
             if not args.keep_open:
                 close_instances(r.notes)
+            r.write_report(0, len(sc["steps"]), r.savegames_check(), blocked=[err])
             return 1
 
     passed, total, aborted = 0, len(sc["steps"]), False
@@ -1009,13 +1100,15 @@ def main():
             aborted = True
             break
     oracle_rows = r.oracles()
+    # RIG-SAVEROOT: tear down BEFORE the report, so the SaveGames comparison also covers the quit-path saves
+    if args.keep_open:
+        say("--keep-open: both instances left running (the SaveGames check below cannot see their quit)")
+    else:
+        close_instances(r.notes)
+    oracle_rows += r.savegames_check()
     for kind, line in oracle_rows:
         say("ORACLE %s %s" % (kind, line))
     r.write_report(passed, total, oracle_rows, blocked=["scenario aborted early"] if aborted else None)
-    if args.keep_open:
-        say("--keep-open: both instances left running")
-    else:
-        close_instances(r.notes)
     ok = passed == total and not aborted and not any(k == "FAIL" for k, _ in oracle_rows)
     print("RESULT: %s (%d/%d steps)" % ("PASS" if ok else "FAIL", passed, total))
     return 0 if ok else 1

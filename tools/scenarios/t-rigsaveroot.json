@@ -1,0 +1,53 @@
+{
+  "id": "T-RIGSAVEROOT",
+  "title": "RIG-SAVEROOT - a rig run keeps EVERY save out of the Steam-Cloud-synced SaveGames folder. rigrun.py exports BAMP_RIG_SAVEROOT and re-copies the fixture into BAMP_RigSaves\\<role>; the DEV build redirects SaveGamePathHelper.SaveGameFolderPath there (src/RigSaveRoot.cs), so the game's own writes and the mod's MP stores follow. Both instances must log the redirect and cache their version folder inside the rig root; a coordinated save and an autosave must land in the rig root on BOTH machines; and after teardown (quit-path saves included) nothing under SaveGames may have changed (savegames_untouched: every file's size and mtime, and the file count, before launch vs after teardown).",
+  "preconditions": "Fixture save1 under SaveGames\\_BAMP_MP* (host melaus, Client1) - only READ, copied into BAMP_RigSaves by the driver. Dev build carrying RigSaveRoot. Two instances.",
+  "instances": 2,
+  "savegames_untouched": true,
+  "vars": {
+    "session": "save1"
+  },
+  "oracles_present": [
+    {"role": "h", "regex": "\\[BAMP\\] \\[RigSaveRoot\\] save root redirected to .*\\\\BAMP_RigSaves\\\\h\\s*$"},
+    {"role": "c", "regex": "\\[BAMP\\] \\[RigSaveRoot\\] save root redirected to .*\\\\BAMP_RigSaves\\\\c\\s*$"},
+    {"role": "h", "regex": "\\[BAMP\\] \\[MPSave\\] version folder cached before patching: '.*\\\\BAMP_RigSaves\\\\h\\\\"},
+    {"role": "c", "regex": "\\[BAMP\\] \\[MPSave\\] version folder cached before patching: '.*\\\\BAMP_RigSaves\\\\c\\\\"}
+  ],
+  "oracles_absent": [
+    "\\[RigSaveRoot\\] (REFUSED|redirect FAILED|version folder still answers)",
+    "\\[MPSave\\] Local save .*\\\\SaveGames\\\\",
+    "\\[MPSave\\] Loading \\.hsg: .*\\\\SaveGames\\\\"
+  ],
+  "oracles_report": [
+    "\\[MPSave\\] Local save ",
+    "\\[MPSave\\] Loading \\.hsg: "
+  ],
+  "steps": [
+    {"seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK"},
+    {"seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK"},
+    {"seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK",
+     "expect_log": [
+       {"role": "h", "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)", "within_s": 240},
+       {"role": "h", "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady", "within_s": 60},
+       {"role": "h", "regex": "\\[BAMP\\] \\[MPSave\\] Loading \\.hsg: .*\\\\BAMP_RigSaves\\\\h\\\\_BAMP_MP\\\\", "within_s": 10}
+     ],
+     "note": "PREMISE: the host loads the fixture COPY from its rig root"},
+    {"seq": 4, "role": "both", "cmd": "mark TEST RIGSAVEROOT START", "expect_result": "OK MARK"},
+    {"seq": 5, "role": "h", "cmd": "status", "expect_result": "settled=True"},
+    {"seq": 6, "role": "h", "cmd": "save", "expect_result": "^OK HostSaveSync",
+     "expect_log": [
+       {"role": "h", "regex": "\\[BAMP\\] \\[MPSave\\] Local save '${session}': ok=True .*\\\\BAMP_RigSaves\\\\h\\\\_BAMP_MP\\\\", "within_s": 90},
+       {"role": "c", "regex": "\\[BAMP\\] \\[MPSave\\] Local save '${session}': ok=True .*\\\\BAMP_RigSaves\\\\c\\\\_BAMP_MP_SIMCLIENT\\\\", "within_s": 90}
+     ],
+     "note": "a coordinated save lands in each machine's rig root"},
+    {"seq": 7, "role": "h", "cmd": "autosave", "expect_result": "^OK HostSaveNow\\('autosave'\\) invoked slot=",
+     "capture": {"autoSlot": "slot=(\\S+)"},
+     "expect_log": [
+       {"role": "h", "regex": "\\[BAMP\\] \\[MPSave\\] Local save '${autoSlot}': ok=True .*\\\\BAMP_RigSaves\\\\h\\\\_BAMP_MP\\\\", "within_s": 90},
+       {"role": "c", "regex": "\\[BAMP\\] \\[MPSave\\] Local save '${autoSlot}': ok=True .*\\\\BAMP_RigSaves\\\\c\\\\_BAMP_MP_SIMCLIENT\\\\", "within_s": 90}
+     ],
+     "note": "an autosave (rotating -auto slot) lands in each machine's rig root"},
+    {"seq": 8, "role": "h", "sleep_s": 10, "note": "uploads / store mirror settle before teardown"},
+    {"seq": 9, "role": "both", "cmd": "mark TEST RIGSAVEROOT END", "expect_result": "OK MARK"}
+  ]
+}
