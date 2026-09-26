@@ -111,6 +111,7 @@ namespace BigAmbitionsMP
                 if (!Directory.Exists(_dir)) return;   // channel not armed — fully inert
                 if (ConfirmCustomizerArmed) TickCustomizerConfirm();
                 if (RejectNextJoin) TickRejectJoin();   // H-REFUSALMUTE-1: re-checks the pending joins every poll until one is refused
+                if (_workArmed) TickWork();   // H-WORKFF-1 part 2: 'work on' follow-through (DEV lever)
                 if (!_armedLogged)
                 {
                     _armedLogged = true;
@@ -2193,6 +2194,26 @@ namespace BigAmbitionsMP
                     return $"OK cleared {cgone} shift(s) from '{caddr}' day {cday} ({cwas - cgone} synthetic kept)";
                 }
 
+                // ── H-WORKFF-1 part 2 (MEASUREMENT lever): the PLAYER as the cashier ─────────────────────
+                // `work on` takes the SAME game path as a click on the register: EmployeeStationController.Interact
+                // (EmployeeStationController.cs:169-175) falls through to Work() (:83; CanWork gate :69-81) ->
+                // MoveTowardsEntity -> PlayerActivityUI.Show(new WorkActivity(null job = owner mode, station)) (:91).
+                // In MP the mod's dock auto-presses the panel's Start (MPRestSync auto-start) -> WorkActivity.StartWorking
+                // (WorkActivity.cs:93-131: AssignEmployee(player) :118) -> PlayerActivityUI.OnActivityStarted -> Running
+                // (PlayerActivityUI.cs:378-386). TickWork follows it through and logs '[DEV] work on at ...' or a FAILED
+                // reason; if nothing pressed Start 2 s after the panel appeared, it presses the panel's own StartWork
+                // button (WorkActivity.cs:53). `work off` = the panel's StopWork button (WorkActivity.cs:55 -> Finish :158).
+                // `work` / `work state` = READ-ONLY: working=True means the game's current activity is a WorkActivity
+                // in state Running.
+                case "work":
+                {
+                    string wa = arg.Trim().ToLowerInvariant();
+                    if (wa.Length == 0 || wa == "state") return "OK work " + WorkStateLine();
+                    if (wa == "on") return WorkOn();
+                    if (wa == "off") return WorkOff();
+                    return "ERR usage: work <on|off|state>";
+                }
+
                 case "autofill":
                     // Review 2026-09-10 #1: the button's helper pops a HudConfirm when staff are unassigned (nothing runs),
                     // fills on a BACKGROUND thread, and its completion touches the open BizMan screen (and UpdateHQPlans for
@@ -3759,6 +3780,271 @@ namespace BigAmbitionsMP
             if (list == null) return null;
             foreach (var e in list) if (e != null && e.id == id) return e;
             return null;
+        }
+
+        // ── H-WORKFF-1 part 2: 'work' lever helpers (DEV, main thread) ──────────────────────────────
+        private static bool _workArmed;
+        private static EmployeeStationController? _workStation;
+        private static string _workDesc = "";
+        private static float _workDeadline, _workPanelSeen = -1f;
+        private static bool _workStartPressed, _workCallPending;
+        private static float _workCalledAt;
+        private static int _workRetries;
+
+        private static PlayerActivity.WorkActivity? CurrentWorkActivity(out string actName, out PlayerActivityState st)
+        {
+            actName = "none"; st = PlayerActivityState.NotStarted;
+            var act = UI.UIs.Instance?.playerActivityUI?.GetCurrentActivity;
+            if (act == null) return null;
+            actName = act.GetType().Name;
+            st = act.GetState();
+            return act as PlayerActivity.WorkActivity;
+        }
+
+        private static System.Collections.Generic.List<EmployeeStationController> StationsHere()
+        {
+            var list = new System.Collections.Generic.List<EmployeeStationController>();
+            var bm = InstanceBehavior<BuildingManager>.Instance;
+            if (bm == null || !BuildingManager.IsInsideBuilding) return list;
+            try { if (bm.IndoorItemContainer != null) list.AddRange(bm.IndoorItemContainer.GetComponentsInChildren<EmployeeStationController>(false)); } catch { }
+            try
+            {
+                if (bm.currentLayout != null)
+                    foreach (var s in bm.currentLayout.GetComponentsInChildren<EmployeeStationController>(false))
+                        if (s != null && !list.Contains(s)) list.Add(s);
+            }
+            catch { }
+            return list;
+        }
+
+        private static bool StationHasPlayer(EmployeeStationController? s)
+        {
+            try { return s != null && s.employee != null && s.employee.employeeTpc != null && s.employee.employeeTpc == Helpers.PlayerHelper.PlayerController?.Character; }
+            catch { return false; }
+        }
+
+        private static string WorkStateLine()
+        {
+            var sb = new StringBuilder();
+            try
+            {
+                var wact = CurrentWorkActivity(out var an, out var st);
+                sb.Append($"working={(wact != null && st == PlayerActivityState.Running)} activity={an} state={st} panel={PlayerActivity.PlayerActivityUI.IsPanelOpen}");
+            }
+            catch (Exception ex) { sb.Append($"working=? err='{ex.Message}'"); }
+            try
+            {
+                sb.Append($" inside={BuildingManager.IsInsideBuilding}");
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (BuildingManager.IsInsideBuilding && bm?.buildingRegistration != null)
+                    sb.Append($" building='{GameStateReader.AddressKey(bm.buildingRegistration)}'");
+                int n = 0, withPlayer = 0;
+                foreach (var s in StationsHere()) { n++; if (StationHasPlayer(s)) withPlayer++; }
+                sb.Append($" stations={n} playerAtStation={withPlayer}");
+            }
+            catch { }
+            sb.Append($" armed={_workArmed}");
+            return sb.ToString();
+        }
+
+        /// <summary>Why CanWork said no: each of its terms, read the way the game reads them (private ones by
+        /// reflection). Global terms once, then per station 'type:reqCS/stationCS/assignable/cleaning'.</summary>
+        private static string CanWorkTerms(System.Collections.Generic.List<EmployeeStationController> here)
+        {
+            var sb = new StringBuilder();
+            object? R(object? o, string name)
+            {
+                try
+                {
+                    var t = typeof(EmployeeStationController);
+                    var p = HarmonyLib.AccessTools.Property(t, name);
+                    if (p != null) return p.GetValue(p.GetGetMethod(true)!.IsStatic ? null : o);
+                    return "?";
+                }
+                catch (Exception ex) { return "!" + (ex.InnerException ?? ex).GetType().Name; }
+            }
+            try { sb.Append($"inHands={(Helpers.PlayerHelper.ItemInstanceInHands != null)} "); } catch { sb.Append("inHands=? "); }
+            try { var sv = InstanceBehavior<GameManager>.Instance.selectedVehicle; sb.Append($"selectedVehicle={(sv != null ? sv.GetType().Name + ":" + sv.name : "none")} "); } catch { sb.Append("selectedVehicle=? "); }
+            try { sb.Append($"ownedBiz={InstanceBehavior<BuildingManager>.Instance.IsPlayerOwnedBusiness} "); } catch { sb.Append("ownedBiz=? "); }
+            try { sb.Append($"panel={PlayerActivity.PlayerActivityUI.IsPanelOpen} "); } catch { }
+            sb.Append($"reqCS={R(null, "BuildingRequiresCustomerService")} |");
+            foreach (var s in here)
+            {
+                sb.Append(' ').Append(s.GetType().Name).Append(':');
+                sb.Append("stationCS=").Append(R(s, "StationSupportsCustomerService"));
+                try { sb.Append(" purchaser=").Append(s.playerItemPurchaserSettings.enabled); } catch { sb.Append(" purchaser=?"); }
+                try { sb.Append(" assignable=").Append(s.Item.assignable); } catch { sb.Append(" assignable=?"); }
+                sb.Append(';');
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Why the walk to the register did not end in the work panel: PlayerController's goal state
+        /// (PlayerController.cs:233 fires the goal only when navigation is not disabled and the path ended).</summary>
+        private static string NavDiag()
+        {
+            try
+            {
+                var pc = Helpers.PlayerHelper.PlayerController;
+                if (pc == null) return "no PlayerController";
+                object? hg = HarmonyLib.AccessTools.Field(pc.GetType(), "_hasGoal")?.GetValue(pc);
+                object? hp = HarmonyLib.AccessTools.Field(pc.GetType(), "_hasPath")?.GetValue(pc);
+                var bl = HarmonyLib.AccessTools.Field(pc.GetType(), "_activeNavigationBlockers")?.GetValue(pc) as System.Collections.IEnumerable;
+                var names = new System.Collections.Generic.List<string>();
+                if (bl != null) foreach (var b in bl) names.Add(b?.ToString() ?? "?");
+                float d = -1f; try { if (_workStation != null) d = UnityEngine.Vector3.Distance(Helpers.PlayerHelper.GetPosition(), _workStation.transform.position); } catch { }
+                bool sv = false; try { sv = InstanceBehavior<GameManager>.Instance.selectedVehicle != null; } catch { }
+                return $"navDisabled={pc.NavigationDisabled} hasGoal={hg} hasPath={hp} blockers=[{string.Join(",", names)}] dToRegister={d:0.0}m selectedVehicle={sv} usingVehicle={Helpers.PlayerHelper.IsUsingVehicle}";
+            }
+            catch (Exception ex) { return "navdiag err " + ex.Message; }
+        }
+
+        private static string WorkFail(string why)
+        {
+            Plugin.Logger.LogWarning($"[DEV] work on FAILED: {why}");
+            return "ERR work on: " + why;
+        }
+
+        private static string WorkOn()
+        {
+            try
+            {
+                if (_workArmed) return "ERR work on: already in progress";
+                if (!BuildingManager.IsInsideBuilding) return WorkFail("not inside a building");
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || bm.buildingRegistration == null) return WorkFail("no BuildingManager / registration");
+                if (PlayerActivity.PlayerActivityUI.IsPanelOpen)
+                {
+                    CurrentWorkActivity(out var an0, out var st0);
+                    return WorkFail($"an activity is already open ({an0} {st0})");
+                }
+                // A player pushing a hand truck / flatbed cannot work (CanWork :75 'selectedVehicle != null'); a real
+                // player lets go first. Same let-go the game's own code uses: HandTruck.Release (HandTruck.cs:129 -> ExitVehicle :189).
+                string released = "";
+                try
+                {
+                    if (InstanceBehavior<GameManager>.Instance.selectedVehicle is HandTruck ht && ht != null && ht.controlledByPlayer)
+                    {
+                        string htName = ht.name;
+                        ht.Release();
+                        released = $" after letting go of the pushed {htName} (HandTruck.Release)";
+                        Plugin.Logger.LogInfo($"[DEV] work: let go of the pushed {htName} first (HandTruck.Release, HandTruck.cs:129).");
+                    }
+                }
+                catch (Exception ex) { return WorkFail("could not let go of the pushed vehicle: " + ex.Message); }
+                string bname = ""; try { bname = bm.buildingRegistration.BusinessName?.ToString() ?? ""; } catch { }
+                string bdesc = $"'{bname}' {GameStateReader.AddressKey(bm.buildingRegistration)}";
+                var here = StationsHere();
+                UnityEngine.Vector3 me = Helpers.PlayerHelper.GetPosition();
+                EmployeeStationController? best = null; float bestD2 = float.MaxValue; int canWork = 0;
+                foreach (var s in here)
+                {
+                    bool cw = false; try { cw = s.CanWork(); } catch { }
+                    if (!cw) continue;
+                    canWork++;
+                    float d2 = (s.transform.position - me).sqrMagnitude;
+                    if (d2 < bestD2) { bestD2 = d2; best = s; }
+                }
+                if (best == null)
+                    return WorkFail($"no station in {bdesc} passes CanWork (stations={here.Count}) - CanWork terms (EmployeeStationController.cs:69-81, :240-247): {CanWorkTerms(here)}");
+                string rdesc = $"{best.GetType().Name}#{MPRegisterSync.RegKeyForStation(best)} ({UnityEngine.Mathf.Sqrt(bestD2):0.0} m away)";
+                _workStation = best; _workDesc = $"{rdesc} in {bdesc}{released}";
+                _workPanelSeen = -1f; _workStartPressed = false; _workRetries = 0;
+                _workDeadline = UnityEngine.Time.unscaledTime + 40f;
+                if (released.Length > 0) { _workCallPending = true; _workArmed = true; }   // Work() on the next tick, once the let-go settled
+                else
+                {
+                    bool ok = best.Work();   // Interact's own fall-through (:169-175) — what the click runs
+                    if (!ok) return WorkFail($"EmployeeStationController.Work() refused at {rdesc} in {bdesc}");
+                    _workCalledAt = UnityEngine.Time.unscaledTime; _workArmed = true;
+                }
+                return $"OK work on queued at {_workDesc} (registers={canWork}/{here.Count}) - result in log ([DEV] work line)";
+            }
+            catch (Exception ex) { _workArmed = false; return WorkFail("exception " + ex.Message); }
+        }
+
+        private static void TickWork()
+        {
+            try
+            {
+                var wact = CurrentWorkActivity(out var an, out var st);
+                float now = UnityEngine.Time.unscaledTime;
+                if (_workCallPending)
+                {
+                    _workCallPending = false;
+                    if (_workStation == null || !_workStation.Work())
+                    {
+                        _workArmed = false;
+                        WorkFail($"EmployeeStationController.Work() refused at {_workDesc} - {NavDiag()}");
+                        return;
+                    }
+                    _workCalledAt = now;
+                    return;
+                }
+                if (wact != null && st == PlayerActivityState.Running)
+                {
+                    _workArmed = false;
+                    Plugin.Logger.LogInfo($"[DEV] work on at {_workDesc} (state=Running playerIsStationEmployee={StationHasPlayer(_workStation)} startPressedByLever={_workStartPressed})");
+                    return;
+                }
+                if (wact != null && st == PlayerActivityState.NotStarted)
+                {
+                    if (_workPanelSeen < 0f) _workPanelSeen = now;
+                    else if (!_workStartPressed && now - _workPanelSeen >= 2f)
+                    {
+                        UI.Elements.ButtonInfo? start = null;
+                        var btns = wact.GetButtons();
+                        if (btns != null) foreach (var b in btns) if (b != null && b.name == "StartWork") { start = b; break; }
+                        if (start == null || start.onClick == null)
+                        {
+                            _workArmed = false;
+                            WorkFail($"the work panel offers no Start at {_workDesc} (shop closed and not opening within 2 h?)");
+                            return;
+                        }
+                        _workStartPressed = true;
+                        start.onClick();
+                        Plugin.Logger.LogInfo("[DEV] work: the panel's StartWork pressed by the lever (nothing auto-started it within 2 s).");
+                    }
+                }
+                if (wact == null && !PlayerActivity.PlayerActivityUI.IsPanelOpen && now - _workCalledAt > 8f && _workRetries < 2 && _workStation != null)
+                {
+                    // A player whose click did not bring the panel up clicks the register again.
+                    _workRetries++;
+                    Plugin.Logger.LogWarning($"[DEV] work: no work panel {now - _workCalledAt:0} s after Work() - {NavDiag()} - clicking the register again (retry {_workRetries}/2)");
+                    if (_workStation.Work()) _workCalledAt = now;
+                }
+                if (now > _workDeadline)
+                {
+                    _workArmed = false;
+                    WorkFail($"not Running 40 s after 'work on' at {_workDesc} (activity={an} state={st} panel={PlayerActivity.PlayerActivityUI.IsPanelOpen}) - {NavDiag()}");
+                }
+            }
+            catch (Exception ex) { _workArmed = false; Plugin.Logger.LogWarning($"[DEV] work on FAILED: exception {ex.Message}"); }
+        }
+
+        private static string WorkOff()
+        {
+            try
+            {
+                _workArmed = false;
+                var wact = CurrentWorkActivity(out var an, out var st);
+                if (wact == null)
+                {
+                    Plugin.Logger.LogWarning($"[DEV] work off FAILED: no work activity (current={an} {st})");
+                    return $"ERR work off: not working (current={an} {st})";
+                }
+                UI.Elements.ButtonInfo? stop = null;
+                var btns = wact.GetButtons();
+                if (btns != null) foreach (var b in btns) if (b != null && b.name == "StopWork") { stop = b; break; }
+                if (stop?.onClick != null) stop.onClick(); else wact.Finish();
+                Plugin.Logger.LogInfo($"[DEV] work off (was {st}; via {(stop?.onClick != null ? "the StopWork button" : "WorkActivity.Finish()")})");
+                return $"OK work off (was {st})";
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[DEV] work off FAILED: exception {ex.Message}");
+                return "ERR work off: " + ex.Message;
+            }
         }
 
         /// <summary>Armed by 'charconfirm'. Runs on the 0.5s tick cadence: waits for

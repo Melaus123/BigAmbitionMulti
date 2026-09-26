@@ -1,0 +1,467 @@
+{
+ "id": "T-WORKSKIP-A",
+ "title": "WORKSKIP leg (a): solo host in his own STAFFED clothing store, 1x for game hours 10 and 11 - the control.",
+ "preconditions": "MEASUREMENT ONLY (bug 20260926-213955). Reporter fixture fx-hq1 (vars.keepMerger true, as every fx-hq1 scenario), SOLO: the client is dropped before the host hosts. Shop = the host's clothing store vars.shop. Part 1 predates the DEV `work` lever (see t-workskip-a2/b2/d2 for the working-player legs): the host STANDS in the shop and does not work the register. STAFFED: the fixture's schedule places an AI cashier. Same start in every leg: setup skip outdoors to 08:45, enter, `clock 09:59`, window opens hour 10 (asserted). NOTHING IS SAVED.",
+ "instances": 2,
+ "vars": {
+  "clientPid": "Client1",
+  "hostPid": "melaus",
+  "session": "fx-hq1",
+  "keepMerger": true,
+  "shop": "20 ba:street_fifthavenue"
+ },
+ "oracles_absent": [
+  "\\[TickIso\\]",
+  "\\[Guard\\]",
+  "(?<!swallowed )NullReferenceException"
+ ],
+ "oracles_report": [
+  "\\[Rest\\] CONSENSUS",
+  "\\[Rest\\] skip GOAL reached",
+  "\\[Rest\\] occupied-shop",
+  "\\[SkipPace\\] ",
+  "SkipHandback|H-SKIPWALKIN",
+  "TillDupes|H-SKIPDOUBLE",
+  "\\[Customers\\] "
+ ],
+ "steps": [
+  {
+   "seq": 1,
+   "role": "c",
+   "drop": true,
+   "note": "SOLO HOST: the client instance closes first and never joins"
+  },
+  {
+   "seq": 2,
+   "role": "h",
+   "cmd": "host",
+   "expect_result": "^OK"
+  },
+  {
+   "seq": 3,
+   "role": "h",
+   "cmd": "hostload ${session}",
+   "expect_result": "^OK"
+  },
+  {
+   "seq": 4,
+   "role": "h",
+   "cmd": "mark TEST T-WORKSKIP-A START",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 5,
+   "role": "h",
+   "sleep_s": 32,
+   "note": "the world settles"
+  },
+  {
+   "seq": 6,
+   "role": "h",
+   "cmd": "status",
+   "abort_on_fail": false,
+   "note": "SOLO: MPWorldReady.IsSettled starts its 3 s settle clock on the FIRST read (run 1 of this scenario read settled=False here); report-only"
+  },
+  {
+   "seq": 7,
+   "role": "h",
+   "sleep_s": 5
+  },
+  {
+   "seq": 8,
+   "role": "h",
+   "cmd": "status",
+   "expect_result": "settled=True"
+  },
+  {
+   "seq": 9,
+   "role": "h",
+   "cmd": "pause off",
+   "expect_result": "^OK"
+  },
+  {
+   "seq": 10,
+   "role": "h",
+   "cmd": "exitbuilding",
+   "abort_on_fail": false,
+   "note": "report-only: an outdoor player only warns"
+  },
+  {
+   "seq": 11,
+   "role": "h",
+   "sleep_s": 8
+  },
+  {
+   "seq": 12,
+   "role": "h",
+   "cmd": "skiprate",
+   "expect_result": "^OK skiprate rate=50 ",
+   "note": "the SHIPPED rate, read not set"
+  },
+  {
+   "seq": 13,
+   "role": "h",
+   "cmd": "regstate ${shop}",
+   "expect_result": "^OK rented=True ",
+   "capture": {
+    "shopName": "name='([^']*)'"
+   },
+   "note": "the host's own clothing store"
+  },
+  {
+   "seq": 14,
+   "role": "h",
+   "cmd": "skipvote 08:45",
+   "expect_result": "^OK skipvote goal=",
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Rest\\] CONSENSUS \\(1/1\\)",
+     "within_s": 60
+    }
+   ],
+   "note": "SETUP skip, OUTDOORS, solo (1/1): 17:38 -> 08:45 next day (~18 real s at rate 50). Identical in every leg."
+  },
+  {
+   "seq": 15,
+   "role": "h",
+   "sleep_s": 35
+  },
+  {
+   "seq": 16,
+   "role": "h",
+   "cmd": "skipstate",
+   "expect_result": "active=False"
+  },
+  {
+   "seq": 17,
+   "role": "h",
+   "cmd": "skipvote off",
+   "expect_result": "^OK skipvote goal=-"
+  },
+  {
+   "seq": 18,
+   "role": "h",
+   "cmd": "schedcount ${shop}",
+   "expect_result": "^OK schedcount",
+   "capture": {
+    "schedD1": "d1=(-?\\d+)",
+    "schedD7": "d7=(-?\\d+)"
+   },
+   "note": "report: the fixture's staffed schedule (AI cashier on the register - NO working-player lever exists)"
+  },
+  {
+   "seq": 19,
+   "role": "h",
+   "cmd": "enterbuilding ${shop}",
+   "expect_result": "^OK enterbuilding",
+   "note": "THE HOST STANDS IN HIS OWN SHOP: the occupied-shop path"
+  },
+  {
+   "seq": 20,
+   "role": "h",
+   "sleep_s": 25,
+   "note": "interior settles at 1x"
+  },
+  {
+   "seq": 21,
+   "role": "h",
+   "cmd": "shopday ${shop}",
+   "expect_result": "pending=[1-9]",
+   "note": "PREMISE: shoppers are still due today at this shop"
+  },
+  {
+   "seq": 22,
+   "role": "h",
+   "cmd": "clock 09:59",
+   "expect_result": "^OK clock",
+   "note": "ALIGN every leg to the same minute; no hour is crossed by this jump"
+  },
+  {
+   "seq": 23,
+   "role": "h",
+   "sleep_s": 3,
+   "note": "the 09->10 roll happens live at 1x (identical in every leg)"
+  },
+  {
+   "seq": 24,
+   "role": "h",
+   "cmd": "shopday reset",
+   "expect_result": "^OK shopday reset day=\\d+ hour=10$",
+   "note": "WINDOW OPENS in hour 10 - asserted"
+  },
+  {
+   "seq": 25,
+   "role": "h",
+   "cmd": "skipstate",
+   "expect_result": "^OK skipstate",
+   "capture": {
+    "w0NowMin": "nowMin=([0-9.]+)"
+   },
+   "note": "clock at read 'w0': window start, ~10:02"
+  },
+  {
+   "seq": 26,
+   "role": "h",
+   "cmd": "shopday ${shop}",
+   "expect_result": "^OK shopday",
+   "capture": {
+    "w0SdDay": "day=(\\d+)",
+    "w0SdHour": "hour=(\\d+)",
+    "w0Entries": "entries=(\\d+)",
+    "w0Due": "due=(\\d+)",
+    "w0Window": "window=(\\d+)",
+    "w0Bodies": "bodies=(\\d+)",
+    "w0Live": " live=(-?\\d+)",
+    "w0CompleteOrders": "completeOrders=(\\d+)",
+    "w0LivePays": "livePays=(-?\\d+)",
+    "w0UnpaidExits": "unpaidExits=(\\d+)",
+    "w0PaperHours": "paperHours=(\\d+)",
+    "w0PaperCand": "paperCandidates=(\\d+)",
+    "w0PaperOrders": "paperOrders=(\\d+)",
+    "w0CapDrops": "capDrops=(\\d+)",
+    "w0TillOrders": "tillOrders=(\\d+)",
+    "w0TillDistinct": "tillDistinct=(\\d+)",
+    "w0PaidRevenue": "paidRevenue=([0-9.]+)",
+    "w0HandBacks": "handBacks=(\\d+)",
+    "w0HbRevenue": "hbRevenue=([0-9.]+)",
+    "w0IdDue": "idDue=(\\d+)",
+    "w0IdBilled": "idBilled=(\\d+)",
+    "w0IdFloor": "idFloor=(\\d+)",
+    "w0IdNosale": "idNosale=(\\d+)",
+    "w0IdCapDrop": "idCapDrop=(\\d+)",
+    "w0IdUnbilled": "idUnbilled=(\\d+)",
+    "w0IdNoPass": "idNoPass=(\\d+)"
+   }
+  },
+  {
+   "seq": 27,
+   "role": "h",
+   "cmd": "tilldupes ${shop}",
+   "expect_result": "dupes=0",
+   "abort_on_fail": false,
+   "capture": {
+    "w0TdOrders": "orders=(\\d+)",
+    "w0TdDistinct": "distinct=(\\d+)",
+    "w0TdDupes": "dupes=(-?\\d+)",
+    "w0TdLiveCompleted": "liveCompleted=(-?\\d+)",
+    "w0TdTdRev": "paidRevenue=([0-9.]+)"
+   },
+   "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
+  },
+  {
+   "seq": 28,
+   "role": "h",
+   "sleep_s": 60,
+   "note": "1x through the rest of hour 10"
+  },
+  {
+   "seq": 29,
+   "role": "h",
+   "cmd": "skipstate",
+   "expect_result": "^OK skipstate",
+   "capture": {
+    "h10NowMin": "nowMin=([0-9.]+)"
+   },
+   "note": "clock at read 'h10': ~11:0x, hour 10 closed at 1x"
+  },
+  {
+   "seq": 30,
+   "role": "h",
+   "cmd": "shopday ${shop}",
+   "expect_result": "^OK shopday",
+   "capture": {
+    "h10SdDay": "day=(\\d+)",
+    "h10SdHour": "hour=(\\d+)",
+    "h10Entries": "entries=(\\d+)",
+    "h10Due": "due=(\\d+)",
+    "h10Window": "window=(\\d+)",
+    "h10Bodies": "bodies=(\\d+)",
+    "h10Live": " live=(-?\\d+)",
+    "h10CompleteOrders": "completeOrders=(\\d+)",
+    "h10LivePays": "livePays=(-?\\d+)",
+    "h10UnpaidExits": "unpaidExits=(\\d+)",
+    "h10PaperHours": "paperHours=(\\d+)",
+    "h10PaperCand": "paperCandidates=(\\d+)",
+    "h10PaperOrders": "paperOrders=(\\d+)",
+    "h10CapDrops": "capDrops=(\\d+)",
+    "h10TillOrders": "tillOrders=(\\d+)",
+    "h10TillDistinct": "tillDistinct=(\\d+)",
+    "h10PaidRevenue": "paidRevenue=([0-9.]+)",
+    "h10HandBacks": "handBacks=(\\d+)",
+    "h10HbRevenue": "hbRevenue=([0-9.]+)",
+    "h10IdDue": "idDue=(\\d+)",
+    "h10IdBilled": "idBilled=(\\d+)",
+    "h10IdFloor": "idFloor=(\\d+)",
+    "h10IdNosale": "idNosale=(\\d+)",
+    "h10IdCapDrop": "idCapDrop=(\\d+)",
+    "h10IdUnbilled": "idUnbilled=(\\d+)",
+    "h10IdNoPass": "idNoPass=(\\d+)"
+   }
+  },
+  {
+   "seq": 31,
+   "role": "h",
+   "cmd": "tilldupes ${shop}",
+   "expect_result": "dupes=0",
+   "abort_on_fail": false,
+   "capture": {
+    "h10TdOrders": "orders=(\\d+)",
+    "h10TdDistinct": "distinct=(\\d+)",
+    "h10TdDupes": "dupes=(-?\\d+)",
+    "h10TdLiveCompleted": "liveCompleted=(-?\\d+)",
+    "h10TdTdRev": "paidRevenue=([0-9.]+)"
+   },
+   "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
+  },
+  {
+   "seq": 32,
+   "role": "h",
+   "sleep_s": 57,
+   "note": "1x through hour 11"
+  },
+  {
+   "seq": 33,
+   "role": "h",
+   "cmd": "skipstate",
+   "expect_result": "^OK skipstate",
+   "capture": {
+    "h11NowMin": "nowMin=([0-9.]+)"
+   },
+   "note": "clock at read 'h11': ~12:0x, hour 11 closed at 1x"
+  },
+  {
+   "seq": 34,
+   "role": "h",
+   "cmd": "shopday ${shop}",
+   "expect_result": "^OK shopday",
+   "capture": {
+    "h11SdDay": "day=(\\d+)",
+    "h11SdHour": "hour=(\\d+)",
+    "h11Entries": "entries=(\\d+)",
+    "h11Due": "due=(\\d+)",
+    "h11Window": "window=(\\d+)",
+    "h11Bodies": "bodies=(\\d+)",
+    "h11Live": " live=(-?\\d+)",
+    "h11CompleteOrders": "completeOrders=(\\d+)",
+    "h11LivePays": "livePays=(-?\\d+)",
+    "h11UnpaidExits": "unpaidExits=(\\d+)",
+    "h11PaperHours": "paperHours=(\\d+)",
+    "h11PaperCand": "paperCandidates=(\\d+)",
+    "h11PaperOrders": "paperOrders=(\\d+)",
+    "h11CapDrops": "capDrops=(\\d+)",
+    "h11TillOrders": "tillOrders=(\\d+)",
+    "h11TillDistinct": "tillDistinct=(\\d+)",
+    "h11PaidRevenue": "paidRevenue=([0-9.]+)",
+    "h11HandBacks": "handBacks=(\\d+)",
+    "h11HbRevenue": "hbRevenue=([0-9.]+)",
+    "h11IdDue": "idDue=(\\d+)",
+    "h11IdBilled": "idBilled=(\\d+)",
+    "h11IdFloor": "idFloor=(\\d+)",
+    "h11IdNosale": "idNosale=(\\d+)",
+    "h11IdCapDrop": "idCapDrop=(\\d+)",
+    "h11IdUnbilled": "idUnbilled=(\\d+)",
+    "h11IdNoPass": "idNoPass=(\\d+)"
+   }
+  },
+  {
+   "seq": 35,
+   "role": "h",
+   "cmd": "tilldupes ${shop}",
+   "expect_result": "dupes=0",
+   "abort_on_fail": false,
+   "capture": {
+    "h11TdOrders": "orders=(\\d+)",
+    "h11TdDistinct": "distinct=(\\d+)",
+    "h11TdDupes": "dupes=(-?\\d+)",
+    "h11TdLiveCompleted": "liveCompleted=(-?\\d+)",
+    "h11TdTdRev": "paidRevenue=([0-9.]+)"
+   },
+   "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
+  },
+  {
+   "seq": 36,
+   "role": "h",
+   "sleep_s": 30,
+   "note": "DRAIN at 1x: bodies mid-checkout finish"
+  },
+  {
+   "seq": 37,
+   "role": "h",
+   "cmd": "skipstate",
+   "expect_result": "^OK skipstate",
+   "capture": {
+    "finNowMin": "nowMin=([0-9.]+)"
+   },
+   "note": "clock at read 'fin': after the 30 s drain"
+  },
+  {
+   "seq": 38,
+   "role": "h",
+   "cmd": "shopday ${shop}",
+   "expect_result": "^OK shopday",
+   "capture": {
+    "finSdDay": "day=(\\d+)",
+    "finSdHour": "hour=(\\d+)",
+    "finEntries": "entries=(\\d+)",
+    "finDue": "due=(\\d+)",
+    "finWindow": "window=(\\d+)",
+    "finBodies": "bodies=(\\d+)",
+    "finLive": " live=(-?\\d+)",
+    "finCompleteOrders": "completeOrders=(\\d+)",
+    "finLivePays": "livePays=(-?\\d+)",
+    "finUnpaidExits": "unpaidExits=(\\d+)",
+    "finPaperHours": "paperHours=(\\d+)",
+    "finPaperCand": "paperCandidates=(\\d+)",
+    "finPaperOrders": "paperOrders=(\\d+)",
+    "finCapDrops": "capDrops=(\\d+)",
+    "finTillOrders": "tillOrders=(\\d+)",
+    "finTillDistinct": "tillDistinct=(\\d+)",
+    "finPaidRevenue": "paidRevenue=([0-9.]+)",
+    "finHandBacks": "handBacks=(\\d+)",
+    "finHbRevenue": "hbRevenue=([0-9.]+)",
+    "finIdDue": "idDue=(\\d+)",
+    "finIdBilled": "idBilled=(\\d+)",
+    "finIdFloor": "idFloor=(\\d+)",
+    "finIdNosale": "idNosale=(\\d+)",
+    "finIdCapDrop": "idCapDrop=(\\d+)",
+    "finIdUnbilled": "idUnbilled=(\\d+)",
+    "finIdNoPass": "idNoPass=(\\d+)"
+   }
+  },
+  {
+   "seq": 39,
+   "role": "h",
+   "cmd": "tilldupes ${shop}",
+   "expect_result": "dupes=0",
+   "abort_on_fail": false,
+   "capture": {
+    "finTdOrders": "orders=(\\d+)",
+    "finTdDistinct": "distinct=(\\d+)",
+    "finTdDupes": "dupes=(-?\\d+)",
+    "finTdLiveCompleted": "liveCompleted=(-?\\d+)",
+    "finTdTdRev": "paidRevenue=([0-9.]+)"
+   },
+   "note": "H-SKIPDOUBLE-1 invariant: no order on the till twice (report, keep going)"
+  },
+  {
+   "seq": 40,
+   "role": "h",
+   "cmd": "shopday ${shop}",
+   "expect_result": "window=[1-9]",
+   "note": "PREMISE: customers really were due in the window"
+  },
+  {
+   "seq": 41,
+   "role": "h",
+   "cmd": "skippace",
+   "expect_result": "^OK skippace max=1000 now=1 scaledBodies=0"
+  },
+  {
+   "seq": 42,
+   "role": "h",
+   "cmd": "mark TEST T-WORKSKIP-A END",
+   "expect_result": "OK MARK"
+  }
+ ]
+}
