@@ -67,8 +67,11 @@ def prepare(session="save1", playthrough="*", roles=RIG_ROLES, log=print):
     for root in sorted(glob.glob(os.path.join(SG, "_BAMP_MP*"))):
         if not os.path.isdir(root):
             continue
-        for m in sorted(glob.glob(os.path.join(root, "**", playthrough, session, MANIFEST), recursive=True)):
-            sessions.append(os.path.dirname(m))
+        # Review LOW-4: the session AND its rotation/lineage siblings (-auto, -auto-N, -disconnect, -recover)
+        for pat in (session, session + "-*"):
+            for m in sorted(glob.glob(os.path.join(root, "**", playthrough, pat, MANIFEST), recursive=True)):
+                if os.path.dirname(m) not in sessions:
+                    sessions.append(os.path.dirname(m))
         # store-level files: every file NOT inside a session folder (a folder holding a manifest), 3 levels deep
         for dp, dn, fn in os.walk(root):
             depth = os.path.relpath(dp, root).count(os.sep) + (0 if dp == root else 1)

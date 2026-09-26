@@ -53,8 +53,13 @@ namespace BigAmbitionsMP
                 Directory.CreateDirectory(dir);
                 _dir = dir;
                 var getter = AccessTools.PropertyGetter(typeof(SaveGamePathHelper), nameof(SaveGamePathHelper.SaveGameFolderPath));
-                new Harmony("com.bamp.bigambitionsmp.rigsaveroot")
-                    .Patch(getter, prefix: new HarmonyMethod(typeof(RigSaveRoot), nameof(SaveGameFolderPathPrefix)));
+                var h = new Harmony("com.bamp.bigambitionsmp.rigsaveroot");
+                h.Patch(getter, prefix: new HarmonyMethod(typeof(RigSaveRoot), nameof(SaveGameFolderPathPrefix)));
+                // Review MEDIUM-1: the game's own ApplySaveGameFolderFix (MainMenuController.cs:343) builds the REAL
+                // SaveGames path by hand and moves loose top-level saves into the (now redirected) character folder,
+                // which the next rig prepare wipes. A rig instance must never touch the real folder: skip it.
+                var fix = AccessTools.Method(typeof(MainMenuController), nameof(MainMenuController.ApplySaveGameFolderFix));
+                if (fix != null) h.Patch(fix, prefix: new HarmonyMethod(typeof(RigSaveRoot), nameof(SkipPrefix)));
                 Plugin.Logger.LogWarning($"[RigSaveRoot] save root redirected to {dir}");
                 // Self-check: the version folder must now answer from the rig root (a JIT-inlined copy of the old
                 // getter would slip past the patch - say so loudly rather than write into SaveGames unnoticed).
@@ -69,6 +74,8 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogError($"[RigSaveRoot] redirect FAILED, save root NOT redirected: {ex.GetType().Name}: {ex.Message}");
             }
         }
+
+        private static bool SkipPrefix() => _dir == null;   // redirected rig instance: never run the game's own folder fix
 
         private static bool SaveGameFolderPathPrefix(ref string __result)
         {

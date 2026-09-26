@@ -544,7 +544,9 @@ class Run:
         if not (added or gone or changed):
             return [("REPORT", "SaveGames UNTOUCHED: %d file(s) before and after, newest %s both times"
                      % (len(after), newest(after)))]
-        kind = "FAIL" if self.sc.get("savegames_untouched") else "REPORT"
+        # Review MEDIUM-2: EVERY rig run must leave SaveGames untouched (a silently failed redirect would
+        # otherwise write into the Steam-synced folder and still PASS). A scenario may opt out only explicitly.
+        kind = "FAIL" if self.sc.get("savegames_untouched", True) else "REPORT"
         sample = (["+" + a for a in added] + ["-" + g for g in gone] + ["~" + c for c in changed])[:5]
         return [(kind, "SaveGames CHANGED: %d added, %d removed, %d modified (files %d -> %d, newest %s -> %s): %s"
                  % (len(added), len(gone), len(changed), len(before), len(after), newest(before), newest(after),
