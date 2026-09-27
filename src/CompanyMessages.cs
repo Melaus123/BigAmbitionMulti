@@ -166,6 +166,12 @@ namespace BigAmbitionsMP
                 if (why == null && p.Buttons != null)
                     foreach (var b in p.Buttons)
                         if (b == null || string.IsNullOrEmpty(b.Key) || b.Key.Length > 96) { why = "button key length"; break; }
+                if (why == null && p.Trailing != null)
+                {
+                    if (p.Trailing.Count > 4) why = $"{p.Trailing.Count} trailing messages";
+                    else foreach (var tm in p.Trailing)
+                        if (tm == null || string.IsNullOrEmpty(tm.Key) || tm.Key.Length > 160 || (tm.Data?.Count ?? 0) > 24) { why = "trailing message"; break; }
+                }
             }
             else if (p.Action == "refused")
             {
@@ -446,7 +452,10 @@ namespace BigAmbitionsMP
                 if (!PayloadSane(p, "receiver")) return;
                 switch (p.Action)
                 {
-                    case "msg":     ApplyRelayed(p); return;
+                    case "msg":
+                        if ((p.Kind ?? "") == "rivalmono") ApplyRivalMono(p);   // H-RIVALPARITY-1 C: a rival's spoken message
+                        else ApplyRelayed(p);
+                        return;
                     case "press":   RunPressHere(p); return;
                     // r2 MAJOR-1: NEVER inline. A press travels from inside the game's own click delegate
                     // (ContextButton.cs:72-78), and on a HOST that is the presser the whole round trip -
@@ -468,7 +477,7 @@ namespace BigAmbitionsMP
         /// contact exactly as a native first message does, and SendMessage drives the badge and the toast.
         /// The copy's contextAction is DROPPED on purpose - it is the only thing that could make deleting
         /// this copy discard the owner's candidate or insurance offer.</summary>
-        private static void ApplyRelayed(CompanyMessagePayload p)
+        private static void ApplyRelayed(CompanyMessagePayload p, bool nativeRead = false)
         {
             var gi = SaveGameManager.Current;
             if (gi == null) return;
@@ -540,7 +549,7 @@ namespace BigAmbitionsMP
 
             var msg = new TextMessage(p.MessageKey,
                                       p.Data == null ? new Dictionary<string, string>() : new Dictionary<string, string>(p.Data),
-                                      read: lateHandled, isNewInteraction: p.IsNewInteraction, isSpecialMessage: p.IsSpecial,
+                                      read: lateHandled || nativeRead, isNewInteraction: p.IsNewInteraction, isSpecialMessage: p.IsSpecial,
                                       additionalData: ad.contextButtonData.Count > 0 ? ad : null);
             msg.contextAction = null;                                          // THE DELETE GUARD (see the class note)
 
@@ -1219,6 +1228,21 @@ namespace BigAmbitionsMP
             if (key == "ba:messagetype_rivals_attempting_to_poach") return true;
             try { if (key == (rival.rentBuildingMessageKey ?? "") && key.Length > 0) return true; } catch { }
 
+            // H-RIVALPARITY-1 C: inside the host key's own monologue callback (WrapForCoMembers below) the contact message
+            // and the special messages native raises right after it are COLLECTED: the online co-members get them as ONE
+            // rivalmono (their own monologue, then the same messages) when the callback returns. The host keeps its copy.
+            if (_monoCollect != null && _monoCollect.ContactId == (contact.id ?? ""))
+            {
+                _monoCollect.Items.Add(new RivalMonoTrailing
+                {
+                    Key     = key,
+                    Data    = msg.messageData == null ? new Dictionary<string, string>() : new Dictionary<string, string>(msg.messageData),
+                    Read    = msg.read,
+                    Special = msg.isSpecialMessage,
+                });
+                return true;
+            }
+
             // H-RIVALPARITY-1 A (2026-09-27): the game's own timeline on the host speaks for the HOST KEY only - every
             // other player's rival attention runs per key in MPRivalAttention and routes its own text - so this message
             // goes to the host key's members: the host keeps its copy, a merged company's online co-members get one.
@@ -1290,28 +1314,250 @@ namespace BigAmbitionsMP
         internal static void OnRivalMessageSendEnter(BigAmbitions.Rivals.SpecialRival rival, string key, AudioClip clip)
         {
             _skipMonologueKey = null;   // never inherit a key from an earlier call
+            _monoCtxRival = null; _monoCtxKey = null;
             if (clip == null) return;   // no clip = no monologue (native goes to SendMessageWithoutNotification)
+            if (MPServer.IsRunning) { _monoCtxRival = rival; _monoCtxKey = key; }   // part C: the wrap below may need it
             try { if (HostCopyWouldBeSuppressed(rival, key)) _skipMonologueKey = key; }
             catch { _skipMonologueKey = null; }
         }
 
         /// <summary>HOST, on the way OUT: an early native dedupe (no state / already sent / already planned) returns
         /// before EnqueueMonologue is ever reached, so the key must never outlive the call that set it.</summary>
-        internal static void OnRivalMessageSendLeave() { _skipMonologueKey = null; }
+        internal static void OnRivalMessageSendLeave() { _skipMonologueKey = null; _monoCtxRival = null; _monoCtxKey = null; }
 
         /// <summary>HOST, on MonologueUI.EnqueueMonologue.  FALSE swallows the monologue and runs its finished-callback
         /// at once - that callback IS the native tail (the contact send, sentMessageKeys, PlannedMessages.Remove,
         /// SentMessages, onMessageSent, the rival-sent-message game event).</summary>
-        internal static bool OnMonologueEnqueue(string messageLocalizeKey, Action<string>? onMonologueFinished)
+        internal static bool OnMonologueEnqueue(string messageLocalizeKey, ref Action<string>? onMonologueFinished)
         {
+            try { MonoEnqueued++; MonoLastKey = messageLocalizeKey; } catch { }   // DEV count only (rivalattn mono) - no log
             if (!MPServer.IsRunning) return true;
-            if (_skipMonologueKey == null || !string.Equals(messageLocalizeKey, _skipMonologueKey, StringComparison.Ordinal)) return true;
+            if (_skipMonologueKey == null || !string.Equals(messageLocalizeKey, _skipMonologueKey, StringComparison.Ordinal))
+            {
+                WrapForCoMembers(messageLocalizeKey, ref onMonologueFinished);
+                return true;
+            }
             _skipMonologueKey = null;
             try { if (_monoSkipLogged.Add(messageLocalizeKey)) Plugin.Logger.LogInfo($"[RivalNews] monologue '{messageLocalizeKey}' skipped on the host (no business in the rival's neighbourhood) - its message goes to the recipients."); } catch { }
             try { onMonologueFinished?.Invoke(messageLocalizeKey); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] monologue '{messageLocalizeKey}' tail: {ex.GetType().Name}: {ex.Message}"); }
             return false;
         }
+
+        // ── H-RIVALPARITY-1 part C (2026-09-27): the rival's SPOKEN message ('rivalmono') ─────────────────────────────
+        /// <summary>DEV counters (rivalattn mono): monologues enqueued on THIS machine (any key) and the last key.</summary>
+        internal static int MonoEnqueued;
+        internal static string MonoLastKey = "";
+        /// <summary>HOST: the rival + key of the native SendMessageToPlayer now running (set only when it has a clip).</summary>
+        private static BigAmbitions.Rivals.SpecialRival? _monoCtxRival;
+        private static string? _monoCtxKey;
+        private sealed class MonoCollect
+        {
+            public BigAmbitions.Rivals.SpecialRival? Rival;
+            public string ContactId = "";
+            public string Key = "";
+            public List<RivalMonoTrailing> Items = new List<RivalMonoTrailing>();
+        }
+        /// <summary>HOST: set while the host key's own monologue callback runs with co-members online.</summary>
+        private static MonoCollect? _monoCollect;
+        private static readonly HashSet<string> _monoSeen = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>HOST, on EnqueueMonologue of the host key's own rival message: with at least one online co-member
+        /// (a merged host company) the game's own finished-callback is wrapped, so everything the rival's contact raises
+        /// inside it is collected and sent to the co-members as one rivalmono afterwards. Solo / no co-member online:
+        /// nothing changes - the game's own callback, as single player.</summary>
+        private static void WrapForCoMembers(string key, ref Action<string>? cb)
+        {
+            try
+            {
+                var rival = _monoCtxRival;
+                if (rival == null || !string.Equals(key, _monoCtxKey, StringComparison.Ordinal)) return;
+                _monoCtxRival = null; _monoCtxKey = null;
+                bool any = false;
+                foreach (var pid in MPRivalAttention.HostKeyOnlineMembers())
+                    if (!string.IsNullOrEmpty(pid) && pid != MPConfig.PlayerId && MPServer.IsOnlinePid(pid)) { any = true; break; }
+                if (!any) return;
+                string contactId = rival.rivalData?.rivalName ?? "";
+                if (contactId.Length == 0) return;
+                var orig = cb;
+                cb = k =>
+                {
+                    var c = new MonoCollect { Rival = rival, ContactId = contactId, Key = k ?? "" };
+                    var outer = _monoCollect;
+                    _monoCollect = c;
+                    try { orig?.Invoke(k!); }
+                    finally
+                    {
+                        _monoCollect = outer;
+                        try { FlushCoMembers(c); }
+                        catch (Exception fx) { Plugin.Logger.LogWarning($"[RivalNews] error sending monologue '{c.Key}' to co-members: {fx.GetType().Name}: {fx.Message}"); }
+                    }
+                };
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] error wrapping monologue '{key}': {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        private static void FlushCoMembers(MonoCollect c)
+        {
+            if (c.Rival == null || c.Items.Count == 0) return;
+            var pids = new List<string>();
+            foreach (var pid in MPRivalAttention.HostKeyOnlineMembers())
+                if (!string.IsNullOrEmpty(pid) && pid != MPConfig.PlayerId && MPServer.IsOnlinePid(pid) && !pids.Contains(pid)) pids.Add(pid);
+            if (pids.Count == 0) return;
+            var main = c.Items[0];
+            var trailing = c.Items.GetRange(1, c.Items.Count - 1);
+            int n = SendRivalMonoToPids(c.Rival, main.Key, main.Data, main.Read, main.Special, trailing, pids);
+            string rid = c.Rival.rivalData?.id ?? "";
+            Plugin.Logger.LogInfo($"[RivalNews] monologue '{c.Key}' from rival '{rid}': rivalmono to {n} co-member(s) [{string.Join(",", pids)}] with {trailing.Count} trailing message(s); host copy kept.");
+        }
+
+        /// <summary>The rival's own audio clip for a message key, looked up on THIS machine's SpecialRival the way the
+        /// game hands it to SendMessageToPlayer: the entrance (RivalsHelper.SendEntranceMessage), activation /
+        /// deactivation / surrender (RivalTimeline.cs:154/173/180) and each timeline entry's messageClip (:243).
+        /// Null = no clip (native then raises plain text, RivalsHelper.cs:604-606).</summary>
+        internal static AudioClip? RivalClipFor(BigAmbitions.Rivals.SpecialRival? rival, string key, out string where)
+        {
+            where = "-";
+            if (rival == null || string.IsNullOrEmpty(key)) return null;
+            try
+            {
+                if (key == (rival.entranceMessageKey ?? "")) { where = "entrance"; return rival.entranceAudioClip; }
+                var tl = rival.timeline;
+                if (tl == null) return null;
+                if (key == (tl.activationMessageKey ?? "")) { where = "activation"; return tl.activationAudioClip; }
+                if (key == (tl.deactivationMessageKey ?? "")) { where = "deactivation"; return tl.deactivationAudioClip; }
+                if (key == (tl.surrenderMessageKey ?? "")) { where = "surrender"; return tl.surrenderAudioClip; }
+                if (tl.allEntries != null)
+                    foreach (var e in tl.allEntries)
+                        if (e != null && e.messageLocalizationKey == key && e.messageClip != null) { where = "entry " + e.id; return e.messageClip; }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>HOST: one rival message for these players as a 'rivalmono': each receiver plays the rival's own
+        /// monologue for it (clip found by key on its machine) and raises, in the callback, the contact message plus the
+        /// trailing messages with native's flags; no clip there = plain text. Returns the number of players sent to.</summary>
+        internal static int SendRivalMonoToPids(BigAmbitions.Rivals.SpecialRival? rival, string key, Dictionary<string, string>? data, bool read, bool isSpecial, List<RivalMonoTrailing>? trailing, List<string>? pids)
+        {
+            int n = 0;
+            try
+            {
+                if (!MPServer.IsRunning || rival == null || string.IsNullOrEmpty(key) || pids == null) return 0;
+                string rivalId = rival.rivalData?.id ?? "";
+                string name = rival.rivalData?.rivalName ?? "";
+                if (name.Length == 0) return 0;
+                var tr = new List<RivalMonoTrailing>();
+                if (trailing != null)
+                    foreach (var tm in trailing)
+                        if (tm != null && !string.IsNullOrEmpty(tm.Key) && tr.Count < 4) tr.Add(tm);
+                foreach (var pid in pids)
+                {
+                    if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId || !MPServer.IsOnlinePid(pid)) continue;
+                    var p = new CompanyMessagePayload
+                    {
+                        PlayerId           = MPConfig.PlayerId,
+                        Action             = "msg",
+                        Kind               = "rivalmono",
+                        RivalId            = rivalId,
+                        Neighborhood       = rival.primaryNeighborhood ?? "",
+                        MessageId          = "bamp-rivalmono-" + Fnv($"{rivalId}|{name}|{key}|{pid}|{++_seq}|{UnityEngine.Time.realtimeSinceStartup}"),
+                        OwnerPid           = MPConfig.PlayerId,
+                        AddressKey         = "",
+                        ContactId          = name,
+                        ContactCategory    = (int)ContactCategoryName.Rivals,
+                        ContactDescription = "rival",
+                        StreetName         = "",
+                        StreetNumber       = 0,
+                        MessageKey         = key,
+                        Data               = data == null ? new Dictionary<string, string>() : new Dictionary<string, string>(data),
+                        IsSpecial          = isSpecial,
+                        IsNewInteraction   = false,
+                        Notify             = true,
+                        StampMinute        = 0,
+                        Read               = read,
+                        Trailing           = tr,
+                    };
+                    if (!PayloadSane(p, "rivalmono sender")) return n;
+                    try { MPServer.SendToPid(pid, MessageEnvelope.Create(MessageType.CompanyMessages, "host", p)); n++; }
+                    catch (Exception sx) { Plugin.Logger.LogWarning($"[RivalMono] error sending '{key}' to '{pid}': {sx.Message}"); }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalMono] error sending '{key}': {ex.Message}"); }
+            return n;
+        }
+
+        /// <summary>CLIENT, main thread: a rival's spoken message for this player's key. The rival's own monologue
+        /// (MonologueUI.EnqueueMonologue with its clip + monologueSprite, RivalsHelper.cs:585) and, in ITS callback, the
+        /// contact message raised read (:588) followed by the trailing messages with the flags the host computed exactly
+        /// as native does. No clip / no monologue UI here = plain text now (read = the payload's flag).</summary>
+        private static void ApplyRivalMono(CompanyMessagePayload p)
+        {
+            try
+            {
+                if (MPServer.IsRunning) return;                                  // the host plays its own key natively
+                if (string.IsNullOrEmpty(p.OwnerPid) || p.OwnerPid == MPConfig.PlayerId) return;
+                if (!_monoSeen.Add(p.MessageId)) return;                         // a resend
+                var rival = BigAmbitions.Rivals.RivalsHelper.GetSpecialRival(p.RivalId ?? "");
+                AudioClip? clip = rival == null ? null : RivalClipFor(rival, p.MessageKey ?? "", out _);
+                UI.Monologues.MonologueUI? ui = null;
+                try { ui = UI.UIs.Instance != null ? UI.UIs.Instance.monologueUI : null; } catch { ui = null; }
+                if (rival != null && clip != null && ui != null)
+                {
+                    var sprite = rival.monologueSprite;
+                    ui.EnqueueMonologue(p.MessageKey, clip, sprite, k =>
+                    {
+                        try { RaiseRivalMono(p, true); }
+                        catch (Exception cx) { Plugin.Logger.LogWarning($"[RivalMono] error raising '{p.MessageKey}': {cx.GetType().Name}: {cx.Message}"); }
+                    });
+                    Plugin.Logger.LogInfo($"[RivalMono] '{p.MessageKey}' from rival '{p.RivalId}': monologue enqueued (clip='{clip.name}', portrait='{(sprite != null ? sprite.name : "-")}', {p.Trailing?.Count ?? 0} trailing).");
+                    return;
+                }
+                Plugin.Logger.LogInfo($"[RivalMono] '{p.MessageKey}' from rival '{p.RivalId}': no clip{(rival == null ? " (rival unknown here)" : "")} - plain text.");
+                RaiseRivalMono(p, false);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalMono] error applying '{p?.MessageKey}': {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        private static void RaiseRivalMono(CompanyMessagePayload p, bool spoken)
+        {
+            bool mainRead = spoken || p.Read;
+            ApplyRelayed(RivalSub(p, p.MessageId, p.MessageKey, p.Data, p.IsSpecial), mainRead);
+            int i = 0;
+            var parts = new List<string>();
+            foreach (var tm in p.Trailing ?? new List<RivalMonoTrailing>())
+            {
+                if (tm == null || string.IsNullOrEmpty(tm.Key)) continue;
+                ApplyRelayed(RivalSub(p, p.MessageId + "-t" + (i++), tm.Key, tm.Data, tm.Special), tm.Read);
+                parts.Add($"{tm.Key} read={(tm.Read ? 1 : 0)} special={(tm.Special ? 1 : 0)}");
+            }
+            // native: every non-special rival message ends with this game event (RivalsHelper.cs:597/:627)
+            if (!p.IsSpecial) try { GameEvent.Invoke("ba:gameevent_rivalsentmessage"); } catch { }
+            Plugin.Logger.LogInfo($"[RivalMono] '{p.MessageKey}' {(spoken ? "monologue finished" : "raised")}: contact message read={(mainRead ? 1 : 0)} special={(p.IsSpecial ? 1 : 0)} + {parts.Count} trailing [{string.Join(" ; ", parts)}].");
+        }
+
+        private static CompanyMessagePayload RivalSub(CompanyMessagePayload p, string mid, string key, Dictionary<string, string>? data, bool special) => new CompanyMessagePayload
+        {
+            PlayerId           = p.PlayerId,
+            Action             = "msg",
+            Kind               = "rivalnews",
+            RivalId            = p.RivalId,
+            Neighborhood       = p.Neighborhood,
+            MessageId          = mid,
+            OwnerPid           = p.OwnerPid,
+            AddressKey         = "",
+            ContactId          = p.ContactId,
+            ContactCategory    = p.ContactCategory,
+            ContactDescription = p.ContactDescription,
+            StreetName         = "",
+            StreetNumber       = 0,
+            MessageKey         = key,
+            Data               = data == null ? new Dictionary<string, string>() : new Dictionary<string, string>(data),
+            IsSpecial          = special,
+            IsNewInteraction   = false,
+            Notify             = p.Notify,
+            StampMinute        = 0,
+        };
 
         /// <summary>H-RIVALPARITY-1 A: TEXT routing for the per-player rival path (MPRivalAttention) - the rival's message,
         /// by the game's own localization key, to exactly these players, through the same "rivalnews" relay the gateway
@@ -1802,9 +2048,9 @@ namespace BigAmbitionsMP
     [HarmonyPatch(typeof(UI.Monologues.MonologueUI), nameof(UI.Monologues.MonologueUI.EnqueueMonologue), new[] { typeof(string), typeof(AudioClip), typeof(Sprite), typeof(Action<string>) })]
     public static class Patch_MonologueUI_EnqueueMonologue_SkipWhenNotRecipient
     {
-        static bool Prefix(string messageLocalizeKey, Action<string> onMonologueFinished)
+        static bool Prefix(string messageLocalizeKey, ref Action<string>? onMonologueFinished)
         {
-            try { return CompanyMessages.OnMonologueEnqueue(messageLocalizeKey, onMonologueFinished); }
+            try { return CompanyMessages.OnMonologueEnqueue(messageLocalizeKey, ref onMonologueFinished); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] monologue prefix: {ex.GetType().Name}: {ex.Message}"); return true; }
         }
     }

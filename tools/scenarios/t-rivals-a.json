@@ -1,6 +1,6 @@
 {
   "id": "T-RIVALS-A",
-  "title": "H-RIVALPARITY-1 part A (user-approved 2026-09-27): per-player rival attention - solo host = native only; the host's per-key count for Client1 equals the client's own GetPlayerValues; Client1's intro + activation happen for Client1 only (text to Client1, host state unchanged); save/reload keeps the store; rivaltimeline report",
+  "title": "H-RIVALPARITY-1 part A (user-approved 2026-09-27): per-player rival attention - solo host = native only; the host's per-key count for Client1 equals the client's own GetPlayerValues; Client1's intro + activation happen for Client1 only (a rivalmono to Client1 - part C: its own monologue, then the text; host state unchanged); save/reload keeps the store; rivaltimeline report",
   "preconditions": "Fixture save1 (host melaus, client Client1; 4 rivals, Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA==). Its manifest predates RivalAttention = the MIGRATION path (clients start fresh). Build H-RIVALPARITY-1 A deployed on both machines. Writes ONE scratch slot (the -auto rotation sibling); the fixture's own save1 is never overwritten.",
   "instances": 2,
   "vars": {
@@ -186,13 +186,13 @@
       "expect_log": [
         {
           "role": "h",
-          "regex": "\\[RivalAttn\\] intro '[^']+' for p:\\S+ on ju1yVbREcE2B5ymg6q5tyA==: text to 1 player\\(s\\) \\[${clientPid}\\]",
+          "regex": "\\[RivalAttn\\] intro '[^']+' for p:\\S+ on ju1yVbREcE2B5ymg6q5tyA==: rivalmono to 1 player\\(s\\) \\[${clientPid}\\]",
           "within_s": 45
         },
         {
           "role": "c",
           "regex": "\\[RivalNews\\] '[^']+' from rival 'ju1yVbREcE2B5ymg6q5tyA==' delivered",
-          "within_s": 50
+          "within_s": 150
         }
       ],
       "note": "TEST 2a: Client1's intro, 10-30 s after the check, as TEXT to Client1 only"
@@ -211,7 +211,7 @@
         {
           "role": "c",
           "regex": "\\[RivalNews\\] 'ba:messagetype_rivalry_activated' from rival 'ju1yVbREcE2B5ymg6q5tyA==' delivered",
-          "within_s": 50
+          "within_s": 150
         }
       ],
       "note": "TEST 2b: the next check activates the rival for Client1 (intro already sent), after the native delay"

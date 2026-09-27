@@ -473,6 +473,19 @@ namespace BigAmbitionsMP
         public string Kind               { get; set; } = "";   // "" = a company message; "rivalnews" = a rival's news by the NEIGHBOURHOOD rule (bypasses the co-member gate)
         public string RivalId            { get; set; } = "";   // rivalnews: the SpecialRival whose contact raised it
         public string Neighborhood       { get; set; } = "";   // rivalnews: that rival's primaryNeighborhood - the rule's scope
+        public bool   Read               { get; set; }         // rivalmono (H-RIVALPARITY-1 C): the main message's native read flag when no monologue plays
+        public List<RivalMonoTrailing> Trailing { get; set; } = new();   // rivalmono: the messages native raises right after the main one, in order
+    }
+
+    /// <summary>H-RIVALPARITY-1 C: one message the game raises in a rival monologue's finished-callback right after the
+    /// contact message (the rivalry activated / deactivated special text, an attack's special message) - the game's own
+    /// key and data, with the read / special flags native gives it.</summary>
+    public class RivalMonoTrailing
+    {
+        public string Key     { get; set; } = "";
+        public Dictionary<string, string> Data { get; set; } = new();
+        public bool   Read    { get; set; }
+        public bool   Special { get; set; }
     }
 
     /// <summary>Shared-shop slice 4: ONE item's retail price at a shared shop, set by a permitted player. The native

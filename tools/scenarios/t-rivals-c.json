@@ -1,0 +1,187 @@
+{
+  "id": "T-RIVALS-C",
+  "title": "H-RIVALPARITY-1 part C (user-approved 2026-09-27): the rival's SPOKEN message per player ('rivalmono') - SOLO host: the game's own monologue path unchanged (gateway line only, no co-member wrap); Client1's intro + activation: the monologue with the rival's own clip + portrait on Client1, the contact message raised read and the rivalry-activated special raised read after it, the host enqueues NO monologue; a forced price war for Client1 fired through its timeline entry: the attack monologue on Client1 only, the special after it; surrender (DEV: per-player step): DefeatRival once on the host, the surrender monologue on Client1, a second surrender refused",
+  "preconditions": "Fixture save1 (host melaus, client Client1 with qualifying shops in Murray Hill; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA== - timeline entry #0 PriceReduction/Medium id 3sbRH70TREa64iCxbD7VAA== has a clip). Dev build with part C levers (rivalattn mono / surrender, rivalforce ... entry). The rival is DEFEATED at the end of this run (scratch session only; the fixture's own save1 is never overwritten - no save is taken).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "rival": "ju1yVbREcE2B5ymg6q5tyA=="
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[RivalMono\\] error",
+    "\\[RivalNews\\] error",
+    "\\[RivalNews\\] monologue '[^']+' from rival",
+    "\\[RivalWar\\] error",
+    "\\[RivalAttn\\] error",
+    "\\[RivalAttn\\] (sweep|tick|step|check|count|snapshot|settle load|host rows|manifest restore|set active|sweep postfix|merged host count|text|key move|defeat)[^\\]]*:",
+    "\\[RivalAttn\\] surrender (for |[^' ]+: )"
+  ],
+  "oracles_report": [
+    "\\[TestDrive\\] .* 'rival(attn|force|mono|state)",
+    "\\[RivalMono\\] ",
+    "\\[RivalNews\\] '",
+    "\\[RivalAttn\\] (intro|activation|deactivation|surrender|FIRED|fire |ACTIVATED|deactivated|DEV|rival )"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "sleep_s": 60, "note": "the host's world loads; NO client yet - the SOLO phase" },
+    { "seq": 4, "role": "h", "cmd": "mark TEST RIVALSC SOLO", "expect_result": "OK MARK" },
+    { "seq": 5, "role": "h", "cmd": "rivalattn mono", "expect_result": "^OK rivalattn mono enqueued=\\d+ last=\\S+ defeats=0$" },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "rivalmono ${rival}",
+      "expect_result": "^OK rivalmono ${rival} key=rivals_\\S+",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalNews\\] 'rivals_[^']+' from rival '${rival}' \\(ba:neighborhood_murrayhill\\): relayed to 0 player\\(s\\) \\[\\]; host copy kept\\.",
+          "within_s": 120
+        }
+      ],
+      "note": "SOLO: the game's own SendMessageToPlayer with a clip - the native monologue plays, its callback raises the contact message (the gateway line, as before part C); no co-member = no wrap ('[RivalNews] monologue ...' is an absent oracle)"
+    },
+    { "seq": 7, "role": "h", "cmd": "rivalattn mono", "expect_result": "^OK rivalattn mono enqueued=[1-9]\\d* last=rivals_\\S+ defeats=0$", "note": "the native monologue was enqueued on the host" },
+    { "seq": 8, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 9, "role": "h", "sleep_s": 5 },
+    { "seq": 10, "role": "h", "cmd": "acceptjoin", "expect_result": "^OK" },
+    { "seq": 11, "role": "c", "sleep_s": 60, "note": "the client is served its save and settles" },
+    { "seq": 12, "role": "c", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 13, "role": "both", "cmd": "mark TEST RIVALSC ACTIVATE", "expect_result": "OK MARK" },
+    { "seq": 14, "role": "c", "cmd": "rivalattn report", "expect_result": "^OK rivalattn report sent" },
+    { "seq": 15, "role": "h", "sleep_s": 5 },
+    { "seq": 16, "role": "h", "cmd": "rivalattn floor ${clientPid} ${rival} 3", "expect_result": "^OK rivalattn floor key=p:\\S+ rival=${rival} n=3" },
+    { "seq": 17, "role": "h", "cmd": "rivalattn mono", "expect_result": "^OK rivalattn mono ", "capture": { "hm1": "enqueued=(\\d+) " } },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "rivalattn sweep",
+      "expect_result": "^OK rivalattn sweep ran",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] intro 'rivals_thierry_laurent_moreau_entrance' for p:\\S+ on ${rival}: rivalmono to 1 player\\(s\\) \\[${clientPid}\\] \\(clip=(entrance|none - plain text), trailing=0\\)",
+          "within_s": 45
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_entrance' (from rival '${rival}': monologue enqueued \\(clip='[^']+', portrait='[^']+', 0 trailing\\)|from rival '${rival}': no clip - plain text)",
+          "within_s": 50
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_entrance' (monologue finished|raised): contact message read=[01] special=0 \\+ 0 trailing",
+          "within_s": 180
+        }
+      ],
+      "note": "Client1's intro: ONE rivalmono to Client1 only; its own monologue (clip looked up on Client1 by key), then the contact message"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "rivalattn sweep",
+      "expect_result": "^OK rivalattn sweep ran",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] activation 'rivals_thierry_laurent_moreau_activation' for p:\\S+ on ${rival}: rivalmono to 1 player\\(s\\) \\[${clientPid}\\] \\(clip=activation, trailing=1\\)",
+          "within_s": 45
+        },
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] ACTIVATED rival ${rival} for p:\\S+ \\(special text to 1 player",
+          "within_s": 45
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_activation' from rival '${rival}': monologue enqueued \\(clip='[^']+', portrait='[^']+', 1 trailing\\)",
+          "within_s": 50
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_activation' monologue finished: contact message read=1 special=0 \\+ 1 trailing \\[ba:messagetype_rivalry_activated read=1 special=1\\]",
+          "within_s": 180
+        }
+      ],
+      "note": "TEST C1: the activation monologue on Client1 with the rival's clip + portrait; in its callback the contact message (read, RivalsHelper.cs:588) and the rivalry-activated special (read, RivalTimeline.cs:192); the host flips Client1's key directly"
+    },
+    { "seq": 20, "role": "h", "cmd": "rivalattn mono", "expect_result": "^OK rivalattn mono enqueued=${hm1} ", "note": "TEST C1: the HOST enqueued no monologue for Client1's intro / activation" },
+    { "seq": 21, "role": "h", "sleep_s": 6 },
+    { "seq": 22, "role": "c", "cmd": "rivalstate", "expect_result": "ju1yVbREcE2B5ymg6q5tyA==:A:" },
+    { "seq": 23, "role": "both", "cmd": "mark TEST RIVALSC ATTACK", "expect_result": "OK MARK" },
+    { "seq": 24, "role": "c", "cmd": "rivalattn report", "expect_result": "^OK rivalattn report sent" },
+    { "seq": 25, "role": "h", "sleep_s": 5 },
+    { "seq": 26, "role": "h", "cmd": "rivalattn mono", "expect_result": "^OK rivalattn mono ", "capture": { "hm2": "enqueued=(\\d+) " } },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "rivalforce ${rival} ${clientPid} price medium entry",
+      "expect_result": "^OK rivalforce key=p:\\S+ rival=${rival} mech=price aggr=Medium result=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] FIRED PriceReduction \\(Medium\\) for p:\\S+ on ${rival} \\(entry 3sbRH70TREa64iCxbD7VAA==, completed\\): special message '[^']+' taken off the shared queue; rivalmono \\(monologue\\) 'rivals_thierry_laurent_moreau_pricereduction' to 1 player\\(s\\), special to 1\\.",
+          "within_s": 10
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_pricereduction' from rival '${rival}': monologue enqueued \\(clip='[^']+', portrait='[^']+', 1 trailing\\)",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_pricereduction' monologue finished: contact message read=1 special=0 \\+ 1 trailing \\[\\S+ read=1 special=[01]\\]",
+          "within_s": 180
+        }
+      ],
+      "note": "TEST C2: a price war for Client1 through its own timeline entry #0: the attack monologue on Client1, then the entry's message and the attack's special message (read = the entry has a clip, RivalTimeline.cs:248)"
+    },
+    { "seq": 28, "role": "h", "cmd": "rivalattn mono", "expect_result": "^OK rivalattn mono enqueued=${hm2} ", "note": "TEST C2: no attack monologue on the host" },
+    { "seq": 29, "role": "both", "cmd": "mark TEST RIVALSC SURRENDER", "expect_result": "OK MARK" },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "rivalattn surrender ${rival}",
+      "expect_result": "^OK rivalattn surrender rival=${rival} scheduled",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] rival ${rival} surrenders \\(per-player path\\)",
+          "within_s": 45
+        },
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] surrender 'rivals_thierry_laurent_moreau_surrender' for p:\\S+ on ${rival}: rivalmono to 1 player\\(s\\) \\[${clientPid}\\] \\(clip=surrender, trailing=0\\)",
+          "within_s": 50
+        },
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] rival ${rival} defeated: surrender rivalmono to 1 of 1 key\\(s\\)",
+          "within_s": 50
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_surrender' from rival '${rival}': monologue enqueued \\(clip='[^']+', portrait='[^']+', 0 trailing\\)",
+          "within_s": 60
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_surrender' monologue finished: contact message read=1 special=0 \\+ 0 trailing",
+          "within_s": 180
+        }
+      ],
+      "note": "TEST C3: the per-player surrender step: the host runs DefeatRival directly (no monologue on the host), the surrender monologue on Client1 (the one key that had the rival active)"
+    },
+    { "seq": 31, "role": "h", "cmd": "rivalattn mono", "expect_result": "^OK rivalattn mono enqueued=${hm2} last=\\S+ defeats=1$", "note": "TEST C3: DefeatRival defeated the rival exactly once; still no monologue on the host" },
+    { "seq": 32, "role": "h", "cmd": "rivalattn surrender ${rival}", "expect_result": "^ERR rival ${rival} already defeated", "note": "a second surrender is refused" },
+    { "seq": 33, "role": "h", "sleep_s": 6 },
+    { "seq": 34, "role": "c", "cmd": "rivalstate", "expect_result": "ju1yVbREcE2B5ymg6q5tyA==:-:D:", "note": "the defeat reached Client1 (per-peer R3)" },
+    { "seq": 35, "role": "both", "cmd": "mark TEST RIVALSC END", "expect_result": "OK MARK" }
+  ]
+}

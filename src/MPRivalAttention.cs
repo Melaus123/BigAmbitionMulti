@@ -548,9 +548,9 @@ namespace BigAmbitionsMP
                 bool active;
                 lock (_lock) active = st.IsActive;
                 if (active && n < 3)
-                    Schedule($"{key}|{rid}|deact", () => { if (DeliverOnce(key, rival, tl.deactivationMessageKey, "deactivation")) SetActive(key, rival, false); });
+                    Schedule($"{key}|{rid}|deact", () => ActivationStep(key, rival, false));
                 else if (!active && n >= 3)
-                    Schedule($"{key}|{rid}|act", () => { if (DeliverOnce(key, rival, tl.activationMessageKey, "activation")) SetActive(key, rival, true); });
+                    Schedule($"{key}|{rid}|act", () => ActivationStep(key, rival, true));
             }
 
             bool isActive;
@@ -569,11 +569,16 @@ namespace BigAmbitionsMP
             }
         }
 
+        private static bool DeliverOnce(string key, SpecialRival rival, string msgKey, string what) => DeliverOnce(key, rival, msgKey, what, null, out _);
+
         /// <summary>SendMessageToPlayer (:164-211) for a key: a key already in Sent only runs the follow-up (true);
-        /// otherwise the TEXT goes to the key's online members (part A: text only) and the key is marked sent.
+        /// otherwise ONE 'rivalmono' goes to the key's online members (part C: each plays the rival's own monologue for it,
+        /// then raises the contact message and the trailing messages - native's callback order and read flags) and the key
+        /// is marked sent. The host itself plays nothing: its follow-ups run directly after this returns.
         /// Nobody online = nothing sent, nothing marked, no follow-up - the next check tries again.</summary>
-        private static bool DeliverOnce(string key, SpecialRival rival, string msgKey, string what)
+        private static bool DeliverOnce(string key, SpecialRival rival, string msgKey, string what, List<RivalMonoTrailing> trailing, out int carried)
         {
+            carried = 0;
             try
             {
                 if (string.IsNullOrEmpty(msgKey)) return true;
@@ -582,21 +587,49 @@ namespace BigAmbitionsMP
                 lock (_lock) { if (st.Sent.Contains(msgKey)) return true; }
                 var pids = OnlinePidsOfKey(key);
                 pids.Remove(MPConfig.PlayerId);
-                int n = CompanyMessages.SendRivalTextToPids(rival, msgKey, false, pids);
+                var clip = CompanyMessages.RivalClipFor(rival, msgKey, out string where);
+                bool hasClip = clip != null;
+                // read=false: that is native's flag only when there is NO clip (SendMessageWithoutNotification, :613-615);
+                // a receiver that plays the monologue raises it read, as the monologue callback does (:588).
+                int n = CompanyMessages.SendRivalMonoToPids(rival, msgKey, null, false, false, trailing, pids);
                 if (n == 0)
                 {
                     Plugin.Logger.LogInfo($"[RivalAttn] {what} '{msgKey}' for {key} on {rid}: no member online - not sent, retried on the next check.");
                     return false;
                 }
                 lock (_lock) st.Sent.Add(msgKey);
-                Plugin.Logger.LogInfo($"[RivalAttn] {what} '{msgKey}' for {key} on {rid}: text to {n} player(s) [{string.Join(",", pids)}].");
+                carried = trailing != null && trailing.Count > 0 ? n : 0;
+                Plugin.Logger.LogInfo($"[RivalAttn] {what} '{msgKey}' for {key} on {rid}: rivalmono to {n} player(s) [{string.Join(",", pids)}] (clip={(hasClip ? where : "none - plain text")}, trailing={trailing?.Count ?? 0}).");
                 return true;
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] {what} for {key}: {ex.Message}"); return false; }
         }
 
-        /// <summary>ActivateRival / DeactivateRival (:187-203) for a key: flip, then the game's own silent special text.</summary>
-        private static void SetActive(string key, SpecialRival rival, bool on)
+        /// <summary>CheckActivation's delayed step (:165-185) for a key. Part C: the spoken message goes as ONE rivalmono
+        /// that carries the special activated / deactivated text native raises right after it (read: HasMessageBeenSent is
+        /// already true there, :192/:201); the host flips the key's state HERE, directly - it never waits for a monologue.</summary>
+        private static void ActivationStep(string key, SpecialRival rival, bool on)
+        {
+            try
+            {
+                var tl = rival.timeline;
+                if (tl == null) return;
+                string rid = rival.rivalData?.id ?? "";
+                var st = Get(key, rid, true);
+                bool flips;
+                lock (_lock) flips = st.IsActive != on;
+                List<RivalMonoTrailing> tr = null;
+                if (flips)
+                    tr = new List<RivalMonoTrailing> { new RivalMonoTrailing { Key = on ? "ba:messagetype_rivalry_activated" : "ba:messagetype_rivalry_deactivated", Read = true, Special = true } };
+                if (DeliverOnce(key, rival, on ? tl.activationMessageKey : tl.deactivationMessageKey, on ? "activation" : "deactivation", tr, out int carried))
+                    SetActive(key, rival, on, carried);
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] step {(on ? "activation" : "deactivation")} for {key}: {ex.Message}"); }
+        }
+
+        /// <summary>ActivateRival / DeactivateRival (:187-203) for a key: flip, then the game's own silent special text -
+        /// already carried by the rivalmono just sent (carriedTo &gt; 0), else sent alone, read = HasMessageBeenSent.</summary>
+        private static void SetActive(string key, SpecialRival rival, bool on, int carriedTo = 0)
         {
             try
             {
@@ -609,9 +642,16 @@ namespace BigAmbitionsMP
                     // Part B (manager ruling 2026-09-27): planned entries are NOT dropped on deactivation - native keeps
                     // firing them (RivalTimeline.PlannedEntriesCoroutine checks only IsCompleted).
                 }
-                var pids = OnlinePidsOfKey(key);
-                pids.Remove(MPConfig.PlayerId);
-                int n = CompanyMessages.SendRivalTextToPids(rival, on ? "ba:messagetype_rivalry_activated" : "ba:messagetype_rivalry_deactivated", true, pids);
+                int n = carriedTo;
+                if (n <= 0)
+                {
+                    var pids = OnlinePidsOfKey(key);
+                    pids.Remove(MPConfig.PlayerId);
+                    string spoken = on ? rival.timeline?.activationMessageKey : rival.timeline?.deactivationMessageKey;
+                    bool rd;
+                    lock (_lock) rd = !string.IsNullOrEmpty(spoken) && st.Sent.Contains(spoken);
+                    n = CompanyMessages.SendRivalMonoToPids(rival, on ? "ba:messagetype_rivalry_activated" : "ba:messagetype_rivalry_deactivated", null, rd, true, null, pids);
+                }
                 Plugin.Logger.LogInfo($"[RivalAttn] {(on ? "ACTIVATED" : "deactivated")} rival {rid} for {key} (special text to {n} player(s)); the host's own state is untouched.");
                 MPServer.PublishRivalStateIfChanged("rivalattn");
             }
@@ -625,25 +665,37 @@ namespace BigAmbitionsMP
             var rd = rival.rivalData;
             if (rd.ownedRetailOfficeBusinesses != null && rd.ownedRetailOfficeBusinesses.Count > 0 && !(rd.WeeklyIncome < 2000f)) return false;
             if (nst != null && nst.isDefeated) return true;
+            ScheduleSurrender(rd);
+            return true;
+        }
+
+        /// <summary>The surrender step (host): after the native delay the host runs DefeatRival DIRECTLY (no monologue
+        /// here - native waits for its own; the keys get theirs from the defeat postfix), and only if still undefeated.</summary>
+        private static void ScheduleSurrender(RivalData rd)
+        {
             string rid = rd.id ?? "";
             lock (_lock) _planned.RemoveAll(p => p.RivalId == rid);
             Schedule($"surrender|{rid}", () =>
             {
                 try
                 {
+                    var ns = RivalsHelper.GetSpecialRivalState(rid);
+                    if (ns != null && ns.isDefeated) { Plugin.Logger.LogInfo($"[RivalAttn] rival {rid} surrender step: already defeated - DefeatRival not run again."); return; }
                     Plugin.Logger.LogInfo($"[RivalAttn] rival {rid} surrenders (per-player path) - the host runs DefeatRival once; its postfix tells every key that had the rival active.");
                     RivalsHelper.DefeatRival(rd);
                     MPServer.PublishRivalStateIfChanged("rivalattn-surrender");
                 }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] surrender {rid}: {ex.Message}"); }
             });
-            return true;
         }
 
         /// <summary>Part D F5 (HOST): the rival is defeated - by either path (the native host timeline or the per-player
         /// replay). EVERY key that had it active gets the surrender text (online members; nobody online = not sent)
         /// and goes inactive, whether or not a check reached that key in the sweep. Idempotent: a second call finds
         /// no active key.</summary>
+        /// <summary>DEV (rivalattn mono): how many times DefeatRival actually defeated a special rival here.</summary>
+        internal static int DefeatRuns;
+
         internal static void OnRivalDefeated(RivalData rd)
         {
             try
@@ -671,7 +723,7 @@ namespace BigAmbitionsMP
                     var st = Get(k, rid, false);
                     if (st != null) lock (_lock) st.IsActive = false;
                 }
-                Plugin.Logger.LogInfo($"[RivalAttn] rival {rid} defeated: surrender text to {told.Count} of {keys.Count} key(s) that had it active [{string.Join(",", told)}]; all set inactive.");
+                Plugin.Logger.LogInfo($"[RivalAttn] rival {rid} defeated: surrender rivalmono to {told.Count} of {keys.Count} key(s) that had it active [{string.Join(",", told)}]; all set inactive.");
                 MPServer.PublishRivalStateIfChanged("rivalattn-defeat");
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] defeat: {ex.Message}"); }
@@ -680,8 +732,15 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(RivalsHelper), "DefeatRival", new[] { typeof(RivalData) })]
         public static class Patch_DefeatRival_TellEveryKey
         {
-            static void Postfix(RivalData rival)
+            static void Prefix(RivalData rival, out bool __state)
             {
+                __state = false;
+                try { var s = rival != null ? RivalsHelper.GetSpecialRivalState(rival.id) : null; __state = s != null && !s.isDefeated; } catch { }
+            }
+
+            static void Postfix(RivalData rival, bool __state)
+            {
+                if (__state) DefeatRuns++;   // DEV count (rivalattn mono): real defeats on this machine
                 if (!MPServer.IsRunning || rival == null) return;
                 try { OnRivalDefeated(rival); }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] defeat postfix: {ex.Message}"); }
@@ -1147,7 +1206,6 @@ namespace BigAmbitionsMP
         internal static string Target;
         private static string _targetEntry;
         private static bool _forcing;          // rivalforce on the host key: no silent completion of a native entry
-        private static int _msgSeq;
 
         internal sealed class WarCtx
         {
@@ -1719,54 +1777,36 @@ namespace BigAmbitionsMP
             if (entry != null) lock (_lock) if (!st.Completed.Contains(entry.id)) st.Completed.Add(entry.id);
             var pids = OnlinePidsOfKey(key);
             pids.Remove(MPConfig.PlayerId);
+            // CompleteEntry (:241-250): the entry's message through SendMessageToPlayer and, in ITS callback, the attack's
+            // special message with read = entry.messageClip != null. Part C: ONE rivalmono carrying both (the receiver's own
+            // monologue first). The entry's message already sent: native runs the callback at once (:569-573) - the
+            // special goes alone.
+            bool entryClip = entry != null && entry.messageClip != null;
+            List<RivalMonoTrailing> tr = null;
+            if (special != null)
+                tr = new List<RivalMonoTrailing> { new RivalMonoTrailing {
+                    Key = special.messageKey,
+                    Data = special.messageData == null ? new Dictionary<string, string>() : new Dictionary<string, string>(special.messageData),
+                    Read = entryClip, Special = special.isSpecialMessage } };
             int t1 = 0, t2 = 0;
+            string how = "none";
+            bool mainSent = true;
             if (entry != null && !string.IsNullOrEmpty(entry.messageLocalizationKey))
+                lock (_lock) mainSent = st.Sent.Contains(entry.messageLocalizationKey);
+            if (!mainSent)
             {
-                bool sent;
-                lock (_lock) sent = st.Sent.Contains(entry.messageLocalizationKey);
-                if (!sent)
-                {
-                    t1 = CompanyMessages.SendRivalTextToPids(rival, entry.messageLocalizationKey, false, pids);
-                    if (t1 > 0) lock (_lock) st.Sent.Add(entry.messageLocalizationKey);
-                }
+                t1 = CompanyMessages.SendRivalMonoToPids(rival, entry.messageLocalizationKey, null, false, false, tr, pids);
+                if (t1 > 0) { lock (_lock) st.Sent.Add(entry.messageLocalizationKey); t2 = tr != null ? t1 : 0; }
+                how = entryClip ? "monologue" : "text";
             }
-            if (special != null) t2 = SendRivalMessageToPids(rival, special, pids);
-            Plugin.Logger.LogInfo($"[RivalAttn] FIRED {mech} ({(Enums.Priority)aggr}) for {key} on {rid} (entry {eid}{(entry != null ? ", completed" : ", forced - no entry")}): special message '{special?.messageKey ?? "-"}' taken off the shared queue and sent as text to {t2} player(s); entry text to {t1}.");
+            else if (tr != null)
+            {
+                t2 = CompanyMessages.SendRivalMonoToPids(rival, tr[0].Key, tr[0].Data, tr[0].Read, tr[0].Special, null, pids);
+                how = "special only";
+            }
+            Plugin.Logger.LogInfo($"[RivalAttn] FIRED {mech} ({(Enums.Priority)aggr}) for {key} on {rid} (entry {eid}{(entry != null ? ", completed" : ", forced - no entry")}): special message '{special?.messageKey ?? "-"}' taken off the shared queue; rivalmono ({how}) '{entry?.messageLocalizationKey ?? "-"}' to {t1} player(s), special to {t2}.");
             MPServer.PublishRivalStateIfChanged("rivalattn-fire");
             return true;
-        }
-
-        /// <summary>The part-A "rivalnews" text relay for a message that carries data (the attack's special message:
-        /// the cut products / the opened shops). The game's own key and data - no new text.</summary>
-        private static int SendRivalMessageToPids(SpecialRival rival, Entities.TextMessage msg, List<string> pids)
-        {
-            int n = 0;
-            try
-            {
-                if (rival == null || msg == null || string.IsNullOrEmpty(msg.messageKey) || pids == null) return 0;
-                string rid = rival.rivalData?.id ?? "";
-                string name = rival.rivalData?.rivalName ?? "";
-                if (name.Length == 0) return 0;
-                foreach (var pid in pids)
-                {
-                    if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId || !MPServer.IsOnlinePid(pid)) continue;
-                    var p = new CompanyMessagePayload
-                    {
-                        PlayerId = MPConfig.PlayerId, Action = "msg", Kind = "rivalnews", RivalId = rid,
-                        Neighborhood = rival.primaryNeighborhood ?? "",
-                        MessageId = "bamp-rivalnews-" + Fnv($"{rid}|{name}|{msg.messageKey}|{pid}|atk|{++_msgSeq}|{UnityEngine.Time.realtimeSinceStartup}"),
-                        OwnerPid = MPConfig.PlayerId, AddressKey = "", ContactId = name,
-                        ContactCategory = (int)UI.Smartphone.Apps.Contacts.ContactCategoryName.Rivals, ContactDescription = "rival",
-                        StreetName = "", StreetNumber = 0, MessageKey = msg.messageKey,
-                        Data = msg.messageData == null ? new Dictionary<string, string>() : new Dictionary<string, string>(msg.messageData),
-                        IsSpecial = msg.isSpecialMessage, IsNewInteraction = false, Notify = true, StampMinute = 0,
-                    };
-                    try { MPServer.SendToPid(pid, MessageEnvelope.Create(MessageType.CompanyMessages, "host", p)); n++; }
-                    catch (System.Exception sx) { Plugin.Logger.LogWarning($"[RivalAttn] error sending the attack message to '{pid}': {sx.Message}"); }
-                }
-            }
-            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] error sending the attack message: {ex.Message}"); }
-            return n;
         }
 
         // ── part B patches ──
@@ -1919,6 +1959,27 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[RivalAttn] DEV: rival {rida} set {(on ? "ACTIVE" : "inactive")} for {ka}{(ka == HostKey ? " (host key: native state)" : "")}.");
                     MPServer.PublishRivalStateIfChanged("rivalattn-dev");
                     return $"OK rivalattn setactive key={ka} rival={rida} active={(on ? 1 : 0)} host={(ka == HostKey ? 1 : 0)}";
+                }
+                if (tk.Length >= 1 && tk[0] == "mono")
+                {
+                    // DEV (part C): monologues enqueued on THIS machine (any key), the last key, real defeats here.
+                    return $"OK rivalattn mono enqueued={CompanyMessages.MonoEnqueued} last={(CompanyMessages.MonoLastKey.Length > 0 ? CompanyMessages.MonoLastKey : "-")} defeats={DefeatRuns}";
+                }
+                if (tk.Length >= 1 && tk[0] == "surrender")
+                {
+                    // DEV (part C): `rivalattn surrender <rival>` - the per-player surrender step now (its income gate
+                    // skipped): after the native 10-30 s the host runs DefeatRival once; every active key hears it.
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    if (tk.Length != 2) return "ERR usage: rivalattn surrender <rival>";
+                    var rs = FindRival(tk[1]);
+                    if (rs?.rivalData == null) return $"ERR unknown rival '{tk[1]}'";
+                    EnsureBound();
+                    var nss = RivalsHelper.GetSpecialRivalState(rs.rivalData.id);
+                    if (nss == null) return $"ERR no native state for '{rs.rivalData.id}'";
+                    if (nss.isDefeated) return $"ERR rival {rs.rivalData.id} already defeated";
+                    ScheduleSurrender(rs.rivalData);
+                    Plugin.Logger.LogInfo($"[RivalAttn] DEV: surrender of rival {rs.rivalData.id} scheduled on the per-player path (income gate skipped).");
+                    return $"OK rivalattn surrender rival={rs.rivalData.id} scheduled";
                 }
                 if (tk.Length >= 1 && tk[0] == "sweep")
                 {
@@ -2115,7 +2176,7 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning) return "ERR host only";
                 var tk = (arg ?? "").Split(new[] { ' ' }, System.StringSplitOptions.RemoveEmptyEntries);
-                if (tk.Length < 3) return "ERR usage: rivalforce <rival|nb> <pid|key|host> price|lowdemand [low|medium|high]";
+                if (tk.Length < 3) return "ERR usage: rivalforce <rival|nb> <pid|key|host> price|lowdemand [low|medium|high] [entry]";
                 var rival = FindRival(tk[0]);
                 if (rival?.rivalData == null) return $"ERR unknown rival '{tk[0]}'";
                 EnsureBound();
@@ -2127,7 +2188,12 @@ namespace BigAmbitionsMP
                 else if (tk[2] == "lowdemand") mech = DefensiveMechanic.LowDemand;
                 else return "ERR mechanic must be price|lowdemand";
                 Enums.Priority pr = Enums.Priority.High;
-                if (tk.Length >= 4 && !System.Enum.TryParse(tk[3], true, out pr)) return $"ERR unknown aggression '{tk[3]}'";
+                bool withEntry = false;
+                for (int ti = 3; ti < tk.Length; ti++)
+                {
+                    if (tk[ti] == "entry") { withEntry = true; continue; }
+                    if (!System.Enum.TryParse(tk[ti], true, out pr)) return $"ERR unknown aggression '{tk[ti]}'";
+                }
                 string rid = rival.rivalData.id, nb = rival.primaryNeighborhood ?? "";
                 bool ok;
                 if (key == HostKey)
@@ -2139,7 +2205,27 @@ namespace BigAmbitionsMP
                     }
                     finally { _forcing = false; }
                 }
-                else ok = FireFor(key, rival, mech, (int)pr, null, true);
+                else
+                {
+                    // part C (DEV): `entry` = the key's first uncompleted timeline entry of that mechanic is fired and
+                    // completed, so its own message (and clip) goes with the attack, exactly as a planned entry's does.
+                    TimelineEntry fe = null;
+                    if (withEntry)
+                    {
+                        var stf = Get(key, rid, true);
+                        var all = rival.timeline?.allEntries;
+                        if (all != null)
+                            foreach (var e in all)
+                            {
+                                if (e == null || e.defense != mech) continue;
+                                bool done;
+                                lock (_lock) done = stf.Completed.Contains(e.id);
+                                if (!done) { fe = e; break; }
+                            }
+                        if (fe == null) return $"ERR no uncompleted {tk[2]} entry for {key} on {rid}";
+                    }
+                    ok = FireFor(key, rival, mech, fe != null ? (int)fe.aggression : (int)pr, fe, true);
+                }
                 int pos = 0;
                 lock (_lock) if (_warQ.TryGetValue(rid, out var q)) pos = q.FindIndex(x => x.Key == key) + 1;
                 Plugin.Logger.LogInfo($"[RivalAttn] DEV: rivalforce {tk[2]} ({pr}) for {key} on {rid}: result={ok}, queue position {pos}.");
