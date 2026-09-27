@@ -1,0 +1,358 @@
+{
+  "id": "T-WORKPANEL",
+  "title": "H-WORKPANEL-1 (user-approved 2026-09-27; bundle 20260922-141939): a NOT-STARTED work panel opened at the host's own CLOSED shop is closed by the mod when he walks out (WorkActivity.CancelWorking, never a throwing GetButtons read); outdoors the activity slot is empty and no NullReferenceException is logged; a new work activity at the OPEN shop still starts.",
+  "preconditions": "Reporter fixture session fx-hq1 (day 44, loads at ~17:38, vars.keepMerger true as every fx-hq1 scenario), SOLO host (the client is dropped). Shop = the host's clothing store vars.shop (Crown Clothing; opening hours end at 16:00, so at ~17:40 it is closed and does not open within 2 h - no clock lever is needed; the `work on` lever's own 'offers no Start' failure line asserts the premise). Levers: work on/state/off, enterbuilding/exitbuilding, exitride, shiftclear, skipvote/skipstate. NOTHING IS SAVED.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "shop": "20 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "(?<!swallowed )NullReferenceException",
+    "\\[Rest\\] buttons read",
+    "\\[Rest\\] work panel close failed",
+    "\\[Rest\\] WorkActivity\\.CancelWorking not found",
+    "\\[TickIso\\]",
+    "\\[Guard\\]"
+  ],
+  "oracles_present": [],
+  "oracles_report": [
+    "\\[Rest\\] work panel closed",
+    "\\[Rest\\] StandUp",
+    "\\[Rest\\] seated",
+    "\\[Rest\\] WEDGE HEAL",
+    "\\[Rest\\] auto-start",
+    "\\[Rest\\] dock X pressed",
+    "\\[DEV\\] work"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "c",
+      "drop": true,
+      "note": "SOLO HOST: the client instance closes first and never joins"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "mark TEST T-WORKPANEL START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 32,
+      "note": "the world settles"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "report-only (the settle clock starts on the first read)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "report-only: an outdoor player only warns"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "exitride",
+      "abort_on_fail": false,
+      "note": "the fixture host pushes a flatbed - let go of it outdoors (existing lever) so he walks in empty-handed"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "shiftclear ${shop} 1",
+      "abort_on_fail": false,
+      "note": "no scheduled cashier on any day (as T-WORKSKIP-E2), so the register is free for the player in part B"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "shiftclear ${shop} 2",
+      "abort_on_fail": false,
+      "note": "no scheduled cashier on any day (as T-WORKSKIP-E2), so the register is free for the player in part B"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "shiftclear ${shop} 3",
+      "abort_on_fail": false,
+      "note": "no scheduled cashier on any day (as T-WORKSKIP-E2), so the register is free for the player in part B"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "shiftclear ${shop} 4",
+      "abort_on_fail": false,
+      "note": "no scheduled cashier on any day (as T-WORKSKIP-E2), so the register is free for the player in part B"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "shiftclear ${shop} 5",
+      "abort_on_fail": false,
+      "note": "no scheduled cashier on any day (as T-WORKSKIP-E2), so the register is free for the player in part B"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "shiftclear ${shop} 6",
+      "abort_on_fail": false,
+      "note": "no scheduled cashier on any day (as T-WORKSKIP-E2), so the register is free for the player in part B"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "shiftclear ${shop} 7",
+      "abort_on_fail": false,
+      "note": "no scheduled cashier on any day (as T-WORKSKIP-E2), so the register is free for the player in part B"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "regstate ${shop}",
+      "expect_result": "^OK rented=True ",
+      "note": "the host's own clothing store"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "^OK skipstate",
+      "capture": {
+        "t0NowMin": "nowMin=([0-9.]+)"
+      },
+      "note": "report: the fixture clock (~17:40 on day 44; the store closes at 16:00 and does not reopen within 2 h)"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "mark TEST T-WORKPANEL A CLOSED-SHOP",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "THE HOST ENTERS HIS OWN CLOSED SHOP"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "interior settles"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "work state",
+      "abort_on_fail": false,
+      "expect_result": "^OK work ",
+      "capture": {
+        "preAct": "activity=(\\S+)",
+        "openHours": "openHours=(\\S+)",
+        "closeHour": "closeHour=(-?\\d+)"
+      },
+      "note": "report: nothing open yet; today's opening hours of the store"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "work on",
+      "expect_result": "^OK work on queued at ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[DEV\\] work on FAILED: the work panel offers no Start",
+          "within_s": 30
+        }
+      ],
+      "note": "DEV lever: the game's own desk click (EmployeeStationController.Work). PREMISE ASSERTED: the shop is closed and does not open within 2 h, so the panel opens NOT STARTED with no Start button (WorkActivity.GetButtons :425-463) - the lever says so and leaves the panel open"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "work state",
+      "expect_result": "^OK work working=False activity=WorkActivity state=NotStarted panel=True inside=True",
+      "note": "ASSERT: the not-started work panel is open, inside the shop"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "mark TEST T-WORKPANEL A WALK-OUT",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] work panel closed - not started and the player left \\(",
+          "within_s": 20
+        }
+      ],
+      "note": "ACT + ASSERT (H-WORKPANEL-1): the player walks out with the panel open -> the mod closes it with WorkActivity.CancelWorking and logs why"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "sleep_s": 4
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "work state",
+      "expect_result": "^OK work working=False activity=none .*panel=False inside=False",
+      "note": "ASSERT: the activity slot is EMPTY outdoors (the game's own OnActivityFinished teardown ran)"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "sleep_s": 3,
+      "note": "several 0.5 s polls outdoors: no buttons-read warning may appear (oracle)"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "mark TEST T-WORKPANEL B OPEN-SHOP",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal=",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(1/1\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "solo consensus skip OUTDOORS to the next trading morning"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "sleep_s": 35
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the same shop, now OPEN"
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "interior settles"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "work on",
+      "expect_result": "^OK work on queued at ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[DEV\\] work on at ",
+          "within_s": 40
+        }
+      ],
+      "note": "ASSERT: a new work activity at an OPEN shop still starts (auto-start or the lever's Start)"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 43,
+      "role": "h",
+      "cmd": "work state",
+      "expect_result": "^OK work working=True activity=WorkActivity state=Running ",
+      "note": "ASSERT: working at the register"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "work off",
+      "abort_on_fail": false,
+      "expect_result": "^OK work off",
+      "note": "clean end"
+    },
+    {
+      "seq": 45,
+      "role": "h",
+      "cmd": "mark TEST T-WORKPANEL END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

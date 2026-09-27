@@ -1677,6 +1677,7 @@ namespace BigAmbitionsMP
 
                 if (_dockXRT != null && RectHit(_dockXRT, mp))
                 {
+                    Plugin.Logger.LogInfo($"[Rest] dock X pressed ({(loiter ? "loitering" : MPRestSync.ActivityName)})");
                     // Loiterers have no activity to stand from — the X ends the loiter session
                     // (which drops the vote). Seated: unchanged.
                     if (loiter) MPRestSync.SetLoitering(false);

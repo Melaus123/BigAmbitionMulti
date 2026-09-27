@@ -510,6 +510,9 @@ namespace BigAmbitionsMP
 
         public static void Tick()
         {
+#if BAMP_DEV
+            try { StockTraceProbe.Tick(); } catch { }   // PROBE-START/PROBE-END: P-STOCKTRACE per-frame watcher (log-only; disarmed by default)
+#endif
             if (!MPServer.IsRunning) return;
             if (_subsByBuilding.Count == 0) return;
             float now = UnityEngine.Time.realtimeSinceStartup;

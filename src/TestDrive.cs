@@ -950,6 +950,22 @@ namespace BigAmbitionsMP
                          + " " + CustomerEntrySync.ForwardDoubleReport(hbReg) + " ";
                 }
 
+                case "stocktrace":
+                {
+                    // PROBE-START: P-STOCKTRACE lever (2026-09-27, log-only). `stocktrace <num> <ba:street_x> <item>` arms the
+                    // probe on this machine: every later change of that shop's stock of <item> (the stockdelta count) is logged
+                    // as a '[StockTrace]' line with before/after, the hook, the caller and the message context. `stocktrace off`.
+                    string stArg = arg.Trim();
+                    if (stArg.Equals("off", StringComparison.OrdinalIgnoreCase)) return "OK stocktrace " + StockTraceProbe.Disarm();
+                    int stSp = stArg.LastIndexOf(' ');
+                    if (stSp <= 0) return "ERR usage: stocktrace <num> <ba:street_x> <item> | stocktrace off";
+                    string stShop = stArg.Substring(0, stSp).Trim(), stItem = stArg.Substring(stSp + 1).Trim();
+                    var stReg = GameStatePatcher.FindRegistration(stShop);
+                    if (stReg == null) return $"ERR no registration at '{stShop}'";
+                    return "OK stocktrace " + StockTraceProbe.Arm(stReg, stItem);
+                    // PROBE-END: P-STOCKTRACE lever
+                }
+
                 case "stockdelta":
                 {
                     // `stockdelta <num> <ba:street_x> [mark]` - H-HANDOFF-1 fold H2 STOCK oracle (CustomerHandoff.StockDelta):

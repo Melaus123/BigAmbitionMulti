@@ -357,7 +357,7 @@ namespace BigAmbitionsMP
             _helloClock.Reset();
             bool wasConnected = _connected;
             double secs = _connectClock.IsRunning ? _connectClock.Elapsed.TotalSeconds : -1;
-            Plugin.Logger.LogWarning($"[Client] Disconnected from host: {reason} after {secs:0.0}s via {LastConnectPath} ({LastConnectTargetClass}); session was {(wasConnected ? "ESTABLISHED" : "never established")}.");
+            Plugin.Logger.LogWarning($"[Client] Disconnected from host: {reason} after {secs:0.0}s via {LastConnectPath} ({LastConnectTargetClass}); session was {(wasConnected ? "ESTABLISHED" : _voluntaryDisconnect ? "closed by this player's own Disconnect" : "never established")}.");
             // Host can attach a HUMAN reason (kick/reject/ban) as disconnect
             // data — "RemoteConnectionClose" told the user nothing (2026-06-11).
             string why = reason;

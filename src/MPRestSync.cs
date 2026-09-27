@@ -559,7 +559,18 @@ namespace BigAmbitionsMP
                 // walk). Zero delay on every path; the round-73 nav heal stays as backstop.
                 bool startPressed = _curActRef != null && ReferenceEquals(_curActRef, _lastAutoStartedActRef);
                 string branch;
-                if (!startPressed && liveState == (int)PlayerActivityState.NotStarted && CancelButtonIndex >= 0)
+                // H-WORKPANEL-1 (user-approved 2026-09-27): a WorkActivity still NotStarted whose buttons cannot be read
+                // (outside a building its GetButtons throws at WorkActivity.cs:454, so CancelButtonIndex is -1) is closed
+                // by the Cancel button's own handler, WorkActivity.CancelWorking (:224-229) - never Finish(), which throws
+                // there before its own CancelWorking call. A readable Cancel button keeps the native-cancel branch below.
+                bool workRegMissing = act is global::PlayerActivity.WorkActivity && BuildingRegistrationMissing();
+                if (!startPressed && act is global::PlayerActivity.WorkActivity && liveState == (int)PlayerActivityState.NotStarted
+                    && (CancelButtonIndex < 0 || workRegMissing)
+                    && CloseNotStartedWork(act, workRegMissing ? "moved - stand-up outside the building" : "moved - stand-up with no readable Cancel button"))
+                {
+                    branch = "work panel closed (never started; WorkActivity.CancelWorking)";
+                }
+                else if (!startPressed && liveState == (int)PlayerActivityState.NotStarted && CancelButtonIndex >= 0)
                 {
                     branch = "native-cancel (never started)";
                     InvokeDockButton(CancelButtonIndex);
@@ -577,6 +588,7 @@ namespace BigAmbitionsMP
                 }
                 else branch = "no lever (heal backstops)";
                 Plugin.Logger.LogInfo($"[Rest] StandUp: liveState={liveState} startPressed={startPressed} → {branch}.");
+                _lastStandUpAt = Time.unscaledTime; _lastStandUpBranch = branch;   // part 2b: names a mod stand-up at the vote-OFF line
 
                 // NO force-clearing of the UI's activity slot here: the movement
                 // lock it tried to fix was actually the input-suppression latch
@@ -812,6 +824,7 @@ namespace BigAmbitionsMP
         // ── Per-frame tick (main thread, MP active + in game) ─────────────────
         public static void Tick()
         {
+            EnsureExitHookForWork();   // H-WORKPANEL-1
             // Taxi instant arrival runs at FRAME cadence (the 0.3s beat matters):
             // stop the ride's machine — its end handler teleports the player;
             // the clock never moved.
@@ -1209,7 +1222,7 @@ namespace BigAmbitionsMP
                 {
                     _localVoteActive = false;
                     SendVote(false, 0, "");
-                    Plugin.Logger.LogInfo("[Rest] vote OFF (stood up).");
+                    Plugin.Logger.LogInfo($"[Rest] vote OFF (stood up). Activity end: {(_lastEndReason.Length > 0 ? _lastEndReason : "not readable")}.");
                 }
                 else if (!SkipActive && NowMinutes() >= _localGoal - 0.1)
                 {
@@ -1291,6 +1304,119 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── H-WORKPANEL-1 (user-approved 2026-09-27; bundle 20260922-141939, host, own CLOSED car dealership) ─────────
+        // A work desk clicked at a closed own shop opens a WorkActivity in NotStarted with NO Start button (Start only
+        // when the shop opens within 2 h, WorkActivity.GetButtons :425-463). MP suppresses the native pause of
+        // ShowActivity, so the player can walk out with it open; outside, BuildingManager.buildingRegistration is null
+        // and every GetButtons read throws at :454 (this poll, Escape via PlayerActivityUI.OnPlayerActionPressed
+        // :445-472, the dock X / WASD StandUp -> Finish) and the slot stays occupied until a reload.
+        // THE CLOSE: the Cancel button's own handler, the private WorkActivity.CancelWorking (:224-229: state ->
+        // Finished, _stateBeforeFinishing = NotStarted; reads neither GetButtons nor the registration). The panel's own
+        // Update then runs the game's teardown, PlayerActivityUI.OnActivityFinished (PlayerActivityUI.cs:400-423:
+        // panel off, time control, slot cleared, activityfinished event) - the panel is re-activated here if it was
+        // inactive, exactly as the round-194 wedge heal does. NotStarted armed nothing physical (StartWorking :93-131
+        // sets the blocker / station employee only on arrival), so the state flip is the whole teardown - the same
+        // reasoning StandUp's native-cancel branch rests on. Triggers: (a) GlobalEvents.onExitBuilding (the game's
+        // exit signal, fired after the street teleport), (b) the mod's movement stand-up (StandUp) and (c) this 0.5 s
+        // poll, which skips the buttons read of such an activity when there is no registration (no log spam).
+        private static System.Reflection.MethodInfo? _cancelWorkingMi;
+        private static bool _cancelWorkingLooked, _cancelWorkingWarned;
+        private static Delegate? _exitForWorkDelegate;
+
+        private static bool BuildingRegistrationMissing()
+        {
+            try { return InstanceBehavior<BuildingManager>.Instance?.buildingRegistration == null; }
+            catch { return true; }
+        }
+
+        private static void EnsureExitHookForWork()
+        {
+            try
+            {
+                var cur = GlobalEvents.onExitBuilding;
+                if (_exitForWorkDelegate != null && cur != null && Array.IndexOf(cur.GetInvocationList(), _exitForWorkDelegate) >= 0) return;
+                GlobalEvents.onExitBuilding += _ => OnExitBuildingForWork();
+                var list = GlobalEvents.onExitBuilding?.GetInvocationList();
+                _exitForWorkDelegate = list != null && list.Length > 0 ? list[list.Length - 1] : null;
+            }
+            catch { }
+        }
+
+        private static void OnExitBuildingForWork()
+        {
+            try
+            {
+                var (act, _) = GetCurrentActivity();
+                if (act != null) CloseNotStartedWork(act, "left the building");
+            }
+            catch { }
+        }
+
+        /// <summary>H-WORKPANEL-1: close a NOT-STARTED WorkActivity through WorkActivity.CancelWorking. True when closed.
+        /// MP only (single-player keeps the native pause that makes this unreachable).</summary>
+        private static bool CloseNotStartedWork(object? act, string why)
+        {
+            try
+            {
+                if (!(MPServer.IsRunning || MPClient.IsClientInWorld)) return false;
+                if (act is not global::PlayerActivity.WorkActivity wa) return false;
+                if (wa.GetState() != global::PlayerActivityState.NotStarted) return false;
+                if (!_cancelWorkingLooked)
+                {
+                    _cancelWorkingLooked = true;
+                    _cancelWorkingMi = HarmonyLib.AccessTools.Method(typeof(global::PlayerActivity.WorkActivity), "CancelWorking");
+                }
+                if (_cancelWorkingMi == null)
+                {
+                    if (!_cancelWorkingWarned) { _cancelWorkingWarned = true; Plugin.Logger.LogWarning("[Rest] WorkActivity.CancelWorking not found - a not-started work panel cannot be closed after leaving."); }
+                    return false;
+                }
+                _cancelWorkingMi.Invoke(wa, null);
+                try
+                {
+                    var (ui, _) = GetActivityUiCached();
+                    if (ui is MonoBehaviour mb && !mb.gameObject.activeSelf) mb.gameObject.SetActive(true);   // its Update runs OnActivityFinished
+                }
+                catch { }
+                Plugin.Logger.LogInfo($"[Rest] work panel closed - not started and the player left ({why}).");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Rest] work panel close failed ({why}): {(ex.InnerException ?? ex).Message}");
+                return false;
+            }
+        }
+
+        // Part 2b (log-only, pre-approved 2026-09-27): why the last seated activity ended, read from the game's own
+        // state at the moment the slot emptied - printed next to '[Rest] vote OFF (stood up)'.
+        private static object? _lastSeenAct;
+        private static string _lastEndReason = "";
+        private static float _lastStandUpAt = -100f;
+        private static string _lastStandUpBranch = "";
+
+        private static string DescribeActivityEnd(object? act)
+        {
+            try
+            {
+                if (Time.unscaledTime - _lastStandUpAt < 2f) return $"stand-up by the mod ({_lastStandUpBranch})";
+                if (act == null) return "";
+                string nm = act.GetType().Name;
+                int st = -1, before = -1;
+                try { var m = act.GetType().GetMethod("GetState"); if (m != null) st = Convert.ToInt32(m.Invoke(act, null)); } catch { }
+                try { var m = act.GetType().GetMethod("GetStateBeforeFinishing"); if (m != null) before = Convert.ToInt32(m.Invoke(act, null)); } catch { }
+                float energy = float.NaN;
+                try { energy = SaveGameManager.Current != null ? SaveGameManager.Current.Energy : float.NaN; } catch { }
+                string why;
+                if (st != (int)PlayerActivityState.Finished) why = $"slot cleared while {(PlayerActivityState)st} (walk-over cancel)";
+                else if (before == (int)PlayerActivityState.NotStarted) why = "cancel (never started)";
+                else if (!float.IsNaN(energy) && energy <= 0f) why = "energy (out of energy)";
+                else why = $"finish (the game ended it from {(PlayerActivityState)before}: time up or Stop)";
+                return $"{why}; {nm} energy={energy:0.#}";
+            }
+            catch { return ""; }
+        }
+
         private static void UpdateSeated()
         {
             try
@@ -1300,6 +1426,8 @@ namespace BigAmbitionsMP
                 // every activity (Rest/Sleep/Work/Workout/Hygiene/Entertain/Study/Swimming/Paid). The taxi
                 // is NOT an IPlayerActivity, so it never reaches here — there is nothing to exclude.
                 bool seated = act != null;
+                if (!seated && Seated) _lastEndReason = DescribeActivityEnd(_lastSeenAct);   // part 2b
+                if (seated) _lastSeenAct = act;
                 if (seated != Seated)
                     Plugin.Logger.LogInfo($"[Rest] seated → {seated}{(seated ? $" ({nm})" : "")}");
                 Seated = seated;
@@ -1361,6 +1489,15 @@ namespace BigAmbitionsMP
                     }
                     catch { }
                 }
+                // H-WORKPANEL-1: a not-started WorkActivity with no building registration throws in GetButtons (:454) on
+                // every read - close it instead of reading (and never spam the buttons-read warning).
+                bool skipButtonsRead = false;
+                if (act is global::PlayerActivity.WorkActivity && ActivityState == (int)PlayerActivityState.NotStarted && BuildingRegistrationMissing())
+                {
+                    skipButtonsRead = true;
+                    CloseNotStartedWork(act, "outside a building - buttons poll");
+                }
+                if (!skipButtonsRead)
                 try
                 {
                     var gb = act!.GetType().GetMethod("GetButtons");

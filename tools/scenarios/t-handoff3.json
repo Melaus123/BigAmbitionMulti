@@ -20,6 +20,7 @@
   ],
   "oracles_present": [],
   "oracles_report": [
+    "\\[StockTrace\\] ",
     "\\[BookOnce\\] ",
     "\\[Handoff\\] body-only .*booked order before .* -> after ",
     "\\[Handoff\\] final rows accounted ",
@@ -333,6 +334,7 @@
       "note": "LEG 1 ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },
     {"seq": 102, "role": "h", "cmd": "stockdelta ${shop}", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sdC1Lost": "lostTotal=(\\d+)", "sdC1LostNamed": "lostNamed=(\\S+)", "sdC1LostUnx": "lostUnexplained=(\\d+)", "sdC1Bad": "bad=(\\S+)", "sdC1Once": "once=(\\S+)"}, "note": "STOCK ORACLE (fold S1 2026-09-27, HARD): stockOk=True needs the per-unit identity AND lostUnexplained=0 (every lost unit has a named cause: exitNative / pending) - the leg before this step"},
+    {"seq": 105, "role": "both", "cmd": "stocktrace ${shop} classiccheapmaleclothing", "expect_result": "^OK stocktrace armed ", "abort_on_fail": false, "note": "P-STOCKTRACE (2026-09-27, log-only): from here every change of this shop's classiccheapmaleclothing stock is logged on BOTH machines ('[StockTrace]' lines: before->after, hook, caller, message context) - the leg-2 missing unit (T-HANDOFF3-20260927-050743) must show up as one of them"},
     {"seq": 103, "role": "h", "cmd": "stockdelta ${shop} mark", "expect_result": "^OK stockdelta .* marked ", "note": "STOCK ORACLE mark before the leg"},
     {
       "seq": 38,
