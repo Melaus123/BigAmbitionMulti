@@ -9742,14 +9742,27 @@ namespace BigAmbitionsMP
                 // D3: the founder's name then the rest in join order. The game has no per-player company
                 // name (BusinessName is per building), so this is built from character names.
                 info.DisplayName = string.Join(" & ", info.MemberNamesOrdered);
-                // Slice 3: every building OPERATED by a group member (rental ledger; a member's own
-                // buildings are harmless in the list — the receiver's flip skips natively-rented regs).
+                // Slice 3: every building OPERATED by a group member (rental ledger), each with its TENANT in the
+                // parallel BuildingOwnerPids (H-MERGEROWNFLIP-1, v26). A member's own buildings stay in the list; the
+                // receiver's flip leaves out the keys whose tenant is itself - no longer the ones whose flag reads
+                // rented (a lease that ended locally, unreported, used to flip the member's OWN building).
+                // H-MERGEROWNFLIP-1 side note: an entry RESERVED for an offline member holds their STABLE id (the
+                // manifest restore, ~:379), which StableIdByPlayer (pid -> stable) cannot look up - such a building
+                // used to drop out of the company list. A value that is itself one of this group's stable ids now
+                // counts; its tenant is sent as "" (offline - never "me" on any machine).
                 foreach (var kv in BuildingOwners)
                 {
-                    string stable = kv.Value == "host" ? MPConfig.StableId
-                                  : StableIdByPlayer.TryGetValue(kv.Value, out var os) ? (os ?? "") : "";
+                    string ownerVal = kv.Value ?? "";
+                    string stable, ownerPid;
+                    if (ownerVal == "host")                                    { stable = MPConfig.StableId; ownerPid = MPConfig.PlayerId; }
+                    else if (StableIdByPlayer.TryGetValue(ownerVal, out var os)) { stable = os ?? "";         ownerPid = ownerVal; }
+                    else if (grp.Value.Contains(ownerVal))                     { stable = ownerVal;          ownerPid = ""; }   // reserved (absent owner)
+                    else                                                       { stable = "";                ownerPid = ""; }
                     if (!string.IsNullOrEmpty(stable) && grp.Value.Contains(stable))
+                    {
                         info.BuildingKeys.Add(kv.Key);
+                        info.BuildingOwnerPids.Add(ownerPid);
+                    }
                 }
                 pay.Groups.Add(info);
             }

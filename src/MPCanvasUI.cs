@@ -3436,7 +3436,7 @@ namespace BigAmbitionsMP
                 HamptonsAccess.Reset();   // registration→address cache, per-address log latches and the tenancy flip die with the scene
                 PassengerSync.Reset();    // passenger seats/locks die with the scene
                 MergerSync.ResetSceneState(); // merger runtime + pending-proposal UI state (same lifecycle as grants)
-                MergerFlip.Reset();           // flip tracking dies with the scene's regs (tick re-applies from state)
+                MergerFlip.Reset();           // H-MERGEROWNFLIP-1: flip table cleared only if a DIFFERENT save is loaded (same save = regs survived, parked ids kept)
                 MergerEmployeeSync.Reset();   // schedule write-back baselines die with the regs too (slice 5)
                 SharedShopSchedule.Reset();   // shared-shop editing baselines + sessions die with the regs (permission feature)
                 SharedShopStaff.Reset();      // shared-shop staffing state (permission feature)

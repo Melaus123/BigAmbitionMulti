@@ -810,8 +810,14 @@ namespace BigAmbitionsMP
         public List<string> MemberNames { get; set; } = new List<string>();
         public int          MemberCount { get; set; }
         /// <summary>AddressKeys of every building OPERATED by a group member (host-resolved from its
-        /// ownership map) — slice 3: each member's ownership-flip target set (minus their own).</summary>
+        /// ownership map) — slice 3: each member's ownership-flip target set, minus the keys whose
+        /// BuildingOwnerPids entry names that member (H-MERGEROWNFLIP-1).</summary>
         public List<string> BuildingKeys { get; set; } = new List<string>();
+        /// <summary>H-MERGEROWNFLIP-1 (v26): the rental-ledger TENANT of each BuildingKeys entry, PARALLEL to it
+        /// (same index), in PlayerId space: "host" is sent as the host's own PlayerId, a member who is OFFLINE (their
+        /// entry reserved under a stable id) as "" - which is never "me". MergerFlip decides "mine or a partner's"
+        /// from this, no longer from the building's RentedByPlayer flag.</summary>
+        public List<string> BuildingOwnerPids { get; set; } = new List<string>();
         /// <summary>Phase 1-A (D3) — the company's display name: the FOUNDER's name, then the other
         /// members' names in JOIN ORDER, joined with " &amp; ". The game has no per-player company name
         /// (only per-building BusinessName), so these are character names.</summary>
@@ -1711,7 +1717,11 @@ namespace BigAmbitionsMP
         //      delivered and the line would stay as silently skipped as it is today. No capability gate
         //      and no old-peer branch exist for it (project rule 2026-09-18), so mixed sessions refuse at
         //      Hello per the freeze rule.
-        public const int Version = 25;
+        // v26 (2026-09-26, H-MERGEROWNFLIP-1): MergerGroupInfo.BuildingOwnerPids - the tenant of every company
+        //      building, parallel to BuildingKeys. The flip now decides "mine or a partner's" from it; a v25 peer
+        //      would still decide from the building's flag and flip a member's OWN lapsed rental. No capability
+        //      gate and no old-peer branch (project rule 2026-09-18): mixed sessions refuse at Hello.
+        public const int Version = 26;
     }
 
     /// <summary>Sent by client on connect.</summary>

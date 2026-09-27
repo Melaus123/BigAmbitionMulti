@@ -27,9 +27,10 @@ namespace BigAmbitionsMP
     ///  • SAVE STRIP: the whole flip reverts around PerformLocalSave (same choke point + restore-in-
     ///    finally as the synthetic cashiers, ANTIPATTERNS Class 5) so a save can never claim
     ///    ownership of a partner's business.
-    ///  • RECONCILE TICK: desired state = the host-pushed building keys of MY merger group;
-    ///    membership/ownership changes and dissolve converge within a second, restoring parked
-    ///    rival identities exactly.
+    ///  • RECONCILE TICK: desired state = the host-pushed building keys of MY merger group whose
+    ///    rental-ledger tenant is NOT me (H-MERGEROWNFLIP-1: the ledger, never the building's own flag,
+    ///    decides "mine or a partner's"); membership/ownership changes and dissolve converge within a
+    ///    second, restoring parked rival identities exactly.
     ///
     /// INERTNESS: no merger → desired set empty → nothing ever flips; every veil push/pop is a
     /// no-op loop over an empty table.
@@ -41,6 +42,15 @@ namespace BigAmbitionsMP
         private static int   _veilDepth;
         private static float _nextTick;
         private static float _nextProbe;   // DIAG [FlipProbe] heartbeat throttle
+        // H-MERGEROWNFLIP-1 step 4: keys this machine RENTED natively while they sat in the flip table (OnNativeRent).
+        // They stay out of the flip and out of REPAIR until the ledger names me, the rent is rolled back (flag false)
+        // or AdoptWaitSeconds pass. Value = unscaled time of the rent.
+        private static readonly Dictionary<string, float> _adopted = new();
+        private const float AdoptWaitSeconds = 60f;
+        // H-MERGEROWNFLIP-1 step 6: the save object the flip table was built against (Reset keeps the table for it).
+        private static object? _tableSave;
+        private static int _stripSkipLogged;   // step 5 tripwire line budget (per table lifetime)
+        private const int StripSkipBudget = 20;
 
         public static int FlippedCount => _flipped.Count;
         public static bool IsFlipped(string addressKey) => !string.IsNullOrEmpty(addressKey) && _flipped.ContainsKey(addressKey);
@@ -99,6 +109,22 @@ namespace BigAmbitionsMP
         {
             if (UnityEngine.Time.unscaledTime < _nextTick) return;
             _nextTick = UnityEngine.Time.unscaledTime + 1f;
+            // H-MERGEROWNFLIP-1 fold F2: Reset may KEEP the table for the same save object; a table (or waiting list)
+            // built against a PREVIOUS world must never reach this one. Clear both WITHOUT touching building records
+            // (they belong to the old save). A transiently null Current is left alone (no records to reconcile then).
+            try
+            {
+                if ((_flipped.Count > 0 || _adopted.Count > 0) && SaveGameManager.Current != null && !ReferenceEquals(SaveGameManager.Current, _tableSave))
+                {
+                    int droppedFlips = _flipped.Count, droppedAdopted = _adopted.Count;
+                    _flipped.Clear(); _adopted.Clear(); _tableSave = null; _stripSkipLogged = 0;
+                    Plugin.Logger.LogWarning($"[Merger] flip table dropped: a different save is loaded ({droppedFlips} flip(s), {droppedAdopted} adopted key(s); building records untouched).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] flip table save check: {ex.Message}"); }
+            // H-MERGEROWNFLIP-1 fold F5: an adopted own rent expires on its OWN 60 s clock, not only when the
+            // reconcile loop happens to visit its building (a missing reg would otherwise keep it out of the flip forever).
+            try { ExpireAdopted(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] adopted expiry: {ex.Message}"); }
             try { MergerAbsence.Tick(); } catch { }   // P3-B: the host's PACED hand-over snapshots, one per tick
             try { CompanyBooks.Tick(); } catch { }    // P4a M0: the MEMBERSHIP EDGE - publish/apply on join, clear on the way out (nothing else fires on formation)
             try { CompanyFeed.Tick(); } catch { }     // P4b: the same edge for the shared transaction feed - a departed owner's rows go from the registry
@@ -120,10 +146,14 @@ namespace BigAmbitionsMP
                 try { MPServer.RebroadcastMergerState(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] state push: {ex.Message}"); }
             }
 
+            // PROBE-START: P-LEASEPROBE  (log-only; once per loaded world: Harmony patch owners on the lease methods)
+            try { LeaseProbe.Tick(); } catch { }
+            // PROBE-END: P-LEASEPROBE
+
             try
             {
                 var desired = DesiredKeys();
-                if (desired.Count == 0 && _flipped.Count == 0) return;   // inert path
+                if (desired.Count == 0 && _flipped.Count == 0 && _adopted.Count == 0) return;   // inert path
                 // DIAG [FlipProbe]: heartbeat whenever reconcile has real work-state — ties every
                 // stuck-flip report to whether the tick RAN and what it believed (10s cadence).
                 if (UnityEngine.Time.unscaledTime >= _nextProbe)
@@ -135,6 +165,11 @@ namespace BigAmbitionsMP
                 var regs = SaveGameManager.Current?.BuildingRegistrations;
                 if (regs == null) return;
 
+                // PROBE-START: P-LEASEPROBE  (log-only; once per loaded world, BEFORE its first flip: each company
+                // building's flag, business name and ledger tenant)
+                try { LeaseProbe.LoadDumpOnce(); } catch { }
+                // PROBE-END: P-LEASEPROBE
+
                 int flippedOnThisTick = 0;   // HQ-PARITY-6 P1
                 foreach (var reg in regs)
                 {
@@ -143,12 +178,28 @@ namespace BigAmbitionsMP
                     try { key = GameStateReader.AddressKey(reg); } catch { continue; }
                     if (string.IsNullOrEmpty(key)) continue;
 
+                    // H-MERGEROWNFLIP-1 step 4: an adopted own rent leaves the waiting list once the ledger names me
+                    // (the ordinary state), the rent was rolled back here (flag false), or the ledger never confirmed it.
+                    if (_adopted.Count > 0 && _adopted.TryGetValue(key, out var adoptedAt))
+                    {
+                        bool rentedNow = false; try { rentedNow = reg.RentedByPlayer; } catch { }
+                        if (LedgerSaysMine(key) || !rentedNow)
+                            _adopted.Remove(key);
+                        else if (UnityEngine.Time.unscaledTime - adoptedAt > AdoptWaitSeconds)
+                        {
+                            _adopted.Remove(key);
+                            TryLedgerOwner(key, out var adOwner);
+                            Plugin.Logger.LogWarning($"[Merger] adopted own rent '{key}' was not confirmed by the ledger in {AdoptWaitSeconds:0} s (tenant '{adOwner}') - handed back to the flip/REPAIR.");
+                        }
+                        else continue;   // still waiting for the ledger: neither REPAIR nor the flip touches it
+                    }
+
                     // CONTAMINATION REPAIR (2026-07-07 field runs 1-2): a save written while a flip
-                    // leaked now claims a partner's building as a NATIVE tenancy — the flip's
-                    // "genuinely mine" skip then makes it both un-flippable and un-revertable, and
-                    // the claim survives dissolve. Heal: RentedByPlayer on a building the host's
-                    // operator ledger attributes to ANOTHER player, outside an active flip, is never
-                    // legitimate — clear it. (Next tick re-flips it properly if we're merged.)
+                    // leaked now claims a partner's building as a NATIVE tenancy — the claim survives
+                    // dissolve. Heal: RentedByPlayer on a building the host's operator ledger attributes
+                    // to ANOTHER player, outside an active flip (and not an own rent still waiting for
+                    // the ledger, step 4 above), is never legitimate — clear it. (Next tick re-flips it
+                    // properly if we're merged.)
                     if (reg.RentedByPlayer && !_flipped.ContainsKey(key) && OwnedByAnother(key))
                     {
                         reg.RentedByPlayer = false;
@@ -157,18 +208,44 @@ namespace BigAmbitionsMP
                         continue;
                     }
 
-                    if (desired.Contains(key))
+                    if (desired.TryGetValue(key, out var ledgerOwner))
                     {
-                        if (_flipped.ContainsKey(key) || reg.RentedByPlayer) continue;   // already flipped / genuinely mine
+                        if (_flipped.ContainsKey(key)) continue;   // already flipped
+                        // H-MERGEROWNFLIP-1 step 3: the building's flag is NO LONGER the "genuinely mine" test -
+                        // DesiredKeys already left out every key whose ledger tenant is me. The flag used to decide
+                        // it, so a lease that ended here unreported (or a load after one) flipped a member's OWN
+                        // rental into a "partner building" (bundle 20260923-222227). Only a key this machine has NO
+                        // ledger answer for (null) keeps the old flag skip. A partner key that already reads rented
+                        // outside the table is REPAIR's job above.
+                        if (ledgerOwner == null && reg.RentedByPlayer) continue;
                         _flipped[key] = reg.businessOwnerRivalId ?? "";
+                        _tableSave = SaveGameManager.Current;
                         reg.businessOwnerRivalId = "";
                         reg.RentedByPlayer = true;
                         RefreshPoi(reg);
                         flippedOnThisTick++;
-                        Plugin.Logger.LogInfo($"[Merger] flip ON  '{key}' (company building now shows as own).");
+                        Plugin.Logger.LogInfo($"[Merger] flip ON  '{key}' (company building now shows as own; ledger tenant '{ledgerOwner ?? "?"}').");
+                        // PROBE-START: P-LEASEPROBE  (log-only; WARNING when the ledger names this machine's player)
+                        try { LeaseProbe.OnFlipOn(key); } catch { }
+                        // PROBE-END: P-LEASEPROBE
                     }
                     else if (_flipped.TryGetValue(key, out var parkedRival))
                     {
+                        // H-MERGEROWNFLIP-1 fold F1: the key left the desired set BECAUSE the ledger now names me (a
+                        // co-member hub sale whose ledger push beat the takeover, or a takeover this machine already
+                        // ran) - it is MY building now: ADOPT it (leave the table, keep the flag, clear the partner id)
+                        // instead of restoring the seller's identity and un-renting the buyer's own building.
+                        bool adoptOff = false;
+                        try { adoptOff = reg.RentedByPlayer && LedgerSaysMine(key); } catch { }
+                        if (adoptOff)
+                        {
+                            _flipped.Remove(key);
+                            reg.businessOwnerRivalId = "";
+                            try { CompanyLists.OnUnflipped(key); } catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] un-flip clear refused: {ex.Message}"); }
+                            RefreshPoi(reg);
+                            Plugin.Logger.LogInfo($"[Merger] flip OFF -> adopted '{key}' (ledger names me)");
+                            continue;
+                        }
                         reg.RentedByPlayer = false;
                         reg.businessOwnerRivalId = parkedRival;
                         _flipped.Remove(key);
@@ -209,15 +286,137 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Partner-owned building addressKeys of MY merger group (host-pushed via
-        /// MergerState.BuildingKeys). My OWN buildings are excluded — they're natively rented and
-        /// must never enter the flip table (the save strip would otherwise strip a real tenancy).</summary>
-        private static HashSet<string> DesiredKeys()
+        /// MergerState.BuildingKeys), each mapped to its ledger TENANT (null = this machine has no ledger
+        /// answer). H-MERGEROWNFLIP-1 step 2: my OWN buildings are excluded BY THE LEDGER - keys whose tenant
+        /// is me ("host" and my own id both, on the host) - so they never enter the flip table (the save
+        /// strip would otherwise strip a real tenancy). Own rents still waiting for the ledger (step 4) are
+        /// excluded too.</summary>
+        private static Dictionary<string, string?> DesiredKeys()
         {
-            var set = new HashSet<string>();
-            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return set;
+            var map = new Dictionary<string, string?>();
+            if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return map;
             foreach (var k in MergerSync.MyGroupBuildingKeys)
-                if (!string.IsNullOrEmpty(k)) set.Add(k);
-            return set;
+            {
+                if (string.IsNullOrEmpty(k) || map.ContainsKey(k) || _adopted.ContainsKey(k)) continue;
+                if (TryLedgerOwner(k, out var owner))
+                {
+                    if (!string.IsNullOrEmpty(owner) && owner == MPConfig.PlayerId) continue;   // the ledger says MINE
+                    map[k] = owner;
+                }
+                else map[k] = null;
+            }
+            return map;
+        }
+
+        /// <summary>H-MERGEROWNFLIP-1: the rental-ledger TENANT of a key, in PlayerId space, as THIS machine knows
+        /// it. Host: its live BuildingOwners ("host" = my id; a reserved offline owner's stable id is returned as
+        /// is - never my id). Client: MY company's host-pushed BuildingOwnerPids (an offline owner is ""). False
+        /// when there is no answer here (not a company building of mine on a client, not in the host's ledger, or
+        /// a payload whose owner list does not line up with its keys).</summary>
+        public static bool TryLedgerOwner(string key, out string owner)
+        {
+            owner = "";
+            if (string.IsNullOrEmpty(key)) return false;
+            try
+            {
+                if (MPServer.IsRunning)
+                {
+                    if (!MPServer.BuildingOwners.TryGetValue(key, out var o) || string.IsNullOrEmpty(o)) return false;
+                    owner = o == "host" ? MPConfig.PlayerId : o;
+                    return true;
+                }
+                if (!MPClient.IsClientInWorld) return false;
+                var g = MergerSync.MyGroup;
+                var keys = g?.BuildingKeys; var owners = g?.BuildingOwnerPids;
+                if (keys == null || owners == null || owners.Count != keys.Count) return false;
+                int i = keys.IndexOf(key);
+                if (i < 0) return false;
+                owner = owners[i] ?? "";
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>H-MERGEROWNFLIP-1: does the rental ledger name THIS machine's player as the tenant? Same
+        /// normalisation as OwnedByAnother ("host" and my own id are both me on the host). False when unknown.</summary>
+        public static bool LedgerSaysMine(string key)
+            => TryLedgerOwner(key, out var o) && !string.IsNullOrEmpty(o) && o == MPConfig.PlayerId;
+
+        /// <summary>H-MERGEROWNFLIP-1 step 9 (HOST): the ledger names ANOTHER player as the tenant - any non-empty
+        /// value other than "host" and my own id, which includes an offline member's reserved stable id.</summary>
+        public static bool HostLedgerNamesOther(string key, out string owner)
+        {
+            owner = "";
+            try
+            {
+                if (!MPServer.IsRunning || string.IsNullOrEmpty(key)) return false;
+                if (!MPServer.BuildingOwners.TryGetValue(key, out var o) || string.IsNullOrEmpty(o)) return false;
+                if (o == "host" || o == MPConfig.PlayerId) return false;
+                owner = o;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>H-MERGEROWNFLIP-1 fold F5: drop _adopted entries older than AdoptWaitSeconds, whatever the loop
+        /// visits. Quiet when the ledger already names me (the ordinary exit), else the same hand-back warning as the loop.</summary>
+        private static void ExpireAdopted()
+        {
+            if (_adopted.Count == 0) return;
+            float now = UnityEngine.Time.unscaledTime;
+            List<string>? expired = null;
+            foreach (var kv in _adopted)
+                if (now - kv.Value > AdoptWaitSeconds) (expired ??= new List<string>()).Add(kv.Key);
+            if (expired == null) return;
+            foreach (var k in expired)
+            {
+                _adopted.Remove(k);
+                if (LedgerSaysMine(k)) continue;
+                TryLedgerOwner(k, out var exOwner);
+                Plugin.Logger.LogWarning($"[Merger] adopted own rent '{k}' was not confirmed by the ledger in {AdoptWaitSeconds:0} s (tenant '{exOwner}') - handed back to the flip/REPAIR.");
+            }
+        }
+
+        /// <summary>H-MERGEROWNFLIP-1 (DEV lever read): is this key an own rent still waiting for the ledger?</summary>
+        public static bool IsAdopted(string key) => !string.IsNullOrEmpty(key) && _adopted.ContainsKey(key);
+
+        /// <summary>H-MERGEROWNFLIP-1 step 4, the ADOPT event (Patch_RentBuilding postfix and, fold F1, the
+        /// BuildingRegistration.AddToPlayer postfix that every takeover path runs - both roles): this machine
+        /// has just rented the building natively. If it sat in the flip table, it leaves it NOW - the flag stays
+        /// true (the native rent set it), the partner id is cleared rather than parked, and the key waits in
+        /// _adopted until the ledger names me, so neither the flip nor REPAIR takes the new lease back. A ledger
+        /// push that later makes a still-flipped key mine is the ordinary flip OFF in Tick. MAIN THREAD.</summary>
+        public static void OnNativeRent(string key)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(key) || !_flipped.TryGetValue(key, out var parked)) return;
+                _flipped.Remove(key);
+                _adopted[key] = UnityEngine.Time.unscaledTime;
+                var reg = GameStatePatcher.FindRegistration(key);
+                if (reg != null)
+                {
+                    reg.RentedByPlayer = true;
+                    reg.businessOwnerRivalId = "";
+                    RefreshPoi(reg);
+                }
+                try { CompanyLists.OnUnflipped(key); } catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] un-flip clear refused: {ex.Message}"); }   // the partner's display copies leave with the flip
+                Plugin.Logger.LogWarning($"[Merger] own rent ADOPTED '{key}': it was flipped (partner '{parked}'); it leaves the flip table, stays rented here, the partner id is cleared.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] adopt own rent '{key}': {ex.Message}"); }
+        }
+
+        /// <summary>H-MERGEROWNFLIP-1 step 5: the save strip, the veil and the serve scope never revert a key the
+        /// ledger calls mine. After steps 2-4 no such key can be in the table - this line is the regression tripwire.</summary>
+        private static bool SkipOwnLease(string key, string pass)
+        {
+            if (!LedgerSaysMine(key)) return false;
+            if (_stripSkipLogged < StripSkipBudget)
+            {
+                _stripSkipLogged++;
+                Plugin.Logger.LogWarning($"[Merger] strip skipped own lease {key} ({pass}; the ledger names this player - it should never be in the flip table){(_stripSkipLogged == StripSkipBudget ? " (line budget reached)" : "")}.");
+            }
+            return true;
         }
 
         /// <summary>Refresh the city-map POI after a flip transition — the same calls the native
@@ -323,6 +522,9 @@ namespace BigAmbitionsMP
                     // wage/rent/marketing/summary passes must see it as owned. One machine only (a mark
                     // names a single simulator), and NEVER for the save strip (SaveStripPush: false).
                     if (honourSimulated && MergerAbsence.SimulatesHere(key)) continue;
+                    // H-MERGEROWNFLIP-1 step 5: never revert (or re-flip) a lease the ledger calls mine. Only the
+                    // revert direction logs, so one veiled pass writes one tripwire line, not two.
+                    if (flip ? LedgerSaysMine(key) : SkipOwnLease(key, honourSimulated ? "veil" : "save strip")) continue;
                     ApplyOne(reg, parkedRival, flip);
                 }
             }
@@ -382,6 +584,7 @@ namespace BigAmbitionsMP
                 // absent owner is the ONLY machine running that shop, so its serve chain must keep booking
                 // locally — leave it flipped.
                 if (MergerAbsence.SimulatesHere(key)) return;
+                if (SkipOwnLease(key, "serve scope")) return;   // H-MERGEROWNFLIP-1 step 5
                 _scopeReg = reg; _scopeParked = parkedRival ?? "";
                 ApplyOne(reg, _scopeParked, flip: false);
             }
@@ -403,11 +606,21 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] serve scope pop: {ex.Message}"); }
         }
 
-        /// <summary>Scene boundary: the regs died with the scene — clear tracking WITHOUT touching
-        /// objects (the fresh scene's regs arrive unflipped; the tick re-applies from state).</summary>
+        /// <summary>Scene boundary: clear tracking WITHOUT touching objects - but, H-MERGEROWNFLIP-1 step 6, the
+        /// FLIP TABLE only when a DIFFERENT save object is loaded. The game-scene load that follows a load keeps
+        /// the same building records (Confirmed, bundle 20260923-222227: six flips made during Loading still read
+        /// rented after 'Game scene loaded'); clearing the table there lost every parked partner id and left the
+        /// survivors to REPAIR. Kept only with no veil and no serve scope up - either leaves its regs at native
+        /// truth, which an empty table matches. The group model is cleared just before this call
+        /// (MergerSync.ResetSceneState), so kept flips go OFF (parked ids restored) until the next merger state
+        /// re-flips them.</summary>
         public static void Reset()
         {
-            _flipped.Clear(); _veilDepth = 0; _saveStrip = false;
+            bool keep = false;
+            try { keep = _flipped.Count > 0 && _veilDepth == 0 && _scopeDepth == 0 && _tableSave != null && ReferenceEquals(SaveGameManager.Current, _tableSave); } catch { }
+            if (keep) Plugin.Logger.LogInfo($"[Merger] scene reset KEPT {_flipped.Count} flip(s): the same save's building records are still loaded.");
+            else { _flipped.Clear(); _adopted.Clear(); _tableSave = null; _stripSkipLogged = 0; }
+            _veilDepth = 0; _saveStrip = false;
             // PHASE 4a: the books overlay clears its TRACKING on the same contract - no RemoveAll, because
             // by the time this runs a DIFFERENT save's records are already loaded (review r2 M2). The
             // active clear on dissolve/unmerge/disconnect is CompanyBooks.Tick's membership edge.

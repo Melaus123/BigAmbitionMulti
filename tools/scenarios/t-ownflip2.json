@@ -1,0 +1,272 @@
+{
+  "id": "T-OWNFLIP2",
+  "title": "H-MERGEROWNFLIP-1 part A, scenarios 2 + 4: (2) the HOST presses Rent (BizManPresentation.RentBuilding) on a building the ledger gives the merged client - refused silently with the log line, no host rent, host money unchanged, the ledger keeps the client; (4) P-LEASEPROBE: the world-ready Harmony patch-owner dump on both machines, and a CLIENT terminate (the BizMan confirm handler) writes enter/exit-or-throw lines and ONE deposit-return stack; afterwards the member's lapsed lease is NOT flipped on the member. Ends dissolved.",
+  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger). The client's shop is discovered on the host (first flipped key). Dev build with the H-MERGEROWNFLIP-1 levers `ownflip <addr>`, `bizrent <addr>`, `bizterminate <addr>` (they call the BizMan page's own handlers on a bare page object, so every Harmony patch runs; the terminate handler's last line re-enables the page's UI and throws on the bare object AFTER all lease state is written - the throw skips the native method's postfixes, including the vacate report, which reproduces bundle 222227's unreported lease end) plus forrent / rent / vacate / mergestatus.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true
+  },
+  "oracles_absent": [
+    "HarmonyException",
+    "Patching exception",
+    "Patch class .* FAILED",
+    "\\[LeaseProbe\\] flip ON of a key the ledger names MINE",
+    "\\[Merger\\] strip skipped own lease",
+    "\\[Conflict\\] DOUBLE TENANCY",
+    "\\[Merger\\] host rent backstop",
+    "\\[Patch\\] Host rented "
+  ],
+  "oracles_present": [
+    {
+      "role": "h",
+      "regex": "\\[LeaseProbe\\] patches on BizManPresentation\\.OnTerminateContractConfirm:"
+    },
+    {
+      "role": "c",
+      "regex": "\\[LeaseProbe\\] patches on HudConfirm\\.Show\\("
+    }
+  ],
+  "oracles_report": [
+    "\\[LeaseProbe\\] patches on ",
+    "\\[LeaseProbe\\] load: ",
+    "\\[LeaseProbe\\] (enter|exit|throw) ",
+    "\\[LeaseProbe\\] deposit-return ",
+    "\\[Merger\\] host rent refused",
+    "\\[Patch\\] Client unrented",
+    "\\[Merger\\] flip ON "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP2 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 55,
+      "note": "both worlds settle (run 1: 35 s was not enough - the host read settled=False)"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "note": "the world-ready patch-owner dump lands while the settle sleep runs - asserted by oracles_present (run 2: an expect_log here searched only from the step start and missed it)"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "note": "the world-ready patch-owner dump lands while the settle sleep runs - asserted by oracles_present (run 2: an expect_log here searched only from the step start and missed it)"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "fx-hq1 loads a player inside a building"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9].*keys=\\['",
+      "capture": {
+        "cShop": "keys=\\['([^']+)'"
+      },
+      "note": "PREMISE: merged; a building the ledger gives the client"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "ownflip ${cShop}",
+      "expect_result": "^OK ownflip .* flipped=True .*ledger='${clientPid}' mine=False",
+      "note": "PREMISE: the host's ledger names the client for it"
+    },
+    {
+      "seq": 14,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP2 HOST-RENT-GUARD",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "bizrent ${cShop}",
+      "expect_result": "^OK bizrent key='${cShop}' money=([0-9.-]+)->\\1 same=True",
+      "refute_result": "threw=",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] host rent refused: ${cShop} held by ${clientPid}",
+          "within_s": 5
+        }
+      ],
+      "note": "THE ASSERTION (2): the host's Rent press is refused before any money moves, silently, with the log line"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "ownflip ${cShop}",
+      "expect_result": "^OK ownflip .* flipped=True .*ledger='${clientPid}' mine=False",
+      "note": "the ledger still names the client; the building is still a flipped partner building on the host"
+    },
+    {
+      "seq": 17,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP2 CLIENT-TERMINATE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "forrent retail",
+      "expect_result": "^OK [1-9][0-9]* for-rent: ",
+      "capture": {
+        "newShop": "for-rent: ([^|]+?)(?: \\||$)"
+      }
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "rent ${newShop}",
+      "expect_result": "^OK RentBuilding invoked"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "sleep_s": 15,
+      "note": "ledger stamp + the 10 s merger push"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "ownflip ${newShop}",
+      "expect_result": "^OK ownflip .* rented=True flipped=False adopted=False truly=True ledger='${clientPid}' mine=True",
+      "note": "PREMISE: the member's own new lease, tenant = me"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "bizterminate ${newShop}",
+      "expect_result": "^OK bizterminate key='${newShop}' .* rented=False",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[LeaseProbe\\] enter OnTerminateContractConfirm: '${newShop}' rented=True",
+          "within_s": 5
+        },
+        {
+          "role": "c",
+          "regex": "\\[LeaseProbe\\] deposit-return ba:transaction_depositreturn(furniture)? [0-9.,-]+ at '${newShop}' .* stack: .*BizManPresentation",
+          "within_s": 5
+        },
+        {
+          "role": "c",
+          "regex": "\\[LeaseProbe\\] (exit|throw) OnTerminateContractConfirm",
+          "within_s": 5
+        }
+      ],
+      "note": "THE ASSERTION (4): the probe brackets the terminate and names the deposit-return path with a stack"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "sleep_s": 15,
+      "note": "two flip ticks and one merger push"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "ownflip ${newShop}",
+      "expect_result": "^OK ownflip .* rented=False flipped=False ",
+      "note": "the lapsed OWN lease is NOT flipped into a 'partner building' (before the fix a flag-false company key flipped ON). If the throw skipped the vacate report the ledger still reads mine=True here - reported, not asserted"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "vacate ${newShop}",
+      "expect_result": "^OK",
+      "abort_on_fail": false,
+      "note": "clean the ledger (the vacate the throw skipped)"
+    },
+    {
+      "seq": 26,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP2 DISSOLVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 31,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP2 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

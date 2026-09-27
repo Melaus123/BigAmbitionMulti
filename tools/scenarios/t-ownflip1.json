@@ -1,0 +1,377 @@
+{
+  "id": "T-OWNFLIP1",
+  "title": "H-MERGEROWNFLIP-1 part A, scenarios 1 + 3: a merged MEMBER rents a building while merged, the company saves and reloads, and the member's own buildings (the new rental and its standing shop) never enter the flip table on the member - no 'flip ON' of a key the ledger names MINE, no save-strip skip, both businesses intact on both machines, the partner's shop still flipped; no false DOUBLE TENANCY on any flipped partner shop. Ends dissolved. Also (scenario 2, cheap): the host's Rent press on the client's building is refused silently.",
+  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger so tools/regress.py resets it with --keep-merger). Host melaus runs vars.ownerShop. The client's own shop is DISCOVERED on the host (the first key the host holds flipped = a building the ledger gives the client) and its name captured as the 'business intact' baseline. Dev build with the H-MERGEROWNFLIP-1 lever `ownflip <addr>` plus forrent / rent / autosave / hostload / acceptjoin / mergestatus. The reload follows T-WALLETDUPE: the client drops, the host loads the slot the autosave wrote, the client relaunches and joins.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "ownerShop": "20 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "HarmonyException",
+    "Patching exception",
+    "Patch class .* FAILED",
+    "\\[LeaseProbe\\] flip ON of a key the ledger names MINE",
+    "\\[Merger\\] strip skipped own lease",
+    "\\[Conflict\\] DOUBLE TENANCY",
+    "\\[Merger\\] host rent backstop",
+    "\\[Patch\\] Host rented "
+  ],
+  "oracles_report": [
+    "\\[LeaseProbe\\] load: ",
+    "\\[LeaseProbe\\] patches on ",
+    "\\[Merger\\] scene reset KEPT",
+    "\\[Merger\\] own rent ADOPTED",
+    "\\[Merger\\] REPAIR",
+    "\\[Merger\\] flip ON ",
+    "\\[Merger\\] flip OFF",
+    "\\[Merger\\] host rent refused"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP1 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 55,
+      "note": "both worlds settle (T-OWNFLIP2 run 1: 35 s was not enough); the host's 10 s merger push has run"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9].*keys=\\['",
+      "capture": {
+        "cShop": "keys=\\['([^']+)'"
+      },
+      "note": "PREMISE: merged; the first building the host holds flipped is one the ledger gives the client"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "ownflip ${cShop}",
+      "expect_result": "^OK ownflip .* flipped=True .*ledger='${clientPid}' mine=False",
+      "note": "PREMISE (host): the client's shop is a flipped partner building here, tenant = the client"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "ownflip ${cShop}",
+      "expect_result": "^OK ownflip .* rented=True flipped=False adopted=False truly=True ledger='${clientPid}' mine=True name='[^']+'",
+      "capture": {
+        "cName": "name='([^']+)'"
+      },
+      "note": "PREMISE (client): its own shop - rented natively, NOT flipped, the pushed ledger tenant is the client itself; the business name is the 'intact' baseline"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "ownflip ${ownerShop}",
+      "expect_result": "^OK ownflip .* flipped=True .*ledger='${hostPid}' mine=False",
+      "note": "PREMISE: the host's shop is a flipped partner building on the client"
+    },
+    {
+      "seq": 14,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP1 HOST-RENT-GUARD",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "bizrent ${cShop}",
+      "expect_result": "^OK bizrent key='${cShop}' money=([0-9.-]+)->\\1 same=True",
+      "refute_result": "threw=",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] host rent refused: ${cShop} held by ${clientPid}",
+          "within_s": 5
+        }
+      ],
+      "note": "scenario 2 (also in T-OWNFLIP2): the host's Rent press on a building the ledger gives the client is refused silently before any money moves"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "ownflip ${cShop}",
+      "expect_result": "^OK ownflip .* flipped=True .*ledger='${clientPid}' mine=False",
+      "note": "the ledger keeps the client"
+    },
+    {
+      "seq": 17,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP1 RENT-WHILE-MERGED",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "forrent retail",
+      "expect_result": "^OK [1-9][0-9]* for-rent: ",
+      "capture": {
+        "newShop": "for-rent: ([^|]+?)(?: \\||$)"
+      }
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "rent ${newShop}",
+      "expect_result": "^OK RentBuilding invoked",
+      "note": "the member rents natively (BuildingHelper.RentBuilding -> Patch_RentBuilding -> RentRequest to the host)"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "sleep_s": 15,
+      "note": "the host stamps the ledger; its 10 s merger push carries the new key + tenant to both flip sets"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "ownflip ${newShop}",
+      "expect_result": "^OK ownflip .* rented=True flipped=False adopted=False truly=True ledger='${clientPid}' mine=True",
+      "note": "the member's NEW rental: in the company list, tenant = me, never flipped here"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "ownflip ${newShop}",
+      "expect_result": "^OK ownflip .* flipped=True .*ledger='${clientPid}' mine=False",
+      "note": "the host shows the member's new rental as a company building (flipped)"
+    },
+    {
+      "seq": 23,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP1 SAVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "autosave",
+      "expect_result": "^OK HostSaveNow\\('autosave'\\) invoked slot=[^ ]+",
+      "capture": {
+        "slot": "slot=([^ ]+)"
+      }
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the client's upload reaches the host and the slot manifest is stamped before the load"
+    },
+    {
+      "seq": 26,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP1 RELOAD",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "drop": true,
+      "note": "as T-WALLETDUPE: the member leaves, the host loads the save, the member comes back"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "hostload ${slot}",
+      "expect_result": "^OK StartLoadGame\\('${slot}'\\) invoked"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "sleep_s": 40,
+      "note": "the host's world loads"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "relaunch": true
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "sleep_s": 45,
+      "note": "the client is served the slot's save and settles; merger pushes arrive"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 37,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP1 AFTER-RELOAD",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 38,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "note": "still merged; partner buildings flipped again"
+    },
+    {
+      "seq": 39,
+      "role": "c",
+      "cmd": "ownflip ${newShop}",
+      "expect_result": "^OK ownflip .* rented=True flipped=False adopted=False truly=True ledger='${clientPid}' mine=True",
+      "note": "THE ASSERTION: the rental made while merged came back as the member's OWN lease (the save did not strip it) and was not flipped"
+    },
+    {
+      "seq": 40,
+      "role": "c",
+      "cmd": "ownflip ${cShop}",
+      "expect_result": "^OK ownflip .* rented=True flipped=False .*truly=True ledger='${clientPid}' mine=True name='${cName}'",
+      "note": "the member's standing shop: own, not flipped, business intact"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "ownflip ${cShop}",
+      "expect_result": "^OK ownflip .* flipped=True .*ledger='${clientPid}' mine=False name='${cName}'",
+      "note": "and intact on the host (a flipped partner building there)"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "ownflip ${newShop}",
+      "expect_result": "^OK ownflip .* flipped=True .*ledger='${clientPid}'"
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "ownflip ${ownerShop}",
+      "expect_result": "^OK ownflip .* flipped=True .*ledger='${hostPid}' mine=False",
+      "note": "the partner's shop is still a flipped company building on the member"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "ownflip ${ownerShop}",
+      "expect_result": "^OK ownflip .* rented=True flipped=False .*mine=True",
+      "note": "and the host's own shop is its own (the flip no longer reads the flag on the host either)"
+    },
+    {
+      "seq": 45,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP1 DISSOLVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 46,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 48,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 49,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 50,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP1 END",
+      "expect_result": "OK MARK"
+    }
+  ],
+  "oracles_present": [
+    {
+      "role": "h",
+      "regex": "\\[LeaseProbe\\] patches on BizManPresentation\\.OnTerminateContractConfirm:"
+    },
+    {
+      "role": "c",
+      "regex": "\\[LeaseProbe\\] patches on HudConfirm\\.Show\\("
+    }
+  ]
+}

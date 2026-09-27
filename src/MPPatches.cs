@@ -107,6 +107,12 @@ namespace BigAmbitionsMP
 
             static void Postfix(Building building, float dailyRent, float lastDeposit)
             {
+                // H-MERGEROWNFLIP-1 step 4 (both roles): a native rent of a key that sits in the merger flip table
+                // ADOPTS it - it leaves the table, stays rented, the partner id is cleared - so the flip and the
+                // save strip never treat this machine's new lease as a partner's building.
+                try { if (MPServer.IsRunning || MPClient.IsConnected) MergerFlip.OnNativeRent(GameStateReader.AddressKey(building)); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] adopt hook: {ex.Message}"); }
+
                 // Round-267 (field 20260815-134731): the owner-interior publisher enrolls on
                 // BUILDING ENTRY — a client renting the building they were ALREADY INSIDE fired
                 // the entry edge before ownership, so nothing they placed ever published and the
@@ -137,10 +143,72 @@ namespace BigAmbitionsMP
                 if (SuppressNextRentRequest) return;   // already handled
 
                 var key = GameStateReader.AddressKey(building);
+                // H-MERGEROWNFLIP-1 step 9 BACKSTOP: the host's own rent never overwrites a ledger entry naming
+                // ANOTHER player (Confirmed route C, bundle 20260923-222227: the host rented a member's building while
+                // they were offline and the ledger flipped to "host"). The BizMan button is refused before any money
+                // moves (Patch_BizMan_RentBuilding_HostLedgerGuard); a rent reaching here anyway (another caller of
+                // BuildingHelper.RentBuilding) keeps the ledger as it is - nothing is recorded or broadcast.
+                if (MergerFlip.HostLedgerNamesOther(key, out var heldBy))
+                {
+                    Plugin.Logger.LogWarning($"[Merger] host rent backstop: the ledger keeps {key} with {heldBy} - this machine's native rent is not recorded or broadcast.");
+                    return;
+                }
                 MPServer.BuildingOwners[key] = "host";
                 MPServer.BroadcastRentConfirmToClients(key, dailyRent, lastDeposit);
                 MPServer.RefreshBuildingAccess();   // housing: guests granted housing can now enter this newly-rented building
                 Plugin.Logger.LogInfo($"[Patch] Host rented {key}, broadcasted to clients.");
+            }
+        }
+
+        // ── Patch: BuildingRegistration.AddToPlayer (merger ADOPT on every takeover) ──
+        // H-MERGEROWNFLIP-1 fold F1: a co-member hub sale sets the buyer's tenancy through
+        // BizManPresentation.OvertakeBusiness -> BuildingRegistration.AddToPlayer (decompile BuildingRegistration.cs
+        // :356-360; MPOffers.BuyerApplyFinalize), NOT through BuildingHelper.RentBuilding, so Patch_RentBuilding's
+        // adopt hook never saw it and the flip OFF later un-rented the buyer's own building. AddToPlayer is the
+        // common tail of every takeover path; OnNativeRent is a no-op for a key that is not flipped (and idempotent
+        // when a native rent also reaches Patch_RentBuilding). Session only; either message order is covered (the
+        // ledger-first order is the flip-OFF adopt in MergerFlip.Tick).
+        [HarmonyPatch(typeof(BuildingRegistration), nameof(BuildingRegistration.AddToPlayer))]
+        public static class Patch_BuildingRegistration_AddToPlayer_MergerAdopt
+        {
+            static void Postfix(BuildingRegistration __instance)
+            {
+                try
+                {
+                    if (__instance == null || !__instance.RentedByPlayer) return;
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    if (MergerFlip.FlippedCount == 0) return;
+                    MergerFlip.OnNativeRent(GameStateReader.AddressKey(__instance));
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] takeover adopt hook: {ex.Message}"); }
+            }
+        }
+
+        // ── Patch: BizManPresentation.RentBuilding (HOST rent guard) ──────────
+        // H-MERGEROWNFLIP-1 step 9 (user ruling 2026-09-26: refuse SILENTLY and log - no notice, no text). A client's
+        // rent request is already refused when the ledger names someone else (MPServer HandleRentRequest); the
+        // host's OWN rent had no such check and overwrote a member's ledger entry (route C, bundle 20260923-222227).
+        // The guard sits on the BizMan button handler, not on BuildingHelper.RentBuilding, because the handler takes
+        // the deposit and the first day's rent (BizManPresentation.cs ~:566-590) BEFORE it calls the helper.
+        // "Another player" = any non-empty ledger value other than "host" and my own id, which includes a reserved
+        // offline member (MPServer ~:379). Host only; inert out of a session.
+        [HarmonyPatch(typeof(BizManPresentation), nameof(BizManPresentation.RentBuilding))]
+        public static class Patch_BizMan_RentBuilding_HostLedgerGuard
+        {
+            static bool Prefix(BizManPresentation __instance)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning) return true;
+                    var bm  = AccessTools.Field(typeof(BizManPresentation), "bizManBusiness")?.GetValue(__instance) as BizManBusiness;
+                    var reg = bm?.buildingRegistration;
+                    if (reg == null) return true;
+                    string key = GameStateReader.AddressKey(reg);
+                    if (!MergerFlip.HostLedgerNamesOther(key, out var owner)) return true;
+                    Plugin.Logger.LogWarning($"[Merger] host rent refused: {key} held by {owner}");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] host rent guard: {ex.Message}"); return true; }
             }
         }
 

@@ -2089,6 +2089,62 @@ namespace BigAmbitionsMP
                          + $"name='{qname}' days={qdays} shifts={qshifts} flipped={MergerFlip.IsFlipped(qkey)} parked='{MergerFlip.ParkedRunner(qkey)}'";
                 }
 
+                case "ownflip":
+                {
+                    // H-MERGEROWNFLIP-1 (read-only): one address as the flip sees it - the native flag, the flip table,
+                    // the adopt wait list, TrulyMine, and the rental-ledger tenant this machine knows (host: its live
+                    // ledger; client: the company's pushed owner ids; '?' = no answer here).
+                    if (arg.Length == 0) return "ERR address key required";
+                    var ofreg = GameStatePatcher.FindRegistration(arg);
+                    if (ofreg == null) return $"ERR no registration for '{arg}'";
+                    string ofkey = arg; try { ofkey = GameStateReader.AddressKey(ofreg); } catch { }
+                    bool ofKnown = MergerFlip.TryLedgerOwner(ofkey, out var ofOwner);
+                    string ofname = "", oftype = "";
+                    try { ofname = ofreg.BusinessName?.ToString() ?? ""; } catch { }
+                    try { oftype = ofreg.businessTypeName?.ToString() ?? ""; } catch { }
+                    return $"OK ownflip key='{ofkey}' rented={ofreg.RentedByPlayer} flipped={MergerFlip.IsFlipped(ofkey)} adopted={MergerFlip.IsAdopted(ofkey)} "
+                         + $"truly={MergerFlip.TrulyMine(ofreg)} ledger='{(ofKnown ? ofOwner : "?")}' mine={MergerFlip.LedgerSaysMine(ofkey)} name='{ofname}' type={oftype}";
+                }
+
+                case "bizrent":
+                case "bizterminate":
+                {
+                    // H-MERGEROWNFLIP-1 (DEV lever): runs the BizMan page's OWN handler for an address -
+                    // BizManPresentation.RentBuilding (the rent button: deposit + first rent + BuildingHelper.RentBuilding)
+                    // or OnTerminateContractConfirm (the terminate confirm: interior sale / deposit refund + vacate) - so
+                    // every Harmony patch on it runs exactly as for a click. The page itself is not opened: a bare
+                    // presentation object carries only the page's business link (building + registration), which is all
+                    // either handler reads. Money is read before and after in the same frame.
+                    var bargs = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (bargs.Length < 2) return $"ERR usage: {verb} <num> <ba:street_x>";
+                    string baddr = bargs[0] + " " + bargs[1];
+                    var bgi = SaveGameManager.Current;
+                    if (bgi == null) return "ERR no game instance";
+                    var breg = GameStatePatcher.FindRegistration(baddr);
+                    if (breg == null) return $"ERR no registration for '{baddr}'";
+                    var bbld = Helpers.BuildingHelper.GetBuilding(breg.Address);
+                    if (bbld == null) return $"ERR no Building for '{baddr}'";
+                    var bpres = (BizManPresentation)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(BizManPresentation));
+                    var bbiz  = (BizManBusiness)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(BizManBusiness));
+                    bbiz.building = bbld;
+                    bbiz.buildingRegistration = breg;
+                    var bfield = HarmonyLib.AccessTools.Field(typeof(BizManPresentation), "bizManBusiness");
+                    if (bfield == null) return "ERR BizManPresentation.bizManBusiness not found";
+                    bfield.SetValue(bpres, bbiz);
+                    float bBefore = bgi.Money;
+                    string bErr = "";
+                    try
+                    {
+                        if (verb == "bizrent") bpres.RentBuilding();
+                        else HarmonyLib.AccessTools.Method(typeof(BizManPresentation), "OnTerminateContractConfirm").Invoke(bpres, null);
+                    }
+                    catch (Exception bex) { var be = bex.InnerException ?? bex; bErr = be.GetType().Name + ": " + be.Message; }
+                    float bAfter = bgi.Money;
+                    var binv = System.Globalization.CultureInfo.InvariantCulture;
+                    return $"OK {verb} key='{baddr}' money={bBefore.ToString("F2", binv)}->{bAfter.ToString("F2", binv)} same={(bBefore == bAfter)} "
+                         + $"rented={breg.RentedByPlayer} flipped={MergerFlip.IsFlipped(baddr)}" + (bErr.Length > 0 ? $" threw='{bErr}'" : "");
+                }
+
                 case "employees":
                 {
                     // RAW roster (the no-arg EmployeeHelper.GetEmployeeInstances() - the same list

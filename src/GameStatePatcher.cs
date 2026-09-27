@@ -5687,10 +5687,14 @@ namespace BigAmbitionsMP
                 // attribution.  Other players' shops + AI businesses are NOT "mine" → the host's relay applies
                 // normally.  (NOTE: IsAnyPlayerBusiness is the WRONG test here — it's true for ANY player's
                 // shop and false for your OWN freshly-loaded shop, because it keys on the empty businessOwnerRivalId.)
+                // H-MERGEROWNFLIP-1 step 7: the rental LEDGER naming me also makes it mine. A member whose own shop had
+                // been wrongly flipped read TrulyMine false, and a stale record naming someone else then overwrote its
+                // business (the Xulturium loss, bundle 20260923-222227).
                 bool receiverOwnsThis = false;
                 try
                 {
                     receiverOwnsThis = IsReceiversOwnBusiness(reg)
+                                     || MergerFlip.LedgerSaysMine(info.AddressKey ?? "")
                                      || (!string.IsNullOrEmpty(info.OwnerPlayerId) && info.OwnerPlayerId == MPConfig.PlayerId)
                                      // Rent-vs-deed split (2026-07-07): OwnerPlayerId is tenancy-only now;
                                      // a building I BOUGHT (deed) is mine even with no business in it.
@@ -5704,9 +5708,11 @@ namespace BigAmbitionsMP
                 // below will treat it as a foreign shop and overwrite name/sign/schedule. Field
                 // case 57-fifthavenue (2026-07-21-204010): the client's own shop was repeatedly
                 // renamed by the host's record whenever attribution flapped. Once per address.
+                // H-MERGEROWNFLIP-1 step 7: TrulyMine, not the raw flag - a merger-flipped PARTNER shop reads
+                // rented too and raised a false alarm on every one of them (host 5371, 4841 in that bundle).
                 try
                 {
-                    if (reg.RentedByPlayer && !receiverOwnsThis && _tenancyConflictLogged.Add(info.AddressKey ?? ""))
+                    if (MergerFlip.TrulyMine(reg) && !receiverOwnsThis && _tenancyConflictLogged.Add(info.AddressKey ?? ""))
                         Plugin.Logger.LogWarning($"[Conflict] DOUBLE TENANCY at '{info.AddressKey}': this machine actively rents it " +
                             $"(local name='{reg.BusinessName}') but the incoming record says name='{info.BusinessName}' " +
                             $"owner='{info.OwnerPlayerId}' deed='{info.DeedOwnerPlayerId}' — two saves claim this address.");
