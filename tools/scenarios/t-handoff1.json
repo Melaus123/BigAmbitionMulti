@@ -16,12 +16,15 @@
     "\\[Guard\\]",
     "(?<!swallowed )NullReferenceException",
     "\\[Handoff\\] (capture|capture live|apply|apply visit|stream|exit snapshot|take-over|wait tick|final received|citizen|leave|send final|hourly pass)\\b[^:(]*: ",
-    "\\[Customers\\] (puppet tick|adopt puppet):"
+    "\\[Customers\\] (puppet tick|adopt puppet|simfirst):",
+    "\\[Handoff\\] late adopt( check| swap)?: "
   ],
   "oracles_report": [
     "\\[BookOnce\\] ",
     "\\[Handoff\\] body-only .*booked order before .* -> after ",
     "\\[Handoff\\] final rows accounted ",
+    "\\[Handoff\\] late adopt ",
+    "\\[Customers\\] DEV simfirst",
     "\\[Handoff\\] ",
     "\\[Customers\\] following ",
     "\\[Customers\\] native mode in ",
@@ -128,58 +131,63 @@
       "capture": { "cNat2": "natives=(\\d+)", "cSig2": "sig=([0-9a-f]{8})", "cList2": "natList=(\\S*)" },
       "note": "LEG 2 PREMISE ASSERTED (2026-09-27: >= 2): the client simulates with >= 2 UNBOOKED live customers (a natList entry id:state:completed=0:k/n:spot:leaving=0:fee) before the owner walks in"
     },
+    { "seq": 44, "role": "h", "cmd": "custstate simfirst", "expect_result": "^OK custstate simfirst armed ", "note": "H-HANDOFF-1 WALK-IN RACE LEVER (2026-09-27): the next building change on the host runs the simulator election BEFORE the host tracks the building - the order that lost the client's crowd in runs T-HANDOFF1-20260927-073838 / -045549 (the owner decided simulator before it ever followed, held no copies, and dropped the client's Final). Since the fix the natural order is always follow-first (t-handoff2 / t-handoffseat cover it); this leg forces the bad order and asserts the late adopt at Final receipt takes the whole crowd over." },
     {
-      "seq": 44, "role": "h", "cmd": "enterbuilding ${shop}", "expect_result": "^OK enterbuilding",
+      "seq": 45, "role": "h", "cmd": "enterbuilding ${shop}", "expect_result": "^OK enterbuilding",
       "expect_log": [
+        { "role": "h", "regex": "\\[Customers\\] DEV simfirst: the election runs before this machine tracks '${shop}'", "within_s": 30 },
+        { "role": "h", "regex": "\\[Customers\\] simulator for '${shop}' .* '${hostPid}' .*the shop's owner is inside and books it", "within_s": 30 },
         { "role": "c", "regex": "\\[Customers\\] following '${hostPid}' in '${shop}' .* ([1-9][0-9]*) native\\(s\\) swapped to puppets in place", "within_s": 30 },
         { "role": "c", "regex": "\\[Handoff\\] final snapshot sent: [1-9][0-9]* @${shop} \\(authority\\)", "within_s": 30 },
         { "role": "h", "regex": "\\[Handoff\\] final from ${clientPid} received: [1-9][0-9]* @${shop} \\(authority", "within_s": 30 },
-        { "role": "h", "regex": "\\[Customers\\] native mode in '${shop}' .* ([1-9][0-9]*) puppet\\(s\\) adopted in place \\(([1-9][0-9]*) with state, [0-9]+ leaving, [0-9]+ walking out\\) from '${clientPid}' via final", "within_s": 40 }
+        { "role": "h", "regex": "\\[Handoff\\] late adopt of the final from '${clientPid}' in '${shop}' - this machine simulates here but never followed it .* [1-9][0-9]* row\\(s\\), [1-9][0-9]* not leaving", "within_s": 30 },
+        { "role": "h", "regex": "\\[Customers\\] native mode in '${shop}' .* ([1-9][0-9]*) puppet\\(s\\) adopted in place \\(([1-9][0-9]*) with state, [0-9]+ leaving, 0 walking out\\) from '${clientPid}' via final; ", "within_s": 40 },
+        { "role": "h", "regex": "\\[Handoff\\] final rows accounted @${shop} from '${clientPid}': rows=[1-9][0-9]* adopted=[0-9]+ bodyOnly=[0-9]+ spawned=[0-9]+ leaving=[0-9]+ refused=0 noReason=0 unaccounted=0 accounted=ok", "within_s": 40 }
       ],
-      "note": "LEG 2 ACT AND ORACLE: the booking player walks back in and takes the crowd; the client swaps N>0 natives to copies IN PLACE (always 0 before step 1) and sends its final; the host adopts WITH STATE via the final"
+      "note": "LEG 2 ACT AND ORACLE, IN THE WALK-IN RACE ORDER (lever at seq 44): the booking player walks back in and the election makes him the simulator BEFORE he follows (no copies on the host); the client swaps N>0 natives to copies IN PLACE and sends its final; the host LATE-ADOPTS from the final's rows. COUNT ASSERTION: 0 walking out, and the accounting line shows refused=0 unaccounted=0 accounted=ok - so adopted (the host's own duplicate natives of those visits, swapped to copies in place) + bodyOnly + spawned (no copy) == the final's rows not leaving; the money / stock identities are the handoffbook (dupIds=0 lostIds=0 identity=ok) and stockdelta (stockOk=True) steps below."
     },
-    { "seq": 45, "role": "h", "sleep_s": 3 },
+    { "seq": 46, "role": "h", "sleep_s": 3 },
     {
-      "seq": 46, "role": "h", "cmd": "custstate",
+      "seq": 47, "role": "h", "cmd": "custstate",
       "expect_result": "^OK custstate bldg='${shop}' sim='${hostPid}' mode=native natives=[1-9][0-9]* .*lastAdopt=[1-9][0-9]*/([1-9][0-9]*)/[0-9]+/[0-9]+ lastMatched=\\1 lastFrom='${clientPid}' lastVia=final ",
       "capture": { "hNat2": "natives=(\\d+)", "hSig2": "sig=([0-9a-f]{8})", "hList2": "natList=(\\S*)", "hAdopt2": "lastAdopt=(\\S+)", "hBookOnce": "bookOnce=(\\d+)" },
       "note": "LEG 2 ASSERTION: the owner simulates again and every with-state adoption resumed its row exactly"
     },
     {
-      "seq": 47, "role": "c", "cmd": "custstate", "expect_result": "^OK custstate bldg='${shop}' sim='${hostPid}' mode=follower natives=0 ",
+      "seq": 48, "role": "c", "cmd": "custstate", "expect_result": "^OK custstate bldg='${shop}' sim='${hostPid}' mode=follower natives=0 ",
       "capture": { "cCopies2": "copies=(\\d+)" }
     },
-    { "seq": 48, "role": "h", "sleep_s": 15 },
-    { "seq": 49, "role": "h", "cmd": "tilldupes ${shop}", "abort_on_fail": false, "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): LEG 2 TILL ORACLE: no order reached the owner's till twice" },
+    { "seq": 49, "role": "h", "sleep_s": 15 },
+    { "seq": 50, "role": "h", "cmd": "tilldupes ${shop}", "abort_on_fail": false, "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): LEG 2 TILL ORACLE: no order reached the owner's till twice" },
     {
-      "seq": 50, "role": "h", "cmd": "handoffbook ${shop}", "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ", "abort_on_fail": false,
+      "seq": 51, "role": "h", "cmd": "handoffbook ${shop}", "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ", "abort_on_fail": false,
       "capture": { "l2Ledger": "ledger=(\\d+)", "l2Booked": "booked=(\\d+)", "l2Paid": "paid=(\\d+)", "l2Fwd": "forwardsIn=(\\d+)", "l2BoReg": "boRegistered=(\\d+)", "l2BoSup": "boSuppressed=(\\d+)", "l2BoBy": "boBookedBy=(\\S+)", "l2BoSupBy": "boSuppressedBy=(\\S+)" },
       "note": "LEG 2 ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },
-    {"seq": 51, "role": "h", "cmd": "stockdelta ${shop}", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sd2Drop": "dropTotal=(-?\\d+)", "sd2Sold": "soldTotal=(\\d+)", "sd2Lost": "lostTotal=(\\d+)", "sd2LostNamed": "lostNamed=(\\S+)", "sd2LostUnx": "lostUnexplained=(\\d+)", "sd2Held": "heldDelta=(-?\\d+)", "sd2Out": "outDelta=(-?\\d+)", "sd2Orders": "orders=(\\S+)", "sd2Once": "once=(\\S+)", "sd2Bags": "bags=(\\S+)", "sd2Bad": "bad=(\\S+)", "sd2Per": "per=(\\S+)"}, "note": "STOCK ORACLE - HARD ASSERT since the stock-correction effort (H-HANDOFF-1 stock once, batch 27, user-approved 2026-09-26) on the machine that keeps the books: per stocked item every unit that left the building's stock is accounted for, drop == live + fwd + hour + other + lost + heldDelta + outDelta (live checkouts here, forwarded sales, the native hourly pass, other till adds, taken-but-unpaid lines, the change in units held by live bodies here, the change in units this machine's shelves gave visits now on the partner's machine). per=item:drop=live+fwd+hour+other+lost+heldDelta+outDelta; once=... are the stock-once counters (credited / deducted at adoption / returned / native re-takes skipped). stockOk=True <=> no unit taken twice, none from nothing."},
+    {"seq": 52, "role": "h", "cmd": "stockdelta ${shop}", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sd2Drop": "dropTotal=(-?\\d+)", "sd2Sold": "soldTotal=(\\d+)", "sd2Lost": "lostTotal=(\\d+)", "sd2LostNamed": "lostNamed=(\\S+)", "sd2LostUnx": "lostUnexplained=(\\d+)", "sd2Held": "heldDelta=(-?\\d+)", "sd2Out": "outDelta=(-?\\d+)", "sd2Orders": "orders=(\\S+)", "sd2Once": "once=(\\S+)", "sd2Bags": "bags=(\\S+)", "sd2Bad": "bad=(\\S+)", "sd2Per": "per=(\\S+)"}, "note": "STOCK ORACLE - HARD ASSERT since the stock-correction effort (H-HANDOFF-1 stock once, batch 27, user-approved 2026-09-26) on the machine that keeps the books: per stocked item every unit that left the building's stock is accounted for, drop == live + fwd + hour + other + lost + heldDelta + outDelta (live checkouts here, forwarded sales, the native hourly pass, other till adds, taken-but-unpaid lines, the change in units held by live bodies here, the change in units this machine's shelves gave visits now on the partner's machine). per=item:drop=live+fwd+hour+other+lost+heldDelta+outDelta; once=... are the stock-once counters (credited / deducted at adoption / returned / native re-takes skipped). stockOk=True <=> no unit taken twice, none from nothing."},
     {
-      "seq": 52, "role": "h", "cmd": "tilldupes ${shop}",
+      "seq": 53, "role": "h", "cmd": "tilldupes ${shop}",
       "capture": { "tdOrders": "orders=(\\d+)", "tdDistinct": "distinct=(\\d+)" },
       "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): NO ORDER REACHED THE OWNER'S TILL TWICE across both hand-offs"
     },
     {
-      "seq": 53, "role": "h", "cmd": "shopday ${shop}", "expect_result": "^OK shopday .*idUnbilled=0 ",
+      "seq": 54, "role": "h", "cmd": "shopday ${shop}", "expect_result": "^OK shopday .*idUnbilled=0 ",
       "capture": { "sdLeaveStale": "leaveStale=(\\d+)", "sdLeaveMissing": "leaveMissing=(\\d+)", "sdTill": "tillOrders=(\\d+)", "sdRev": "paidRevenue=([0-9.]+)" },
       "note": "the owner's accounting identity holds (unbilled 0); the churn totals are captured for the report"
     },
-    { "seq": 54, "role": "h", "cmd": "tilldupes ${shop}", "abort_on_fail": false, "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): END TILL ORACLE: no order reached the owner's till twice" },
+    { "seq": 55, "role": "h", "cmd": "tilldupes ${shop}", "abort_on_fail": false, "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): END TILL ORACLE: no order reached the owner's till twice" },
     {
-      "seq": 55, "role": "h", "cmd": "handoffbook ${shop}", "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ", "abort_on_fail": false,
+      "seq": 56, "role": "h", "cmd": "handoffbook ${shop}", "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ", "abort_on_fail": false,
       "capture": { "endLedger": "ledger=(\\d+)", "endBooked": "booked=(\\d+)", "endPaid": "paid=(\\d+)", "endFwd": "forwardsIn=(\\d+)", "endBoReg": "boRegistered=(\\d+)", "endBoSup": "boSuppressed=(\\d+)", "endBoBy": "boBookedBy=(\\S+)", "endBoSupBy": "boSuppressedBy=(\\S+)" },
       "note": "END ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },
-    {"seq": 56, "role": "both", "cmd": "mark TEST T-HANDOFF1 LEG3 OWNER-OUTSIDE-HOUR", "expect_result": "OK MARK"},
-    {"seq": 57, "role": "h", "cmd": "stockdelta ${shop} mark", "expect_result": "^OK stockdelta .* marked ", "note": "LEG 3 STOCK ORACLE mark: the owner is inside and simulating (after leg 2)"},
-    {"seq": 58, "role": "h", "cmd": "exitbuilding", "expect_result": "^OK", "abort_on_fail": false, "expect_log": [{"role": "h", "regex": "\\[Handoff\\] final snapshot sent: [0-9]+ @${shop} \\(exit\\)", "within_s": 20}], "note": "LEG 3 ACT: the owner walks out again and STAYS OUTSIDE; the client continues the crowd (forwards any sale to the owner)"},
-    {"seq": 59, "role": "both", "cmd": "mark TEST T-HANDOFF1 LEG3 HOUR-WAIT", "expect_result": "OK MARK", "abort_on_fail": false, "expect_log": [{"role": "h", "regex": "\\[StaffRoster\\] [0-9]+ injected/synthetic record\\(s\\) sit out the hourly employee pass", "within_s": 150}], "note": "LEG 3: wait for the next game-hour boundary on the host with the OWNER OUTSIDE - the owner's native hourly pass runs for his clothing store while the client simulates it (evidence (b) of the stock effort: the pass sells from the owner's stock)"},
-    {"seq": 60, "role": "h", "sleep_s": 12},
-    {"seq": 61, "role": "h", "cmd": "handoffbook ${shop}", "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0", "abort_on_fail": false, "note": "LEG 3 ORDER-COUNT IDENTITY on the booking machine across the hourly pass (money stays book-once)"},
-    {"seq": 62, "role": "h", "cmd": "stockdelta ${shop}", "note_leg": "LEG 3: owner outside across the hour - hour= terms are the native pass's sales", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sd3Drop": "dropTotal=(-?\\d+)", "sd3Sold": "soldTotal=(\\d+)", "sd3Lost": "lostTotal=(\\d+)", "sd3LostNamed": "lostNamed=(\\S+)", "sd3LostUnx": "lostUnexplained=(\\d+)", "sd3Held": "heldDelta=(-?\\d+)", "sd3Out": "outDelta=(-?\\d+)", "sd3Orders": "orders=(\\S+)", "sd3Once": "once=(\\S+)", "sd3Bags": "bags=(\\S+)", "sd3Bad": "bad=(\\S+)", "sd3Per": "per=(\\S+)"}, "note": "STOCK ORACLE - HARD ASSERT since the stock-correction effort (H-HANDOFF-1 stock once, batch 27, user-approved 2026-09-26) on the machine that keeps the books: per stocked item every unit that left the building's stock is accounted for, drop == live + fwd + hour + other + lost + heldDelta + outDelta (live checkouts here, forwarded sales, the native hourly pass, other till adds, taken-but-unpaid lines, the change in units held by live bodies here, the change in units this machine's shelves gave visits now on the partner's machine). per=item:drop=live+fwd+hour+other+lost+heldDelta+outDelta; once=... are the stock-once counters (credited / deducted at adoption / returned / native re-takes skipped). stockOk=True <=> no unit taken twice, none from nothing."},
-    {"seq": 63, "role": "both", "cmd": "mark TEST T-HANDOFF1 END", "expect_result": "OK MARK"}
+    {"seq": 57, "role": "both", "cmd": "mark TEST T-HANDOFF1 LEG3 OWNER-OUTSIDE-HOUR", "expect_result": "OK MARK"},
+    {"seq": 58, "role": "h", "cmd": "stockdelta ${shop} mark", "expect_result": "^OK stockdelta .* marked ", "note": "LEG 3 STOCK ORACLE mark: the owner is inside and simulating (after leg 2)"},
+    {"seq": 59, "role": "h", "cmd": "exitbuilding", "expect_result": "^OK", "abort_on_fail": false, "expect_log": [{"role": "h", "regex": "\\[Handoff\\] final snapshot sent: [0-9]+ @${shop} \\(exit\\)", "within_s": 20}], "note": "LEG 3 ACT: the owner walks out again and STAYS OUTSIDE; the client continues the crowd (forwards any sale to the owner)"},
+    {"seq": 60, "role": "both", "cmd": "mark TEST T-HANDOFF1 LEG3 HOUR-WAIT", "expect_result": "OK MARK", "abort_on_fail": false, "expect_log": [{"role": "h", "regex": "\\[StaffRoster\\] [0-9]+ injected/synthetic record\\(s\\) sit out the hourly employee pass", "within_s": 150}], "note": "LEG 3: wait for the next game-hour boundary on the host with the OWNER OUTSIDE - the owner's native hourly pass runs for his clothing store while the client simulates it (evidence (b) of the stock effort: the pass sells from the owner's stock)"},
+    {"seq": 61, "role": "h", "sleep_s": 12},
+    {"seq": 62, "role": "h", "cmd": "handoffbook ${shop}", "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0", "abort_on_fail": false, "note": "LEG 3 ORDER-COUNT IDENTITY on the booking machine across the hourly pass (money stays book-once)"},
+    {"seq": 63, "role": "h", "cmd": "stockdelta ${shop}", "note_leg": "LEG 3: owner outside across the hour - hour= terms are the native pass's sales", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sd3Drop": "dropTotal=(-?\\d+)", "sd3Sold": "soldTotal=(\\d+)", "sd3Lost": "lostTotal=(\\d+)", "sd3LostNamed": "lostNamed=(\\S+)", "sd3LostUnx": "lostUnexplained=(\\d+)", "sd3Held": "heldDelta=(-?\\d+)", "sd3Out": "outDelta=(-?\\d+)", "sd3Orders": "orders=(\\S+)", "sd3Once": "once=(\\S+)", "sd3Bags": "bags=(\\S+)", "sd3Bad": "bad=(\\S+)", "sd3Per": "per=(\\S+)"}, "note": "STOCK ORACLE - HARD ASSERT since the stock-correction effort (H-HANDOFF-1 stock once, batch 27, user-approved 2026-09-26) on the machine that keeps the books: per stocked item every unit that left the building's stock is accounted for, drop == live + fwd + hour + other + lost + heldDelta + outDelta (live checkouts here, forwarded sales, the native hourly pass, other till adds, taken-but-unpaid lines, the change in units held by live bodies here, the change in units this machine's shelves gave visits now on the partner's machine). per=item:drop=live+fwd+hour+other+lost+heldDelta+outDelta; once=... are the stock-once counters (credited / deducted at adoption / returned / native re-takes skipped). stockOk=True <=> no unit taken twice, none from nothing."},
+    {"seq": 64, "role": "both", "cmd": "mark TEST T-HANDOFF1 END", "expect_result": "OK MARK"}
   ]
 }

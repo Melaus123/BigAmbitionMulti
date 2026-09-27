@@ -174,6 +174,18 @@ namespace BigAmbitionsMP
         private const float AwaitLeftGrace = 1.5f;    // an EXITING simulator's Final is sent from ResetIndoors and may still be in flight
         internal static int LastAdopted, LastWithState, LastLeaving, LastWalked, LastMatched;   // custstate lever
         internal static string LastAdoptFrom = "", LastAdoptVia = "";
+        // H-HANDOFF-1 walk-in race (2026-09-27): _takenFrom = the simulator whose crowd the last take-over in THIS building
+        // episode adopted (cleared on a building change and whenever this machine follows again), so a late Final from it
+        // is never adopted twice. _lateTake = a late adopt (this machine never followed that simulator) is waiting for the
+        // interior to finish loading. LateAdopts counts the late adopts (custstate lever / report).
+        private static string _takenFrom = "";
+        private static bool _lateTake;
+        internal static int LateAdopts;
+#if BAMP_DEV
+        // `custstate simfirst` (host): the next building change runs the election BEFORE this machine tracks the
+        // building - the order that lost the partner's crowd - once, so the late adopt at Final receipt is exercised.
+        internal static bool DevSimFirst;
+#endif
         internal static string MyBuilding => _myBldg;
         internal static string AwaitingFinalFrom => _awaitFinalFrom;
         internal static string PreviousSimulator => _prevSim;
@@ -191,7 +203,7 @@ namespace BigAmbitionsMP
                 _looksById.Clear();
                 _looksSent.Clear();
                 _myBldg = "";
-                _prevSim = ""; _lastReactSim = ""; _awaitFinalFrom = ""; _heldForGone = ""; _staleHoldLoggedFor = ""; _readyPendingVia = "";   // H-HANDOFF-1 step 11
+                _prevSim = ""; _lastReactSim = ""; _awaitFinalFrom = ""; _heldForGone = ""; _staleHoldLoggedFor = ""; _readyPendingVia = ""; _takenFrom = ""; _lateTake = false;   // H-HANDOFF-1 step 11
                 try { CustomerHandoff.Reset(); } catch { }   // also clears the BookOnce registry
                 try { ResetActs(); } catch { }               // H-PUPPETANIM-1
                 try { SkipPaceBodies.RestoreAll(); } catch { }   // D-SKIPPACE-1: leaving the building / session end - no body keeps a scaled speed
@@ -211,8 +223,17 @@ namespace BigAmbitionsMP
                     if (_puppets.Count > 0 || _followerHere) Reset();
                     return;
                 }
-                if (MPServer.IsRunning) HostElectionTick();
+#if BAMP_DEV
+                if (DevSimFirst && MPServer.IsRunning) DevSimFirstTick();
+#endif
+                // H-HANDOFF-1 walk-in race (2026-09-27): track my own building BEFORE the host election. Both read the
+                // same CurrentShopAddress; with the election first, a pass landing on the frame the owner's shop context
+                // changed elected him for a building this machine had not tracked yet (its ReactToAuthority was skipped,
+                // _myBldg still the old one), so the owner never followed the partner, held no copies, and dropped the
+                // partner's Final (runs T-HANDOFF1-20260927-073838 / -045549). The late adopt in OnFinalReceived is the
+                // belt for any other order.
                 TrackMyBuilding();
+                if (MPServer.IsRunning) HostElectionTick();
                 HandoffWaitTick();       // H-HANDOFF-1 step 5: a take-over waiting for the old simulator's Final
                 SimulatorStreamTick();
                 HandoffStreamTick();     // H-HANDOFF-1 (ruling a): visit rows on change, <= 1/s
@@ -225,6 +246,52 @@ namespace BigAmbitionsMP
                 ChurnTick();
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] puppet tick: {ex.Message}"); }
+        }
+
+#if BAMP_DEV
+        /// <summary>`custstate simfirst`: on the frame this machine's shop context changes to a building, run the election
+        /// BEFORE TrackMyBuilding (the pre-2026-09-27 order), once.</summary>
+        private static void DevSimFirstTick()
+        {
+            try
+            {
+                string cur = MPRegisterSync.CurrentShopAddress ?? "";
+                if (cur.Length == 0 || cur == _myBldg) return;
+                DevSimFirst = false;
+                _nextElectAt = 0f;
+                Plugin.Logger.LogInfo($"[Customers] DEV simfirst: the election runs before this machine tracks '{cur}' (the walk-in race order).");
+                HostElectionTick();
+            }
+            catch (Exception ex) { DevSimFirst = false; Plugin.Logger.LogWarning($"[Customers] simfirst: {ex.Message}"); }
+        }
+#endif
+
+        /// <summary>H-HANDOFF-1 walk-in race (2026-09-27): this machine simulates the building it stands in but never
+        /// followed <paramref name="pid"/>, which simulated it and sent its Final - it holds no copies, so the take-over
+        /// runs from the Final's rows alone (fold F5: each row spawned at the entrance with its state; the book-once
+        /// registry, stock-once and seat pins work exactly as in any take-over). Once per Final: TakeOver consumes it,
+        /// and a take-over that already ran from that simulator in this building episode is never repeated.</summary>
+        private static void LateAdopt(string pid, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId || _myBldg.Length == 0) return;
+                var rows = CustomerHandoff.FinalRowsFrom(pid);
+                if (rows.Count == 0) return;
+                if (_takenFrom == pid)
+                {
+                    Plugin.Logger.LogInfo($"[Handoff] final from '{pid}' after a take-over from it already ran in '{_myBldg}' - not adopted twice.");
+                    CustomerHandoff.ConsumeFinal(pid);
+                    return;
+                }
+                int open = 0;
+                foreach (var r in rows) if (r != null && !r.Leaving) open++;
+                _prevSim = pid;
+                _lateTake = true;
+                Plugin.Logger.LogInfo($"[Handoff] late adopt of the final from '{pid}' in '{_myBldg}' - this machine simulates here but never followed it (walk-in race, {why}); {rows.Count} row(s), {open} not leaving, spawned from their rows.");
+                TakeOver("final");
+            }
+            catch (Exception ex) { _lateTake = false; Plugin.Logger.LogWarning($"[Handoff] late adopt: {ex.Message}"); }
         }
 
         // ── Host: simulator election ─────────────────────────────────────────────────────────────────
@@ -421,7 +488,7 @@ namespace BigAmbitionsMP
             _looksSent.Clear();
             _myBldg = cur;
             // H-HANDOFF-1 step 11: the hand-off state belongs to the building I was in.
-            _prevSim = ""; _lastReactSim = ""; _awaitFinalFrom = ""; _heldForGone = ""; _staleHoldLoggedFor = ""; _readyPendingVia = "";
+            _prevSim = ""; _lastReactSim = ""; _awaitFinalFrom = ""; _heldForGone = ""; _staleHoldLoggedFor = ""; _readyPendingVia = ""; _takenFrom = ""; _lateTake = false;
             try { CustomerHandoff.OnBuildingChanged(cur); } catch { }
             ReactToAuthority();
         }
@@ -440,6 +507,7 @@ namespace BigAmbitionsMP
             {
                 _followerHere = true;
                 _awaitFinalFrom = "";
+                _takenFrom = ""; _lateTake = false;   // walk-in race: following again starts a new hand-off
                 _rigDiagLogged = false;   // one rig-diagnostic line per follow session (P-PUPPET-RIG)
                 // H-HANDOFF-1 step 1 (batch 27): DisableCustomersSpawn used to run HERE, before the swap - and its
                 // CleanCustomers (IndoorCustomerSpawner.cs:309-314 -> :122-133) released every live customer, so the
@@ -512,6 +580,16 @@ namespace BigAmbitionsMP
                 }
                 TakeOver(CustomerHandoff.HasFreshFinal(_prevSim) ? "final" : "no-final");
             }
+            else if (!follow && !_followerHere && sim == MPConfig.PlayerId && _awaitFinalFrom.Length == 0 && _readyPendingVia.Length == 0)
+            {
+                // Walk-in race: a Final that reached this building before this machine became its simulator.
+                try
+                {
+                    string fp = CustomerHandoff.FreshFinalSender();
+                    if (fp.Length > 0) LateAdopt(fp, "final already here");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] late adopt check: {ex.Message}"); }
+            }
         }
 
         /// <summary>H-HANDOFF-1 step 5, every frame: the fallback floor of a waiting take-over.</summary>
@@ -531,8 +609,9 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!_followerHere || !IAmSimulatorFor(_myBldg))
+                    if ((!_followerHere && !_lateTake) || !IAmSimulatorFor(_myBldg))
                     {
+                        _lateTake = false;
                         Plugin.Logger.LogInfo($"[Handoff] dropped the take-over waiting for the interior of '{_myBldg}' - authority moved on.");
                         _readyPendingVia = "";
                         return;
@@ -607,8 +686,45 @@ namespace BigAmbitionsMP
                 if (_awaitFinalFrom.Length > 0 && pid == _awaitFinalFrom && _followerHere && IAmSimulatorFor(_myBldg))
                     TakeOver("final");
                 else if (_readyPendingVia.Length > 0 && pid == _prevSim) _readyPendingVia = "final";   // fold R0: it runs at ready
+                else if (!_followerHere && _awaitFinalFrom.Length == 0 && _readyPendingVia.Length == 0
+                         && !string.IsNullOrEmpty(pid) && pid != MPConfig.PlayerId && IAmSimulatorFor(_myBldg))
+                    LateAdopt(pid, "final received");   // walk-in race (2026-09-27): never followed it - adopt from the rows
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] final received: {ex.Message}"); }
+        }
+
+        /// <summary>H-HANDOFF-1 walk-in race (2026-09-27): each live native here whose id is a not-leaving row of the Final
+        /// from <paramref name="from"/> is swapped for a copy at its position (seat / queue spot freed first, as in the
+        /// follow branch), so the take-over adopts it with the row's state instead of refusing the row.</summary>
+        private static int LateSwapDuplicates(string from)
+        {
+            int n = 0;
+            try
+            {
+                var want = new HashSet<string>();
+                foreach (var r in CustomerHandoff.FinalRowsFrom(from))
+                    if (r != null && !string.IsNullOrEmpty(r.Id) && !r.Leaving) want.Add(r.Id);
+                if (want.Count == 0) return 0;
+                var reg = FindReg(_myBldg);
+                foreach (var c in new List<Customer>(IndoorCustomerSpawner.Customers))
+                {
+                    if (c == null || c.isPlayer) continue;
+                    string id = RowIdOf(c, reg);
+                    if (string.IsNullOrEmpty(id) || !want.Contains(id) || _puppets.ContainsKey(id)) continue;
+                    Vector3 pos = c.transform.position;
+                    float yaw = c.transform.eulerAngles.y;
+                    var look = CaptureLook(c.tpc);
+                    try { CustomerSeatPins.FreeHeld(c); } catch { }
+                    try { c.ReleaseCustomer(); } catch { }
+                    var pup = SpawnPuppet(pos, yaw);
+                    if (pup == null) continue;
+                    _puppets[id] = pup;
+                    if (look != null) { pup.look = look; _looksById[id] = look; ApplyLookTo(pup.tpc, look); }
+                    n++;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] late adopt swap: {ex.Message}"); }
+            return n;
         }
 
         /// <summary>The gaining side of a hand-off (was the inline branch of ReactToAuthority).</summary>
@@ -629,6 +745,19 @@ namespace BigAmbitionsMP
             string from = _prevSim;
             _awaitFinalFrom = "";
             _followerHere = false;
+            bool lateNow = _lateTake;
+            if (lateNow) LateAdopts++;
+            _lateTake = false;
+            _takenFrom = from;   // walk-in race: a later Final from it in this episode is not adopted twice
+            if (lateNow && from.Length > 0)
+            {
+                // Run T-HANDOFF1-20260927-082837: this machine's spawner ran while it never followed, and the interior
+                // load spawned 2 of the Final's visits a second time (fresh, without the partner's progress) - F5 then
+                // refused those rows "already live on this machine". Such a native becomes a copy in place, so the loop
+                // below adopts that body WITH the row's state, exactly like a copy the follow branch would have made.
+                int sw = LateSwapDuplicates(from);
+                if (sw > 0) Plugin.Logger.LogInfo($"[Handoff] late adopt in '{_myBldg}': {sw} native(s) of this machine were visits of the final from '{from}' - swapped to copies in place, adopted with the rows' state.");
+            }
             // Round-43 SMOOTH HANDOFF (gaining side): adopt each puppet's schedule entry as a REAL
             // customer AT the puppet's position — bodies stay put, the AI resumes its routine from
             // there (a mid-checkout customer re-approaches; the agreed settle behavior). Puppets
@@ -700,7 +829,9 @@ namespace BigAmbitionsMP
                         }
                         else
                         {
-                            if (!_adoptBooked) refusedOpen.Add(r.Id);
+                            // Walk-in race: "already live on this machine" means a body carries that visit here - its
+                            // entry is never reopened (the spawner would bring the same customer a second time).
+                            if (!_adoptBooked && _adoptWhy != "already live on this machine") refusedOpen.Add(r.Id);
                             outcome[r.Id] = "refused:" + _adoptWhy;
                         }
                     }

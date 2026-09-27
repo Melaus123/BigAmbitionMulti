@@ -868,6 +868,15 @@ namespace BigAmbitionsMP
                     //                    holds n customers (natives when simulating, copies when following) -
                     //                    a rig step waits on that line instead of guessing a sleep.
                     string csArg = (arg ?? "").Trim();
+                    // `custstate simfirst` (H-HANDOFF-1 walk-in race, 2026-09-27) HOST only: the next building change runs
+                    //                    the simulator election BEFORE this machine tracks the building (the order that
+                    //                    lost the partner's crowd), once - the late adopt at Final receipt must take over.
+                    if (csArg.Equals("simfirst", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!MPServer.IsRunning) return "ERR custstate simfirst: host only";
+                        CustomerPuppets.DevSimFirst = true;
+                        return $"OK custstate simfirst armed bldg='{CustomerPuppets.MyBuilding}' lateAdopts={CustomerPuppets.LateAdopts}";
+                    }
                     if (csArg.StartsWith("arm seated", StringComparison.OrdinalIgnoreCase))
                     {
                         int csS;

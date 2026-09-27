@@ -391,6 +391,22 @@ namespace BigAmbitionsMP
             return l;
         }
 
+        /// <summary>H-HANDOFF-1 walk-in race (2026-09-27): the partner whose fresh, unconsumed Final holds rows for the
+        /// building I am in ("" = none) - newest first.</summary>
+        internal static string FreshFinalSender()
+        {
+            try
+            {
+                if (_visitBldg != CustomerPuppets.MyBuilding || _visitBldg.Length == 0) return "";
+                string best = ""; float bestAt = float.MinValue, now = Time.unscaledTime;
+                foreach (var kv in _finalFrom)
+                    if (!string.IsNullOrEmpty(kv.Key) && kv.Key != MPConfig.PlayerId && now - kv.Value <= FinalFreshSeconds
+                        && kv.Value > bestAt && FinalRowsFrom(kv.Key).Count > 0) { best = kv.Key; bestAt = kv.Value; }
+                return best;
+            }
+            catch { return ""; }
+        }
+
         internal static bool RowIsFinal(string id)
             => !string.IsNullOrEmpty(id) && _visit.TryGetValue(id, out var k) && k.Final;
 
