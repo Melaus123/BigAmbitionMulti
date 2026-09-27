@@ -1,0 +1,450 @@
+{
+  "id": "T-STANDINTILL-BLIP",
+  "title": "H-STANDINTILL-2 T1 leg 'blip': a CLIENT stand-in (the host has left the company) that loses its link in-process (DEV lever netdrop = the involuntary drop path, disconnect save written) and rejoins is re-designated as the SAME stand-in (SameSimulator) and KEEPS its live till - the T6 orders it took after its last publish are paid exactly once. NO save.",
+  "preconditions": "Fixture fx-hq1 (merged pair melaus + Client1, keepMerger); Client1 owns the fast food at vars.shop. Client2 joins new and is grown into the company; then the HOST LEAVES, so Client2 is the stand-in when Client1 drops. Tags: T1 = A's pre-absence unpaid orders, T2 = D's stale copies, T6 = D's stint orders taken after its forced publish (only its live till holds them).",
+  "instances": 3,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "dPid": "Client2",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "shop": "11 ba:street_tenthavenue"
+  },
+  "oracles_absent": [
+    "HarmonyException",
+    "Patching exception",
+    "(?<!swallowed )NullReferenceException",
+    "\\[TillLedger\\] \\S+ PAID T2#",
+    "\\[Absence\\] till take-over '",
+    "\\[TillLedger\\] \\S+ PAID T[1-9]#.* books=False",
+    "\\[Absence\\] same-stand-in till check"
+  ],
+  "oracles_report": [
+    "\\[TillLedger\\]",
+    "\\[Absence\\] till of ",
+    "SameSimulator",
+    "same stand-in again",
+    "\\[Absence\\] hand-back publish",
+    "\\[Paperwork\\] filed",
+    "\\[MPSave\\] (ACCEPTED|REJECTED) client disconnect save",
+    "\\[Absence\\] mark for",
+    "\\[Absence\\] simulating",
+    "\\[Absence\\] stopped simulating",
+    "\\[Client\\] Disconnected from host"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "d",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "d",
+      "cmd": "charconfirm",
+      "expect_result": "^OK armed",
+      "note": "Client2 has no slot in fx-hq1"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 6,
+      "role": "all",
+      "cmd": "mark TEST STANDINTILL START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "note": "PREMISE: the fixture pair is merged"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "merge propose ${dPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 13,
+      "role": "d",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] (GROWN|FORMED) group",
+          "within_s": 20
+        }
+      ]
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "sleep_s": 14
+    },
+    {
+      "seq": 15,
+      "role": "d",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "note": "PREMISE: three members"
+    },
+    {
+      "seq": 16,
+      "role": "all",
+      "cmd": "mark TEST STANDINTILL-BLIP HOST LEAVES",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "sleep_s": 10
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False",
+      "note": "PREMISE: the host is no longer a member, so a CLIENT stands in"
+    },
+    {
+      "seq": 20,
+      "role": "d",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "note": "PREMISE: A and D still merged"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "regstate ${shop}",
+      "expect_result": "^OK rented=True .*flipped=False",
+      "note": "PREMISE: A's own shop"
+    },
+    {
+      "seq": 22,
+      "role": "d",
+      "cmd": "regstate ${shop}",
+      "expect_result": "^OK rented=True .*flipped=True",
+      "note": "PREMISE: a flipped partner shop on D (the future stand-in)"
+    },
+    {
+      "seq": 23,
+      "role": "all",
+      "cmd": "mark TEST STANDINTILL-BLIP SEED",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "tillledger seed 1 3 ${shop}",
+      "expect_result": "^OK tillledger seed key='${shop}' books=True .*tagged=\\[T1#1,T1#2,T1#3\\]"
+    },
+    {
+      "seq": 25,
+      "role": "d",
+      "cmd": "tillledger seed 2 2 ${shop}",
+      "expect_result": "^OK tillledger seed key='${shop}' books=False .*tagged=\\[T2#1,T2#2\\]"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "sleep_s": 40,
+      "note": "A's publish carries its till to the host store"
+    },
+    {
+      "seq": 27,
+      "role": "all",
+      "cmd": "mark TEST STANDINTILL-BLIP HANDOVER",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "drop": true,
+      "note": "OWNER A DROPS; the CLIENT D stands in",
+      "expect_log": [
+        {
+          "role": "d",
+          "regex": "\\[Absence\\] till of '${shop}' for '${clientPid}' taken over: \\d+ local order\\(s\\)",
+          "within_s": 90
+        }
+      ]
+    },
+    {
+      "seq": 29,
+      "role": "d",
+      "sleep_s": 5
+    },
+    {
+      "seq": 30,
+      "role": "d",
+      "cmd": "tillledger show ${shop}",
+      "expect_result": "^OK tillledger show key='${shop}' books=True .*tagged=\\[T1#1,T1#2,T1#3\\]",
+      "note": "D took A's till over"
+    },
+    {
+      "seq": 31,
+      "role": "d",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "note": "D's last publish BEFORE the T6 orders"
+    },
+    {
+      "seq": 32,
+      "role": "d",
+      "cmd": "tillledger seed 6 2 ${shop}",
+      "expect_result": "^OK tillledger seed key='${shop}' books=True .*tagged=\\[T1#1,T1#2,T1#3,T6#1,T6#2\\]",
+      "note": "stint orders only D's live till holds"
+    },
+    {
+      "seq": 33,
+      "role": "all",
+      "cmd": "mark TEST STANDINTILL-BLIP NETDROP",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 34,
+      "role": "d",
+      "cmd": "netdrop",
+      "expect_result": "^OK netdrop",
+      "note": "D's link drops in-process (involuntary path: Reset, disconnect save)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] mark for '${clientPid}' suspended",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 36,
+      "role": "d",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "note": "D is a known player (auto-accepted); its world reloads from its disconnect save",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] hand-over of '${clientPid}' .*-> '${dPid}' \\(same stand-in again",
+          "within_s": 240
+        },
+        {
+          "role": "d",
+          "regex": "\\[Absence\\] till of '${shop}' for '${clientPid}' KEPT",
+          "within_s": 240
+        }
+      ]
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 39,
+      "role": "d",
+      "cmd": "tillledger show ${shop}",
+      "expect_result": "^OK tillledger show key='${shop}' books=True .*tagged=\\[T1#1,T1#2,T1#3,T6#1,T6#2\\]",
+      "note": "THE FIX: D kept its live till (T6 would be lost to the stored copy otherwise)"
+    },
+    {
+      "seq": 40,
+      "role": "d",
+      "cmd": "tillledger pay ${shop}",
+      "expect_result": "^OK tillledger pay key='${shop}' books=True .*paid=\\[T1#1,T1#2,T1#3,T6#1,T6#2\\]",
+      "note": "each order paid ONCE, no stale T2"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "sleep_s": 40,
+      "note": "D's post-pay till reaches the host store under A"
+    },
+    {
+      "seq": 42,
+      "role": "all",
+      "cmd": "mark TEST STANDINTILL-BLIP RETURN",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "relaunch": true,
+      "note": "A returns"
+    },
+    {
+      "seq": 44,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 45,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] owner '${clientPid}' returned",
+          "within_s": 120
+        },
+        {
+          "role": "c",
+          "regex": "\\[Paperwork\\] returned books for '${shop}'",
+          "within_s": 120
+        }
+      ]
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 47,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 48,
+      "role": "c",
+      "cmd": "tillledger show ${shop}",
+      "expect_result": "^OK tillledger show key='${shop}' books=True .*tagged=\\[\\]",
+      "note": "nothing D already paid comes back to A"
+    },
+    {
+      "seq": 49,
+      "role": "c",
+      "cmd": "tillledger pay ${shop}",
+      "expect_result": "^OK tillledger pay key='${shop}' books=True .*paid=\\[\\]",
+      "note": "no second payment"
+    },
+    {
+      "seq": 50,
+      "role": "all",
+      "cmd": "mark TEST STANDINTILL-BLIP DISSOLVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 51,
+      "role": "d",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent"
+    },
+    {
+      "seq": 52,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 53,
+      "role": "c",
+      "cmd": "merge leave",
+      "abort_on_fail": false,
+      "note": "FIXTURE HYGIENE: may already be dissolved by D's leave"
+    },
+    {
+      "seq": 54,
+      "role": "h",
+      "sleep_s": 6
+    },
+    {
+      "seq": 55,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 56,
+      "role": "d",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 57,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 58,
+      "role": "all",
+      "cmd": "mark TEST STANDINTILL-BLIP END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

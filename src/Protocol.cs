@@ -4239,6 +4239,13 @@ namespace BigAmbitionsMP
         /// the one piece of on-screen text this leg is approved to show (the return toast, user
         /// approval 2026-09-11). Empty = nobody known, and the owner shows no toast at all.</summary>
         public string RanByName { get; set; } = "";
+
+        /// <summary>H-STANDINTILL-2 T1 (2026-09-27, additive - a missing field reads false): the host sends this
+        /// hand-over to the SAME machine that was already standing in for this owner in the same stint (a re-send
+        /// after its installs were lost, or a re-designation back to the machine that last ran these addresses after
+        /// a disconnect blip). That machine's own till is then the live one and is kept - the host's stored copy can
+        /// be up to one publish (30 s) older. The receiver still checks the till is the one it stood in with.</summary>
+        public bool SameSimulator { get; set; }
     }
 
     // ══ MERGER PHASE 4a - COMPANY BOOKS (2026-09-11, D14/D18/D19) ═══════════════════════════════

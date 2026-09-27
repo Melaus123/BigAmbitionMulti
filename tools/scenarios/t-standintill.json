@@ -1,7 +1,7 @@
 {
   "id": "T-STANDINTILL",
-  "title": "H-STANDINTILL-1: a FRESH stand-in takes the absent owner's till over from the hand-over bundle (MergerAbsence.TakeOverTill -> PaperworkSync.FillTill), so its stale copies are never paid, the owner's pre-absence unpaid orders ride through the stint, and each order is paid exactly once across the machines (DEV lever tillledger: synthetic tagged orders T<tag>#<k>, per-order PAID ledger lines). NO save.",
-  "preconditions": "Fixture fx-hq1 (merged pair melaus + Client1, keepMerger); Client1 owns the fast food at vars.shop. Client2 joins new and is grown into the company (as t-standinput). The member host is the stand-in. Dev build with tillledger / absence / regstate / mergestatus / exitbuilding. Tags: T1 = A's pre-absence unpaid orders, T2 = B's stale copies, T3 = B's stint orders paid at B's roll, T4 = stint orders still unpaid at A's return.",
+  "title": "H-STANDINTILL-1: a FRESH stand-in takes the absent owner's till over from the hand-over bundle (MergerAbsence.TakeOverTill -> PaperworkSync.FillTill), so its stale copies are never paid, the owner's pre-absence unpaid orders ride through the stint, and each order is paid exactly once across the machines (DEV lever tillledger: synthetic tagged orders T<tag>#<k>, per-order PAID ledger lines). H-STANDINTILL-2 leg 'hand-back flush': T5 orders taken <30 s before the owner returns reach the owner exactly once through the stand-in's hand-back publish. NO save.",
+  "preconditions": "Fixture fx-hq1 (merged pair melaus + Client1, keepMerger); Client1 owns the fast food at vars.shop. Client2 joins new and is grown into the company (as t-standinput). The member host is the stand-in. Dev build with tillledger / absence / regstate / mergestatus / exitbuilding. Tags: T1 = A's pre-absence unpaid orders, T2 = B's stale copies, T3 = B's stint orders paid at B's roll, T4 = stint orders still unpaid at A's return. T5 = stint orders taken after a forced publish, carried only by the hand-back publish.",
   "instances": 3,
   "vars": {
     "clientPid": "Client1",
@@ -25,7 +25,9 @@
     "\\[Paperwork\\] returned books",
     "\\[Absence\\] simulating",
     "\\[Absence\\] stopped simulating",
-    "\\[Paperwork\\] kept the simulated record"
+    "\\[Paperwork\\] kept the simulated record",
+    "\\[Absence\\] hand-back publish",
+    "\\[Paperwork\\] filed"
   ],
   "steps": [
     {
@@ -280,12 +282,26 @@
     },
     {
       "seq": 35,
+      "role": "h",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "note": "H-STANDINTILL-2 T5 leg 'hand-back flush': restarts the host's 30 s publish clock, so the T5 orders below reach the host copy ONLY through the stand-in's hand-back publish"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "cmd": "tillledger seed 5 2 ${shop}",
+      "expect_result": "^OK tillledger seed key='${shop}' books=True .*tagged=\\[T4#1,T4#2,T5#1,T5#2\\]",
+      "note": "stint orders taken within 30 s of the hand-back (A joins right after)"
+    },
+    {
+      "seq": 37,
       "role": "c",
       "cmd": "join",
       "expect_result": "^OK"
     },
     {
-      "seq": 36,
+      "seq": 38,
       "role": "h",
       "cmd": "acceptjoin",
       "expect_result": "^OK",
@@ -299,55 +315,65 @@
           "role": "c",
           "regex": "\\[Paperwork\\] returned books for '${shop}'",
           "within_s": 90
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] hand-back publish for '${clientPid}' .*published day",
+          "within_s": 120
+        },
+        {
+          "role": "h",
+          "regex": "\\[Paperwork\\] filed \\d+ simulated businesses of '${clientPid}' from '${hostPid}'",
+          "within_s": 120
         }
       ]
     },
     {
-      "seq": 37,
+      "seq": 39,
       "role": "h",
       "sleep_s": 20
     },
     {
-      "seq": 38,
+      "seq": 40,
       "role": "c",
       "cmd": "exitbuilding",
       "abort_on_fail": false
     },
     {
-      "seq": 39,
+      "seq": 41,
       "role": "c",
       "cmd": "tillledger show ${shop}",
-      "expect_result": "^OK tillledger show key='${shop}' books=True .*tagged=\\[T4#1,T4#2\\]",
-      "note": "A's till holds the stint's unpaid orders exactly once and nothing stale (no T1/T2/T3)"
+      "expect_result": "^OK tillledger show key='${shop}' books=True .*tagged=\\[T4#1,T4#2,T5#1,T5#2\\]",
+      "note": "A's till holds the stint's unpaid orders exactly once - T5 only via the hand-back publish - and nothing stale (no T1/T2/T3)"
     },
     {
-      "seq": 40,
+      "seq": 42,
       "role": "c",
       "cmd": "tillledger pay ${shop}",
-      "expect_result": "^OK tillledger pay key='${shop}' books=True .*paid=\\[T4#1,T4#2\\]",
-      "note": "A pays the stint's unpaid orders once"
+      "expect_result": "^OK tillledger pay key='${shop}' books=True .*paid=\\[T4#1,T4#2,T5#1,T5#2\\]",
+      "note": "A pays the stint's unpaid orders (incl. the hand-back's T5) once"
     },
     {
-      "seq": 41,
+      "seq": 43,
       "role": "h",
       "cmd": "tillledger show ${shop}",
       "expect_result": "^OK tillledger show key='${shop}' books=False ",
       "note": "report: B's leftover copy after its stint (F1b premise - T4 still sits here, unpaid by the veil)"
     },
     {
-      "seq": 42,
+      "seq": 44,
       "role": "h",
       "sleep_s": 40,
       "note": "A's post-pay till reaches the host store"
     },
     {
-      "seq": 43,
+      "seq": 45,
       "role": "all",
       "cmd": "mark TEST STANDINTILL LEG3 STANDIN AGAIN",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 44,
+      "seq": 46,
       "role": "c",
       "drop": true,
       "note": "A drops again; B stands in again",
@@ -360,44 +386,44 @@
       ]
     },
     {
-      "seq": 45,
+      "seq": 47,
       "role": "h",
       "sleep_s": 5
     },
     {
-      "seq": 46,
+      "seq": 48,
       "role": "h",
       "cmd": "tillledger show ${shop}",
       "expect_result": "^OK tillledger show key='${shop}' books=True .*tagged=\\[\\]",
       "note": "nothing from stint 1 (T1-T4) in B's till"
     },
     {
-      "seq": 47,
+      "seq": 49,
       "role": "h",
       "cmd": "tillledger pay ${shop}",
       "expect_result": "^OK tillledger pay key='${shop}' books=True .*paid=\\[\\]",
       "note": "nothing from stint 1 paid again"
     },
     {
-      "seq": 48,
+      "seq": 50,
       "role": "all",
       "cmd": "mark TEST STANDINTILL DISSOLVE",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 49,
+      "seq": 51,
       "role": "c",
       "relaunch": true,
       "note": "A returns so the merger can be dissolved"
     },
     {
-      "seq": 50,
+      "seq": 52,
       "role": "c",
       "cmd": "join",
       "expect_result": "^OK"
     },
     {
-      "seq": 51,
+      "seq": 53,
       "role": "h",
       "cmd": "acceptjoin",
       "expect_result": "^OK",
@@ -410,47 +436,47 @@
       ]
     },
     {
-      "seq": 52,
+      "seq": 54,
       "role": "h",
       "sleep_s": 20
     },
     {
-      "seq": 53,
+      "seq": 55,
       "role": "d",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent"
     },
     {
-      "seq": 54,
+      "seq": 56,
       "role": "h",
       "sleep_s": 8
     },
     {
-      "seq": 55,
+      "seq": 57,
       "role": "c",
       "cmd": "mergestatus",
       "expect_result": "member=True"
     },
     {
-      "seq": 56,
+      "seq": 58,
       "role": "c",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
       "note": "FIXTURE HYGIENE: every merger scenario ENDS DISSOLVED; NO save"
     },
     {
-      "seq": 57,
+      "seq": 59,
       "role": "h",
       "sleep_s": 6
     },
     {
-      "seq": 58,
+      "seq": 60,
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "member=False.*flipped=0"
     },
     {
-      "seq": 59,
+      "seq": 61,
       "role": "all",
       "cmd": "mark TEST STANDINTILL END",
       "expect_result": "OK MARK"

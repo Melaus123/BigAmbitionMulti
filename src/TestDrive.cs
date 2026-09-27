@@ -2028,6 +2028,26 @@ namespace BigAmbitionsMP
                     return $"OK blip armed: the link reads as down for {bsecs:0.#} s - watch [Merger] view dropped / view kept";
                 }
 
+                case "netdrop":
+                {
+                    // H-STANDINTILL-2 (DEV lever, test only): an INVOLUNTARY link loss IN-PROCESS - the path a real network
+                    // blip takes (MPClient.OnDisconnected with the voluntary flag false: MergerAbsence.Reset, the drop grace,
+                    // the disconnect save), then the socket is closed so the host sees the departure. The rig's own drop
+                    // closes the whole game, which a blip does not. Rejoin with `join`.
+                    if (MPServer.IsRunning) return "ERR client only";
+                    if (!MPClient.IsConnected) return "ERR not connected";
+                    try
+                    {
+                        var ndM = typeof(MPClient).GetMethod("OnDisconnected",
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                        if (ndM == null) return "ERR MPClient.OnDisconnected not found";
+                        ndM.Invoke(null, new object?[] { "test lever netdrop", null, null });
+                        MPClient.Disconnect();
+                    }
+                    catch (Exception exNd) { return "ERR netdrop: " + (exNd.InnerException?.Message ?? exNd.Message); }
+                    return "OK netdrop: the involuntary drop path ran and the link is closed - rejoin with 'join'";
+                }
+
                 case "terminate":
                 {
                     // MERGER PHASE 5 (P11, D27) - TEST LEVER. Sends the leg the member's terminate CONFIRM

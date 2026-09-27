@@ -833,14 +833,18 @@ namespace BigAmbitionsMP
                 }
                 var et = f.FieldType.GetGenericArguments();
                 if (et.Length != 1) return 0;
-                list.Clear();
+                // H-STANDINTILL-2 T4: build the new rows FIRST and swap them in after - an error mid-fill used to
+                // leave a half-filled list (a partial till); now it leaves the old list untouched.
+                var fresh = new List<object>();
                 foreach (var s in src ?? new List<T>())
                 {
                     if (s == null) continue;
                     var e = Activator.CreateInstance(et[0]);
                     fill(e, s);
-                    list.Add(e);
+                    fresh.Add(e);
                 }
+                list.Clear();
+                foreach (var e in fresh) list.Add(e);
                 return list.Count;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] returned '{fieldName}': {ex.Message}"); return 0; }

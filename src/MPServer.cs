@@ -675,11 +675,23 @@ namespace BigAmbitionsMP
         /// true when anything moved (the caller then re-serialises what is left of the sender's).</summary>
         private static bool HostFileSimulatedPaperwork(BusinessPaperworkPayload p, string senderPid)
         {
-            if (p == null || string.IsNullOrEmpty(senderPid) || MergerAbsence.MarkCount == 0) return false;
+            if (p == null || string.IsNullOrEmpty(senderPid) || (MergerAbsence.MarkCount == 0 && !MergerAbsence.HostHasHandbacks)) return false;
             var mine = new List<MergerAbsence.AbsenceMark>();
             foreach (var kv in MergerAbsence.Marks)
                 if (kv.Value != null && kv.Value.SimulatorPid == senderPid && kv.Value.Addresses.Count > 0)
                     mine.Add(kv.Value);
+            // H-STANDINTILL-2 T5: a stand-in's HAND-BACK publish (MergerAbsence.HandBackFlush) lands after the mark
+            // stopped naming it; for 60 s after the drop its publish of those addresses is still the owner's.
+            try
+            {
+                foreach (var hb in MergerAbsence.HostHandbackMarksFor(senderPid))
+                {
+                    bool dup = false;
+                    foreach (var x in mine) if (x.OwnerStable == hb.OwnerStable) { dup = true; break; }
+                    if (!dup) mine.Add(hb);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] hand-back filing for '{senderPid}': {ex.Message}"); }
             if (mine.Count == 0) return false;
 
             bool any = false;
@@ -860,11 +872,26 @@ namespace BigAmbitionsMP
                         // veil exception, the promoted staff and the installed paperwork back first.
                         string wasSim = MergerAbsence.Marks.TryGetValue(stable, out var had) ? had.SimulatorPid : "";
                         var wasAddrs = had != null ? new List<string>(had.Addresses) : new List<string>();
+                        // H-STANDINTILL-2 T1: the receiver WAS the last simulator of this very stint (read BEFORE
+                        // HostSetMark over-writes LastSimulatorPid) - a suspend-and-back after its disconnect blip.
+                        // Its own till is newer than the stored copy, so the hand-over says so. Not after the owner came
+                        // back in between (OwnerBack: the return stopped that stint) and not when addresses were added.
+                        bool sameSim = false;
+                        try
+                        {
+                            if (had != null && !had.OwnerBack && !string.IsNullOrEmpty(had.LastSimulatorPid) && had.LastSimulatorPid == sim)
+                            {
+                                var hadSet = new HashSet<string>(had.Addresses, StringComparer.OrdinalIgnoreCase);
+                                sameSim = true;
+                                foreach (var a in addrs) if (!hadSet.Contains(a ?? "")) { sameSim = false; break; }
+                            }
+                        }
+                        catch { sameSim = false; }
                         if (MergerAbsence.HostSetMark(stable, pid, sim, addrs, day))
                         {
                             if (!string.IsNullOrEmpty(wasSim) && wasSim != sim)
                                 MergerAbsence.HostSendDrop(wasSim, stable, pid, wasAddrs, $"re-designated to '{sim}'");
-                            if (MergerAbsence.Marks.TryGetValue(stable, out var mk)) MergerAbsence.SendHandover(mk);
+                            if (MergerAbsence.Marks.TryGetValue(stable, out var mk)) MergerAbsence.SendHandover(mk, sameSim);
                         }
                         else if (sim == MPConfig.PlayerId && !MergerAbsence.SimulatesHere(addrs[0])
                                  && MergerAbsence.Marks.TryGetValue(stable, out var mk2))
@@ -957,7 +984,7 @@ namespace BigAmbitionsMP
                     return;
                 }
                 Plugin.Logger.LogInfo($"[Absence] re-sending the hand-over of '{m.OwnerPid}' to '{simPid}' (its installs were lost).");
-                MergerAbsence.SendHandover(m);
+                MergerAbsence.SendHandover(m, sameSimulator: true);   // H-STANDINTILL-2 T1: the mark is still this simulator's
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] re-send: {ex.Message}"); }
         }

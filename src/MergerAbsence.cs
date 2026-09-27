@@ -235,7 +235,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>HOST: reset with the world (new world / manifest restore).</summary>
-        public static void HostReset() { _marks.Clear(); _returnLogged.Clear(); _snapQueue.Clear(); _lastReturnLine = ""; }
+        public static void HostReset() { _marks.Clear(); _returnLogged.Clear(); _snapQueue.Clear(); _lastReturnLine = ""; _handbacks.Clear(); }
 
         // ── B2 hand-over send (host) ──────────────────────────────────────────
         // r2 F1a: the third element says whether this pair belongs to the RETURN LEG. A return's snapshot
@@ -245,7 +245,7 @@ namespace BigAmbitionsMP
 
         /// <summary>HOST: hand the designated simulator its payload, then PACE one interior snapshot
         /// per tick to it. The host itself applies locally instead of sending to itself.</summary>
-        public static void SendHandover(AbsenceMark m)
+        public static void SendHandover(AbsenceMark m, bool sameSimulator = false)
         {
             if (m == null) return;
             try
@@ -264,10 +264,11 @@ namespace BigAmbitionsMP
                     PaperworkJson = json,
                     Drop          = false,
                     Marks         = HostSnapshot(),
+                    SameSimulator = sameSimulator,   // H-STANDINTILL-2 T1
                 };
                 int bytes = string.IsNullOrEmpty(json) ? 0 : System.Text.Encoding.UTF8.GetByteCount(json);
                 Plugin.Logger.LogInfo($"[Absence] hand-over of '{m.OwnerPid}' ({m.Addresses.Count} addresses, "
-                                    + $"{bytes} bytes paperwork) -> '{m.SimulatorPid}'.");
+                                    + $"{bytes} bytes paperwork) -> '{m.SimulatorPid}'{(sameSimulator ? " (same stand-in again: its own till is kept)" : "")}.");
 
                 if (m.SimulatorPid == MPConfig.PlayerId) ApplyHandover(p);            // the host is the simulator
                 else MPServer.SendToPlayer(m.SimulatorPid, MessageEnvelope.Create(MessageType.MergerHandover, "host", p));
@@ -303,6 +304,7 @@ namespace BigAmbitionsMP
             {
                 var addrs = new HashSet<string>(addresses ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
                 _snapQueue.RemoveAll(q => q.pid == simPid && addrs.Contains(q.addr ?? ""));
+                HostNoteHandback(simPid, ownerStable, ownerPid, addresses);   // H-STANDINTILL-2 T5: BEFORE the local apply below
                 Plugin.Logger.LogInfo($"[Absence] '{simPid}' stops simulating '{ownerPid}' ({why}).");
                 var p = new MergerHandoverPayload
                 {
@@ -317,6 +319,52 @@ namespace BigAmbitionsMP
                 else MPServer.SendToPlayer(simPid, MessageEnvelope.Create(MessageType.MergerHandover, "host", p));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] drop send: {ex.Message}"); }
+        }
+
+        // == H-STANDINTILL-2 T5 - THE HAND-BACK WINDOW (host) ====================
+        // A stand-in publishes its paperwork once more right before it stops (HandBackFlush). By the time that
+        // publish reaches the host, the mark no longer names the sender (HostNoteReturn clears SimulatorPid first,
+        // a re-designation re-points it, HostDropMark removes it), so MPServer.HostFileSimulatedPaperwork would
+        // no longer file those addresses under their OWNER. Every HostSendDrop therefore opens a short window in
+        // which the dropped machine's publish of exactly those addresses is still filed under the owner.
+        private static readonly List<(string sim, AbsenceMark mark, int at)> _handbacks = new();
+        private const int HandbackWindowMs = 60000;
+
+        private static void HostNoteHandback(string simPid, string ownerStable, string ownerPid, List<string>? addresses)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(simPid) || string.IsNullOrEmpty(ownerStable)) return;
+                int now = Environment.TickCount;
+                _handbacks.RemoveAll(h => unchecked(now - h.at) > HandbackWindowMs
+                                          || (h.sim == simPid && h.mark.OwnerStable == ownerStable));
+                _handbacks.Add((simPid, new AbsenceMark
+                {
+                    OwnerStable = ownerStable, OwnerPid = ownerPid ?? "", SimulatorPid = simPid,
+                    Addresses = new List<string>(addresses ?? new List<string>()), LastSimulatorPid = simPid,
+                }, now));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back window: {ex.Message}"); }
+        }
+
+        /// <summary>HOST: true while any hand-back window is open (MPServer's filing gate).</summary>
+        public static bool HostHasHandbacks => _handbacks.Count > 0;
+
+        /// <summary>HOST: the owners this sender was told to stop standing in for in the last 60 s, as
+        /// mark-shaped records (owner stable/pid + the addresses) for MPServer.HostFileSimulatedPaperwork.</summary>
+        public static List<AbsenceMark> HostHandbackMarksFor(string senderPid)
+        {
+            var l = new List<AbsenceMark>();
+            try
+            {
+                if (string.IsNullOrEmpty(senderPid) || _handbacks.Count == 0) return l;
+                int now = Environment.TickCount;
+                _handbacks.RemoveAll(h => unchecked(now - h.at) > HandbackWindowMs);
+                foreach (var h in _handbacks)
+                    if (h.sim == senderPid && h.mark != null && h.mark.Addresses.Count > 0) l.Add(h.mark);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back window read: {ex.Message}"); }
+            return l;
         }
 
         // == MERGER PHASE 3-C - THE RETURN LEG, HOST SIDE (C1) =================
@@ -659,15 +707,23 @@ namespace BigAmbitionsMP
             if (p == null) return;
             try
             {
-                if (p.Drop) { UndoLocal(p.OwnerPid, $"host dropped the mark for '{p.OwnerPid}'"); return; }
+                if (p.Drop)
+                {
+                    HandBackFlush(p.OwnerPid, "the host dropped the mark");   // H-STANDINTILL-2 T5: while the addresses are still ours
+                    ForgetHeld(p.OwnerPid);
+                    UndoLocal(p.OwnerPid, $"host dropped the mark for '{p.OwnerPid}'");
+                    return;
+                }
                 if (!string.IsNullOrEmpty(p.SimulatorPid) && p.SimulatorPid != MPConfig.PlayerId)
                 { Plugin.Logger.LogWarning($"[Absence] hand-over addressed to '{p.SimulatorPid}' arrived here - ignored."); return; }
 
                 BusinessPaperworkPayload bundle = null;
+                bool bundleUnreadable = false;   // H-STANDINTILL-2 T3: a PARSE FAILURE is not 'the owner has no till'
                 if (!string.IsNullOrEmpty(p.PaperworkJson))
                 {
                     try { bundle = Newtonsoft.Json.JsonConvert.DeserializeObject<BusinessPaperworkPayload>(p.PaperworkJson); }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] paperwork parse: {ex.Message}"); }
+                    bundleUnreadable = bundle == null;
                 }
 
                 // The owner's WHOLE address set: a moving contract names two addresses, so the
@@ -679,6 +735,12 @@ namespace BigAmbitionsMP
                 // been the single writer of that till all along, so its own till is newer than any bundle.
                 var tillAlreadyHere = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var kv in _simHere) if (kv.Value == owner) tillAlreadyHere.Add(kv.Key);
+                // H-STANDINTILL-2 T1: the host says this machine is the SAME stand-in as before (a re-send, or the
+                // re-designation back after a disconnect blip - whose Reset emptied _simHere above but left the till
+                // live). Its own till is then the newest record: keep it. Only for a till this process really held
+                // in that stint - the SAME registration object it stood in with - so a restarted game or a reloaded
+                // world (whose till came from a load) still takes the owner's till over.
+                if (p.SameSimulator) KeepHeldTills(owner, p.Addresses, tillAlreadyHere);
                 UndoLocal(owner, $"re-applying the hand-over for '{owner}'", restoreDisplay: false);   // MAJOR-2: undo THEN install
                 // WAVE 4 r2 (review MAJOR-2): this machine is about to hold that owner's REAL items. Its
                 // DISPLAY COPIES of the same agreements must go first, or both sets sit in the lists at once
@@ -691,7 +753,13 @@ namespace BigAmbitionsMP
                     if (string.IsNullOrEmpty(addr)) continue;
                     _simHere[addr] = owner;                  // (a)+(b)+(e): the veil exception, the interior
                                                               // publisher and the paperwork publish all read this
-                    if (!tillAlreadyHere.Contains(addr)) TakeOverTill(addr, bundle, owner);   // H-STANDINTILL-1
+                    if (!tillAlreadyHere.Contains(addr))
+                    {
+                        if (bundleUnreadable)   // H-STANDINTILL-2 T3: never empty a till over a bundle we could not read
+                            Plugin.Logger.LogWarning($"[Absence] till of '{addr}' for '{owner}' NOT taken over: the hand-over "
+                                                   + "paperwork did not parse - the local till is left as it is.");
+                        else TakeOverTill(addr, bundle, owner);   // H-STANDINTILL-1
+                    }
                     int staff = PromoteStaffFor(addr, bundle, owner);        // (c)
                     int items = InstallListsFor(addr, bundle, owned, owner);  // (d)
                     Plugin.Logger.LogInfo($"[Absence] simulating '{addr}' for '{p.OwnerPid}' "
@@ -749,6 +817,22 @@ namespace BigAmbitionsMP
                     : "nothing - the bundle holds no record of this address, so it is emptied";
                 Plugin.Logger.LogInfo($"[Absence] till of '{addr}' for '{owner}' taken over: {before} local order(s) worth "
                                     + $"{beforeVal.ToString("F2", inv)} replaced by {src} - now {after} order(s) worth {afterVal.ToString("F2", inv)}.");
+                // H-STANDINTILL-2 T2: how old the stored record is. The bundle carries the publisher's game DAY only
+                // (BusinessPaperworkPayload.Day - no time of day); within the day it is at most one publish (30 s) old.
+                try
+                {
+                    if (bundle != null)
+                    {
+                        int today = 0; try { today = GameStateReader.GetGameTime().day; } catch { }
+                        Plugin.Logger.LogInfo($"[Absence] till of '{addr}' for '{owner}': the hand-over bundle was published on "
+                                            + $"game day {bundle.Day} (today: day {today}; the bundle carries no time of day).");
+                        if (bundle.Day > 0 && today > 0 && bundle.Day < today)
+                            Plugin.Logger.LogWarning($"[Absence] till of '{addr}' for '{owner}': the hand-over bundle PREDATES today "
+                                                   + $"(published day {bundle.Day}, today day {today}) - orders the owner took after that "
+                                                   + "publish are not in it.");
+                    }
+                }
+                catch { }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] till take-over '{addr}': {ex.Message}"); }
         }
@@ -764,6 +848,96 @@ namespace BigAmbitionsMP
             }
             catch { }
             return v;
+        }
+
+        // ── H-STANDINTILL-2 T5: the stand-in's hand-back publish ──────────────
+        /// <summary>Right before this machine stops standing in for ONE owner (the host's Drop - which is what the owner's
+        /// return, a re-designation, a suspend and the dead sweep all send - or the mark-gone sweep), publish its paperwork
+        /// once more while the owner's addresses are still in _simHere, so the orders it took since its last 30 s publish
+        /// reach the host's copy (filed under the owner through the host's hand-back window). Main thread.</summary>
+        private static void HandBackFlush(string ownerPid, string why)
+        {
+            try
+            {
+                string owner = ownerPid ?? "";
+                int n = 0;
+                foreach (var kv in _simHere) if (kv.Value == owner) n++;
+                if (n == 0) return;
+                var pub = PaperworkSync.FlushNow($"hand-back of '{owner}'");
+                Plugin.Logger.LogInfo($"[Absence] hand-back publish for '{owner}' ({n} stood-in address(es), {why}): "
+                                    + (pub != null ? $"published day {pub.Day}." : "NOT published (world not settled, not a member, or no session)."));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back publish for '{ownerPid}': {ex.Message}"); }
+        }
+
+        // ── H-STANDINTILL-2 T1: the tills this process stood in with, kept past a disconnect's Reset ──
+        // A client's involuntary drop runs Reset (MPClient.OnDisconnected) and THEN writes its disconnect save; the rejoin
+        // RELOADS the world (MPSaveCoordinator.ProceedWithLoadData) from that save when the host commits it - else from the
+        // host's older stored .hsg. So the registration object is always new after a rejoin, and what proves "the till I
+        // stood in with" is its CONTENT: the order count and day-roll value remembered here at the Reset. A restarted
+        // game remembers nothing and takes the owner's till over, exactly as before.
+        private static readonly Dictionary<string, (string owner, int count, string value)> _heldAtReset = new(StringComparer.OrdinalIgnoreCase);
+
+        private static (int count, string value) TillPrint(string addr)
+        {
+            var reg = GameStatePatcher.FindRegistration(addr);
+            if (reg == null) return (-1, "");
+            int c = 0; try { c = reg.unprocessedCompletedOrders?.Count ?? 0; } catch { }
+            return (c, TillValue(reg).ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        private static void RememberHeld()
+        {
+            try
+            {
+                foreach (var kv in _simHere)
+                {
+                    (int count, string value) tp = (-1, "");
+                    try { tp = TillPrint(kv.Key); } catch { }
+                    if (tp.count >= 0) _heldAtReset[kv.Key] = (kv.Value ?? "", tp.count, tp.value);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] remember held tills: {ex.Message}"); }
+        }
+
+        private static void ForgetHeld(string ownerPid)
+        {
+            try
+            {
+                var gone = new List<string>();
+                foreach (var kv in _heldAtReset) if (kv.Value.owner == (ownerPid ?? "")) gone.Add(kv.Key);
+                foreach (var a in gone) _heldAtReset.Remove(a);
+            }
+            catch { }
+        }
+
+        private static void KeepHeldTills(string owner, List<string>? addresses, HashSet<string> tillAlreadyHere)
+        {
+            try
+            {
+                foreach (var addr in addresses ?? new List<string>())
+                {
+                    if (string.IsNullOrEmpty(addr) || tillAlreadyHere.Contains(addr)) continue;
+                    (int count, string value) now = (-1, "");
+                    try { now = TillPrint(addr); } catch { }
+                    bool held = _heldAtReset.TryGetValue(addr, out var h) && h.owner == owner;
+                    if (held && now.count == h.count && now.value == h.value)
+                    {
+                        tillAlreadyHere.Add(addr);
+                        Plugin.Logger.LogInfo($"[Absence] till of '{addr}' for '{owner}' KEPT: the same stand-in again (SameSimulator) "
+                                            + $"with the till it stood in with ({now.count} order(s) worth {now.value}) - no take-over from the stored copy.");
+                    }
+                    else
+                        Plugin.Logger.LogInfo($"[Absence] till of '{addr}' for '{owner}': SameSimulator named, but this machine's till "
+                                            + (held ? $"({now.count} order(s) worth {now.value}) is not the one it stood in with ({h.count} worth {h.value}) - "
+                                                    : "was never stood in with in this game session (restart) - ")
+                                            + "taking the owner's till over.");
+                }
+                // NOT forgotten here: a hand-over that lands while the rejoin's world load is still running finds no
+                // registration yet, and the re-send after the load must still be able to match. A Drop or the
+                // mark-gone sweep forgets it; the next Reset overwrites it.
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] same-stand-in till check: {ex.Message}"); }
         }
 
         /// <summary>B5 / re-apply / re-designation: stop simulating for ONE absent owner (r1 MAJOR-6 -
@@ -817,6 +991,7 @@ namespace BigAmbitionsMP
         /// and promoted staff have to be lifted back OUT of the live GameInstance first.</summary>
         public static void Reset()
         {
+            RememberHeld();   // H-STANDINTILL-2 T1: BEFORE the undo empties _simHere
             try { UndoLocalAll("session/scene reset"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] reset undo: {ex.Message}"); }
             _simHere.Clear(); _known.Clear(); _promotedStaff.Clear(); _installed.Clear();
             _snapQueue.Clear(); _idWarned.Clear(); _fieldWarned.Clear(); _resendAsked.Clear();
@@ -1858,7 +2033,12 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[Absence] stopped simulating '{kv.Key}' for '{kv.Value}' (mark gone).");
                         if (!orphans.Contains(kv.Value)) orphans.Add(kv.Value);
                     }
-                foreach (var owner in orphans) UndoLocal(owner, "no mark names this machine any more");
+                foreach (var owner in orphans)
+                {
+                    HandBackFlush(owner, "no mark names this machine any more");   // H-STANDINTILL-2 T5
+                    ForgetHeld(owner);
+                    UndoLocal(owner, "no mark names this machine any more");
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] mark-gone sweep: {ex.Message}"); }
         }
