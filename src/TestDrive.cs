@@ -810,16 +810,38 @@ namespace BigAmbitionsMP
                     // `custstate`        this interior's natives, each id:timeState:completed:done k/n:queue spot:
                     //                    leaving:fee lines[:seat], and its copies (id:visit row known 1/0), plus
                     //                    the last take-over's tallies. sig = md5 of the sorted id:k/n pairs.
+                    //                    Part B: a held spot appends :held=<kind>/<item8>/<seat idx|sub>/<endMin> and a queue
+                    //                    place :q=<line item8>/<spot> (CustomerSeatPins.HeldTag).
+                    // `custstate held`   part B oracle: leak counts on THIS machine (leakSeats / leakSlots / leakSpots /
+                    //                    leakLine / leakDance = spots marked taken that no live customer or pending want
+                    //                    holds), wantTaken k/n, the adopted rows' held spot vs the body's now
+                    //                    (heldSame / heldDone / heldPending / heldFallback / heldMismatch), endDelta max.
+                    // `custstate arm seated <n>` part B: log "[Handoff] armed seated count reached" ONCE, the moment n
+                    //                    live natives here sit on a table seat.
                     // `custstate arm <n>` log "[Handoff] armed count reached" ONCE, the moment this interior
                     //                    holds n customers (natives when simulating, copies when following) -
                     //                    a rig step waits on that line instead of guessing a sleep.
                     string csArg = (arg ?? "").Trim();
+                    if (csArg.StartsWith("arm seated", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int csS;
+                        if (!int.TryParse(csArg.Substring(10).Trim(), out csS) || csS <= 0) return "ERR usage: custstate arm seated <n>";
+                        CustomerHandoff.ArmSeated(csS);
+                        return $"OK custstate armed seated n={csS} bldg='{CustomerPuppets.MyBuilding}'";
+                    }
                     if (csArg.StartsWith("arm", StringComparison.OrdinalIgnoreCase))
                     {
                         int csN;
                         if (!int.TryParse(csArg.Substring(3).Trim(), out csN) || csN <= 0) return "ERR usage: custstate arm <n>";
                         CustomerHandoff.Arm(csN);
                         return $"OK custstate armed n={csN} bldg='{CustomerPuppets.MyBuilding}'";
+                    }
+                    if (csArg.Equals("held", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string chAddr = CustomerPuppets.MyBuilding;
+                        string chMode = CustomerPuppets.AwaitingFinalFrom.Length > 0 ? "waiting"
+                                      : CustomerPuppets.SpawnerSuppressedHere ? "follower" : "native";
+                        return $"OK custstate held bldg='{chAddr}' sim='{CustomerPuppets.SimulatorFor(chAddr)}' mode={chMode} {CustomerSeatPins.HeldReport()}";
                     }
                     string csAddr = CustomerPuppets.MyBuilding;
                     string csFee = "";
@@ -848,7 +870,7 @@ namespace BigAmbitionsMP
                                 try { csSpot = csC.assignedWaitingLine != null ? csC.currentWaitingLineSpot : -1; } catch { }
                                 bool csLv = CustomerHandoff.IsLeavingBody(csC);
                                 if (csLv) csLeaving++;
-                                csNatives.Add($"{csId}:{(int)csC.customerTimeState}:{(csCompleted ? 1 : 0)}:{csK}/{csItems}:{csSpot}:{(csLv ? 1 : 0)}:{csF}{(csC.isSittingOn != null ? ":seat" : "")}");
+                                csNatives.Add($"{csId}:{(int)csC.customerTimeState}:{(csCompleted ? 1 : 0)}:{csK}/{csItems}:{csSpot}:{(csLv ? 1 : 0)}:{csF}{CustomerSeatPins.HeldTag(csC)}");
                                 csSigParts.Add($"{csId}:{csK}/{csItems}");
                             }
                     }

@@ -28,8 +28,9 @@ namespace BigAmbitionsMP
     ///     already leaving. While one adoption runs (AdoptScope) the entrance fee, the gym's PayEntranceFee
     ///     and the arrival complaint are suppressed once, because the source machine already did them.
     ///
-    /// The row also carries SeatItem / SeatIndex / Remaining for LATER efforts (same seat or machine, resumed
-    /// workout time); this build fills SeatItem where it is cheap and applies none of the three.</summary>
+    /// Part B (2026-09-27, CustomerSeatPins): the row also carries the HELD SPOT (SeatKind / SeatItem / SeatIndex /
+    /// SeatSub, the queue line QueueItem) and the activity's absolute end time EndMin; the taker pins the same seat,
+    /// machine, slot chair, casino table spot, cinema seat or queue line and resumes the remaining time.</summary>
     internal static class CustomerHandoff
     {
         // ── Receiver: the newest visit row per customer id ──────────────────────────────────────────
@@ -83,8 +84,9 @@ namespace BigAmbitionsMP
                 _adoptScope = false; _suppressFeeCheck = false; _suppressFeePay = false; _feeCounted = false;
                 StoppedStreamingFor = "";
                 _ledger.Clear(); _fwdBooked.Clear(); _fwdSeen.Clear();
+                CustomerSeatPins.Reset();
 #if BAMP_DEV
-                _armN = 0;
+                _armN = 0; _armSeatN = 0;
 #endif
             }
             catch { }
@@ -98,6 +100,7 @@ namespace BigAmbitionsMP
                 if (_visitBldg != newBldg) { _visit.Clear(); _visitBldg = newBldg ?? ""; }
                 _sentSig.Clear(); _streamBldg = ""; _nextFullAt = 0f;
                 if (StoppedStreamingFor != (newBldg ?? "")) StoppedStreamingFor = "";
+                CustomerSeatPins.OnBuilding(newBldg ?? "");
             }
             catch { }
         }
@@ -170,14 +173,9 @@ namespace BigAmbitionsMP
                 r.Basket    = c.hasABasket;
                 try { r.Spot = c.assignedWaitingLine != null ? c.currentWaitingLineSpot : -1; } catch { r.Spot = -1; }
                 try { r.TimeState = (int)c.customerTimeState; } catch { }
-                // Kept for the later same-seat effort: the seat's item instance id where it is one lookup away.
-                try
-                {
-                    var seat = c.isSittingOn?.SeatTransform;
-                    var ic = seat != null ? seat.GetComponentInParent<ItemController>() : null;
-                    if (ic != null && ic.ItemInstance != null) r.SeatItem = ic.ItemInstance.id ?? "";
-                }
-                catch { }
+                // Part B step A: the held spot (table id + seat index, machine, slot chair, casino table spot, cinema
+                // seat), the queue line and the activity's absolute end time (CustomerSeatPins.ReadHeld).
+                CustomerSeatPins.CaptureHeld(c, r);
                 var cd = c.citizenData;
                 if (cd != null)
                 {
@@ -211,7 +209,12 @@ namespace BigAmbitionsMP
                 h = h * 31 + (r.Basket ? 1 : 0);
                 h = h * 31 + r.Spot;
                 h = h * 31 + r.TimeState;
+                h = h * 31 + r.SeatKind;
                 h = h * 31 + (r.SeatItem ?? "").GetHashCode();
+                h = h * 31 + r.SeatIndex;
+                h = h * 31 + (r.SeatSub ?? "").GetHashCode();
+                h = h * 31 + (r.QueueItem ?? "").GetHashCode();
+                h = h * 31 + (int)Math.Round(r.EndMin * 10f);   // absolute: moves only when a new activity starts
                 h = h * 31 + r.Entries.Count;
                 foreach (var e in r.Entries)
                     h = h * 31 + (e.ItemName ?? "").GetHashCode() * 8 + (e.Processed ? 4 : 0) + (e.Paid ? 2 : 0) + (e.Available ? 1 : 0);
@@ -552,10 +555,22 @@ namespace BigAmbitionsMP
 
 #if BAMP_DEV
         // ── DEV: `custstate arm <n>` - one log line the moment this interior holds n customers ────────
-        private static int _armN;
+        private static int _armN, _armSeatN;
         internal static void Arm(int n) { _armN = n; }
+        /// <summary>Part B: `custstate arm seated <n>` - one line the moment n live natives sit on a table seat.</summary>
+        internal static void ArmSeated(int n) { _armSeatN = n; }
         internal static void ArmTick(int natives, int copies)
         {
+            if (_armSeatN > 0)
+            {
+                int k = 0;
+                try { foreach (var c in IndoorCustomerSpawner.Customers) if (c != null && !c.isPlayer && c.isSittingOn != null) k++; } catch { }
+                if (k >= _armSeatN)
+                {
+                    Plugin.Logger.LogInfo($"[Handoff] armed seated count reached: {k} >= {_armSeatN} @{CustomerPuppets.MyBuilding}");
+                    _armSeatN = 0;
+                }
+            }
             if (_armN <= 0) return;
             if (natives + copies < _armN) return;
             Plugin.Logger.LogInfo($"[Handoff] armed count reached: {natives + copies} >= {_armN} (natives={natives} copies={copies}) @{CustomerPuppets.MyBuilding}");

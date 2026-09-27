@@ -1005,9 +1005,13 @@ namespace BigAmbitionsMP
         public bool   Leaving    { get; set; }           // the body had started walking out (Customer.CustomerLeaveBuilding)
         public bool   Basket     { get; set; }           // hasABasket
         public int    Spot       { get; set; } = -1;     // queue spot, -1 = not queued; the taker adopts in queue order
-        public string SeatItem   { get; set; } = "";     // LATER EFFORT (same seat/machine): the seat's item instance id where cheap; not applied yet
-        public int    SeatIndex  { get; set; } = -1;     // LATER EFFORT: the seat spot's index; -1 = unknown (not filled in this build)
-        public float  Remaining  { get; set; } = -1f;    // LATER EFFORT (resumed workout/seat time): remaining activity minutes; -1 = unknown
+        public string SeatItem   { get; set; } = "";     // part B: the held spot's item id - table (kind 1), slot chair, casino table, gym machine, cinema seat item
+        public int    SeatIndex  { get; set; } = -1;     // part B: the table's SeatSpots index (kind 1); -1 otherwise
+        public float  Remaining  { get; set; } = -1f;    // part B: DIAGNOSTIC only - minutes left at capture (EndMin carries it; not in the change signature)
+        public int    SeatKind   { get; set; }           // part B (CustomerSeatPins): 0 none, 1 table seat, 2 slot chair, 3 casino table spot, 4 gym machine, 5 cinema seat
+        public string SeatSub    { get; set; } = "";     // part B: casino play spot / cinema sitting position - transform name@sibling index
+        public float  EndMin     { get; set; } = -1f;    // part B: ABSOLUTE game minute the current activity ends; -1 = unknown / still walking there
+        public string QueueItem  { get; set; } = "";     // part B: the queue line owner's item id ("" = not queued); Spot is the place in it
         public int    TimeState  { get; set; }           // (int)CustomerTimeState on the source - diagnostic only
         public string NationalID { get; set; } = "";
         public string Name       { get; set; } = "";

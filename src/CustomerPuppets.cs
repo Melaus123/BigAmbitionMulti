@@ -429,6 +429,9 @@ namespace BigAmbitionsMP
                         {
                             try { var vr = CustomerHandoff.Capture(c, id); if (vr != null) finalRows.Add(vr); } catch { }
                         }
+                        // H-HANDOFF-1 part B step C: the pooled release frees none of the seat, queue place, slot chair,
+                        // casino table spot or dance spot this body holds - they stayed "taken" on this machine.
+                        if (!c.isPlayer) { try { CustomerSeatPins.FreeHeld(c); } catch { } }
                         try { c.ReleaseCustomer(); } catch { }
                         if (!id.StartsWith("i", StringComparison.Ordinal) && !_puppets.ContainsKey(id))
                         {
@@ -935,10 +938,13 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] apply visit {entryId}: {ex.Message}"); }
                 }
+                // H-HANDOFF-1 part B step B1: the held spot this body should get, recorded BEFORE the spawn (keyed by
+                // its CustomerEntry - the tree may tick inside Init).
+                if (v != null) CustomerSeatPins.WantBefore(entry, entryId, v);
                 int before = IndoorCustomerSpawner.Customers.Count;
                 _spawnCustomerM ??= HarmonyLib.AccessTools.Method(typeof(IndoorCustomerSpawner), "SpawnCustomer",
                     new[] { typeof(AI.Customers.CustomerEntries.CustomerEntry) });
-                if (_spawnCustomerM == null) { withState = false; bodyOnly = false; _adoptWhy = "SpawnCustomer not found"; return false; }
+                if (_spawnCustomerM == null) { CustomerSeatPins.DropEntry(entry, "no spawner"); withState = false; bodyOnly = false; _adoptWhy = "SpawnCustomer not found"; return false; }
                 // H-HANDOFF-1 step 7: Init runs synchronously inside SpawnCustomer (IndoorCustomerSpawner.cs:272), so
                 // this scope covers the entrance fee, PayEntranceFee and the arrival complaint (CustomerHandoff).
                 // F2: never add or charge a fee on an order that is already booked. F3/K5: the fee CHECK is suppressed
@@ -969,24 +975,29 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Handoff] body-only {entryId}: booked order before {tillBefore} -> after {tillAfter} ({(tillAfter == tillBefore ? "untouched" : "CHANGED")}); the body carries a detached copy{(feeOnlyBooked ? " - fee-only visit, it stays" : "")}.");
                 }
                 var list = IndoorCustomerSpawner.Customers;
-                if (list.Count <= before) { withState = false; bodyOnly = false; _adoptWhy = "spawn refused (capacity or fee)"; return false; }   // the entry stays unconsumed
+                if (list.Count <= before) { CustomerSeatPins.DropEntry(entry, "spawn refused"); withState = false; bodyOnly = false; _adoptWhy = "spawn refused (capacity or fee)"; return false; }   // the entry stays unconsumed
                 // Consumed — the regular spawner must not spawn it again. H-HANDOFF-1 (C3): set only AFTER the
                 // success check; before, a refused spawn still consumed the entry and that shopper never came.
                 entry.completed = true;
                 var c = list[list.Count - 1];
-                if (c == null) return true;
+                if (c == null) { CustomerSeatPins.DropEntry(entry, "no body"); return true; }
                 // Fold F2, rig run T-HANDOFF1-20260926-212003: a body whose order is already BOOKED walks out even
                 // when its row was not leaving - adopted in place it went back to the till and Customer.CompleteOrder
                 // (:385-397, no completed check) put the SAME order in the till a second time (tilldupes +2).
                 // Fold K6: except a fee-only (gym) visit - its order was completed at the door and the visit goes on.
                 bool leave = (booked && !feeOnlyBooked) || (v != null && v.Leaving && (withState || booked));
+                // Part B step B2: reserve the wanted seat / machine right after the spawn, before another adopted body's
+                // random pick can take it; a body that walks straight out wants nothing.
+                if (leave) CustomerSeatPins.DropEntry(entry, "walks out"); else CustomerSeatPins.ReserveAfter(entry, c);
                 if (pup != null && pup.go != null)   // fold F5: a body without a copy stays where SpawnCustomer put it (the entrance)
                 {
                 Vector3 pos = pup.go.transform.position;
                 // Round-44: HOLD the position — the native spawn-init repositions the body + assigns
                 // objectives over the next frames; a single warp raced it (field: teleport + bolting).
                 // (H-HANDOFF-1: not for a body that walks straight out - the hold would drag it back.)
-                if (!leave) _warpHolds.Add((c, pos, Time.unscaledTime + 0.75f));
+                // Part B step B5: not for a seat / machine want either - UseWorkoutMachine switches the agent off and
+                // snaps the body to the machine, and the hold's transform fallback would pull it off again.
+                if (!leave && !CustomerSeatPins.HasSpotWant(entry)) _warpHolds.Add((c, pos, Time.unscaledTime + 0.75f));
                 try
                 {
                     var ag = c.tpc != null ? c.tpc.navmeshAgent : null;
