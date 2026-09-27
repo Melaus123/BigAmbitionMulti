@@ -47,6 +47,7 @@ namespace BigAmbitionsMP
         }
         private static readonly Dictionary<string, Known> _visit = new();
         private static readonly Dictionary<string, float> _finalFrom = new();   // sender pid -> when its last Final arrived
+        private static readonly Dictionary<string, float> _finalAt = new();     // fold W5: sender pid -> the At of its LATEST Final's rows (never consumed)
         private static string _visitBldg = "";
         internal static int FinalsReceived, StreamRowsReceived;
 
@@ -81,7 +82,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                _visit.Clear(); _finalFrom.Clear(); _visitBldg = "";
+                _visit.Clear(); _finalFrom.Clear(); _finalAt.Clear(); _visitBldg = "";
                 _leaving.Clear();
                 _sentSig.Clear(); _streamBldg = ""; _nextStreamAt = 0f; _nextFullAt = 0f;
                 _adoptScope = false; _suppressFeeCheck = false; _suppressFeePay = false; _feeCounted = false;
@@ -92,6 +93,7 @@ namespace BigAmbitionsMP
                 CustomerSeatPins.Reset();
 #if BAMP_DEV
                 _armN = 0; _armSeatN = 0;
+                PremiseReset();
 #endif
             }
             catch { }
@@ -102,7 +104,8 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (_visitBldg != newBldg) { _visit.Clear(); _visitBldg = newBldg ?? ""; }
+                // Fold W5 (review of 81830db): a Final from the old building is stale here - its freshness goes with its rows.
+                if (_visitBldg != newBldg) { _visit.Clear(); _visitBldg = newBldg ?? ""; _finalFrom.Clear(); _finalAt.Clear(); }
                 _sentSig.Clear(); _streamBldg = ""; _nextFullAt = 0f;
                 if (StoppedStreamingFor != (newBldg ?? "")) StoppedStreamingFor = "";
                 CustomerSeatPins.OnBuilding(newBldg ?? "");
@@ -351,6 +354,7 @@ namespace BigAmbitionsMP
                 if (p.Final)
                 {
                     _finalFrom[p.SimulatorPid ?? ""] = now;
+                    _finalAt[p.SimulatorPid ?? ""] = now;
                     FinalsReceived++;
                     Plugin.Logger.LogInfo($"[Handoff] final from {p.SimulatorPid} received: {n} @{p.AddressKey} ({p.Reason}{(p.SourceBooks ? ", source books" : "")}).");
                     CustomerPuppets.HoldForHandoff(p.Rows, p.SimulatorPid ?? "");
@@ -378,14 +382,17 @@ namespace BigAmbitionsMP
             => !string.IsNullOrEmpty(id) && _visit.TryGetValue(id, out var k) && k.SourceBooks;
 
         /// <summary>Fold F5: every row of the last Final from <paramref name="fromPid"/> (the taker spawns the ones
-        /// it holds no copy of).</summary>
+        /// it holds no copy of). Fold W5: only the rows of the LATEST Final from it (an older Final's rows of the same
+        /// sender are not part of this hand-off).</summary>
         internal static List<CustomerVisitRow> FinalRowsFrom(string fromPid)
         {
             var l = new List<CustomerVisitRow>();
             try
             {
                 if (string.IsNullOrEmpty(fromPid)) return l;
-                foreach (var kv in _visit) if (kv.Value.Final && kv.Value.From == fromPid && kv.Value.Row != null) l.Add(kv.Value.Row);
+                bool haveAt = _finalAt.TryGetValue(fromPid, out float lastAt);
+                foreach (var kv in _visit)
+                    if (kv.Value.Final && kv.Value.From == fromPid && kv.Value.Row != null && (!haveAt || kv.Value.At >= lastAt)) l.Add(kv.Value.Row);
             }
             catch { }
             return l;
@@ -657,6 +664,53 @@ namespace BigAmbitionsMP
                 if (visits > 0) Plugin.Logger.LogInfo($"[Stock] {units} unit(s) of {visits} open visit(s) leave @{addr} with the hand-off (taken off this machine's shelves; never deducted again).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] note final: {ex.Message}"); }
+        }
+
+        /// <summary>Fold W1 (review of 81830db): the late adopt releases this machine's own DUPLICATE native of a visit in the
+        /// partner's Final. On the machine that keeps the books, the units that duplicate took off this machine's shelves are
+        /// recorded as that visit's credits before the release - the bookkeeping NoteFinalStock uses - so the adoption of the
+        /// row uses them (StockOnAdopt) instead of taking the same items off a shelf again. A duplicate of a visit that walks
+        /// out UNSOLD on the partner's machine (a leaving row, nothing paid) puts its units back on a shelf, as the native Leave
+        /// would (the row's own ReturnUnsoldWalkOut ran at receipt, before this body was found).</summary>
+        internal static int CreditDuplicate(BuildingRegistration? reg, string id, Customer? c, CustomerVisitRow? row)
+        {
+            try
+            {
+                if (reg == null || c == null || string.IsNullOrEmpty(id)) return 0;
+                bool books = false;
+                try { books = MergerFlip.BooksHere(reg); } catch { }
+                if (!books) return 0;
+                var o = c.order;
+                if (o?.entries == null || o.completed || BookOnce.IsBooked(id)) return 0;   // sold already: its Order is in the till
+                var units = new List<KeyValuePair<string, float>>();
+                foreach (var e in o.entries)
+                {
+                    if (e == null || string.IsNullOrEmpty(e.itemName)) continue;
+                    bool bag = IsPaperBag(e.itemName);
+                    if (bag ? !e.available : !TakenOe(e)) continue;
+                    if (!bag && !CustomerEntrySync.IsShelfItem(reg, e.itemName)) continue;   // a fee or a service: no stock
+                    units.Add(new KeyValuePair<string, float>(e.itemName, e.wholesalePrice));
+                }
+                if (units.Count == 0) return 0;
+                string addr = "";
+                try { addr = GameStateReader.AddressKey(reg); } catch { }
+                bool unsoldWalkOut = row != null && row.Leaving;
+                if (unsoldWalkOut && row!.Entries != null) foreach (var re in row.Entries) if (re != null && re.Paid) { unsoldWalkOut = false; break; }
+                if (unsoldWalkOut)
+                {
+                    StockUnsoldReturns++;
+                    int back = ReturnLeftovers(reg, units, id, "its late-adopt duplicate was released; the visit walks out unsold");
+                    Plugin.Logger.LogInfo($"[Stock] late-adopt duplicate {id} @{addr}: {back}/{units.Count} unit(s) it took off this machine's shelves back on a shelf (the visit walks out unsold).");
+                    return units.Count;
+                }
+                if (!_out.TryGetValue(id, out var ov)) { ov = new OutVisit { Addr = addr }; _out[id] = ov; }
+                ov.Units.AddRange(units);
+                try { var eo = CustomerEntrySync.TryFindEntry(reg, id)?.order; if (eo != null && !_outOrders.TryGetValue(eo, out _)) _outOrders.Add(eo, _markObj); } catch { }
+                StockOutUnits += units.Count;
+                Plugin.Logger.LogInfo($"[Stock] late-adopt duplicate {id} @{addr}: {units.Count} unit(s) it took off this machine's shelves recorded as the visit's credits before its release (the adoption of its row uses them).");
+                return units.Count;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] credit duplicate {id}: {ex.Message}"); return 0; }
         }
 
         /// <summary>The units this machine gave a visit whose body is elsewhere - removed: the caller uses them up.</summary>
@@ -1211,8 +1265,169 @@ namespace BigAmbitionsMP
             catch (Exception ex) { return "ERR stockdelta " + ex.Message; }
         }
 
+        // ── DEV: `premise await|get|set|do` - the rig's bounded premise waits (scenario hardening, 2026-09-27) ──────────
+        // A leg's premise (n live customers, n unbooked, n unbooked that arrived in the CURRENT game hour after the wait
+        // was armed - the booking owner's hourly pass books every body already present -, n seated, n seated with at least
+        // m game minutes of their seat activity left) is waited for up to a bound, the wait is retried once, and a premise
+        // never reached is logged "[Premise] <tag> NOT MET": TestDrive `premise do` then SKIPS the assertions that need it
+        // (report line), never a fail. One wait at a time; the tag verdicts live until the session resets.
+        private sealed class PremiseWait
+        {
+            public string Tag = "", Conds = "";
+            public float Bound, Start, First, NextAt, EatMin = 20f, BusyMin = 10f;
+            public int Retries, Live = -1, Unbooked = -1, Fresh = -1, Seated = -1, Eating = -1, Busy = -1;
+            public readonly HashSet<string> Old = new();
+            public readonly Dictionary<string, int> Seen = new();
+        }
+        private static PremiseWait? _pw;
+        private static readonly Dictionary<string, bool> _premise = new();
+        private static void PremiseReset() { try { _pw = null; _premise.Clear(); } catch { } }
+
+        internal static string PremiseAwait(string tag, float bound, string conds)
+        {
+            try
+            {
+                float now = Time.unscaledTime;
+                var w = new PremiseWait { Tag = tag, Bound = bound, Start = now, First = now, Conds = conds };
+                foreach (var part in conds.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var kv = part.Split('=');
+                    if (kv.Length != 2) return "ERR premise await: bad condition '" + part + "'";
+                    string k = kv[0].Trim().ToLowerInvariant(), v = kv[1].Trim(), vn = v;
+                    float em = -1f;
+                    int sl = v.IndexOf('/');
+                    if (sl > 0)
+                    {
+                        vn = v.Substring(0, sl);
+                        if (!float.TryParse(v.Substring(sl + 1), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out em) || em < 0f)
+                            return "ERR premise await: bad minutes in '" + part + "'";
+                    }
+                    if (!int.TryParse(vn, out int cn) || cn < 0) return "ERR premise await: bad count in '" + part + "'";
+                    switch (k)
+                    {
+                        case "live": w.Live = cn; break;
+                        case "unbooked": w.Unbooked = cn; break;
+                        case "fresh": w.Fresh = cn; break;
+                        case "seated": w.Seated = cn; break;
+                        case "eating": w.Eating = cn; if (em >= 0f) w.EatMin = em; break;
+                        case "busy": w.Busy = cn; if (em >= 0f) w.BusyMin = em; break;
+                        default: return "ERR premise await: unknown condition '" + k + "' (live, unbooked, fresh, seated, eating=n[/minutes], busy=n[/minutes])";
+                    }
+                }
+                var all = IndoorCustomerSpawner.Customers;
+                if (all != null)
+                    foreach (var c in all)
+                    {
+                        if (c == null || c.isPlayer) continue;
+                        string id = CustomerPuppets.RowIdForCustomer(c) ?? "";
+                        if (id.Length > 0) w.Old.Add(id);
+                    }
+                _premise.Remove(tag);
+                _pw = w;
+                return $"OK premise await tag={tag} bound={bound:F0}s conds={conds} retries=1 bldg='{CustomerPuppets.MyBuilding}' present={w.Old.Count}";
+            }
+            catch (Exception ex) { return "ERR premise await: " + ex.Message; }
+        }
+
+        /// <summary>met / unmet / pending (the wait still runs) / unknown (never awaited or set on this machine).</summary>
+        internal static string PremiseState(string tag)
+        {
+            try
+            {
+                if (_premise.TryGetValue(tag ?? "", out bool m)) return m ? "met" : "unmet";
+                if (_pw != null && _pw.Tag == tag) return "pending";
+            }
+            catch { }
+            return "unknown";
+        }
+
+        /// <summary>The partner machine's verdict, handed over by the rig (a captured `premise get`).</summary>
+        internal static void PremiseSet(string tag, bool met)
+        {
+            try
+            {
+                _premise[tag ?? ""] = met;
+                if (!met) Plugin.Logger.LogInfo($"[Premise] not met ({tag}): the assertions that need it are skipped on this machine (premise not met).");
+            }
+            catch { }
+        }
+
+        private static void PremiseTick(int natives, int copies)
+        {
+            var w = _pw;
+            if (w == null) return;
+            try
+            {
+                float now = Time.unscaledTime;
+                if (now < w.NextAt) return;
+                w.NextAt = now + 0.5f;
+                int hourKey = -1;
+                try { var tm = TimeHelper.Now(); hourKey = (int)tm.Day * 24 + (int)tm.Hour; } catch { }
+                float nowMin = -1f;
+                try { nowMin = TimeHelper.NowInMinutes(); } catch { }
+                int unb = 0, fresh = 0, seat = 0, eat = 0, busy = 0;
+                var all = IndoorCustomerSpawner.Customers;
+                if (all != null)
+                    foreach (var c in all)
+                    {
+                        if (c == null || c.isPlayer) continue;
+                        string id = CustomerPuppets.RowIdForCustomer(c) ?? "";
+                        bool isNew = false;
+                        int firstHour = hourKey;
+                        if (id.Length > 0 && !w.Old.Contains(id))
+                        {
+                            isNew = true;
+                            if (!w.Seen.TryGetValue(id, out firstHour)) { firstHour = hourKey; w.Seen[id] = hourKey; }
+                        }
+                        bool lv = IsLeavingBody(c);
+                        bool done = c.order != null && c.order.completed;
+                        if (!lv && !done && !BookOnce.IsBooked(id))
+                        {
+                            unb++;
+                            if (isNew && firstHour == hourKey) fresh++;
+                        }
+                        if (!lv && c.isSittingOn != null)
+                        {
+                            seat++;
+                            float end = -1f;
+                            try { end = CustomerSeatPins.ReadHeld(c).EndMin; } catch { }
+                            if (end < 0f || nowMin < 0f || end - nowMin >= w.EatMin) eat++;
+                        }
+                        // busy: IN a timed activity (seat, gym machine, slot, table / play spot) whose end is known and at least
+                        // BusyMin game minutes away - the taker can resume that timer (the rig's resumed >= 1).
+                        if (!lv && w.Busy >= 0)
+                        {
+                            float bend = -1f;
+                            try { bend = CustomerSeatPins.ReadHeld(c).EndMin; } catch { }
+                            if (bend >= 0f && (nowMin < 0f || bend - nowMin >= w.BusyMin)) busy++;
+                        }
+                    }
+                int live = natives + copies;
+                bool met = (w.Live < 0 || live >= w.Live) && (w.Unbooked < 0 || unb >= w.Unbooked) && (w.Fresh < 0 || fresh >= w.Fresh)
+                        && (w.Seated < 0 || seat >= w.Seated) && (w.Eating < 0 || eat >= w.Eating) && (w.Busy < 0 || busy >= w.Busy);
+                string counts = $"live={live} unbooked={unb} fresh={fresh} seated={seat} eating={eat} (seat time left >= {w.EatMin:F0} game min) busy={(w.Busy >= 0 ? busy.ToString() : "-")} (activity end >= {w.BusyMin:F0} game min away) - wanted {w.Conds} @{CustomerPuppets.MyBuilding}";
+                if (met)
+                {
+                    _premise[w.Tag] = true; _pw = null;
+                    Plugin.Logger.LogInfo($"[Premise] {w.Tag} met after {now - w.First:F0}s ({w.Retries} retr{(w.Retries == 1 ? "y" : "ies")}): {counts}");
+                    return;
+                }
+                if (now - w.Start < w.Bound) return;
+                if (w.Retries == 0)
+                {
+                    w.Retries = 1; w.Start = now;
+                    Plugin.Logger.LogInfo($"[Premise] {w.Tag} not reached within {w.Bound:F0}s - retrying the set-up once (a second wait of {w.Bound:F0}s): {counts}");
+                    return;
+                }
+                _premise[w.Tag] = false; _pw = null;
+                Plugin.Logger.LogInfo($"[Premise] {w.Tag} NOT MET within {now - w.First:F0}s (1 retry): {counts} - the assertions that need it are SKIPPED (premise not met), not failed.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Premise] tick: {ex.Message}"); }
+        }
+
         internal static void ArmTick(int natives, int copies)
         {
+            PremiseTick(natives, copies);
             if (_armSeatN > 0)
             {
                 int k = 0;

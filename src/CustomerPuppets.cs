@@ -695,25 +695,30 @@ namespace BigAmbitionsMP
 
         /// <summary>H-HANDOFF-1 walk-in race (2026-09-27): each live native here whose id is a not-leaving row of the Final
         /// from <paramref name="from"/> is swapped for a copy at its position (seat / queue spot freed first, as in the
-        /// follow branch), so the take-over adopts it with the row's state instead of refusing the row.</summary>
+        /// follow branch), so the take-over adopts it with the row's state instead of refusing the row.
+        /// Fold W2 (review of 81830db): a duplicate whose row is LEAVING is swapped too - the duplicate is released and the
+        /// leaving row is adopted as leaving (it walks out as the partner's visit), not left as a second body of that visit.
+        /// Fold W1: before a duplicate is released, the units it took off this machine's shelves become that visit's
+        /// credits (CustomerHandoff.CreditDuplicate - the bookkeeping NoteFinalStock uses), so the adoption uses them.</summary>
         private static int LateSwapDuplicates(string from)
         {
-            int n = 0;
+            int n = 0, nLeaving = 0, credited = 0;
             try
             {
-                var want = new HashSet<string>();
+                var want = new Dictionary<string, CustomerVisitRow>();
                 foreach (var r in CustomerHandoff.FinalRowsFrom(from))
-                    if (r != null && !string.IsNullOrEmpty(r.Id) && !r.Leaving) want.Add(r.Id);
+                    if (r != null && !string.IsNullOrEmpty(r.Id)) want[r.Id] = r;
                 if (want.Count == 0) return 0;
                 var reg = FindReg(_myBldg);
                 foreach (var c in new List<Customer>(IndoorCustomerSpawner.Customers))
                 {
                     if (c == null || c.isPlayer) continue;
                     string id = RowIdOf(c, reg);
-                    if (string.IsNullOrEmpty(id) || !want.Contains(id) || _puppets.ContainsKey(id)) continue;
+                    if (string.IsNullOrEmpty(id) || !want.TryGetValue(id, out var row) || _puppets.ContainsKey(id)) continue;
                     Vector3 pos = c.transform.position;
                     float yaw = c.transform.eulerAngles.y;
                     var look = CaptureLook(c.tpc);
+                    try { credited += CustomerHandoff.CreditDuplicate(reg, id, c, row); } catch { }
                     try { CustomerSeatPins.FreeHeld(c); } catch { }
                     try { c.ReleaseCustomer(); } catch { }
                     var pup = SpawnPuppet(pos, yaw);
@@ -721,7 +726,10 @@ namespace BigAmbitionsMP
                     _puppets[id] = pup;
                     if (look != null) { pup.look = look; _looksById[id] = look; ApplyLookTo(pup.tpc, look); }
                     n++;
+                    if (row != null && row.Leaving) nLeaving++;
                 }
+                if (nLeaving > 0 || credited > 0)
+                    Plugin.Logger.LogInfo($"[Handoff] late adopt in '{_myBldg}': of {n} swapped duplicate(s), {nLeaving} carry a LEAVING row (adopted as leaving); {credited} shelf unit(s) the duplicates took were settled for their visits.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] late adopt swap: {ex.Message}"); }
             return n;
@@ -831,7 +839,7 @@ namespace BigAmbitionsMP
                         {
                             // Walk-in race: "already live on this machine" means a body carries that visit here - its
                             // entry is never reopened (the spawner would bring the same customer a second time).
-                            if (!_adoptBooked && _adoptWhy != "already live on this machine") refusedOpen.Add(r.Id);
+                            if (!_adoptBooked && !_adoptLiveHere) refusedOpen.Add(r.Id);
                             outcome[r.Id] = "refused:" + _adoptWhy;
                         }
                     }
@@ -964,6 +972,9 @@ namespace BigAmbitionsMP
         /// already booked on this machine (the book-once registry; a refused unbooked visit is reopened).</summary>
         private static string _adoptWhy = "";
         private static bool _adoptBooked;
+        /// <summary>Fold W3 (review of 81830db): the last refusal was 'a body of that visit is already live on this machine' -
+        /// the walk-in check never reopens such an entry. A flag, not a compare against the refusal's wording.</summary>
+        private static bool _adoptLiveHere;
 
         /// <summary>Fold K6: an order that holds nothing but entrance-fee lines - a gym visit, completed at the door
         /// while the workout goes on (the native hourly pass can append a second fee line: still fee-only).</summary>
@@ -1116,7 +1127,7 @@ namespace BigAmbitionsMP
                                                 out bool withState, out bool leftNow, out bool matched, out bool bodyOnly)
         {
             withState = false; leftNow = false; matched = false; bodyOnly = false;
-            _adoptWhy = ""; _adoptBooked = false;
+            _adoptWhy = ""; _adoptBooked = false; _adoptLiveHere = false;
             try
             {
                 if (pup != null && pup.go == null) { _adoptWhy = "copy has no body"; return false; }
@@ -1159,7 +1170,7 @@ namespace BigAmbitionsMP
                     bool live = false;
                     // Fold L: a row-built stand-in entry is a NEW object - a live body of the same visit is found by its id.
                     try { foreach (var lc in IndoorCustomerSpawner.Customers) if (lc != null && !lc.isPlayer && (ReferenceEquals(lc.customerEntry, entry) || LiveIdOf(lc) == entryId)) { live = true; break; } } catch { }
-                    if (live) { _adoptWhy = "already live on this machine"; return false; }
+                    if (live) { _adoptWhy = "already live on this machine"; _adoptLiveHere = true; return false; }
                 }
                 string fee = "";
                 try { fee = BusinessTypeHelper.GetEntranceFeeNameForBusinessType(InstanceBehavior<BuildingManager>.Instance.businessType) ?? ""; } catch { }

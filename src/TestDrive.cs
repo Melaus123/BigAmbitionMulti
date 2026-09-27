@@ -850,6 +850,59 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { return $"ERR puppetacts: {ex.GetType().Name}: {ex.Message}"; }
                 }
 
+                // ── Scenario hardening (2026-09-27): bounded premise waits; a premise never reached SKIPS its assertions ──
+                // `premise await <tag> <bound_s> <cond>=<n>[,...]`  arm ONE wait on this machine (conditions: live, unbooked,
+                //                    fresh = unbooked and arrived in the current game hour after the arm, seated,
+                //                    eating=<n>[/<game minutes left>], busy=<n>[/<game minutes left>] = in a timed activity
+                //                    whose end is known); it logs "[Premise] <tag> met after ..." or, after the
+                //                    bound, retries once and then logs "[Premise] <tag> NOT MET within ...".
+                // `premise get <tag>`  met | unmet (a wait still pending or an unknown tag reads unmet) - the rig captures it.
+                // `premise set <tag> met|unmet`  the partner's verdict, handed over by the rig (unmet logs the skip line).
+                // `premise do <tag> <command>`  runs <command>; when the premise is unmet its result is prefixed
+                //                    "PREMISE NOT MET (<tag>) - assertion skipped | " and "[Premise] not met (<tag>)" is logged, so a
+                //                    step's regex can accept the skip explicitly. An unknown tag is an ERR (never a silent skip).
+                case "premise":
+                {
+                    try
+                    {
+                        string[] pa = (arg ?? "").Split(new[] { ' ' }, 3, StringSplitOptions.RemoveEmptyEntries);
+                        string psub = pa.Length > 0 ? pa[0].ToLowerInvariant() : "";
+                        string ptag = pa.Length > 1 ? pa[1] : "";
+                        if (ptag.Length == 0) return "ERR usage: premise await|get|set|do <tag> ...";
+                        if (psub == "await")
+                        {
+                            string[] paw = pa.Length > 2 ? pa[2].Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries) : new string[0];
+                            if (paw.Length < 2 || !float.TryParse(paw[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float pbound) || pbound <= 0f)
+                                return "ERR usage: premise await <tag> <bound_s> <cond>=<n>[,<cond>=<n>...]";
+                            return CustomerHandoff.PremiseAwait(ptag, pbound, paw[1].Replace(" ", ""));
+                        }
+                        if (psub == "get")
+                        {
+                            string pst = CustomerHandoff.PremiseState(ptag);
+                            return pst == "met" ? $"OK premise {ptag}=met" : $"OK premise {ptag}=unmet ({pst})";
+                        }
+                        if (psub == "set")
+                        {
+                            string pv = pa.Length > 2 ? pa[2].Trim().ToLowerInvariant() : "";
+                            if (pv != "met" && pv != "unmet") return "ERR usage: premise set <tag> met|unmet";
+                            CustomerHandoff.PremiseSet(ptag, pv == "met");
+                            return $"OK premise {ptag}={pv}";
+                        }
+                        if (psub == "do")
+                        {
+                            string pinner = pa.Length > 2 ? pa[2].Trim() : "";
+                            if (pinner.Length == 0) return "ERR usage: premise do <tag> <command>";
+                            string pst = CustomerHandoff.PremiseState(ptag);
+                            if (pst == "met") return Execute(pinner);
+                            if (pst != "unmet") return $"ERR premise do: tag '{ptag}' is {pst} (await or set it first)";
+                            Plugin.Logger.LogInfo($"[Premise] not met ({ptag}): '{pinner}' runs, the assertions that need the premise are skipped (premise not met).");
+                            return $"PREMISE NOT MET ({ptag}) - assertion skipped | " + Execute(pinner);
+                        }
+                        return "ERR usage: premise await|get|set|do <tag> ...";
+                    }
+                    catch (Exception ex) { return "ERR premise: " + ex.Message; }
+                }
+
                 // ── H-HANDOFF-1 (batch 27): what each live customer's VISIT has reached, on THIS machine ──
                 case "custstate":
                 {
