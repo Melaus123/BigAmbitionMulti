@@ -1,13 +1,14 @@
 {
   "id": "T-RIVALS-DM",
-  "title": "H-RIVALPARITY-1 part D F3 (2026-09-27): merged companies - on DISSOLVE each member's key gets a copy of the company's rival state; on MERGE the members' keys join the company key (active if any member was, completed / sent joined), both members get the company's state, no re-intro; ends dissolved",
-  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger true so tools/regress.py resets it with --keep-merger). Dev build with part D levers (rivalattn setactive / floor). NOTHING is saved; the run ends dissolved and the fixture reset restores the pair.",
-  "instances": 2,
+  "title": "H-RIVALPARITY-1 part D F3 (2026-09-27): merged companies - on DISSOLVE each member's key gets a copy of the company's rival state; on MERGE the members' keys join the company key (active if any member was, completed / sent joined), both members get the company's state, no re-intro; ends dissolved; folds R1/R2: the HOST joining an existing company folds the company's stored rows into its native state (no re-intro, the old rows gone), the HOST leaving a company that carries on leaves the company its state; ends dissolved",
+  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger true so tools/regress.py resets it with --keep-merger). Dev build with part D levers (rivalattn setactive / floor). NOTHING is saved; the run ends dissolved and the fixture reset restores the pair. Folds R1/R2: Client2 joins new (third instance) and forms a company with Client1; the host joins it, then leaves it; the run ends with every company dissolved.",
+  "instances": 3,
   "vars": {
     "clientPid": "Client1",
     "hostPid": "melaus",
     "session": "fx-hq1",
-    "keepMerger": true
+    "keepMerger": true,
+    "dPid": "Client2"
   },
   "oracles_absent": [
     "NullReferenceException",
@@ -39,44 +40,69 @@
       "expect_result": "^OK"
     },
     {
-      "seq": 3,
-      "role": "h",
-      "cmd": "hostload ${session}",
-      "expect_result": "^OK"
+      "role": "d",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 3
     },
     {
-      "seq": 4,
+      "role": "d",
+      "cmd": "charconfirm",
+      "expect_result": "^OK armed",
+      "seq": 4
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 300
+        }
+      ]
+    },
+    {
+      "seq": 6,
       "role": "both",
       "cmd": "mark TEST RIVALSDM START",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 5,
+      "seq": 7,
       "role": "h",
       "sleep_s": 40,
       "note": "both worlds settle"
     },
     {
-      "seq": 6,
+      "seq": 8,
       "role": "h",
       "cmd": "status",
       "expect_result": "settled=True"
     },
     {
-      "seq": 7,
+      "seq": 9,
       "role": "c",
       "cmd": "status",
       "expect_result": "settled=True"
     },
     {
-      "seq": 8,
+      "role": "d",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "seq": 10
+    },
+    {
+      "seq": 11,
       "role": "c",
       "cmd": "mergestatus",
       "expect_result": "member=True",
       "note": "PREMISE: the pair is merged"
     },
     {
-      "seq": 9,
+      "seq": 12,
       "role": "h",
       "cmd": "rivalstate",
       "expect_result": "^OK rivalstate rivals=[1-9]",
@@ -86,42 +112,42 @@
       "note": "the first rival of this world (fx-hq1: 0 active)"
     },
     {
-      "seq": 10,
+      "seq": 13,
       "role": "h",
       "cmd": "rivalattn",
-      "expect_result": "^OK rivalattn host hostKey=g:\\S+ keys=0 ",
+      "expect_result": "^OK rivalattn host hostKey=g:\\S+ keys=\\d+ ",
       "capture": {
         "coKey": "hostKey=(\\S+)"
       },
-      "note": "the host key IS the company key (Client1 shares it: no other key)"
+      "note": "the host key IS the company key (Client1 shares it: no other key) (fold R1/R2 run: Client2 online under its own key)"
     },
     {
-      "seq": 11,
+      "seq": 14,
       "role": "both",
       "cmd": "mark TEST RIVALSDM COMPANY",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 12,
+      "seq": 15,
       "role": "h",
       "cmd": "rivalattn setactive ${hostPid} ${rival} 1",
       "expect_result": "^OK rivalattn setactive key=${coKey} rival=\\S+ active=1 host=1",
       "note": "the company's state (native): active for the rival"
     },
     {
-      "seq": 13,
+      "seq": 16,
       "role": "h",
       "sleep_s": 6
     },
     {
-      "seq": 14,
+      "seq": 17,
       "role": "c",
       "cmd": "rivalstate",
       "expect_result": ":A:",
       "note": "both members get the company's state (Client1 is in the host key)"
     },
     {
-      "seq": 15,
+      "seq": 18,
       "role": "h",
       "cmd": "rivalattn ${rival}",
       "expect_result": "\\{host\\}\\|count=-?\\d+\\|income=[^|]*\\|pct=[^|]*\\|active=1\\|completed=\\d+\\|sent=\\d+\\|native",
@@ -131,13 +157,13 @@
       }
     },
     {
-      "seq": 16,
+      "seq": 19,
       "role": "both",
       "cmd": "mark TEST RIVALSDM DISSOLVE",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 17,
+      "seq": 20,
       "role": "c",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
@@ -151,68 +177,68 @@
       "note": "TEST 4 dissolve: each member's key gets a copy of the company's state"
     },
     {
-      "seq": 18,
+      "seq": 21,
       "role": "h",
       "sleep_s": 3
     },
     {
-      "seq": 19,
+      "seq": 22,
       "role": "h",
       "cmd": "rivalattn floor ${clientPid} ${rival} 3",
       "expect_result": "^OK rivalattn floor key=p:\\S+ ",
       "note": "keeps a natural hourly check from deactivating Client1's copy on its real count"
     },
     {
-      "seq": 20,
+      "seq": 23,
       "role": "h",
       "sleep_s": 5
     },
     {
-      "seq": 21,
+      "seq": 24,
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "member=False"
     },
     {
-      "seq": 22,
+      "seq": 25,
       "role": "h",
       "cmd": "rivalattn ${rival}",
       "expect_result": "^OK rivalattn host hostKey=p:\\S+ .*\\{host\\}\\|[^;]*\\|active=1\\|.*\\{${clientPid}\\}\\|count=\\d+\\|floor=3\\|income=[^|]*\\|pct=[^|]*\\|active=1\\|completed=${cC}\\|sent=${cS}\\|",
       "note": "TEST 4: after the dissolve BOTH keep the company's state - the host key (native) and Client1's own key (completed + sent identical)"
     },
     {
-      "seq": 23,
+      "seq": 26,
       "role": "c",
       "cmd": "rivalstate",
       "expect_result": "${rival}:A:",
       "note": "Client1's machine: still active (its own key now)"
     },
     {
-      "seq": 24,
+      "seq": 27,
       "role": "both",
       "cmd": "mark TEST RIVALSDM MERGE",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 25,
+      "seq": 28,
       "role": "h",
       "cmd": "rivalattn setactive ${hostPid} ${rival} 0",
       "expect_result": "^OK rivalattn setactive key=p:\\S+ rival=\\S+ active=0 host=1",
       "note": "the two keys now DIFFER: the host inactive, Client1 active"
     },
     {
-      "seq": 26,
+      "seq": 29,
       "role": "h",
       "cmd": "merge propose ${clientPid}",
       "expect_result": "OK merge propose sent"
     },
     {
-      "seq": 27,
+      "seq": 30,
       "role": "h",
       "sleep_s": 4
     },
     {
-      "seq": 28,
+      "seq": 31,
       "role": "c",
       "cmd": "merge accept",
       "expect_result": "OK merge accept sent",
@@ -226,38 +252,38 @@
       "note": "TEST 4 merge: the members' keys join the company key - active because ONE member was"
     },
     {
-      "seq": 29,
+      "seq": 32,
       "role": "h",
       "sleep_s": 8
     },
     {
-      "seq": 30,
+      "seq": 33,
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "member=True"
     },
     {
-      "seq": 31,
+      "seq": 34,
       "role": "h",
       "cmd": "rivalattn ${rival}",
-      "expect_result": "^(?!.*p:[^{ ]*\\{${clientPid}\\})OK rivalattn host hostKey=g:\\S+ keys=0 .*\\{host\\}\\|[^;]*\\|active=1\\|completed=${cC}\\|sent=${cS}\\|native",
-      "note": "TEST 4: the company key holds the union (active=1, lists joined) and Client1's own key is gone from the store"
+      "expect_result": "^(?!.*p:[^{ ]*\\{${clientPid}\\})OK rivalattn host hostKey=g:\\S+ keys=\\d+ .*\\{host\\}\\|[^;]*\\|active=1\\|completed=${cC}\\|sent=${cS}\\|native",
+      "note": "TEST 4: the company key holds the union (active=1, lists joined) and Client1's own key is gone from the store (fold R1/R2 run: Client2 online under its own key)"
     },
     {
-      "seq": 32,
+      "seq": 35,
       "role": "c",
       "cmd": "rivalstate",
       "expect_result": "${rival}:A:",
       "note": "both members get the company's state"
     },
     {
-      "seq": 33,
+      "seq": 36,
       "role": "both",
       "cmd": "mark TEST RIVALSDM END-DISSOLVED",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 34,
+      "seq": 37,
       "role": "c",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
@@ -271,32 +297,256 @@
       "note": "FIXTURE HYGIENE: end dissolved; NO save"
     },
     {
-      "seq": 35,
+      "seq": 38,
       "role": "h",
       "sleep_s": 8
     },
     {
-      "seq": 36,
+      "seq": 39,
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "member=False"
     },
     {
-      "seq": 37,
+      "seq": 40,
       "role": "h",
       "cmd": "rivalattn ${rival}",
       "expect_result": "\\{${clientPid}\\}\\|count=\\d+\\|floor=\\d+\\|income=[^|]*\\|pct=[^|]*\\|active=1\\|",
       "note": "TEST 4: each member keeps the state after the second dissolve"
     },
     {
-      "seq": 38,
+      "seq": 41,
       "role": "c",
       "cmd": "rivalstate",
       "expect_result": "${rival}:A:"
     },
     {
-      "seq": 39,
-      "role": "both",
+      "role": "all",
+      "cmd": "mark TEST RIVALSDM HOST-JOINS",
+      "expect_result": "OK MARK",
+      "seq": 42
+    },
+    {
+      "role": "h",
+      "cmd": "rivalattn floor ${clientPid} ${rival} 3",
+      "expect_result": "^OK rivalattn floor key=p:\\S+ ",
+      "note": "keeps a natural hourly check from deactivating Client1's state (the floor follows its key into the new company)",
+      "seq": 43
+    },
+    {
+      "role": "c",
+      "cmd": "merge propose ${dPid}",
+      "expect_result": "OK merge propose sent",
+      "seq": 44
+    },
+    {
+      "role": "h",
+      "sleep_s": 4,
+      "seq": 45
+    },
+    {
+      "role": "d",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] merge \\(merge\\): p:\\S+ \\+ p:\\S+ -> g:\\S+: \\d+ rival row\\(s\\) combined, active on \\[[^\\]]*${rival}",
+          "within_s": 15
+        }
+      ],
+      "note": "a company WITHOUT the host (Client1 + Client2): a stored g: key, active with Client1's completed / sent entries",
+      "seq": 46
+    },
+    {
+      "role": "h",
+      "sleep_s": 8,
+      "seq": 47
+    },
+    {
+      "role": "h",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "(g:[^{ ]+)\\{[^}]*${clientPid}[^}]*\\}\\|count=\\d+\\|floor=\\d+\\|income=[^|]*\\|pct=[^|]*\\|active=1\\|completed=${cC}\\|sent=${cS}\\|",
+      "capture": {
+        "yKey": "(g:[^{ ]+)\\{[^}]*${clientPid}"
+      },
+      "note": "the company's stored rows",
+      "seq": 48
+    },
+    {
+      "role": "h",
+      "cmd": "rivalattn setactive ${hostPid} ${rival} 0",
+      "expect_result": "^OK rivalattn setactive key=p:\\S+ rival=\\S+ active=0 host=1",
+      "note": "the host's own (native) state inactive: only the company's rows can make it active after the join",
+      "seq": 49
+    },
+    {
+      "role": "c",
+      "cmd": "merge propose ${hostPid}",
+      "expect_result": "OK merge propose sent",
+      "seq": 50
+    },
+    {
+      "role": "h",
+      "sleep_s": 4,
+      "seq": 51
+    },
+    {
+      "role": "h",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] merge \\(merge\\): p:\\S+ -> ${yKey} \\(host key: native state\\): \\d+ rival row\\(s\\) combined, active on \\[[^\\]]*${rival}",
+          "within_s": 15
+        },
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] host key moved \\(merge\\): p:\\S+ -> ${yKey}: the company's stored rows folded into the native state and removed \\([1-9]\\d* row\\(s\\)",
+          "within_s": 15
+        }
+      ],
+      "note": "TEST 1 (fold R1): the HOST joins the existing company - the company's stored rows fold into the native state and leave the store",
+      "seq": 52
+    },
+    {
+      "role": "h",
+      "sleep_s": 8,
+      "seq": 53
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True",
+      "seq": 54
+    },
+    {
+      "role": "h",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "^OK rivalattn host hostKey=${yKey} keys=\\d+ .*\\{host\\}\\|[^;]*\\|active=1\\|completed=${cC}\\|sent=${cS}\\|native",
+      "note": "TEST 1: the company keeps active + its lists on the native state (no re-intro: the intro oracle stays absent)",
+      "seq": 55
+    },
+    {
+      "role": "c",
+      "cmd": "rivalstate",
+      "expect_result": "${rival}:A:",
+      "seq": 56
+    },
+    {
+      "role": "d",
+      "cmd": "rivalstate",
+      "expect_result": "${rival}:A:",
+      "seq": 57
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST RIVALSDM HOST-LEAVES",
+      "expect_result": "OK MARK",
+      "seq": 58
+    },
+    {
+      "role": "h",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] host left \\(leave\\): ${yKey} carries on without the host - the native state copied into it: \\d+ rival row\\(s\\), active on \\[[^\\]]*${rival}",
+          "within_s": 15
+        }
+      ],
+      "note": "TEST 2 (fold R2): the host leaves; Client1 + Client2 carry on under the company key",
+      "seq": 59
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 60
+    },
+    {
+      "role": "h",
+      "cmd": "rivalattn floor ${clientPid} ${rival} 3",
+      "expect_result": "^OK rivalattn floor key=${yKey} ",
+      "seq": 61
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 62
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False",
+      "seq": 63
+    },
+    {
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True",
+      "seq": 64
+    },
+    {
+      "role": "h",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "${yKey}\\{[^}]*\\}\\|count=\\d+\\|floor=3\\|income=[^|]*\\|pct=[^|]*\\|active=1\\|completed=${cC}\\|sent=${cS}\\|",
+      "note": "TEST 2: the members who stay keep the company's state (active, completed + sent)",
+      "seq": 65
+    },
+    {
+      "role": "c",
+      "cmd": "rivalstate",
+      "expect_result": "${rival}:A:",
+      "seq": 66
+    },
+    {
+      "role": "d",
+      "cmd": "rivalstate",
+      "expect_result": "${rival}:A:",
+      "seq": 67
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST RIVALSDM END-DISSOLVED-2",
+      "expect_result": "OK MARK",
+      "seq": 68
+    },
+    {
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] dissolve \\(dissolve\\): ${yKey} -> p:\\S+: ",
+          "within_s": 15
+        }
+      ],
+      "note": "FIXTURE HYGIENE: end dissolved; NO save",
+      "seq": 69
+    },
+    {
+      "role": "h",
+      "sleep_s": 8,
+      "seq": 70
+    },
+    {
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=False",
+      "seq": 71
+    },
+    {
+      "role": "d",
+      "cmd": "mergestatus",
+      "expect_result": "member=False",
+      "seq": 72
+    },
+    {
+      "seq": 73,
+      "role": "all",
       "cmd": "mark TEST RIVALSDM END",
       "expect_result": "OK MARK"
     }

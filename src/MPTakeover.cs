@@ -59,6 +59,25 @@ namespace BigAmbitionsMP
                 { Toast(UI.Notification.NotificationType.Error, "You need the Headquarters diploma to take over a business."); return false; }
                 if (reg.GetBuildingType() == "ba:buildingtype_office" && !EducationHelper.HasCompletedDiploma(DiplomaName.OfficeBusinesses))
                 { Toast(UI.Notification.NotificationType.Error, "You need the Office Businesses diploma to take over an office business."); return false; }
+                // Fold R5: the game's own rival gate (BizManPresentation.cs:751-764), in the game's order, on THIS
+                // machine's own per-key rival state - the rival's monologue and the game's cannot-rent notice instead
+                // of a generic rejection. The host's check (MPRivalAttention.HostRefusesFor "overtake") stays the backstop.
+                if (BigAmbitions.Rivals.RivalsHelper.IsFeatureEnabled)
+                {
+                    var sr = BigAmbitions.Rivals.RivalsHelper.GetSpecialRival(reg.buildingOwnerRivalId);
+                    if (sr?.rivalData != null && BigAmbitions.Rivals.RivalsHelper.GetSpecialRivalState(sr.rivalData.id)?.isActive == true)
+                    {
+                        BigAmbitions.Rivals.RivalsHelper.SendRentBuildingMessage(sr);
+                        try
+                        {
+                            UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "notification_cannot_rent_building_owned_by_rival",
+                                                               new System.Collections.Generic.Dictionary<string, string> { { "name", sr.rivalData.rivalName } });
+                        }
+                        catch { }
+                        Plugin.Logger.LogInfo($"[Takeover] offer for '{addr}' refused by this machine's own rival gate: rival '{sr.rivalData.id}' is active here (RivalsHelper.SendRentBuildingMessage + notification_cannot_rent_building_owned_by_rival).");
+                        return false;
+                    }
+                }
                 if (!float.TryParse(offerField?.text, out float offer) || offer <= 0f)
                 { Toast(UI.Notification.NotificationType.Error, "Invalid amount."); return false; }
                 if (SaveGameManager.Current.Money < offer)

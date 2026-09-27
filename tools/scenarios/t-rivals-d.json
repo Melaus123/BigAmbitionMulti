@@ -1,7 +1,7 @@
 {
   "id": "T-RIVALS-D",
-  "title": "H-RIVALPARITY-1 part D (2026-09-27): the rent block per player - a rival's building is blocked only for the players the rival is active for, on both machines (client gate = its per-key R3 state; host refusal reads the REQUESTING player's key); F1: a client-recorded rent-refusal key survives the next per-peer R3 update; solo host unchanged",
-  "preconditions": "Fixture save1 (host melaus, client Client1; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA==). Dev build with part D levers (rivalrent find|gate|try|force|host, rivalattn setactive). NOTHING is saved: the forced client rent is refused and rolled back; the host's native state is set back at the end.",
+  "title": "H-RIVALPARITY-1 part D (2026-09-27): the rent block per player - a rival's building is blocked only for the players the rival is active for, on both machines (client gate = its per-key R3 state; host refusal reads the REQUESTING player's key); F1: a client-recorded rent-refusal key survives the next per-peer R3 update; solo host unchanged; fold R3 (test 3): a client that BOUGHT a rival-owned building rents it - allowed on both machines (the host's deed ledger); fold R4 (test 4): a host-side rival refusal shows the game's own rival response on the client (RivalsHelper.SendRentBuildingMessage + notification_cannot_rent_building_owned_by_rival)",
+  "preconditions": "Fixture save1 (host melaus, client Client1; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA==). Dev build with part D levers (rivalrent find|gate|try|force|host, rivalattn setactive). NOTHING is saved: the forced client rent is refused and rolled back; the host's native state is set back at the end. Fold R3/R4 levers: rivalrent buy (client, no money). The bought + rented building is not saved (fixture reset).",
   "instances": 2,
   "vars": {
     "clientPid": "Client1",
@@ -21,7 +21,8 @@
     "\\[TestDrive\\] .* 'rivalattn",
     "\\[RivalAttn\\] ",
     "\\[RivalSync\\] (rent|overtake|host rival state published)",
-    "\\[Client\\] Rent DENIED"
+    "\\[Client\\] Rent DENIED",
+    "\\[Server\\] (BuyRequest|Rent confirmed|Rent denied)"
   ],
   "steps": [
     {
@@ -109,8 +110,8 @@
     {
       "seq": 13,
       "role": "c",
-      "sleep_s": 60,
-      "note": "the client is served its save and settles"
+      "sleep_s": 110,
+      "note": "the client is served its save and settles (110 s: run T-RIVALS-D-20260927-113239 saw the client settle later than 60 s)"
     },
     {
       "seq": 14,
@@ -203,9 +204,14 @@
           "role": "c",
           "regex": "\\[Client\\] Rent DENIED for ${addr} ",
           "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalSync\\] rent of '${addr}' refused by the host: the game's own rival response shown - RivalsHelper\\.SendRentBuildingMessage \\(rival '${rival}'",
+          "within_s": 20
         }
       ],
-      "note": "TEST 1: past the local gate, the HOST refuses too, naming Client1's key; the client rolls its optimistic rent back"
+      "note": "TEST 1: past the local gate, the HOST refuses too, naming Client1's key; the client rolls its optimistic rent back; TEST 4 (fold R4): the host's refusal brings the game's own rival response on the client"
     },
     {
       "seq": 25,
@@ -341,14 +347,116 @@
       "note": "restore the host's native state (nothing is saved)"
     },
     {
-      "seq": 42,
+      "role": "both",
+      "cmd": "mark TEST RIVALSD BOUGHT",
+      "expect_result": "OK MARK",
+      "seq": 42
+    },
+    {
+      "role": "h",
+      "cmd": "rivalattn floor ${clientPid} ${rival} 3",
+      "expect_result": "^OK rivalattn floor",
+      "seq": 43
+    },
+    {
+      "role": "h",
+      "cmd": "rivalattn setactive ${clientPid} ${rival} 1",
+      "expect_result": "^OK rivalattn setactive key=${cKey} rival=${rival} active=1 host=0",
+      "note": "TEST 3 premise: the rival is active for Client1 (the host would refuse its rent of a rival building)",
+      "seq": 44
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 45
+    },
+    {
+      "role": "c",
+      "cmd": "rivalrent gate ${addr}",
+      "expect_result": "^OK rivalrent gate=blocked .*rival=${rival}",
+      "note": "TEST 3 premise: blocked before the purchase",
+      "seq": 46
+    },
+    {
+      "role": "c",
+      "cmd": "rivalrent buy ${addr}",
+      "expect_result": "^OK rivalrent buy sent addr='${addr}' wasrival=${rival} owned=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] BuyRequest: ${addr} \\S+ owned by ${clientPid}",
+          "within_s": 15
+        }
+      ],
+      "note": "TEST 3: Client1 buys the rival's building (the game's own buy core, no money; the game has no rival gate on buying)",
+      "seq": 47
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 48
+    },
+    {
+      "role": "c",
+      "cmd": "rivalrent gate ${addr}",
+      "expect_result": "^OK rivalrent gate=allowed ",
+      "note": "TEST 3: the client's own gate allows (its deed)",
+      "seq": 49
+    },
+    {
+      "role": "h",
+      "cmd": "rivalrent host ${addr} ${clientPid}",
+      "expect_result": "^OK rivalrent host=allowed ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalSync\\] rent of '${addr}' by '${clientPid}' allowed: the building is player-bought \\(deed '${clientPid}'\\)",
+          "within_s": 5
+        }
+      ],
+      "note": "TEST 3 (fold R3): the host's authority gate allows the buyer, although the rival is active for its key",
+      "seq": 50
+    },
+    {
+      "role": "c",
+      "cmd": "rivalrent force ${addr}",
+      "expect_result": "^OK rivalrent force sent .*localgate=allowed .*bought=1",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Rent confirmed: ${addr} \\S+ ${clientPid}",
+          "within_s": 20
+        }
+      ],
+      "note": "TEST 3: the rent goes through on both machines",
+      "seq": 51
+    },
+    {
+      "role": "c",
+      "sleep_s": 5,
+      "seq": 52
+    },
+    {
+      "role": "h",
+      "cmd": "rivalattn setactive ${clientPid} ${rival} 0",
+      "expect_result": "^OK rivalattn setactive",
+      "seq": 53
+    },
+    {
+      "role": "h",
+      "cmd": "rivalattn floor ${clientPid} ${rival} 0",
+      "expect_result": "^OK rivalattn floor",
+      "seq": 54
+    },
+    {
+      "seq": 55,
       "role": "h",
       "cmd": "rivalattn ${rival}",
       "expect_result": "^OK rivalattn host ",
       "note": "REPORT"
     },
     {
-      "seq": 43,
+      "seq": 56,
       "role": "both",
       "cmd": "mark TEST RIVALSD END",
       "expect_result": "OK MARK"

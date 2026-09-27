@@ -5379,7 +5379,7 @@ namespace BigAmbitionsMP
                         var rivalReg = GameStatePatcher.FindRegistration(req.AddressKey);
                         if (MPRivalAttention.HostRefusesFor(rivalReg, req.AddressKey, senderPid, "rent", true, out var _))
                         {
-                            req.DenyReason = "owned by an active rival";
+                            req.DenyReason = MPRivalAttention.RentDenyRivalReason;   // fold R4: the client answers it with the game's own rival response
                             Send(peer, MessageEnvelope.Create(MessageType.RentDeny, "host", req));
                             return;
                         }

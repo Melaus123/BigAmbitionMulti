@@ -1553,6 +1553,27 @@ namespace BigAmbitionsMP
             string why = string.IsNullOrEmpty(payload.DenyReason) ? "already taken" : payload.DenyReason;
             Plugin.Logger.LogWarning($"[Client] Rent DENIED for {payload.AddressKey} — {why}; rolling back the optimistic local rent.");
             GameStatePatcher.RollbackRent(payload.AddressKey, payload.LastDeposit);
+            // Fold R4: the host refused because the building's rival is active for this player (this machine's own gate
+            // was passed on a stale state) - the game's own response here too (BizManPresentation.cs:538-551): the
+            // rival's rent-building monologue and the game's cannot-rent notice. Game texts only.
+            if (why == MPRivalAttention.RentDenyRivalReason)
+            {
+                string addrK = payload.AddressKey ?? "";
+                GameStatePatcher.EnqueueOnMainThread(() =>
+                {
+                    try
+                    {
+                        var reg = GameStatePatcher.FindRegistration(addrK);
+                        var sr = reg == null ? null : BigAmbitions.Rivals.RivalsHelper.GetSpecialRival(reg.buildingOwnerRivalId);
+                        if (sr?.rivalData == null) { Plugin.Logger.LogWarning($"[RivalSync] rent of '{addrK}' refused by the host (active rival) but this machine names no rival for the building - no rival notice."); return; }
+                        BigAmbitions.Rivals.RivalsHelper.SendRentBuildingMessage(sr);
+                        UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "notification_cannot_rent_building_owned_by_rival",
+                                                           new Dictionary<string, string> { { "name", sr.rivalData.rivalName } });
+                        Plugin.Logger.LogInfo($"[RivalSync] rent of '{addrK}' refused by the host: the game's own rival response shown - RivalsHelper.SendRentBuildingMessage (rival '{sr.rivalData.id}', key '{sr.rentBuildingMessageKey}') + notification_cannot_rent_building_owned_by_rival.");
+                    }
+                    catch (Exception rx) { Plugin.Logger.LogWarning($"[RivalSync] rent refusal notice for '{addrK}': {rx.Message}"); }
+                });
+            }
         }
 
         private static void HandleVacate(MessageEnvelope env)
