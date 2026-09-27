@@ -1,0 +1,278 @@
+{
+  "id": "T-PUPPETFLIPS",
+  "title": "H-PUPPETSTUTTER-1, two players: the watcher's customer copies stop and start walking as often as the real customers do. The client's fast-food shop at normal speed, the client simulating (owner, enters first) and the host watching; 60 s of IsMoving true->false counts on both machines via `puppetflips`. NO save.",
+  "preconditions": "Reporter fixture session fx-hq1 (day 44, MERGED - vars.keepMerger true). Dev build with H-PUPPETSTUTTER-1 (puppetflips / custstate / enterbuilding / exitbuilding / skipvote / skipstate, BAMP_DEV). The fixture loads at 17:38 with Client1 inside a building, so both step outside and take one consensus skip OUTDOORS to 10:45 the next morning (as T-HANDOFF1 does). The fast food at vars.shop is the CLIENT's (t-shopday-pick), so the client enters first and simulates it; the host follows and renders copies from the client's stream. ORACLE: watcher flips per minute (host, copies) within 1.5x of simulator flips per minute (client, natives sampled at each stream tick) - `puppetflips vs <n>` on the host computes the ratio. Before the fix the design expects watcher >> simulator (the chase slowed each copy to a stop between rows and late reliable rows stopped the walk).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "shop": "11 ba:street_tenthavenue"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "(?<!swallowed )NullReferenceException",
+    "\\[Customers\\] (puppet tick|apply puppets|puppet spawn):",
+    "ERR puppetflips"
+  ],
+  "oracles_report": [
+    "\\[Customers\\] following ",
+    "\\[Customers\\] simulator for ",
+    "\\[Customers\\] puppet rig",
+    "\\[TestDrive\\] puppetflips"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST T-PUPPETFLIPS START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 32,
+      "note": "both worlds settle"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only): the HOST's own world can still be loading here (run T-HANDOFF2-20260926-213941 read settled=False at 39 s)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only)"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only)"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 18
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "note": "ASSERT the host settled, bounded at ~90 s after the load (rigrun has no retry-until primitive, so the ladder always runs its full length)"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "fx-hq1 loads Client1 inside a building; report-only"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "the setup skip to the next trading morning, taken OUTDOORS"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 40
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the OWNER (client) enters first: he books the shop and simulates it"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the host watches: copies driven by the client's stream"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "sleep_s": 6
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "custstate arm 3",
+      "expect_result": "^OK custstate armed n=3 bldg='${shop}'",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Handoff\\] armed count reached: ([3-9]|[1-9][0-9]+) >= 3",
+          "within_s": 180
+        }
+      ],
+      "note": "THE PREMISE WAIT: the simulator's interior holds 3 live customers (an event, not a sleep)"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${shop}' sim='${clientPid}' mode=native natives=[1-9]",
+      "capture": {
+        "cNat": "natives=(\\d+)"
+      }
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${shop}' sim='${clientPid}' mode=follower natives=0 .*copies=[1-9]",
+      "capture": {
+        "hCopies": "copies=(\\d+)"
+      },
+      "note": "PREMISE: the host is a FOLLOWER holding copies"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "puppetflips reset",
+      "expect_result": "^OK puppetflips reset"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "puppetflips reset",
+      "expect_result": "^OK puppetflips reset"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "THE WINDOW: 60 real seconds of normal-speed shopping"
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "puppetflips",
+      "expect_result": "^OK puppetflips secs=[0-9.]+ sim=[1-9][0-9]* simPerMin=[0-9.]+ .*simMoving=[1-9]",
+      "capture": {
+        "simFlips": " sim=(\\d+)",
+        "simPm": "simPerMin=([0-9.]+)",
+        "simSamples": "simSamples=(\\d+)",
+        "simMoving": "simMoving=(\\d+)",
+        "cWatch": " watch=(\\d+)"
+      },
+      "note": "the SIMULATOR's natives: walk stops per minute, sampled at each stream tick (premise: somebody walked and stopped)"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "puppetflips vs ${simPm}",
+      "expect_result": "^OK puppetflips .* watch=[0-9]+ watchPerMin=[0-9.]+ .*follower=True .* ratio=[0-9.]+ within=True",
+      "capture": {
+        "watchFlips": " watch=(\\d+)",
+        "watchPm": "watchPerMin=([0-9.]+)",
+        "ratio": "ratio=([0-9.]+)",
+        "watchMovingFrames": "watchMovingFrames=(\\d+)"
+      },
+      "note": "THE ASSERTION: the watcher's copies stop walking within 1.5x as often as the real customers (before the fix: many times more)"
+    },
+    {
+      "seq": 35,
+      "role": "both",
+      "cmd": "mark TEST T-PUPPETFLIPS END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

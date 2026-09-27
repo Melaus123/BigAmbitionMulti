@@ -781,6 +781,29 @@ namespace BigAmbitionsMP
                     return $"OK custevict asked={ceWant} evicted={ceDone} skipActive={MPRestSync.SkipActive} ids={ceIds}";
                 }
 
+                // ── H-PUPPETSTUTTER-1 (batch 27): walk-animation stops per minute, both sides ──
+                case "puppetflips":
+                {
+                    // `puppetflips`            IsMoving true->false changes since the last reset: sim = this machine's natives at
+                    //                          each stream sample (simulator), watch = its customer copies (watcher), per minute.
+                    // `puppetflips reset`      zero both counters and restart the clock.
+                    // `puppetflips vs <n>`     also compare this watcher's rate to the simulator's <n> per minute (within 1.5x).
+                    try
+                    {
+                        string pfa = arg.Trim();
+                        if (pfa == "reset") { CustomerPuppets.ResetFlips(); return "OK puppetflips reset"; }
+                        float pfv = -1f;
+                        if (pfa.StartsWith("vs ", StringComparison.Ordinal))
+                        {
+                            if (!float.TryParse(pfa.Substring(3).Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out pfv))
+                                return "ERR usage: puppetflips [reset | vs <simPerMin>]";
+                        }
+                        else if (pfa.Length > 0) return "ERR usage: puppetflips [reset | vs <simPerMin>]";
+                        return "OK puppetflips " + CustomerPuppets.FlipsLine(pfv);
+                    }
+                    catch (Exception ex) { return $"ERR puppetflips: {ex.GetType().Name}: {ex.Message}"; }
+                }
+
                 // ── H-HANDOFF-1 (batch 27): what each live customer's VISIT has reached, on THIS machine ──
                 case "custstate":
                 {

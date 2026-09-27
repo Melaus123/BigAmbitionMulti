@@ -982,6 +982,7 @@ namespace BigAmbitionsMP
         public float Yaw { get; set; }
         public string Held { get; set; } = "";   // round-42: hand prop name (basket/box) — "" = empty hands
         public int Fill { get; set; }            // round-45: active direct children of the held prop (basket fill visuals)
+        public float Fwd { get; set; }           // H-PUPPETSTUTTER-1: the real body's animator Forward while IsMoving, else 0 (0 = absent/old sender)
     }
 
     /// <summary>Slice 3 (round-41): the simulating machine's live customer bodies for one building.
@@ -991,6 +992,7 @@ namespace BigAmbitionsMP
         public string AddressKey   { get; set; } = "";
         public string SimulatorPid { get; set; } = "";
         public List<PuppetRowInfo> Rows { get; set; } = new();
+        public float T { get; set; }             // H-PUPPETSTUTTER-1: the sender's Time.unscaledTime at this sample (0 = absent/old sender)
     }
 
     /// <summary>H-HANDOFF-1 (message 219): one live customer's visit, enough for the machine taking the crowd

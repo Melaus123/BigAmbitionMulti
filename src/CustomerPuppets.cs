@@ -65,8 +65,31 @@ namespace BigAmbitionsMP
             // a look apply may swap the controller, which re-triggers the check.
             public RuntimeAnimatorController? motionTimeCheckedOn;
             public bool hasMotionTime;
+            // H-PUPPETSTUTTER-1: the last 3 stream samples, stamped in the SIMULATOR's clock (bsim) - the copy is
+            // drawn at a render time 1.5 stream intervals behind the newest sample, interpolated between the two
+            // samples around it (no chase). bn = 0: nothing buffered - hold where the body stands.
+            public readonly float[] bt = new float[3];
+            public readonly Vector3[] bp = new Vector3[3];
+            public readonly float[] byaw = new float[3];
+            public readonly float[] bfwd = new float[3];
+            public int bn;
+            public string bsim = "";
+            public bool snapNext;
         }
         private static readonly Dictionary<string, Puppet> _puppets = new();
+
+        // H-PUPPETSTUTTER-1: one clock-offset estimate per simulator (receiver unscaledTime - sender stamp), kept as
+        // TrafficSync keeps the host's: re-seeded on a > 1 s step, otherwise blended 0.05 per batch.
+        private static readonly Dictionary<string, float> _clockOffsetBySim = new();
+        private const float ClockOffsetBlend = 0.05f;
+        private const float RenderDelayIntervals = 1.5f;
+        private const float SnapMetres = 3f;
+        private const float CatchUpSpeed = 8f;   // m/s cap for the body reaching its render point after a hold (steady state it IS the render point)
+        // H-PUPPETSTUTTER-1 flip counters (DEV lever `puppetflips`): IsMoving true->false changes, per copy on the
+        // watcher (DriveLocomotion) and per native at each stream sample on the simulator.
+        private static int _flipsWatch, _flipsSim, _simSamples, _simMovingSamples, _watchFrames, _watchMovingFrames;
+        private static float _flipsSince = -1f;
+        private static Dictionary<string, bool> _simMoving = new(), _simMovingNext = new();
 
         // Simulator-side per-customer HandContent cache (round-42 hand-prop mirroring).
         private static readonly Dictionary<int, Transform?> _handNodes = new();
@@ -527,7 +550,7 @@ namespace BigAmbitionsMP
                     if (!_puppets.TryGetValue(id, out var pup) || pup.go == null) continue;
                     pup.holdUntil = now + HandoffHoldSeconds;
                     pup.lastSeen = now;
-                    if (pup.leaving) { pup.leaving = false; pup.target = pup.go.transform.position; stopped++; }
+                    if (pup.leaving) { pup.leaving = false; pup.target = pup.go.transform.position; pup.bn = 0; stopped++; }   // H-PUPPETSTUTTER-1: bn = 0 holds it where it stands
                     held++;
                 }
                 Plugin.Logger.LogInfo($"[Handoff] holding {held} cop(ies) in place for the take-over ({stopped} walk-out(s) stopped) - {why}.");
@@ -1142,7 +1165,7 @@ namespace BigAmbitionsMP
             if (Time.unscaledTime < _nextStreamAt) return;
             _nextStreamAt = Time.unscaledTime + StreamInterval;
 
-            var p = new CustomerPuppetStatePayload { AddressKey = _myBldg, SimulatorPid = MPConfig.PlayerId };
+            var p = new CustomerPuppetStatePayload { AddressKey = _myBldg, SimulatorPid = MPConfig.PlayerId, T = Time.unscaledTime };
             try
             {
                 var reg = FindReg(_myBldg);
@@ -1152,6 +1175,19 @@ namespace BigAmbitionsMP
                     var t = c.transform;
                     string rid = RowIdOf(c, reg);
                     var (heldName, heldFill) = HeldStateOf(c);
+                    // H-PUPPETSTUTTER-1: a live read of what the real body is animating - Forward while IsMoving, else 0.
+                    float rowFwd = 0f;
+                    try
+                    {
+                        var an = c.tpc != null ? c.tpc.animator : null;
+                        if (an != null)
+                        {
+                            bool mv = an.GetBool(BaseHuman.IsMoving);
+                            if (mv) rowFwd = Mathf.Max(0f, an.GetFloat(BaseHuman.Forward));
+                            NoteSimMoving(rid, mv);
+                        }
+                    }
+                    catch { }
                     p.Rows.Add(new PuppetRowInfo
                     {
                         Id   = rid,
@@ -1159,6 +1195,7 @@ namespace BigAmbitionsMP
                         Yaw  = t.eulerAngles.y,
                         Held = heldName,
                         Fill = heldFill,
+                        Fwd  = rowFwd,
                     });
                     // Round-44: ship each customer's look ONCE so followers dress the same person.
                     if (!_looksSent.Contains(rid))
@@ -1176,6 +1213,7 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
+            try { var sw = _simMoving; _simMoving = _simMovingNext; _simMovingNext = sw; _simMovingNext.Clear(); } catch { }   // H-PUPPETSTUTTER-1: only this tick's natives carry over
             // ROUND-132: the follower was rendering 1-3 bodies while the simulator had a dozen customers
             // queued (QueueProbe: joined=14, one departure).  Rows are keyed by id on the receiver
             // (_puppets[r.Id]), so ANY two customers resolving to the SAME id collapse into one body — which
@@ -1719,6 +1757,17 @@ namespace BigAmbitionsMP
             {
                 if (p == null || p.SimulatorPid == MPConfig.PlayerId) return;   // my own echo
                 if (p.AddressKey != _myBldg || !_followerHere) return;          // not my room / I'm native
+                // H-PUPPETSTUTTER-1: the sender's clock stamp (an old sender sends none - stamp it on arrival).
+                float arrive = Time.unscaledTime;
+                float senderT = p.T > 0f ? p.T : arrive;
+                string simKey = p.SimulatorPid ?? "";
+                try
+                {
+                    float off = arrive - senderT;
+                    if (!_clockOffsetBySim.TryGetValue(simKey, out var cur) || Mathf.Abs(off - cur) > 1f) _clockOffsetBySim[simKey] = off;
+                    else _clockOffsetBySim[simKey] = Mathf.Lerp(cur, off, ClockOffsetBlend);
+                }
+                catch { }
                 var seen = new HashSet<string>();
                 foreach (var r in p.Rows)
                 {
@@ -1757,9 +1806,10 @@ namespace BigAmbitionsMP
                         }
                     }
                     catch { }
-                    pup.target   = newTarget;
+                    pup.target   = newTarget;   // stays the NEWEST sample (lag meter, adoption)
                     pup.yaw      = r.Yaw;
                     pup.lastSeen = Time.unscaledTime;
+                    PushSample(pup, simKey, senderT, newTarget, r.Yaw, r.Fwd);
                     if (pup.leaving) pup.leaving = false;   // simulator says they're still here
                     if (pup.held != (r.Held ?? "")) UpdateHeld(pup, r.Held ?? "");
                     if (pup.fill != r.Fill) ApplyFill(pup, r.Fill);
@@ -1892,10 +1942,19 @@ namespace BigAmbitionsMP
                 if (!pup.leaving && now - pup.lastSeen > 2.5f && now > pup.holdUntil && !StaleHoldApplies(kv.Key, now)) { _leaveStale++; _leaveStaleTotal++; StartLeaving(pup); }
 
                 var tr = pup.go.transform;
+                if (!pup.leaving)
+                {
+                    // H-PUPPETSTUTTER-1: drawn from the sample buffer at a fixed delay - no chase, so no speed pulse.
+                    float bf = 0f;
+                    try { bf = RenderBuffered(pup, tr, now); } catch { }
+                    try { DriveLocomotion(pup, bf); } catch { }
+                    continue;
+                }
+                // Leaving copies walk to the exit at a constant walking speed (the pre-fix chase, minus its pulse).
                 Vector3 to = pup.target - tr.position;
                 to.y = 0f;
                 float dist = to.magnitude;
-                float speed = Mathf.Clamp(dist / StreamInterval, 0f, 4f * MPRestSync.SkipPace);   // cover the gap by the NEXT tick - the same one live interval the simulator streams on - capped (D-SKIPPACE-1: the cap follows the shop's skip pace, 1 outside a skip)
+                float speed = LeaveWalkSpeed();
                 if (dist > 0.02f)
                 {
                     tr.position = Vector3.MoveTowards(tr.position, pup.target, speed * Time.deltaTime);
@@ -1908,7 +1967,7 @@ namespace BigAmbitionsMP
                 }
                 try { DriveLocomotion(pup, speed); } catch { }
 
-                if (pup.leaving && (dist < 0.6f || now > pup.leaveAt)) dead.Add(kv.Key);
+                if (dist < 0.6f || now > pup.leaveAt) dead.Add(kv.Key);
             }
             foreach (var k in dead)
             {
@@ -1919,6 +1978,136 @@ namespace BigAmbitionsMP
                     _puppets.Remove(k);
                 }
             }
+        }
+
+        /// <summary>H-PUPPETSTUTTER-1: add one stream sample to a copy's 3-sample buffer. A new simulator, a clock that
+        /// went back more than 1 s, or a jump over SnapMetres restarts the buffer (a jump also snaps the body).</summary>
+        private static void PushSample(Puppet pup, string sim, float t, Vector3 pos, float yaw, float fwd)
+        {
+            try
+            {
+                if (pup.bsim != sim) { pup.bn = 0; pup.bsim = sim; }
+                if (pup.bn > 0)
+                {
+                    int last = pup.bn - 1;
+                    if (t < pup.bt[last] - 1f) pup.bn = 0;                 // the sender's clock restarted
+                    else if (t <= pup.bt[last] + 0.0001f) return;          // duplicate / out of order
+                    else
+                    {
+                        var j = pos - pup.bp[last]; j.y = 0f;
+                        if (j.magnitude > SnapMetres) { pup.bn = 0; pup.snapNext = true; }
+                    }
+                }
+                if (pup.bn == 3)
+                {
+                    for (int i = 0; i < 2; i++) { pup.bt[i] = pup.bt[i + 1]; pup.bp[i] = pup.bp[i + 1]; pup.byaw[i] = pup.byaw[i + 1]; pup.bfwd[i] = pup.bfwd[i + 1]; }
+                    pup.bn = 2;
+                }
+                pup.bt[pup.bn] = t; pup.bp[pup.bn] = pos; pup.byaw[pup.bn] = yaw; pup.bfwd[pup.bn] = fwd;
+                pup.bn++;
+            }
+            catch { }
+        }
+
+        /// <summary>H-PUPPETSTUTTER-1: place a (not leaving) copy at render time rt = now - offset - 1.5 x StreamInterval:
+        /// straight-line between the two samples around rt, held at the newest past it (no extrapolation), at the
+        /// oldest before it. Faces the motion while the reported Forward is above 0.01, else turns to the reported
+        /// yaw. Returns the Forward to animate with.</summary>
+        private static float RenderBuffered(Puppet pup, Transform tr, float now)
+        {
+            int n = pup.bn;
+            if (n <= 0)
+            {
+                tr.rotation = Quaternion.Slerp(tr.rotation, Quaternion.Euler(0f, pup.yaw, 0f), 10f * Time.deltaTime);
+                return 0f;
+            }
+            float off = 0f;
+            _clockOffsetBySim.TryGetValue(pup.bsim ?? "", out off);
+            float rt = now - off - RenderDelayIntervals * StreamInterval;
+            int last = n - 1;
+            Vector3 pos, seg = Vector3.zero;
+            float yaw, fwd;
+            if (rt >= pup.bt[last])
+            {
+                pos = pup.bp[last]; yaw = pup.byaw[last];
+                // a late batch: keep the stride for up to two intervals rather than stop the walk animation
+                fwd = (rt - pup.bt[last] <= 2f * StreamInterval) ? pup.bfwd[last] : 0f;
+                if (last > 0) seg = pup.bp[last] - pup.bp[last - 1];
+            }
+            else if (rt <= pup.bt[0])
+            {
+                pos = pup.bp[0]; yaw = pup.byaw[0]; fwd = pup.bfwd[0];
+                if (n > 1) seg = pup.bp[1] - pup.bp[0];
+            }
+            else
+            {
+                int i = 0;
+                while (i < last - 1 && rt >= pup.bt[i + 1]) i++;
+                float span = pup.bt[i + 1] - pup.bt[i];
+                float u = span > 0.0001f ? Mathf.Clamp01((rt - pup.bt[i]) / span) : 1f;
+                pos = Vector3.Lerp(pup.bp[i], pup.bp[i + 1], u);
+                yaw = Mathf.LerpAngle(pup.byaw[i], pup.byaw[i + 1], u);
+                fwd = Mathf.Lerp(pup.bfwd[i], pup.bfwd[i + 1], u);
+                seg = pup.bp[i + 1] - pup.bp[i];
+            }
+            Vector3 d = pos - tr.position;
+            if (pup.snapNext || d.magnitude > SnapMetres) { tr.position = pos; pup.snapNext = false; }
+            else if (d.sqrMagnitude > 1e-8f)
+                tr.position = Vector3.MoveTowards(tr.position, pos, CatchUpSpeed * Mathf.Max(1f, MPRestSync.SkipPace) * Time.deltaTime);
+            seg.y = 0f;
+            Quaternion want = (fwd > 0.01f && seg.sqrMagnitude > 0.0001f)
+                ? Quaternion.LookRotation(seg.normalized)
+                : Quaternion.Euler(0f, yaw, 0f);
+            tr.rotation = Quaternion.Slerp(tr.rotation, want, 10f * Time.deltaTime);
+            return fwd;
+        }
+
+        /// <summary>H-PUPPETSTUTTER-1: a leaving copy's constant walk - GlobalReferences.walkingSpeedWalk (x the shop's
+        /// skip pace while a skip runs, as the natives are paced).</summary>
+        private static float LeaveWalkSpeed()
+        {
+            float w = 1.5f;
+            try { var gr = InstanceBehavior<GlobalReferences>.Instance; if (gr != null && gr.walkingSpeedWalk > 0.05f) w = gr.walkingSpeedWalk; } catch { }
+            return w * Mathf.Max(1f, MPRestSync.SkipPace);
+        }
+
+        /// <summary>H-PUPPETSTUTTER-1: simulator side of the flip counter - one native's IsMoving at this stream sample.</summary>
+        private static void NoteSimMoving(string rid, bool moving)
+        {
+            try
+            {
+                if (_flipsSince < 0f) _flipsSince = Time.unscaledTime;
+                _simSamples++;
+                if (moving) _simMovingSamples++;
+                if (_simMoving.TryGetValue(rid, out var was) && was && !moving) _flipsSim++;
+                _simMovingNext[rid] = moving;
+            }
+            catch { }
+        }
+
+        internal static void ResetFlips()
+        {
+            _flipsWatch = _flipsSim = _simSamples = _simMovingSamples = _watchFrames = _watchMovingFrames = 0;
+            _flipsSince = Time.unscaledTime;
+        }
+
+        /// <summary>DEV lever `puppetflips`: both counters per minute since the last reset. `vs` = the other machine's
+        /// simulator rate: within = this watcher's rate is inside 1.5x of it either way.</summary>
+        internal static string FlipsLine(float vsSimPerMin = -1f)
+        {
+            float secs = _flipsSince < 0f ? 0f : Time.unscaledTime - _flipsSince;
+            float mins = Mathf.Max(secs / 60f, 0.001f);
+            float simPm = _flipsSim / mins, watchPm = _flipsWatch / mins;
+            string line = $"secs={secs:0.0} sim={_flipsSim} simPerMin={simPm:0.0} simSamples={_simSamples} simMoving={_simMovingSamples} "
+                + $"watch={_flipsWatch} watchPerMin={watchPm:0.0} watchFrames={_watchFrames} watchMovingFrames={_watchMovingFrames} "
+                + $"copies={_puppets.Count} follower={_followerHere} bldg='{_myBldg}'";
+            if (vsSimPerMin >= 0f)
+            {
+                float ratio = vsSimPerMin > 0.001f ? watchPm / vsSimPerMin : (watchPm > 0.001f ? 999f : 1f);
+                bool within = ratio <= 1.5f && ratio >= 1f / 1.5f;
+                line += $" vs={vsSimPerMin:0.0} ratio={ratio:0.00} within={within}";
+            }
+            return line;
         }
 
         private static bool _rigDiagLogged;
@@ -1945,6 +2134,14 @@ namespace BigAmbitionsMP
             // irrelevant, and idle puppets fidget exactly like native customers. Purely local —
             // nothing travels.
             var bored = pup.tpc != null ? pup.tpc.boredAnimations : null;
+            try
+            {
+                if (_flipsSince < 0f) _flipsSince = Time.unscaledTime;
+                _watchFrames++;
+                if (speed > 0.01f) _watchMovingFrames++;
+                else if (anim.GetBool(BaseHuman.IsMoving)) _flipsWatch++;   // H-PUPPETSTUTTER-1: this copy stops walking
+            }
+            catch { }
             if (speed <= 0.01f)
             {
                 anim.SetBool(BaseHuman.IsMoving, false);
