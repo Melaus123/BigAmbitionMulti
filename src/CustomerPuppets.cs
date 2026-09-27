@@ -65,14 +65,22 @@ namespace BigAmbitionsMP
             // a look apply may swap the controller, which re-triggers the check.
             public RuntimeAnimatorController? motionTimeCheckedOn;
             public bool hasMotionTime;
-            // H-PUPPETSTUTTER-1: the last 3 stream samples, stamped in the SIMULATOR's clock (bsim) - the copy is
-            // drawn at a render time 1.5 stream intervals behind the newest sample, interpolated between the two
-            // samples around it (no chase). bn = 0: nothing buffered - hold where the body stands.
-            public readonly float[] bt = new float[3];
-            public readonly Vector3[] bp = new Vector3[3];
-            public readonly float[] byaw = new float[3];
-            public readonly float[] bfwd = new float[3];
+            // H-PUPPETSTUTTER-1: the last 4 stream samples (fold P1 2026-09-27: was 3), stamped in the SIMULATOR's
+            // clock (bsim) - the copy is drawn at a render time `delay` behind the sender's clock, interpolated between
+            // the two samples around it (no chase). bn = 0: nothing buffered - hold where the body stands.
+            public readonly float[] bt = new float[BufSamples];
+            public readonly Vector3[] bp = new Vector3[BufSamples];
+            public readonly float[] byaw = new float[BufSamples];
+            public readonly float[] bfwd = new float[BufSamples];
             public int bn;
+            public float delay;   // fold P3: the eased render delay, s (0 = not set yet)
+            // fold A1 (review 2026-09-27): each buffered sample's activity (PuppetRowInfo Loops/Dance/ActItem) - applied
+            // when the render time reaches that sample, not when the batch arrives. actT = the sample time last applied.
+            public readonly long[] bloops = new long[BufSamples];
+            public readonly float[] bdance = new float[BufSamples];
+            public readonly string[] bact = new string[BufSamples];
+            public float actT = float.MinValue;
+            public float rt = float.MinValue;   // this copy's render time (sender clock) this frame - the one-shot queue reads it
             public string bsim = "";
             public bool snapNext;
             // H-PUPPETANIM-1: what this copy SHOWS - looping activity bits (PuppetRowInfo.Loops), dance type, workout machine.
@@ -83,11 +91,35 @@ namespace BigAmbitionsMP
         }
         private static readonly Dictionary<string, Puppet> _puppets = new();
 
-        // H-PUPPETSTUTTER-1: one clock-offset estimate per simulator (receiver unscaledTime - sender stamp), kept as
-        // TrafficSync keeps the host's: re-seeded on a > 1 s step, otherwise blended 0.05 per batch.
-        private static readonly Dictionary<string, float> _clockOffsetBySim = new();
-        private const float ClockOffsetBlend = 0.05f;
-        private const float RenderDelayIntervals = 1.5f;
+        // H-PUPPETSTUTTER-1: one clock-offset estimate per simulator (receiver unscaledTime - sender stamp).
+        // Fold P1 (review 2026-09-27): taken from its LOW end - a row's offset is the true offset plus that row's transit
+        // delay, so the smallest recent one is the truest. A smaller offset is taken at once; a larger one blends in only
+        // ClockOffsetRise per batch, so the burst of late rows after a stall no longer lifts it (before: the first late
+        // row re-seeded it ~1 s high and it took ~10 s to blend back - copies pinned to the oldest sample, stepping).
+        // A step UP of more than 1 s (the sender's clock restarted) still re-seeds, but only once it has held
+        // ClockReseedAfter seconds (a stall's burst drains well inside that), and to the smallest offset seen meanwhile.
+        // jit: how far rows arrive ABOVE that floor, averaged (JitterBlend per batch, each row counted at most JitterCap
+        // so a stall's burst barely moves it) - the render time sits that much further back, so a row of ordinary
+        // lateness does not leave the copy holding its newest sample.
+        private sealed class ClockEst { public float off; public float highSince = -1f; public float highMin; public float jit; }
+        private const float JitterBlend = 0.05f;
+        private const float JitterCap = 0.5f;
+        private static readonly Dictionary<string, ClockEst> _clockOffsetBySim = new();
+        private const float ClockOffsetRise = 0.02f;
+        private const float ClockReseedAfter = 2f;
+        private const int BufSamples = 4;
+        // Fold P3: the render delay is 1.5 x the spacing of the samples actually received (the smallest gap in the
+        // buffer), not the watcher's own StreamInterval, and it moves at most RenderDelayEase s per real second - at a
+        // skip end (pace 5 -> 1) it no longer jumps 0.075 -> 0.375 s behind a buffer that spans ~0.1 s.
+        private const float RenderDelayGaps = 1.5f;
+        private const float RenderDelayEase = 0.5f;
+        // Fold P2: a leaving copy's walk-out limit = distance to the exit / walking speed + margin, within [6, cap] s.
+        private const float LeaveMarginSeconds = 3f;
+        private const float LeaveCapSeconds = 30f;
+        // puppetflips readout (fold P1/P3): the offset estimate, how far rows arrive above it, re-seeds, the render
+        // delay, and where the render time falls in the buffer (frames, copies with >= 2 samples).
+        private static float _offLast, _offExcessSum, _delayLast, _jitLast;
+        private static int _offBatches, _offReseeds, _rbBetween, _rbOldest, _rbNewest;
         private const float SnapMetres = 3f;
         private const float CatchUpSpeed = 8f;   // m/s cap for the body reaching its render point after a hold (steady state it IS the render point)
         // H-PUPPETSTUTTER-1 flip counters (DEV lever `puppetflips`): IsMoving true->false changes, per copy on the
@@ -1960,8 +1992,20 @@ namespace BigAmbitionsMP
                 try
                 {
                     float off = arrive - senderT;
-                    if (!_clockOffsetBySim.TryGetValue(simKey, out var cur) || Mathf.Abs(off - cur) > 1f) _clockOffsetBySim[simKey] = off;
-                    else _clockOffsetBySim[simKey] = Mathf.Lerp(cur, off, ClockOffsetBlend);
+                    if (!_clockOffsetBySim.TryGetValue(simKey, out var ce) || ce == null) { ce = new ClockEst { off = off }; _clockOffsetBySim[simKey] = ce; }
+                    else if (off <= ce.off) { ce.off = off; ce.highSince = -1f; }                  // fold P1: the low end, at once
+                    else if (off - ce.off > 1f)                                                    // a big step up: re-seed only if it holds
+                    {
+                        if (ce.highSince < 0f) { ce.highSince = arrive; ce.highMin = off; }
+                        else
+                        {
+                            ce.highMin = Mathf.Min(ce.highMin, off);
+                            if (arrive - ce.highSince >= ClockReseedAfter) { ce.off = ce.highMin; ce.highSince = -1f; _offReseeds++; }
+                        }
+                    }
+                    else { ce.off = Mathf.Lerp(ce.off, off, ClockOffsetRise); ce.highSince = -1f; }  // slowly up
+                    ce.jit = Mathf.Lerp(ce.jit, Mathf.Clamp(off - ce.off, 0f, JitterCap), JitterBlend);
+                    _offLast = ce.off; _jitLast = ce.jit; _offExcessSum += off - ce.off; _offBatches++;
                 }
                 catch { }
                 var seen = new HashSet<string>();
@@ -2002,20 +2046,19 @@ namespace BigAmbitionsMP
                         }
                     }
                     catch { }
-                    pup.target   = newTarget;   // stays the NEWEST sample (lag meter, adoption)
+                    pup.target   = newTarget;   // the NEWEST sample - only the walk-out reads it (and swaps in the exit); the lag meter uses newTarget, an adoption the DRAWN body position
                     pup.yaw      = r.Yaw;
                     pup.lastSeen = Time.unscaledTime;
-                    PushSample(pup, simKey, senderT, newTarget, r.Yaw, r.Fwd);
+                    PushSample(pup, simKey, senderT, newTarget, r.Yaw, r.Fwd, r.Loops, r.Dance, r.ActItem ?? "");   // fold A1: activity too
                     if (pup.leaving) pup.leaving = false;   // simulator says they're still here
                     if (pup.held != (r.Held ?? "")) UpdateHeld(pup, r.Held ?? "");
                     if (pup.fill != r.Fill) ApplyFill(pup, r.Fill);
-                    try { ApplyActivity(pup, r.Loops, r.Dance, r.ActItem ?? ""); } catch { }   // H-PUPPETANIM-1
                 }
                 // Rows that vanished = customers who left/were served away → walk out.
                 foreach (var kv in _puppets)
                     if (!seen.Contains(kv.Key) && !kv.Value.leaving) { _leaveMissing++; _leaveMissingTotal++; StartLeaving(kv.Value); }
                 // H-PUPPETANIM-1: the customers' one-shots since the previous batch, in send order.
-                if (p.Ev != null && p.Ev.Count > 0) PlayEvents(p.Ev);
+                if (p.Ev != null && p.Ev.Count > 0) QueueEvents(p.Ev, senderT, arrive);   // fold A1: played when the copy's render time reaches T
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] apply puppets: {ex.Message}"); }
         }
@@ -2090,13 +2133,25 @@ namespace BigAmbitionsMP
         {
             _puppetLeaves++; _puppetLeavesTotal++;
             pup.leaving = true;
-            pup.leaveAt = Time.unscaledTime + 6f;   // hard stop even if no exit is reachable
+            pup.bn = 0;   // fold P4: if its rows resume, it starts a fresh buffer - not a straight line from a stale sample
+            pup.actT = float.MinValue;
+            float now = Time.unscaledTime;
+            pup.leaveAt = now + 6f;   // hard stop even if no exit is reachable
             try { ApplyActivity(pup, 0L, 0f, ""); } catch { }   // H-PUPPETANIM-1: a copy walking out stands up and lets go of its machine
             try
             {
                 var zones = InstanceBehavior<BuildingManager>.Instance?.exitZones;
                 if (zones != null && zones.Count > 0 && zones[0] != null)
+                {
                     pup.target = zones[0].transform.position;
+                    // fold P2: long enough to reach the exit at plain walking speed (a skip only shortens it), capped
+                    if (pup.go != null)
+                    {
+                        var to = pup.target - pup.go.transform.position; to.y = 0f;
+                        float walk = Mathf.Max(0.5f, LeaveWalkSpeed() / Mathf.Max(1f, MPRestSync.SkipPace));
+                        pup.leaveAt = now + Mathf.Clamp(to.magnitude / walk + LeaveMarginSeconds, 6f, LeaveCapSeconds);
+                    }
+                }
             }
             catch { }
         }
@@ -2130,7 +2185,7 @@ namespace BigAmbitionsMP
 
         private static void UpdatePuppets()
         {
-            if (_puppets.Count == 0) return;
+            if (_puppets.Count == 0) { if (_pendingEv.Count > 0) _pendingEv.Clear(); return; }
             var dead = new List<string>();
             float now = Time.unscaledTime;
             foreach (var kv in _puppets)
@@ -2169,6 +2224,7 @@ namespace BigAmbitionsMP
 
                 if (dist < 0.6f || now > pup.leaveAt) dead.Add(kv.Key);
             }
+            try { PlayDueEvents(now); } catch { }   // fold A1: after every copy's render time is set this frame
             foreach (var k in dead)
             {
                 if (_puppets.TryGetValue(k, out var pup))
@@ -2181,9 +2237,9 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>H-PUPPETSTUTTER-1: add one stream sample to a copy's 3-sample buffer. A new simulator, a clock that
+        /// <summary>H-PUPPETSTUTTER-1: add one stream sample to a copy's BufSamples-sample buffer. A new simulator, a clock that
         /// went back more than 1 s, or a jump over SnapMetres restarts the buffer (a jump also snaps the body).</summary>
-        private static void PushSample(Puppet pup, string sim, float t, Vector3 pos, float yaw, float fwd)
+        private static void PushSample(Puppet pup, string sim, float t, Vector3 pos, float yaw, float fwd, long loops, float dance, string act)
         {
             try
             {
@@ -2199,18 +2255,24 @@ namespace BigAmbitionsMP
                         if (j.magnitude > SnapMetres) { pup.bn = 0; pup.snapNext = true; }
                     }
                 }
-                if (pup.bn == 3)
+                if (pup.bn == BufSamples)
                 {
-                    for (int i = 0; i < 2; i++) { pup.bt[i] = pup.bt[i + 1]; pup.bp[i] = pup.bp[i + 1]; pup.byaw[i] = pup.byaw[i + 1]; pup.bfwd[i] = pup.bfwd[i + 1]; }
-                    pup.bn = 2;
+                    for (int i = 0; i < BufSamples - 1; i++)
+                    {
+                        pup.bt[i] = pup.bt[i + 1]; pup.bp[i] = pup.bp[i + 1]; pup.byaw[i] = pup.byaw[i + 1]; pup.bfwd[i] = pup.bfwd[i + 1];
+                        pup.bloops[i] = pup.bloops[i + 1]; pup.bdance[i] = pup.bdance[i + 1]; pup.bact[i] = pup.bact[i + 1];
+                    }
+                    pup.bn = BufSamples - 1;
                 }
                 pup.bt[pup.bn] = t; pup.bp[pup.bn] = pos; pup.byaw[pup.bn] = yaw; pup.bfwd[pup.bn] = fwd;
+                pup.bloops[pup.bn] = loops; pup.bdance[pup.bn] = dance; pup.bact[pup.bn] = act ?? "";
                 pup.bn++;
             }
             catch { }
         }
 
-        /// <summary>H-PUPPETSTUTTER-1: place a (not leaving) copy at render time rt = now - offset - 1.5 x StreamInterval:
+        /// <summary>H-PUPPETSTUTTER-1: place a (not leaving) copy at render time rt = now - offset - delay (fold P3: delay eases
+        /// toward 1.5 x the smallest gap between the buffered samples):
         /// straight-line between the two samples around rt, held at the newest past it (no extrapolation), at the
         /// oldest before it. Faces the motion while the reported Forward is above 0.01, else turns to the reported
         /// yaw. Returns the Forward to animate with.</summary>
@@ -2223,25 +2285,49 @@ namespace BigAmbitionsMP
                 return 0f;
             }
             float off = 0f;
-            _clockOffsetBySim.TryGetValue(pup.bsim ?? "", out off);
-            float rt = now - off - RenderDelayIntervals * StreamInterval;
+            if (_clockOffsetBySim.TryGetValue(pup.bsim ?? "", out var ce) && ce != null) off = ce.off + ce.jit;
+            // fold P3: the spacing of the samples actually received (the smallest gap - one late batch does not stretch it)
+            float gap = StreamInterval;
+            if (n >= 2)
+            {
+                gap = float.MaxValue;
+                for (int k = 1; k < n; k++) { float g = pup.bt[k] - pup.bt[k - 1]; if (g < gap) gap = g; }
+                gap = Mathf.Clamp(gap, 0.02f, 0.5f);
+            }
+            float wantDelay = RenderDelayGaps * gap;
+            pup.delay = pup.delay <= 0f ? wantDelay : Mathf.MoveTowards(pup.delay, wantDelay, RenderDelayEase * Time.unscaledDeltaTime);
+            _delayLast = pup.delay;
+            float rt = now - off - pup.delay;
+            pup.rt = rt;
             int last = n - 1;
+            // fold A1: the activity of the newest sample at or before rt (the oldest while rt is before them all), applied
+            // once per sample - a copy sits, dances or mounts a machine when it is DRAWN at that spot.
+            int ai = 0;
+            for (int k = last; k > 0; k--) if (pup.bt[k] <= rt) { ai = k; break; }
+            if (pup.bt[ai] != pup.actT)
+            {
+                pup.actT = pup.bt[ai];
+                try { ApplyActivity(pup, pup.bloops[ai], pup.bdance[ai], pup.bact[ai] ?? ""); } catch { }
+            }
             Vector3 pos, seg = Vector3.zero;
             float yaw, fwd;
             if (rt >= pup.bt[last])
             {
+                if (n >= 2) _rbNewest++;
                 pos = pup.bp[last]; yaw = pup.byaw[last];
-                // a late batch: keep the stride for up to two intervals rather than stop the walk animation
-                fwd = (rt - pup.bt[last] <= 2f * StreamInterval) ? pup.bfwd[last] : 0f;
+                // a late batch: keep the stride for up to two gaps rather than stop the walk animation
+                fwd = (rt - pup.bt[last] <= 2f * gap) ? pup.bfwd[last] : 0f;
                 if (last > 0) seg = pup.bp[last] - pup.bp[last - 1];
             }
             else if (rt <= pup.bt[0])
             {
+                if (n >= 2) _rbOldest++;
                 pos = pup.bp[0]; yaw = pup.byaw[0]; fwd = pup.bfwd[0];
                 if (n > 1) seg = pup.bp[1] - pup.bp[0];
             }
             else
             {
+                _rbBetween++;
                 int i = 0;
                 while (i < last - 1 && rt >= pup.bt[i + 1]) i++;
                 float span = pup.bt[i + 1] - pup.bt[i];
@@ -2289,6 +2375,8 @@ namespace BigAmbitionsMP
         internal static void ResetFlips()
         {
             _flipsWatch = _flipsSim = _simSamples = _simMovingSamples = _watchFrames = _watchMovingFrames = 0;
+            _offBatches = _offReseeds = _rbBetween = _rbOldest = _rbNewest = 0;
+            _offExcessSum = 0f;
             _flipsSince = Time.unscaledTime;
         }
 
@@ -2301,7 +2389,9 @@ namespace BigAmbitionsMP
             float simPm = _flipsSim / mins, watchPm = _flipsWatch / mins;
             string line = $"secs={secs:0.0} sim={_flipsSim} simPerMin={simPm:0.0} simSamples={_simSamples} simMoving={_simMovingSamples} "
                 + $"watch={_flipsWatch} watchPerMin={watchPm:0.0} watchFrames={_watchFrames} watchMovingFrames={_watchMovingFrames} "
-                + $"copies={_puppets.Count} follower={_followerHere} bldg='{_myBldg}'";
+                + $"copies={_puppets.Count} follower={_followerHere} bldg='{_myBldg}' "
+                + $"off={_offLast:0.000} jit={_jitLast:0.000} offExcessAvg={(_offBatches > 0 ? _offExcessSum / _offBatches : 0f):0.000} offBatches={_offBatches} offReseeds={_offReseeds} delay={_delayLast:0.000} "
+                + $"renderBetween={_rbBetween} pinnedOldest={_rbOldest} pinnedOldestPerMin={_rbOldest / mins:0.0} heldNewest={_rbNewest} heldNewestPerMin={_rbNewest / mins:0.0}";
             if (vsSimPerMin >= 0f)
             {
                 float ratio = vsSimPerMin > 0.001f ? watchPm / vsSimPerMin : (watchPm > 0.001f ? 999f : 1f);
@@ -2689,6 +2779,13 @@ namespace BigAmbitionsMP
         /// (DriveLocomotion) and the paced speed restored; ("", 0) is also the release on leave / removal.</summary>
         private static void ApplyActivity(Puppet pup, long loops, float dance, string act)
         {
+            // fold A4 (review 2026-09-27): the machine first - a copy without an animator still lets go of its machine
+            if (act != pup.act)
+            {
+                if (pup.act.Length > 0) MachineUse(pup.act, false);
+                pup.act = act;
+                if (act.Length > 0) MachineUse(act, true);
+            }
             var an = pup.anim;
             if (an == null) return;
             if (!pup.actsChecked) pup.actsChecked = LogActsParams(an);
@@ -2696,19 +2793,23 @@ namespace BigAmbitionsMP
             {
                 long diff = loops ^ pup.loops;
                 var d = ParamsOf(an);
-                foreach (var def in LoopDefs())
+                // fold A2: an animator that reports no parameters yet commits nothing - pup.loops stays, the next sample retries
+                if (d != null && d.Count > 0)
                 {
-                    long bit = 1L << def.bit;
-                    if ((diff & bit) == 0L) continue;
-                    bool on = (loops & bit) != 0L;
-                    if (d == null || !d.TryGetValue(def.hash, out var ty) || ty != AnimatorControllerParameterType.Bool)
+                    foreach (var def in LoopDefs())
                     {
-                        if (on) { _missingHits++; _missingNames.Add(def.name); }
-                        continue;
+                        long bit = 1L << def.bit;
+                        if ((diff & bit) == 0L) continue;
+                        bool on = (loops & bit) != 0L;
+                        if (!d.TryGetValue(def.hash, out var ty) || ty != AnimatorControllerParameterType.Bool)
+                        {
+                            if (on) { _missingHits++; _missingNames.Add(def.name); }
+                            continue;
+                        }
+                        an.SetBool(def.hash, on);
                     }
-                    an.SetBool(def.hash, on);
+                    pup.loops = loops;
                 }
-                pup.loops = loops;
             }
             if ((loops & (1L << DanceBit)) != 0L && Mathf.Abs(dance - pup.dance) > 0.0001f)
             {
@@ -2719,12 +2820,17 @@ namespace BigAmbitionsMP
             // SkipPaceBodies puts on the simulator's natives (idempotent; RestoreAll puts it back when the skip ends).
             if (loops != 0L) { if (MPRestSync.SkipPace > 1.001f) SkipPaceBodies.ApplyAnimator(an); }
             else if (SkipPaceBodies.IsAnimatorScaled(an)) SkipPaceBodies.RestoreAnimatorOne(an);
-            if (act != pup.act)
-            {
-                if (pup.act.Length > 0) SetMachineFlag(pup.act, false);
-                pup.act = act;
-                if (act.Length > 0) SetMachineFlag(act, true);
-            }
+        }
+
+        /// <summary>Fold A3 (review 2026-09-27): copies using each workout machine - its flag goes on with the first user and
+        /// off with the last, so one copy stepping off and another stepping on (any order, any frame) leave it on.</summary>
+        private static readonly Dictionary<string, int> _machineUsers = new();
+        private static void MachineUse(string itemId, bool on)
+        {
+            _machineUsers.TryGetValue(itemId, out int n);
+            if (on) { _machineUsers[itemId] = n + 1; if (n == 0) SetMachineFlag(itemId, true); }
+            else if (n <= 1) { _machineUsers.Remove(itemId); SetMachineFlag(itemId, false); }
+            else _machineUsers[itemId] = n - 1;
         }
 
         /// <summary>The workout machine's OWN animator flag (WorkoutAnimatorController.StartWorkoutAnimation sets it on the
@@ -2751,25 +2857,54 @@ namespace BigAmbitionsMP
             catch { }
         }
 
-        /// <summary>Watcher: replay the simulator's one-shots on the copies - AnimationSpeed first, then the trigger, only
-        /// when the copy's controller has that trigger.</summary>
-        private static void PlayEvents(List<PuppetEventInfo> evs)
+        /// <summary>Fold A1 (review 2026-09-27): a batch's one-shots wait, stamped with its sender time T, until the copy's
+        /// render time reaches T (PlayDueEvents, each frame) - they fire where the copy is DRAWN, not ~1.5 intervals
+        /// early. A copy that is gone, leaving or not buffering, or a wait over EvMaxWait real seconds, plays/drops at
+        /// once as before. Send order is kept (a copy's later events carry later T).</summary>
+        private struct PendingEv { public PuppetEventInfo e; public float t; public float arrive; }
+        private static readonly List<PendingEv> _pendingEv = new();
+        private const int MaxPendingEv = 256;
+        private const float EvMaxWait = 2f;
+        private static void QueueEvents(List<PuppetEventInfo> evs, float t, float arrive)
         {
             for (int i = 0; i < evs.Count; i++)
             {
-                try
-                {
-                    var e = evs[i];
-                    if (e == null || string.IsNullOrEmpty(e.Id)) continue;
-                    if (!_puppets.TryGetValue(e.Id, out var pup) || pup.leaving || pup.anim == null) continue;
-                    var an = pup.anim;
-                    if (!HasParam(an, e.H, AnimatorControllerParameterType.Trigger)) { _evNoParam++; continue; }
-                    if (HasParam(an, AnimSpeedHash, AnimatorControllerParameterType.Float)) an.SetFloat(AnimSpeedHash, e.S > 0f ? e.S : 1f);
-                    an.SetTrigger(e.H);
-                    _evPlayed++;
-                }
-                catch { }
+                if (evs[i] == null) continue;
+                if (_pendingEv.Count >= MaxPendingEv) { PlayOne(evs[i]); continue; }
+                _pendingEv.Add(new PendingEv { e = evs[i], t = t, arrive = arrive });
             }
+        }
+
+        private static void PlayDueEvents(float now)
+        {
+            if (_pendingEv.Count == 0) return;
+            int w = 0;
+            for (int i = 0; i < _pendingEv.Count; i++)
+            {
+                var pe = _pendingEv[i];
+                bool wait = pe.e != null && !string.IsNullOrEmpty(pe.e.Id) && now - pe.arrive < EvMaxWait
+                    && _puppets.TryGetValue(pe.e.Id, out var pup) && !pup.leaving && pup.bn > 0 && pup.rt < pe.t;
+                if (wait) _pendingEv[w++] = pe;
+                else PlayOne(pe.e);
+            }
+            if (w < _pendingEv.Count) _pendingEv.RemoveRange(w, _pendingEv.Count - w);
+        }
+
+        /// <summary>Watcher: replay one of the simulator's one-shots on its copy - AnimationSpeed first, then the trigger,
+        /// only when the copy's controller has that trigger.</summary>
+        private static void PlayOne(PuppetEventInfo? e)
+        {
+            try
+            {
+                if (e == null || string.IsNullOrEmpty(e.Id)) return;
+                if (!_puppets.TryGetValue(e.Id, out var pup) || pup.leaving || pup.anim == null) return;
+                var an = pup.anim;
+                if (!HasParam(an, e.H, AnimatorControllerParameterType.Trigger)) { _evNoParam++; return; }
+                if (HasParam(an, AnimSpeedHash, AnimatorControllerParameterType.Float)) an.SetFloat(AnimSpeedHash, e.S > 0f ? e.S : 1f);
+                an.SetTrigger(e.H);
+                _evPlayed++;
+            }
+            catch { }
         }
 
         /// <summary>One line per follow session: how many looping activity parameters the copy's controller carries.
@@ -2912,6 +3047,8 @@ namespace BigAmbitionsMP
                 try { if (kv.Value.go != null) UnityEngine.Object.Destroy(kv.Value.go); } catch { }
             }
             _puppets.Clear();
+            _machineUsers.Clear();   // fold A3
+            _pendingEv.Clear();      // fold A1
             _handNodes.Clear();
             _custEntryIds.Clear();
             _pendingEmotes.Clear();

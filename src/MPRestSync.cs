@@ -1322,6 +1322,7 @@ namespace BigAmbitionsMP
         private static System.Reflection.MethodInfo? _cancelWorkingMi;
         private static bool _cancelWorkingLooked, _cancelWorkingWarned;
         private static Delegate? _exitForWorkDelegate;
+        private static Delegate? _exitHookSeen;   // fold A5: the onExitBuilding value last checked (a delegate is immutable - any change is a new reference)
 
         private static bool BuildingRegistrationMissing()
         {
@@ -1334,10 +1335,12 @@ namespace BigAmbitionsMP
             try
             {
                 var cur = GlobalEvents.onExitBuilding;
-                if (_exitForWorkDelegate != null && cur != null && Array.IndexOf(cur.GetInvocationList(), _exitForWorkDelegate) >= 0) return;
+                if (_exitForWorkDelegate != null && cur != null && ReferenceEquals(cur, _exitHookSeen)) return;   // fold A5: unchanged - no per-frame GetInvocationList
+                if (_exitForWorkDelegate != null && cur != null && Array.IndexOf(cur.GetInvocationList(), _exitForWorkDelegate) >= 0) { _exitHookSeen = cur; return; }
                 GlobalEvents.onExitBuilding += _ => OnExitBuildingForWork();
                 var list = GlobalEvents.onExitBuilding?.GetInvocationList();
                 _exitForWorkDelegate = list != null && list.Length > 0 ? list[list.Length - 1] : null;
+                _exitHookSeen = GlobalEvents.onExitBuilding;
             }
             catch { }
         }

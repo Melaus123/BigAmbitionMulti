@@ -264,7 +264,13 @@
         "watchFlips": " watch=(\\d+)",
         "watchPm": "watchPerMin=([0-9.]+)",
         "ratio": "ratio=([0-9.]+)",
-        "watchMovingFrames": "watchMovingFrames=(\\d+)"
+        "watchMovingFrames": "watchMovingFrames=(\\d+)",
+        "offExcessAvg": "offExcessAvg=(-?[0-9.]+)",
+        "offReseeds": "offReseeds=(\\d+)",
+        "renderDelay": " delay=([0-9.]+)",
+        "pinnedOldestPm": "pinnedOldestPerMin=([0-9.]+)",
+        "heldNewestPm": "heldNewestPerMin=([0-9.]+)",
+        "renderBetween": "renderBetween=(\\d+)"
       },
       "note": "THE ASSERTION: the watcher's copies stop walking within 1.5x as often as the real customers (before the fix: many times more)"
     },
