@@ -1,0 +1,291 @@
+{
+  "id": "T-CARHIT",
+  "title": "P-CARHIT (LOG-ONLY probe, user direction 2026-09-27; H-CARSTACK-1 / H-TRAFFIC-RAM-1 evidence) - car-to-car PHYSICS CONTACTS at any force, classed per side. The T-CARHANDOVER2 geography: the client is put on a road lane far away and runs its OWN Gley traffic, the host (running its own traffic all along, with the fixture's parked cars around the spawn) walks in by road-snapped steps and both hold together 100 s - so local traffic, the other machine's traffic replicas, player-car ghosts and parked cars meet near traffic with the other player close by. ASSERT: the HOST (20 own Gley cars all run) logs at least one detailed [CarHit] contact with valid classes (the client's contacts are reported: 2 in run T-CARHIT-20260927-130900, 0 in T-CARHIT-20260927-131811); NO detailed line ever names the local driver (driver contacts are counted, not detailed). COST CHECK: 20 s disarmed, then 20 s armed, before the walk; compare the `perf` readouts of the two windows. NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1; both avatars spawn outdoors near (65, -194)). Dev build (tp / tproad / traffic levers are BAMP_DEV only). 'tproad x z' (added 2026-09-24) snaps to the NEAREST Gley traffic waypoint by x/z and faces along its lane. Far point (-500, -150), about 565 m west of the spawn. Run 1 (2026-09-24 01:05) proved the OLD far point (999.7, -99.4) is OFF the Gley road network: its nearest traffic waypoint is 599.7 m away at (400, 0, -99.4) - so step 8 also asserts the snap is under 40 m. The host's steps are offsets from the client's snapped position toward the spawn (direction about (+0.997, -0.078)). Dev build with 'carhit [on|off]' (P-CARHIT readout; on/off arms the probe only). The rig has NO lever that moves a car, so a DRIVEN car never meets traffic here: the driver-count path is asserted only negatively (no detailed driver line) and read from the counters.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "(?<!swallowed )NullReferenceException",
+    "HarmonyException",
+    "CarHitProbe\\.OnContact",
+    "\\[CarHit\\] driver \\S+ x ",
+    "\\[CarHit\\] \\S+ \\S+ x driver ",
+    "\\[TrafficSync\\] .*(failed|exception|threw)"
+  ],
+  "oracles_present": [
+    {
+      "role": "h",
+      "regex": "\\[CarHit\\] (parked-player|traffic|traffic-replica|car-ghost|parked-ambient|parked-replica|ghost-other|other) \\S+ x (parked-player|traffic|traffic-replica|car-ghost|parked-ambient|parked-replica|ghost-other|other) \\S+ impulse=[\\d.]+ relSpeed=[\\d.]+ pos=-?[\\d.]+,-?[\\d.]+ nearestRemotePlayer=(none|\\d+) trafficSim=(host|me|\\?) mode=(ghost|own) hook=(vdc|gley) "
+    }
+  ],
+  "oracles_report": [
+    "\\[CarHit\\] (parked-player|traffic|traffic-replica|car-ghost|parked-ambient|parked-replica|ghost-other|other) \\S+ x (parked-player|traffic|traffic-replica|car-ghost|parked-ambient|parked-replica|ghost-other|other) \\S+ impulse=[\\d.]+ relSpeed=[\\d.]+ pos=-?[\\d.]+,-?[\\d.]+ nearestRemotePlayer=(none|\\d+) trafficSim=(host|me|\\?) mode=(ghost|own) hook=(vdc|gley) ",
+    "\\[CarHit\\] driver contacts \\(counted, not detailed\\)",
+    "\\[CarHit\\] detail budget",
+    "\\[CarStack\\] PAIR ",
+    "\\[TrafficSync\\] traffic mode: (local|ghost)",
+    "\\[Gley\\] swallowed NullReferenceException in traffic collider handler"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TrafficSync\\] snapshots on the (unreliable|reliable) lane \\(seq-guarded\\); identity re-send every 5s\\.",
+          "within_s": 150
+        }
+      ]
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 75,
+      "note": "both worlds load and settle; the host evaluates a mode for the peer on its 0.2 s beat"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST CARHIT START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "role": "both",
+      "cmd": "carhit off",
+      "expect_result": "^OK carhit armed=False ",
+      "note": "COST CHECK: the probe disarmed (its hooks still run but return at once)",
+      "seq": 8
+    },
+    {
+      "role": "both",
+      "cmd": "perf reset",
+      "expect_result": "^OK",
+      "note": "COST CHECK: restart the frame window - the disarmed leg starts here",
+      "seq": 9
+    },
+    {
+      "role": "h",
+      "sleep_s": 20,
+      "seq": 10
+    },
+    {
+      "role": "both",
+      "cmd": "perf reset",
+      "expect_result": "^OK",
+      "note": "COST CHECK BEFORE: the 20 s DISARMED window's frame figures (then the window restarts)",
+      "seq": 11
+    },
+    {
+      "role": "both",
+      "cmd": "carhit on",
+      "expect_result": "^OK carhit armed=True ",
+      "note": "armed from here (the default in every build)",
+      "seq": 12
+    },
+    {
+      "role": "h",
+      "sleep_s": 20,
+      "seq": 13
+    },
+    {
+      "role": "both",
+      "cmd": "perf reset",
+      "expect_result": "^OK",
+      "note": "COST CHECK AFTER: the 20 s ARMED window's frame figures",
+      "seq": 14
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "tproad -500 -150",
+      "expect_result": "^OK tproad -?[\\d.]+ -?[\\d.]+ -?[\\d.]+ wp=\\d+ snap=([0-9]|[1-3][0-9])\\.\\d ",
+      "capture": {
+        "cx": "^OK tproad (-?[\\d.]+) ",
+        "cz": "^OK tproad -?[\\d.]+ -?[\\d.]+ (-?[\\d.]+) "
+      },
+      "derive": {
+        "h1x": [
+          "cx",
+          "238"
+        ],
+        "h1z": [
+          "cz",
+          "-19"
+        ],
+        "h2x": [
+          "cx",
+          "149"
+        ],
+        "h2z": [
+          "cz",
+          "-12"
+        ],
+        "h3x": [
+          "cx",
+          "80"
+        ],
+        "h3z": [
+          "cz",
+          "-6"
+        ],
+        "h4x": [
+          "cx",
+          "10"
+        ],
+        "h4z": [
+          "cz",
+          "-1"
+        ]
+      },
+      "note": "PREMISE: the client is outdoors (tproad refuses inside a building or a vehicle), ON a road lane, and far from the host",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TrafficSync\\] traffic mode: local \\(seq \\d+\\) - this client is far from every other player",
+          "within_s": 60
+        },
+        {
+          "role": "c",
+          "regex": "\\[TrafficSync\\] traffic mode: local (\\(ghosts handed over in|- \\d+ ghost\\(s\\) still on screen)",
+          "within_s": 100
+        }
+      ]
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "sleep_s": 40,
+      "note": "the client's own Gley traffic fills in around it at the game's density"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=local local=([3-9]|[1-9]\\d+) handover=none",
+      "note": "PREMISE: local mode really in force with >= 3 local cars alive around the client. The client's log is searched from THIS step's mark by every later host step's expect_log (no client command runs until step 20)."
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "tproad ${h1x} ${h1z}",
+      "expect_result": "^OK tproad ",
+      "note": "host about 240 m from the client, on a road (the local->ghost switch fires below 250 m)"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "pause at ~240 m"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "tproad ${h2x} ${h2z}",
+      "expect_result": "^OK tproad ",
+      "note": "host about 150 m from the client, on a road"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "pause at ~150 m"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "tproad ${h3x} ${h3z}",
+      "expect_result": "^OK tproad ",
+      "note": "host about 80 m from the client, on a road"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "pause at ~80 m"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "tproad ${h4x} ${h4z}",
+      "expect_result": "^OK tproad ",
+      "note": "host beside the client, on a road"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "sleep_s": 100,
+      "note": "hold together: the handover keeps in-view local cars within 70 m up to its 90 s ceiling; the probe prints every 2 s while it runs"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h ",
+      "note": "the client switched to ghost mode (asserted on the client log); the T-CARHANDOVER2 '>= 3 local cars in view' premise is NOT carried: it is P-CARSTACK's, and run T-CARHIT-20260927-130900 had inView=2 while its [CarHit] contacts were logged",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TrafficSync\\] traffic mode: ghost \\(seq \\d+\\) - another player is near",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c ",
+      "note": "recorded only"
+    },
+    {
+      "role": "c",
+      "cmd": "carhit",
+      "expect_result": "^OK carhit armed=True contacts=\\d+ driverCounted=\\d+ detailed=\\d+/200 ",
+      "note": "READOUT: per-class-pair counters (total/detailed); a driver pair shows total>0 with detailed 0",
+      "seq": 28
+    },
+    {
+      "role": "h",
+      "cmd": "carhit",
+      "expect_result": "^OK carhit armed=True contacts=\\d+ driverCounted=\\d+ detailed=\\d+/200 ",
+      "seq": 29
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST CARHIT END",
+      "expect_result": "OK MARK",
+      "seq": 30
+    }
+  ]
+}

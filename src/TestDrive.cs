@@ -4335,6 +4335,18 @@ namespace BigAmbitionsMP
                     return "ERR not in a car";
                 }
 
+                // PROBE-START: P-CARHIT
+                case "carhit":
+                {
+                    // P-CARHIT readout (DEV, read-only): car-to-car contacts per class pair (total/detailed) and the probe's
+                    // budgets. `carhit on|off` arms/disarms the PROBE ITSELF (the [Perf] cost check) - no game state.
+                    if (arg == "on") CarHitProbe.Armed = true;
+                    else if (arg == "off") CarHitProbe.Armed = false;
+                    else if (arg.Length > 0) return "ERR usage: carhit [on|off]";
+                    return "OK carhit " + CarHitProbe.Readout();
+                }
+                // PROBE-END: P-CARHIT
+
                 case "cartstate":
                 {
                     // H-CARTICON-1 rig readout (read-only): VehicleManager.CartStateReadout for one vehicle id.
