@@ -1580,6 +1580,13 @@ namespace BigAmbitionsMP
 
         public static void StartNewGame(GameVariablesDto settings)
         {
+            // EFFORT BATCH 28 (B): a throw after the lobby latch flipped hands the lobby back.
+            try { StartNewGameCore(settings); }
+            catch (Exception ex) { StartFailed("StartNewGame", ex); }
+        }
+
+        private static void StartNewGameCore(GameVariablesDto settings)
+        {
             if (!_running) return;
             // PROTON-1: refuse to start a session this machine cannot write saves for -- an
             // unresolved version folder turns every MP store path relative, silently.
@@ -1657,6 +1664,14 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+#if BAMP_DEV
+                    // EFFORT BATCH 28 test lever ('startfail arm'): one forced failure of this continuation.
+                    if (TestDrive.ForceStartFailOnce)
+                    {
+                        TestDrive.ForceStartFailOnce = false;
+                        throw new InvalidOperationException("DEV startfail lever: forced start-continuation failure (test)");
+                    }
+#endif
                     Plugin.Logger.LogInfo("[Server] Initialising new game and loading character creation...");
                     // New() must be called first — same as MainMenuController.StartNewGame(difficulty).
                     // Without it, IntroCharacterCustomizer.StartGame() finds SaveGameManager.Current
@@ -1669,7 +1684,7 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"[Server] StartNewGame error: {ex}");
+                    StartFailed("StartNewGame", ex);
                 }
             });
         }
@@ -1701,8 +1716,41 @@ namespace BigAmbitionsMP
             try { MPCanvasUI.PostLobbyNotice($"Load refused: {why}"); } catch { }
         }
 
+        /// <summary>EFFORT BATCH 28 (B, user-approved 2026-09-21): EVERY failure of a lobby start
+        /// (a throw in StartNewGame/StartLoadGame after IsInLobby flipped, or in their main-thread
+        /// continuations) hands the lobby back so Start can be pressed again.  Field bundle
+        /// 20260921-043653 (Proton host): three StartNewGame errors, then "Lobby Start ignored - a
+        /// start is already in flight" forever.  Logged ONCE per failure (this line replaces the
+        /// old "StartNewGame error" line and keeps its prefix).  Same world-up guard as
+        /// NotifyLoadRefused: a failure reached with a live world never flips back to "lobby".
+        /// No on-screen text (the lobby's existing Start button is the whole affordance).</summary>
+        internal static void StartFailed(string where, Exception ex)
+        {
+            try
+            {
+                bool worldUp = false;
+                try { worldUp = SaveGameManager.Current != null && Helpers.PlayerHelper.PlayerController != null; } catch { }
+                if (!_running || worldUp || IsInLobby)
+                {
+                    Plugin.Logger.LogError($"[Server] {where} error (lobby latch untouched: {(!_running ? "server stopped" : worldUp ? "a world is up" : "still in the lobby")}): {ex}");
+                    return;
+                }
+                MPSaveCoordinator.ConsumeDevHostLoadAs(where + " failed");   // the override never outlives its start (NotifyLoadRefused rule)
+                IsInLobby = true;
+                Plugin.Logger.LogError($"[Server] {where} error - lobby restored, Start can be pressed again: {ex}");
+            }
+            catch (Exception e2) { Plugin.Logger.LogError($"[Server] {where} error: {ex} (lobby restore failed: {e2.Message})"); }
+        }
+
         /// <summary>Host clicked "Load Multiplayer Save" in the lobby.</summary>
         public static void StartLoadGame()
+        {
+            // EFFORT BATCH 28 (B): same wrapper as StartNewGame.
+            try { StartLoadGameCore(); }
+            catch (Exception ex) { StartFailed("StartLoadGame", ex); }
+        }
+
+        private static void StartLoadGameCore()
         {
             if (!_running) return;
             // PROTON-1: refuse to start a session this machine cannot write saves for -- an
@@ -1818,7 +1866,7 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Logger.LogError($"[Server] StartLoadGame error: {ex}");
+                    StartFailed("StartLoadGame", ex);
                 }
             });
         }

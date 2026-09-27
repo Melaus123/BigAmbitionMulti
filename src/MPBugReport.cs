@@ -2170,67 +2170,23 @@ namespace BigAmbitionsMP
         }
 
         // Replace IPv4 addresses with a placeholder — hides the host's public IP from uploaded logs.
+        // EFFORT BATCH 28 (C, user-approved 2026-09-21): this is now the ONLY redaction. Steam account
+        // numbers and user folder names in paths are KEPT (they were blanked 2026-08-11 / 2026-08-26;
+        // reversed - they carry diagnostic value, e.g. Proton / Steam Deck paths). A mod token
+        // `mod:<name>@a.b.c.d` (MPContentFingerprint) is an assembly VERSION, not an address: the
+        // lookbehind skips a dotted quad that directly follows `mod:<name>@`.
         private static readonly System.Text.RegularExpressions.Regex _ipv4 =
-            new System.Text.RegularExpressions.Regex(@"\b(?:\d{1,3}\.){3}\d{1,3}\b", System.Text.RegularExpressions.RegexOptions.Compiled);
-        // Bug-report v2 (task #40): the Windows account name in file paths is often a real
-        // name (bundle 20260811-225015 showed the host's) and carries zero diagnostic value —
-        // players are identified by in-game name + stable id, never by the account segment.
-        // [\\/]+ (not [\\/]) so JSON-escaped paths (C:\\Users\\name) redact too; the segment
-        // itself (8.3 short forms included) is replaced, everything after it is preserved.
-        // macOS home folders live under /Users/NAME - matched case-sensitively so URL paths
-        // such as /users/<id> stay; the same [\\/]+ separators as the Windows form so a
-        // JSON-escaped \/Users\/name redacts too.
-        private static readonly System.Text.RegularExpressions.Regex _userPath =
-            new System.Text.RegularExpressions.Regex(@"(?i)([A-Z]:[\\/]+Users[\\/]+|(?-i:[\\/]+Users[\\/]+))([^\\/\r\n""']+)", System.Text.RegularExpressions.RegexOptions.Compiled);
-        // A player's SteamID64 identifies their Steam account and can be looked up, and it reached
-        // uploads three ways: MPConfig logs "Stable id: steam-<id>" into Player.log at every startup,
-        // peer-log requests ship each connected player's whole Player.log, and the save-store folders
-        // inside the bundle are NAMED steam-<id>. User ruling 2026-08-26: strip them — the raw number
-        // has no diagnostic value.
-        //
-        // Replaced with a STABLE ALIAS rather than a fixed placeholder, deliberately: the folders must
-        // stay distinct (two players collapsing to one name would collide as duplicate zip entries) and
-        // the same player must read the same in the log and in the folder tree, or a multi-player bundle
-        // becomes unreadable. This is a PSEUDONYM, not a secret — the id space is small enough to brute
-        // force — but it stops the account number being published, which is what was asked for.
-        // WIDENED 2026-08-26 after review: the first version matched only "steam-<id>", so it caught the
-        // config line and the save-store folder names and MISSED every raw id — and the raw ones are on
-        // the STEAM-INVITE path, which is how most players join. Six sites logged the number with
-        // no prefix: MPSteamPresence "[SteamJoin] queued join -> {hostId}" (x3), MPClient "Connecting via
-        // Steam relay to {hostSteamId}", SteamTransports "relay listener up (id ...)", and MPCanvasUI's
-        // "[Steam] client valid: ... id={SteamId}".
-        //
-        // Anchored on 7656119 — the SteamID64 individual-account prefix — rather than a bare \d{17}, so an
-        // unrelated 17-digit run is never mangled. Any steam-/steam: prefix is PRESERVED and only the
-        // digits are replaced: "steam-<id>" reads "steam-p<alias>", a bare id reads "p<alias>".
-        // Case-insensitive, which the first version was not.
-        private static readonly System.Text.RegularExpressions.Regex _steamId =
-            new System.Text.RegularExpressions.Regex(@"(?i)\b(?:steam[-:])?(7656119\d{10})\b", System.Text.RegularExpressions.RegexOptions.Compiled);
-
-        /// <summary>FNV-1a, written out rather than using string.GetHashCode(): the framework's string
-        /// hash is not contractually stable across processes, and an alias that changes between two
-        /// files of the SAME bundle would defeat the point.</summary>
-        private static string SteamAlias(string id)
-        {
-            unchecked
-            {
-                uint h = 2166136261u;
-                foreach (char c in id) { h ^= c; h *= 16777619u; }
-                return h.ToString("x8");
-            }
-        }
+            new System.Text.RegularExpressions.Regex(@"(?<!\bmod:[^\s@]+@)\b(?:\d{1,3}\.){3}\d{1,3}\b", System.Text.RegularExpressions.RegexOptions.Compiled);
 
         internal static string RedactSensitive(string s)
         {
             if (string.IsNullOrEmpty(s)) return s;
-            s = _steamId.Replace(s, m => m.Value.Replace(m.Groups[1].Value, "p" + SteamAlias(m.Groups[1].Value)));
-            return _userPath.Replace(_ipv4.Replace(s, "[redacted-ip]"), "$1[user]");
+            return _ipv4.Replace(s, "[redacted-ip]");
         }
 
-        /// <summary>Zip ENTRY NAMES carry steam-&lt;id&gt; too (the save-store folders); only file
-        /// CONTENTS were being redacted, so the ids were published in the archive's directory listing.</summary>
-        internal static string RedactEntryName(string rel)
-            => string.IsNullOrEmpty(rel) ? rel : _steamId.Replace(rel, m => m.Value.Replace(m.Groups[1].Value, "p" + SteamAlias(m.Groups[1].Value)));
+        /// <summary>Zip ENTRY NAMES: nothing to redact any more (Steam ids are kept, batch 28 C). Kept
+        /// as the one seam the bundle builder calls, so a future rule has a single place to go.</summary>
+        internal static string RedactEntryName(string rel) => rel;
 
         private static byte[] Ascii(string value) => Encoding.ASCII.GetBytes(value);
 

@@ -64,6 +64,10 @@ namespace BigAmbitionsMP
         internal static bool HoldRivalsSnapshot;
         internal static RivalsSnapshotPayload? HeldRivalsSnapshot;
 
+        /// <summary>EFFORT BATCH 28 "startfail" verb state — while true, the NEXT StartNewGame
+        /// main-thread continuation throws once (MPServer), exercising the lobby hand-back.</summary>
+        internal static bool ForceStartFailOnce;
+
         /// <summary>Round-260 "rentdeny" verb state — while true, the host denies every
         /// RentRequest with a TestDrive reason, letting an agent exercise the client's
         /// optimistic-rent rollback (the starter-item leak) without needing a genuinely
@@ -229,6 +233,25 @@ namespace BigAmbitionsMP
                     if (!MPServer.IsRunning) return "ERR start the server first ('host')";
                     MPServer.StartNewGame(new GameVariablesDto());
                     return "OK StartNewGame invoked (default settings)";
+
+                case "startfail":
+                    // EFFORT BATCH 28 (B) test lever, host-side: 'arm' -> the next StartNewGame
+                    // continuation throws once; bare -> readout of the lever + the lobby latch.
+                    if (arg == "arm") { ForceStartFailOnce = true;  return "OK the next StartNewGame continuation throws once (host-side)"; }
+                    if (arg == "off") { ForceStartFailOnce = false; return "OK startfail disarmed"; }
+                    return $"OK startfail armed={ForceStartFailOnce} running={MPServer.IsRunning} inLobby={MPServer.IsInLobby}";
+
+                case "rivalids":
+                {
+                    // EFFORT BATCH 28 (A) readout: the ids native GenerateRivals minted into THIS
+                    // machine's world (wholesale 7 + import 8) - on a client these come from the
+                    // host's feed, so host and client must print the same list. Read-only.
+                    var rgi = SaveGameManager.Current;
+                    if (rgi == null) return "ERR no world loaded";
+                    var rw = rgi.wholesaleRivalIds; var rim = rgi.importRivalIds;
+                    int rn = (rw?.Length ?? 0) + (rim?.Length ?? 0);
+                    return $"OK rivalids n={rn} w=[{(rw == null ? "" : string.Join(",", rw))}] i=[{(rim == null ? "" : string.Join(",", rim))}]";
+                }
 
                 case "rentdeny":
                     // Round-260 test switch: host-side. 'arm' → every RentRequest denied

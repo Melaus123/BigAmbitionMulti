@@ -4411,15 +4411,22 @@ namespace BigAmbitionsMP
         // (private) code writes RivalDataCache normally — we never need
         // direct access to that private field.
         //
-        // Two Harmony patches collaborate:
-        //   * Patch_RivalsHelper_GenerateRivals — Prefix flips a "we're inside"
-        //     flag, Postfix flips it back AND on HOST broadcasts the rival ids
-        //     to clients as soon as they're generated (so client has them
-        //     before its own GenerateRivals runs).
-        //   * Patch_UuidHelper_GenerateBase64Uuid — Prefix checks the flag +
-        //     dequeues from GameStatePatcher.PendingRivalIdQueue.  Outside
-        //     GenerateRivals (and on host, where the queue is unused), the
-        //     original runs normally — 38 other callers stay untouched.
+        // One Harmony patch class does it all (EFFORT BATCH 28, 2026-09-27):
+        //   * Prefix flips a "we're inside" flag, Postfix flips it back AND on
+        //     HOST broadcasts the rival ids to clients as soon as they're
+        //     generated (so client has them before its own GenerateRivals runs).
+        //   * Transpiler rewrites GenerateRivals' OWN two id mints (the 7
+        //     wholesale + 8 import draws, RivalsHelper.cs:476/:482) to call
+        //     NextRivalId, which dequeues from GameStatePatcher.PendingRivalIdQueue
+        //     when the feed is armed and otherwise calls the original
+        //     UuidHelper.GenerateBase64Uuid.  This REPLACES the old Harmony Prefix
+        //     on UuidHelper.GenerateBase64Uuid itself — the only detour into
+        //     HGExtensions, and the frame the Proton/Steam Deck host start died in
+        //     (bundle 20260921-043653: NullReferenceException at
+        //     GenerateBase64Uuid +0x0 <- SaveGameManager.New, three times).
+        //     The ~28 other callers of GenerateBase64Uuid are no longer detoured
+        //     at all (they only ever saw the original: the old Prefix fed ids
+        //     solely while RivalsGenerateRunning, i.e. inside GenerateRivals).
 
         [HarmonyPatch]
         public static class Patch_RivalsHelper_GenerateRivals
@@ -4478,6 +4485,65 @@ namespace BigAmbitionsMP
                 return true;
             }
 
+            // EFFORT BATCH 28 (A): route GenerateRivals' own id mints through NextRivalId.
+            // Matched by name + declaring type (no compile-time token needed); a count other
+            // than 2 means a game update moved the mints — logged, and whatever matched is
+            // still routed (unmatched mints simply stay native = random ids on a client).
+            static System.Collections.Generic.IEnumerable<CodeInstruction> Transpiler(System.Collections.Generic.IEnumerable<CodeInstruction> instructions)
+            {
+                var list = new System.Collections.Generic.List<CodeInstruction>(instructions);
+                try
+                {
+                    var feed = AccessTools.Method(typeof(Patch_RivalsHelper_GenerateRivals), nameof(NextRivalId));
+                    int swapped = 0;
+                    if (feed != null)
+                    {
+                        foreach (var ins in list)
+                        {
+                            if ((ins.opcode == System.Reflection.Emit.OpCodes.Call || ins.opcode == System.Reflection.Emit.OpCodes.Callvirt)
+                                && ins.operand is System.Reflection.MethodInfo mi
+                                && mi.Name == "GenerateBase64Uuid"
+                                && mi.DeclaringType != null && mi.DeclaringType.FullName == "Extensions.UuidHelper"
+                                && mi.GetParameters().Length == 0)
+                            {
+                                ins.opcode = System.Reflection.Emit.OpCodes.Call;
+                                ins.operand = feed;
+                                swapped++;
+                            }
+                        }
+                    }
+                    if (swapped == 2)
+                        Plugin.Logger.LogInfo("[Wave6] GenerateRivals transpiler: 2 id mint call(s) routed through the rival id feed.");
+                    else
+                        Plugin.Logger.LogWarning($"[Wave6] GenerateRivals transpiler: {swapped} id mint call(s) routed (expected 2) - a game update moved the rival id mints; client rival ids may not match the host's.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Wave6] GenerateRivals transpiler: {ex.Message}"); }
+                return list;
+            }
+
+            private static int _drained = 0;
+
+            /// <summary>Stands in for UuidHelper.GenerateBase64Uuid at GenerateRivals' two mint
+            /// sites (Transpiler above). Same gate as the retired HGExtensions Prefix: a CLIENT in
+            /// world, inside GenerateRivals, with host ids queued -> the next host id; otherwise
+            /// the ORIGINAL method (so the host, and a drained queue, mint natively).</summary>
+            public static string NextRivalId()
+            {
+                try
+                {
+                    if (MPClient.IsClientInWorld && GameStatePatcher.RivalsGenerateRunning)
+                    {
+                        if (GameStatePatcher.PendingRivalIdQueue.Count > 0)
+                            return GameStatePatcher.PendingRivalIdQueue.Dequeue();
+                        if (_drained < 3)
+                            Plugin.Logger.LogWarning("[Wave6] GenerateBase64Uuid called inside GenerateRivals but queue empty — falling back to original.  Host's roster may be smaller than client expects.");
+                        _drained++;
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Wave6] rival id feed: {ex.Message}"); }
+                return global::Extensions.UuidHelper.GenerateBase64Uuid();
+            }
+
             static void Postfix()
             {
                 // Only true if the Prefix let the original run.  Safe to clear.
@@ -4514,38 +4580,6 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Wave6] Host post-GenerateRivals broadcast: {ex.Message}"); }
                 }
-            }
-        }
-
-        [HarmonyPatch]
-        public static class Patch_UuidHelper_GenerateBase64Uuid
-        {
-            static System.Reflection.MethodBase? TargetMethod() =>
-                VehicleManager.FindGameType("Extensions.UuidHelper")?.GetMethod("GenerateBase64Uuid",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
-
-            private static int _drained = 0;
-            static bool Prefix(ref string __result)
-            {
-                try
-                {
-                    // Only intercept when we're inside GenerateRivals on the
-                    // CLIENT and our queue has IDs to feed.  All other callers
-                    // (item IDs, employee IDs, etc.) see the original.
-                    if (!MPClient.IsClientInWorld) return true;
-                    if (!GameStatePatcher.RivalsGenerateRunning) return true;
-                    if (GameStatePatcher.PendingRivalIdQueue.Count == 0)
-                    {
-                        if (_drained < 3)
-                            Plugin.Logger.LogWarning($"[Wave6] GenerateBase64Uuid called inside GenerateRivals but queue empty — falling back to original.  Host's roster may be smaller than client expects.");
-                        _drained++;
-                        return true;
-                    }
-                    __result = GameStatePatcher.PendingRivalIdQueue.Dequeue();
-                    return false;   // skip original
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Wave6] UUID Prefix: {ex.Message}"); }
-                return true;
             }
         }
 
