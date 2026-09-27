@@ -1458,6 +1458,22 @@ namespace BigAmbitionsMP
                     return $"OK schednull {arg} dayNull={snDay} cacheNull={snCache} pageOpen={snOpen}";
                 }
 
+                // ── H-SCHEDSTATION-1 (2026-09-27) schedule-row levers ─────────
+                // `schedrows <addressKey> [day 1-7]` READ-ONLY: the station rows the schedule page builds for this
+                // registration (BuildingRegistration.GetAssignableItems, what ScheduleHelper.FetchWorkstations reads),
+                // the employees the page can colour (the FetchEmployees query: assigned to THIS address on this
+                // machine), and every shift of the day with where its employee is assigned here and whether the page's
+                // colour lookup (ScheduleHelper.GetEmployeeColor = EmployeesById[id]) would throw.  With the page open
+                // on this registration it also lists the drawn rows as station:sliders/cachedShifts.
+                // `schedtab <addressKey> <day>` opens the BizMan Schedule tab on that shop and day (the game's own
+                // BizMan.Open(address, "Schedule") + that day's button).
+                // `shiftat <addressKey> <day> <stationId|auto> <employeeId> <fromHour> <toHour|auto>` adds ONE shift
+                // through ScheduleHelper.AddWorkShift - the call ScheduleEmployeeSelection makes when the player picks an
+                // employee - opening the tab first if needed; a native throw is caught and reported (addErr=).
+                case "schedrows": return SchedRows(arg);
+                case "schedtab":  return SchedTab(arg);
+                case "shiftat":   return ShiftAt(arg);
+
                 // ── round-238 zombie-ledger synthesis ─────────────────────────
                 case "ledgerdrop":
                 {
@@ -4432,6 +4448,324 @@ namespace BigAmbitionsMP
         /// <summary>Employee lookup by id over the RAW roster - the no-arg
         /// EmployeeHelper.GetEmployeeInstances(), which returns gi.EmployeeInstances unfiltered
         /// (MPPatches :1211), so a merger's injected partner records are visible to the driver.</summary>
+        // ── H-SCHEDSTATION-1 lever helpers (DEV, main thread) ──────────────────────────────────────
+        private static readonly System.Reflection.FieldInfo? _ssDaySel =
+            HarmonyLib.AccessTools.Field(typeof(UI.Smartphone.Apps.BizMan.Schedule.BizManSchedule), "daySelectionController");
+        private static readonly System.Reflection.MethodInfo? _ssSelect =
+            HarmonyLib.AccessTools.Method(typeof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleDaySelectionController), "OnDaySelected", new[] { typeof(int) });
+
+        private static string SsAt(Entities.EmployeeInstance? e)
+        {
+            if (e == null) return "MISSING";
+            try { return e.assignedAddress != null ? GameStateReader.AddressKey(e.assignedAddress) : "none"; } catch { return "?"; }
+        }
+
+        private static Entities.EmployeeInstance? SsEmp(string? id)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            Entities.EmployeeInstance? e = null;
+            try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(id!, out e); } catch { }
+            return e;
+        }
+
+        private static string SsErr(Exception ex)
+        {
+            string ty = ex.GetType().Name.Replace("Exception", "");
+            string at = "";
+            try
+            {
+                foreach (var ln in (ex.StackTrace ?? "").Split('\n'))
+                {
+                    int i = ln.IndexOf("ScheduleHelper", StringComparison.Ordinal);
+                    if (i < 0) continue;
+                    string s = ln.Substring(i + 14).TrimStart('.', ':');
+                    int p = s.IndexOf('(');
+                    if (p > 0) s = s.Substring(0, p);
+                    at = s.Trim().Replace(' ', '_');
+                    break;
+                }
+            }
+            catch { }
+            return at.Length > 0 ? ty + "@" + at : ty;
+        }
+
+        /// <summary>Open the BizMan Schedule tab on this registration (and select a day when day > 0).
+        /// Returns "" on success, else the reason.</summary>
+        private static string SsOpenTab(global::BuildingRegistration reg, int day)
+        {
+            if (!SharedShopSchedule.IsScheduleTabOpenFor(reg))
+            {
+                var ui = InstanceBehavior<UI.UIs>.Instance;
+                if (ui == null || ui.fullMenu == null || ui.fullMenu.bizMan == null) return "no BizMan app";
+                ui.fullMenu.bizMan.Open(reg.Address, "Schedule");
+                if (!SharedShopSchedule.IsScheduleTabOpenFor(reg)) return "the Schedule tab did not open on this shop";
+            }
+            if (day <= 0) return "";
+            int pos = -1;
+            if (reg.scheduleDays != null)
+                for (int i = 0; i < reg.scheduleDays.Count; i++)
+                    if (reg.scheduleDays[i] != null && (int)reg.scheduleDays[i].day == day) { pos = i; break; }
+            if (pos < 0) return $"no schedule day {day}";
+            var sched = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.Business?.bizManSchedule;
+            var dsc = sched != null ? _ssDaySel?.GetValue(sched) : null;
+            if (dsc == null || _ssSelect == null) return "day selector not found";
+            _ssSelect.Invoke(dsc, new object[] { pos + 1 });
+            var cur = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.CurrentScheduleDay;
+            if (cur == null || (int)cur.day != day) return $"day {day} not selected (page on {(cur == null ? -1 : (int)cur.day)})";
+            return "";
+        }
+
+        private static string SchedTab(string arg)
+        {
+            try
+            {
+                if (arg.Trim() == "close")
+                {   // the phone's own close (FullMenu.CloseFullMenu) - the page's OnDisable runs as for the player
+                    var cui = InstanceBehavior<UI.UIs>.Instance;
+                    if (cui == null || cui.fullMenu == null) return "ERR no full menu";
+                    cui.fullMenu.CloseFullMenu();
+                    return "OK schedtab close";
+                }
+                var tk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (tk.Length < 3 || !int.TryParse(tk[tk.Length - 1], out int day) || day < 1 || day > 7)
+                    return "ERR usage: schedtab <addressKey> <day 1-7> | schedtab close";
+                string addr = string.Join(" ", tk, 0, tk.Length - 1);
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (reg == null) return $"ERR no registration for '{addr}'";
+                string err = SsOpenTab(reg, day);
+                if (err.Length > 0) return "ERR schedtab: " + err;
+                return $"OK schedtab {addr} day={day} pageOpen={SharedShopSchedule.IsScheduleTabOpenFor(reg)}";
+            }
+            catch (Exception ex) { return $"ERR schedtab: {SsErr(ex)}: {ex.Message}"; }
+        }
+
+        /// <summary>The station rows the open schedule page has drawn: "stationId:sliders/cachedShifts ...".</summary>
+        private static string SsRows(out int cells)
+        {
+            cells = -1;
+            try
+            {
+                var rsb = new StringBuilder(); cells = 0;
+                foreach (var c in UnityEngine.Object.FindObjectsOfType<UI.Smartphone.Apps.BizMan.Schedule.ScheduleCellView>())
+                {
+                    if (c == null || !c.gameObject.activeInHierarchy) continue;
+                    cells++;
+                    string wid = "?"; try { wid = c.WorkstationId; } catch { }
+                    int sl = 0; try { sl = c.WorkShiftParent.GetComponentsInChildren<UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider>(false).Length; } catch { }
+                    int want = -1; try { want = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.GetWorkShiftsByWorkstationId(wid).Count; } catch { }
+                    if (rsb.Length > 0) rsb.Append(' ');
+                    rsb.Append(wid).Append(':').Append(sl).Append('/').Append(want);
+                }
+                return rsb.ToString();
+            }
+            catch { return "?"; }
+        }
+
+        private static string SchedRows(string arg)
+        {
+            try
+            {
+                var tk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (tk.Length < 2) return "ERR usage: schedrows <addressKey> [day 1-7]";
+                int n = tk.Length, day = 0;
+                if (n >= 3 && int.TryParse(tk[n - 1], out int dd)) { day = dd; n--; }
+                string addr = string.Join(" ", tk, 0, n);
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (reg == null) return $"ERR no registration for '{addr}'";
+                string regKey = addr; try { regKey = GameStateReader.AddressKey(reg); } catch { }
+                bool open = SharedShopSchedule.IsScheduleTabOpenFor(reg);
+                int pageDay = -1, pageStations = -1, pageDict = -1;
+                Dictionary<string, Entities.EmployeeInstance>? pd = null;
+                if (open)
+                {
+                    try { var cur = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.CurrentScheduleDay; if (cur != null) pageDay = (int)cur.day; } catch { }
+                    try { pageStations = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.WorkstationsById?.Count ?? -1; } catch { }
+                    try { pd = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.EmployeesById; pageDict = pd?.Count ?? -1; } catch { }
+                }
+                if (day == 0 && pageDay > 0) day = pageDay;
+                if (day == 0 && reg.scheduleDays != null)
+                    foreach (var d in reg.scheduleDays) if (d?.workShifts != null && d.workShifts.Count > 0) { day = (int)d.day; break; }
+                if (day == 0) day = 1;
+
+                // the station rows (what FetchWorkstations reads) - read into a private list, the page's statics untouched
+                var items = new List<BigAmbitions.Items.ItemInstance>();
+                try { reg.GetAssignableItems(items); } catch (Exception ex) { return $"ERR schedrows GetAssignableItems: {SsErr(ex)}"; }
+                // the employees the page can colour: FetchEmployees' own query, into a private list
+                var dict = new HashSet<string>();
+                try
+                {
+                    var q = Helpers.EmployeeHelper.GetEmployeeInstances(new EmployeeInstancesQueryInfo { withAssignedAddress = reg.Address });
+                    if (q != null) foreach (var e in q) if (e?.id != null) dict.Add(e.id);
+                }
+                catch (Exception ex) { return $"ERR schedrows employees: {SsErr(ex)}"; }
+
+                ScheduleDay? sd = null;
+                try { sd = SharedShopSchedule.FindDay(reg, day); } catch { }
+                int shifts = 0, notIn = 0, throwing = 0;
+                var list = new StringBuilder();
+                if (sd?.workShifts != null)
+                    foreach (var w in sd.workShifts)
+                    {
+                        if (w == null) continue;
+                        shifts++;
+                        string? id = w.employeeId;
+                        var e = SsEmp(id);
+                        bool inD = id != null && dict.Contains(id);
+                        bool inPage = pd == null ? inD : (id != null && pd.ContainsKey(id));
+                        string colour = id == null ? "ArgNull" : (inPage ? "ok" : "KNF");
+                        if (!inD) notIn++;
+                        if (colour != "ok") throwing++;
+                        string nm = ""; try { nm = e?.characterData?.name ?? ""; } catch { }
+                        if (list.Length > 0) list.Append(" ; ");
+                        list.Append(w.itemInstanceId).Append('|').Append(id ?? "<null>").Append('|')
+                            .Append(w.startingHour).Append('-').Append(w.endingHour).Append('|').Append(nm)
+                            .Append("|at=").Append(SsAt(e)).Append("|inDict=").Append(inD).Append("|colour=").Append(colour);
+                    }
+
+                // a candidate: an employee named by a shift of THIS shop (any day) who exists here but is not on the
+                // page's list - else any injected staff copy not on the list
+                string cand = "-", candSrc = "-", candAt = "-", candSt = "-";
+                if (reg.scheduleDays != null)
+                    foreach (var d in reg.scheduleDays)
+                    {
+                        if (cand != "-") break;
+                        if (d?.workShifts == null) continue;
+                        foreach (var w in d.workShifts)
+                        {
+                            string id = w?.employeeId ?? "";
+                            if (id.Length == 0 || SharedShopSchedule.IsSynthetic(id) || dict.Contains(id)) continue;
+                            var e = SsEmp(id);
+                            if (e == null) continue;
+                            cand = id; candSrc = "shift"; candAt = SsAt(e); candSt = string.IsNullOrEmpty(w!.itemInstanceId) ? "-" : w.itemInstanceId;
+                            break;
+                        }
+                    }
+                if (cand == "-")
+                    try
+                    {
+                        foreach (var kv in Helpers.EmployeeHelper.EmployeeInstancesDictionary)
+                        {
+                            string id = kv.Key ?? "";
+                            if (id.Length == 0 || SharedShopSchedule.IsSynthetic(id) || dict.Contains(id) || !MPRegisterSync.IsInjectedStaff(id)) continue;
+                            cand = id; candSrc = "injected"; candAt = SsAt(kv.Value); break;
+                        }
+                    }
+                    catch { }
+
+                string st0 = "-";
+                foreach (var it in items)
+                {
+                    if (it == null || string.IsNullOrEmpty(it.id)) continue;
+                    bool cleaning = false;
+                    try { cleaning = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.IsCleaningStation(it); } catch { }
+                    if (!cleaning) { st0 = it.id; break; }
+                }
+                if (candSt == "-") candSt = st0;
+
+                // a free hour for the candidate at candSt on this day (opening hours first)
+                int slot = -1;
+                if (sd != null && candSt != "-")
+                {
+                    var order = new List<int>();
+                    try { if (sd.openingHourSlots != null) foreach (var s in sd.openingHourSlots) for (int h = s.startingHour; h < s.endingHour; h++) order.Add(h); } catch { }
+                    for (int h = 0; h < 24; h++) if (!order.Contains(h)) order.Add(h);
+                    foreach (int h in order)
+                    {
+                        bool busy = false;
+                        if (sd.workShifts != null)
+                            foreach (var w in sd.workShifts)
+                                if (w != null && !SharedShopSchedule.IsSynthetic(w.employeeId) && (w.itemInstanceId == candSt || w.employeeId == cand) && w.startingHour <= h && h < w.endingHour) { busy = true; break; }
+                        if (!busy) { slot = h; break; }
+                    }
+                }
+
+                // the rows actually drawn (page open on this registration only)
+                string rows = "-"; int cells = -1;
+                if (open) rows = SsRows(out cells);
+
+                var ids = new StringBuilder();
+                foreach (var it in items) { if (it == null) continue; if (ids.Length > 0) ids.Append(','); ids.Append(it.id); }
+                return $"OK schedrows {regKey} day={day} pageOpen={open} pageDay={pageDay} stations={items.Count} pageStations={pageStations} " +
+                       $"dict={dict.Count} pageDict={pageDict} shifts={shifts} notInDict={notIn} colourThrows={throwing} cells={cells} " +
+                       $"st0={st0} cand={cand} candSrc={candSrc} candAt=[{candAt}] candSt={candSt} slot={slot} " +
+                       $"stationIds=[{ids}] rows=[{rows}] list=[{list}]";
+            }
+            catch (Exception ex) { return $"ERR schedrows: {SsErr(ex)}: {ex.Message}"; }
+        }
+
+        private static string ShiftAt(string arg)
+        {
+            try
+            {
+                var tk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                int n = tk.Length;
+                // optional trailing 'reload': after the add, run the page's own row reload
+                // (ScheduleHelper.RequestScheduleScrollerReload - the call native AddWorkShift makes right after
+                // its employee update) even when that update threw, and report the rows it drew
+                bool reload = n > 0 && tk[n - 1] == "reload";
+                if (reload) n--;
+                if (n < 7) return "ERR usage: shiftat <addressKey> <day 1-7> <stationId|auto> <employeeId> <fromHour> <toHour|auto> [reload]";
+                string toTok = tk[n - 1], fromTok = tk[n - 2], emp = tk[n - 3], st = tk[n - 4], dayTok = tk[n - 5];
+                string addr = string.Join(" ", tk, 0, n - 5);
+                if (!int.TryParse(dayTok, out int day) || day < 1 || day > 7) return $"ERR day '{dayTok}' is not 1-7";
+                if (!int.TryParse(fromTok, out int from) || from < 0 || from > 23) return $"ERR fromHour '{fromTok}' is not 0-23";
+                int to = -1;
+                if (toTok != "auto" && (!int.TryParse(toTok, out to) || to <= from || to > 24)) return $"ERR toHour '{toTok}' must be after fromHour and <= 24";
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (reg == null) return $"ERR no registration for '{addr}'";
+                var e = FindEmployee(emp);
+                if (e == null) return $"ERR no employee '{emp}' on this machine";
+                string openErr = SsOpenTab(reg, day);
+                if (openErr.Length > 0) return "ERR shiftat: " + openErr;
+                var wbi = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.WorkstationsById;
+                if (st == "auto") { st = ""; if (wbi != null) foreach (var kv in wbi) if (!string.IsNullOrEmpty(kv.Key)) { st = kv.Key; break; } }
+                if (wbi == null || !wbi.ContainsKey(st)) return $"ERR station '{st}' is not a row on this page";
+                bool inPage = false;
+                try { inPage = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.EmployeesById?.ContainsKey(emp) == true; } catch { }
+                var dayObj = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.CurrentScheduleDay;
+                int before = dayObj?.workShifts?.Count ?? -1;
+                string addErr = "none", editErr = "none";
+                try { UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.AddWorkShift(from, st, emp); }
+                catch (Exception ex) { addErr = SsErr(ex); }
+                WorkShift? made = null;
+                if (dayObj?.workShifts != null)
+                    foreach (var w in dayObj.workShifts)
+                        if (w != null && w.employeeId == emp && w.itemInstanceId == st && w.startingHour == from) { made = w; break; }
+                if (made != null && to > 0 && made.endingHour != to && addErr == "none")
+                {
+                    try
+                    {
+                        UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.EditWorkShift(st, emp, from, from, to);
+                        UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.RequestScheduleScrollerReload.Invoke(false);
+                    }
+                    catch (Exception ex) { editErr = SsErr(ex); }
+                }
+                string reloadErr = "-", rowsNow = "-";
+                if (reload)
+                {
+                    reloadErr = "none";
+                    try { UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.RequestScheduleScrollerReload.Invoke(false); }
+                    catch (Exception ex)
+                    {
+                        reloadErr = SsErr(ex);
+                        try
+                        {   // the exact error the page's reload raised (it propagates out of the reload call to here)
+                            var fr = (ex.StackTrace ?? "").Split('\n');
+                            Plugin.Logger.LogWarning($"[TestDrive] shiftat reload threw {ex.GetType().FullName}: {ex.Message} | " +
+                                string.Join(" <- ", fr.Take(8).Select(x => x.Trim())));
+                        }
+                        catch { }
+                    }
+                    rowsNow = SsRows(out int rc) + " cells=" + rc;
+                }
+                int after = dayObj?.workShifts?.Count ?? -1;
+                string regKey = addr; try { regKey = GameStateReader.AddressKey(reg); } catch { }
+                return $"OK shiftat {regKey} day={day} st={st} emp={emp} empAt=[{SsAt(e)}] inPageDict={inPage} " +
+                       $"shift={(made == null ? "none" : made.startingHour + "-" + made.endingHour)} dayShifts={before}->{after} addErr={addErr} editErr={editErr} reloadErr={reloadErr} rows=[{rowsNow}]";
+            }
+            catch (Exception ex) { return $"ERR shiftat: {SsErr(ex)}: {ex.Message}"; }
+        }
+
         private static Entities.EmployeeInstance? FindEmployee(string id)
         {
             if (string.IsNullOrEmpty(id)) return null;

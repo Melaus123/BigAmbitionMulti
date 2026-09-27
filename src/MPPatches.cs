@@ -4243,11 +4243,26 @@ namespace BigAmbitionsMP
         // stale cache.  MPRegisterSync + SharedShopSchedule.NoteShiftsRemoved stop it
         // being cached; this arm is the last line of defence, and it too loses only
         // the tint.
+        // H-SCHEDSTATION-1 (2026-09-27): a THIRD way to reach the same statement.  EmployeesById is the page's
+        // own list - the employees assigned to THIS shop on THIS machine (ScheduleHelper.FetchEmployees,
+        // ScheduleHelper.cs:120-135) - not every employee here.  On a merged / shared shop a shift can name an
+        // employee who exists on this machine but is assigned elsewhere here (a partner's staff copy on another
+        // shop or the bench): GetEmployeeById found them, the unknown-id arm rethrew, and the cell's
+        // SetWorkShiftsData died (rig T-SCHEDSTATION: KeyNotFoundException in SetUp <- SetWorkShiftsData), taking
+        // the station row's sliders with it.  Any id missing from EmployeesById for any reason now draws in a
+        // neutral colour (logged once per id); the unknown-id arm below is unchanged.
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider), "SetUp")]
         public static class Patch_WorkShiftSlider_SetUp_OrphanColourGuard
         {
             private static readonly System.Collections.Generic.HashSet<string> _loggedIds = new();
-            static Exception? Finalizer(Exception __exception, WorkShift __2)
+            /// <summary>The neutral tint for a shift whose employee is not on this page's list (H-SCHEDSTATION-1).</summary>
+            internal static UnityEngine.Color NeutralShiftColour()
+            {
+                try { var gr = InstanceBehavior<GlobalReferences>.Instance; if (gr != null) return gr.colors.lightGrey; } catch { }
+                return UnityEngine.Color.grey;
+            }
+
+            static Exception? Finalizer(Exception __exception, UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider __instance, WorkShift __2)
             {
                 if (__exception is System.ArgumentNullException)
                 {   // H-SCHEDNULL-1: only the NO-ID case is ours; any other null argument is a real fault
@@ -4268,7 +4283,35 @@ namespace BigAmbitionsMP
                     string id = __2?.employeeId ?? "";
                     Entities.EmployeeInstance? emp = null;
                     try { emp = Helpers.EmployeeHelper.GetEmployeeById(id); } catch { }
-                    if (emp != null) return __exception;   // resolvable employee — some other missing key
+                    if (emp != null)
+                    {   // H-SCHEDSTATION-1: the employee exists here - is it on this page's list?
+                        bool onPage = true;
+                        try
+                        {
+                            var byId = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.EmployeesById;
+                            onPage = byId != null && byId.ContainsKey(id);
+                        }
+                        catch { }
+                        if (onPage) return __exception;   // drawable employee — some other missing key
+                        try
+                        {
+                            if (HarmonyLib.AccessTools.Field(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider), "background")
+                                    ?.GetValue(__instance) is UnityEngine.UI.Image bg)
+                                bg.color = NeutralShiftColour();
+                        }
+                        catch { }
+                        try
+                        {
+                            if (_loggedIds.Add("elsewhere|" + id))
+                            {
+                                string at = "no shop";
+                                try { if (emp.assignedAddress != null) at = "assigned to " + GameStateReader.AddressKey(emp.assignedAddress); } catch { at = "?"; }
+                                Plugin.Logger.LogWarning($"[ScheduleDiag] SetUp: shift names employee {id} not assigned to this shop here ({at}) - drawn neutral");
+                            }
+                        }
+                        catch { }
+                        return null;
+                    }
                     if (_loggedIds.Add($"{__2?.itemInstanceId}|{id}"))
                         Plugin.Logger.LogWarning($"[ScheduleDiag] SetUp: shift names unknown employee '{id}' — colour skipped (SHIFT-SETUP-1).");
                     return null;
@@ -4303,7 +4346,36 @@ namespace BigAmbitionsMP
                     string id = __0?.employeeId ?? "";
                     Entities.EmployeeInstance? emp = null;
                     try { emp = Helpers.EmployeeHelper.GetEmployeeById(id); } catch { }
-                    if (emp != null) return __exception;   // some other failure — surface it
+                    if (emp != null)
+                    {   // H-SCHEDSTATION-1: an employee who exists here but is not on this page's list (assigned
+                        // elsewhere on this machine): GetScheduleEmployeeById returned null and the name line NRE'd.
+                        // Show the name this machine holds for them; the warning icon stays hidden.
+                        bool onPage = true;
+                        try
+                        {
+                            var byId = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.EmployeesById;
+                            onPage = byId != null && byId.ContainsKey(id);
+                        }
+                        catch { }
+                        if (onPage) return __exception;   // some other failure — surface it
+                        var ts = typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider);
+                        try { if (HarmonyLib.AccessTools.Field(ts, "employeeNameLabel")?.GetValue(__instance) is TMPro.TMP_Text nl) nl.text = emp.characterData?.name ?? ""; } catch { }
+                        try
+                        {
+                            var tip = HarmonyLib.AccessTools.Field(ts, "employeeTooltip")?.GetValue(__instance);
+                            if (tip != null) HarmonyLib.AccessTools.Field(tip.GetType(), "employeeInstance")?.SetValue(tip, emp);
+                        }
+                        catch { }
+                        try { HarmonyLib.AccessTools.Method(ts, "UpdateSickOverlay")?.Invoke(__instance, new object[] { emp }); } catch { }
+                        try { if (HarmonyLib.AccessTools.Field(ts, "warningObj")?.GetValue(__instance) is UnityEngine.GameObject w) w.SetActive(false); } catch { }
+                        try
+                        {
+                            if (_loggedIds.Add("elsewhere|" + id))
+                                Plugin.Logger.LogWarning($"[ScheduleDiag] slider: shift names employee {id} not assigned to this shop here - name shown from this machine's record (H-SCHEDSTATION-1).");
+                        }
+                        catch { }
+                        return null;
+                    }
                     var t = typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider);
                     if (HarmonyLib.AccessTools.Field(t, "employeeNameLabel")?.GetValue(__instance) is TMPro.TMP_Text label)
                         label.text = "(missing staff)";
