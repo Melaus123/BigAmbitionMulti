@@ -942,7 +942,7 @@ namespace BigAmbitionsMP
         // ── DEV: `stockdelta <shop> [mark]` - the rig's STOCK oracle (fold H2; an identity since the stock-once effort) ──
         // On the machine that keeps the books, per stocked item between two readouts (each readout re-marks), every unit
         // that left the building's stock (every cargo slot: shelves, storage, the register) is accounted for:
-        //   drop == live + fwd + hour + other + lost + heldDelta + outDelta
+        //   drop == live + fwd + hour + other + lost + heldDelta + outDelta + theft
         //   live   paid lines of new till Orders paid by a live checkout HERE (Order.Pay on this machine)
         //   fwd    paid lines of new till Orders booked from a partner's forwarded sale
         //   hour   paid lines of new till Orders the native hourly pass added (BusinessSimulatorHelper.SimulateBusiness)
@@ -950,6 +950,8 @@ namespace BigAmbitionsMP
         //   lost   taken-but-unpaid lines of the new Orders (processed, available, acceptable, not paid)
         //   heldDelta  change in units held by live bodies here (open orders; a booked visit's copy is sold, not held)
         //   outDelta   change in units this machine's shelves gave visits whose bodies now live on the partner's machine
+        //   theft      units the game's own hourly shoplifting took (BusinessHelper.RunHourly -> BusinessSecurityHelper.SimulateTheft;
+        //              the P-STOCKTRACE finding, T-HANDOFF3-20260927-061856) - counted by Patch_SimulateTheft_StockOracle
         // stockOk <=> the identity holds for every stocked item (no unit taken twice, none from nothing). Items never
         // stocked here (a fee) are listed as made; paper bags (a random bag name) are report-only.
         private static string _sdKey = "", _sdAt = "";
@@ -983,6 +985,7 @@ namespace BigAmbitionsMP
                 if (reg.itemInstances != null) foreach (var kv in reg.itemInstances) if (kv.Value != null) s.Add(kv.Value);
                 _sdTraceSet = s;
                 _sdTakes.Clear();
+                _sdTheft.Clear();
             }
             catch { _sdTraceSet = null; }
         }
@@ -1015,6 +1018,32 @@ namespace BigAmbitionsMP
                 if (_sdTraceSet == null || _sdTakes.Count > 60) return;
                 string k = CustomerEntrySync.ShortItem(item) + "@" + (who ?? "?").Replace(' ', '_');
                 _sdTakes.TryGetValue(k, out var v); _sdTakes[k] = v + n;
+            }
+            catch { }
+        }
+
+        // DEV: units the native hourly shoplifting (BusinessSecurityHelper.SimulateTheft) removed from the marked shop between a
+        // mark and the readout, per item: the stock before vs after each SimulateTheft call (its own shelf refill from storage
+        // nets to zero in this count). Cleared at every mark (SdTraceArm). Read-only on the game.
+        private static readonly Dictionary<string, int> _sdTheft = new();
+
+        internal static Dictionary<string, int>? SdTheftBefore(BuildingRegistration? reg)
+        {
+            try
+            {
+                if (_sdTraceSet == null || reg == null || _sdKey.Length == 0 || GameStateReader.AddressKey(reg) != _sdKey) return null;
+                return SdStock(reg);
+            }
+            catch { return null; }
+        }
+
+        internal static void SdTheftAfter(BuildingRegistration? reg, Dictionary<string, int>? before)
+        {
+            try
+            {
+                if (before == null || reg == null || _sdTraceSet == null) return;
+                var after = SdStock(reg);
+                foreach (var kv in before) { int n = kv.Value - SdGet(after, kv.Key); if (n > 0) SdAdd(_sdTheft, kv.Key, n); }
             }
             catch { }
         }
@@ -1129,33 +1158,35 @@ namespace BigAmbitionsMP
                         }
                     }
                     var names = new SortedSet<string>(StringComparer.Ordinal);
-                    foreach (var dd in new[] { stock, _sdStock, live, fwd, hour, oth, lost, held, _sdHeld, outNow, _sdOut })
+                    foreach (var dd in new[] { stock, _sdStock, live, fwd, hour, oth, lost, held, _sdHeld, outNow, _sdOut, _sdTheft })
                         foreach (var k in dd.Keys) names.Add(k);
                     var per = new List<string>();
                     var bad = new List<string>();
                     int lostExitT = 0, lostPendT = 0, lostUnxT = 0;
                     int dropT = 0, soldT = 0, lostT = 0, heldT = 0, outT = 0, liveT = 0, fwdT = 0, hourT = 0, othT = 0, made = 0, bagDrop = 0, bagSold = 0;
+                    int theftT = 0, bagTheft = 0;
                     foreach (var nm in names)
                     {
                         int b0 = SdGet(_sdStock, nm), b1 = SdGet(stock, nm);
                         int L = SdGet(live, nm), F = SdGet(fwd, nm), H = SdGet(hour, nm), O = SdGet(oth, nm), lo = SdGet(lost, nm);
                         int hd = SdGet(held, nm) - SdGet(_sdHeld, nm), od = SdGet(outNow, nm) - SdGet(_sdOut, nm);
+                        int th = SdGet(_sdTheft, nm);
                         int drop = b0 - b1, s = L + F + H + O;
-                        if (drop == 0 && s == 0 && lo == 0 && hd == 0 && od == 0) continue;
+                        if (drop == 0 && s == 0 && lo == 0 && hd == 0 && od == 0 && th == 0) continue;
                         string sn = CustomerEntrySync.ShortItem(nm);
-                        if (IsPaperBag(nm)) { bagDrop += drop; bagSold += s; continue; }
+                        if (IsPaperBag(nm)) { bagDrop += drop; bagSold += s; bagTheft += th; continue; }
                         if (!_sdStock.ContainsKey(nm) && !stock.ContainsKey(nm)) { made += s; per.Add($"{sn}:made{s}"); continue; }
-                        dropT += drop; soldT += s; lostT += lo; heldT += hd; outT += od; liveT += L; fwdT += F; hourT += H; othT += O;
-                        per.Add($"{sn}:{drop}={L}+{F}+{H}+{O}+{lo}+{hd}+{od}");
-                        if (drop != s + lo + hd + od) bad.Add($"{sn}:{drop}!={s}+{lo}+{hd}+{od}");
+                        dropT += drop; soldT += s; lostT += lo; heldT += hd; outT += od; liveT += L; fwdT += F; hourT += H; othT += O; theftT += th;
+                        per.Add($"{sn}:{drop}={L}+{F}+{H}+{O}+{lo}+{hd}+{od}+{th}");
+                        if (drop != s + lo + hd + od + th) bad.Add($"{sn}:{drop}!={s}+{lo}+{hd}+{od}+{th}");
                         int lx = SdGet(lostExit, nm), lp = SdGet(lostPend, nm), lu = SdGet(lostUnx, nm);
                         lostExitT += lx; lostPendT += lp; lostUnxT += lu;
                         if (lu > 0) bad.Add($"{sn}:lost{lu}unexplained");
                     }
                     res = $"{key} since={_sdAt} at={now} newOrders={newOrders} orders=live{nLive}/fwd{nFwd}/hour{nHour}/other{nOth} dropTotal={dropT} soldTotal={soldT} "
-                        + $"tillLive={liveT} fwdSold={fwdT} hourSold={hourT} otherSold={othT} lostTotal={lostT} lostNamed=exitNative{lostExitT}/pending{lostPendT} lostUnexplained={lostUnxT} heldDelta={heldT} outDelta={outT} outNow={outSum} "
-                        + $"madeSold={made} bags={bagDrop}/{bagSold} {StockReadout()} stockOk={(bad.Count == 0 ? "True" : "False")} bad={(bad.Count == 0 ? "-" : string.Join(";", bad))} "
-                        + $"per={(per.Count == 0 ? "-" : string.Join(";", per))} (per=item:drop=live+fwd+hour+other+lost+heldDelta+outDelta) {SdTakesReadout()}";
+                        + $"tillLive={liveT} fwdSold={fwdT} hourSold={hourT} otherSold={othT} lostTotal={lostT} lostNamed=exitNative{lostExitT}/pending{lostPendT} lostUnexplained={lostUnxT} heldDelta={heldT} outDelta={outT} outNow={outSum} theftTotal={theftT} "
+                        + $"madeSold={made} bags={bagDrop}/{bagSold}/stolen{bagTheft} {StockReadout()} stockOk={(bad.Count == 0 ? "True" : "False")} bad={(bad.Count == 0 ? "-" : string.Join(";", bad))} "
+                        + $"per={(per.Count == 0 ? "-" : string.Join(";", per))} (per=item:drop=live+fwd+hour+other+lost+heldDelta+outDelta+theft) {SdTakesReadout()}";
                 }
                 _sdKey = key; _sdStock = stock; _sdHeld = held; _sdOut = outNow; _sdTill = tillNow; _sdAt = now;
                 SdTraceArm(reg);
@@ -1553,6 +1584,26 @@ namespace BigAmbitionsMP
         static void Finalizer(ValueTuple<BuildingRegistration, int> tuple, int __state)
         {
             try { if (__state >= 0) CustomerHandoff.SdNoteHourly(tuple.Item1, __state); } catch { }
+        }
+    }
+#endif
+
+#if BAMP_DEV
+    /// <summary>DEV stock oracle: the units the game's own hourly shoplifting (BusinessHelper.RunHourly ->
+    /// BusinessSecurityHelper.SimulateTheft) takes off the marked shop are the identity's `theft` term
+    /// (CustomerHandoff.StockDelta). The P-STOCKTRACE finding (T-HANDOFF3-20260927-061856). Read-only.</summary>
+    [HarmonyPatch(typeof(BusinessSecurityHelper), nameof(BusinessSecurityHelper.SimulateTheft))]
+    public static class Patch_SimulateTheft_StockOracle
+    {
+        static void Prefix(BuildingRegistration buildingRegistration, out Dictionary<string, int>? __state)
+        {
+            __state = null;
+            try { __state = CustomerHandoff.SdTheftBefore(buildingRegistration); } catch { __state = null; }
+        }
+
+        static void Finalizer(BuildingRegistration buildingRegistration, Dictionary<string, int>? __state)
+        {
+            try { if (__state != null) CustomerHandoff.SdTheftAfter(buildingRegistration, __state); } catch { }
         }
     }
 #endif
