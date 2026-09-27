@@ -1,0 +1,138 @@
+{
+  "id": "T-RIVALSELLERS3",
+  "title": "H-RIVALPARITY-1 part E: a SOLO host is unchanged - with no other player connected (no self-report) the host's day-roll recount of sellers is the game's own: after the roll the cached count equals the live walk by the game's own rule (FillProvidersDictionary :333-353) for the items of Client1's Murray Hill liquor store / gym, and RivalClientSellers adds nothing. READ-ONLY levers; NO save",
+  "preconditions": "Fixture save1 (host melaus). The client instance is launched but never joins. The clock lever moves the host to 23:57 through RunMainGameTick; live time then crosses midnight. NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[RivalSellers\\] seller count: \\+[1-9]",
+    "\\[RivalSellers\\] error"
+  ],
+  "oracles_report": [
+    "\\[RivalSellers\\] "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "the host's world loads; NO client - the SOLO case"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "mark TEST RIVALSELLERS3 BEFORE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "marketdemand beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand ",
+      "capture": {
+        "day0": "day=(\\d+)"
+      }
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "providers beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers "
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "providers whisky ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers "
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "providers energydrink ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers "
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mark TEST RIVALSELLERS3 ROLL",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "clock 23:57",
+      "expect_result": "^OK clock "
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "live time crosses midnight: NewDay -> CompetitionHelper.RunDaily -> FillProvidersDictionary (+ the part E postfix) + UpdateMarketDemands"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "mark TEST RIVALSELLERS3 AFTER",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "marketdemand beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand ",
+      "expect_gt": {
+        "day=(\\d+)": "${day0}"
+      },
+      "note": "the day really rolled"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "providers beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers item=\\S+ nb=\\S+ cached=(\\d+) live=\\1 ",
+      "note": "SOLO: cached == the game's own rule walk (nothing added)"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "providers whisky ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers item=\\S+ nb=\\S+ cached=(\\d+) live=\\1 "
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "providers energydrink ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers item=\\S+ nb=\\S+ cached=(\\d+) live=\\1 "
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "mark TEST RIVALSELLERS3 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

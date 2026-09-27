@@ -420,6 +420,7 @@ class Run:
         self.instances = int(sc.get("instances", 2) or 2)
         self.active = ROLES[: self.instances]           # 2 -> h,c (unchanged); 3 -> h,c,d
         self.mark_off = {r: 0 for r in ROLES}
+        self.prev_mark_off = {r: 0 for r in ROLES}
         self.run_start_off = {r: 0 for r in ROLES}
         self.flicked = {r: False for r in ROLES}
         self.down = set()                            # roles DROPPED right now (D3: all/both skip them)
@@ -458,6 +459,9 @@ class Run:
 
     def mark(self, role, text):
         size = log_size(LOGS[role])
+        # expect_log entries with "since_prev_step": true search from the mark BEFORE this one: evidence a
+        # game-clock event may log while the previous step is still waiting (t-rivals-c step 19).
+        self.prev_mark_off[role] = self.mark_off[role]
         res, err = self.send(role, "mark " + text)
         if err:
             return err
@@ -473,11 +477,11 @@ class Run:
         self.mark_off[role] = size
         return "mark '%s' never appeared in the %s log within %.0fs" % (text, ROLE_NAME[role], DEFAULT_WITHIN_S)
 
-    def wait_log(self, role, pattern, within_s):
+    def wait_log(self, role, pattern, within_s, from_off=None):
         deadline = now() + within_s
         rx = re.compile(pattern)
         while True:
-            text = read_text_from(LOGS[role], self.mark_off[role])
+            text = read_text_from(LOGS[role], self.mark_off[role] if from_off is None else from_off)
             for line in text.splitlines():
                 if rx.search(line):
                     return line.strip()[:200], None
@@ -728,7 +732,8 @@ class Run:
                 pat = subst(el["regex"], self.vars, escape=True)
             except Unresolved as u:
                 return False, "expect_log has unresolved ${%s}" % u
-            line, lerr = self.wait_log(lrole, pat, float(el.get("within_s", DEFAULT_WITHIN_S)))
+            line, lerr = self.wait_log(lrole, pat, float(el.get("within_s", DEFAULT_WITHIN_S)),
+                                          self.prev_mark_off[lrole] if el.get("since_prev_step") else None)
             if lerr:
                 return False, lerr
             evidence = (evidence + " | " if evidence else "") + "%s: %s" % (ROLE_NAME[lrole], line)
@@ -817,7 +822,8 @@ class Run:
                     except Unresolved as u:
                         verdict, evidence = "FAIL", "expect_log has unresolved ${%s}" % u
                         break
-                    line, lerr = self.wait_log(lrole, pat, float(el.get("within_s", DEFAULT_WITHIN_S)))
+                    line, lerr = self.wait_log(lrole, pat, float(el.get("within_s", DEFAULT_WITHIN_S)),
+                                          self.prev_mark_off[lrole] if el.get("since_prev_step") else None)
                     if lerr:
                         verdict, evidence = "FAIL", lerr
                         break

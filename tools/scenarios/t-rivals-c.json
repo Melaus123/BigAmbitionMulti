@@ -90,11 +90,13 @@
       "expect_log": [
         {
           "role": "h",
+          "since_prev_step": true,
           "regex": "\\[RivalAttn\\] activation 'rivals_thierry_laurent_moreau_activation' for p:\\S+ on ${rival}: rivalmono to 1 player\\(s\\) \\[${clientPid}\\] \\(clip=activation, trailing=1\\)",
           "within_s": 45
         },
         {
           "role": "h",
+          "since_prev_step": true,
           "regex": "\\[RivalAttn\\] ACTIVATED rival ${rival} for p:\\S+ \\(special text to 1 player",
           "within_s": 45
         },

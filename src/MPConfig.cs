@@ -222,6 +222,22 @@ namespace BigAmbitionsMP
             catch { return true; }
         }
 
+        /// <summary>H-RIVALPARITY-1 part E: settings-file key "RivalClientSellers" (no UI), read live at each seller recount on
+        /// the HOST (ProductMarketHelper.FillProvidersDictionary: at load and daily). Default (absent) true = another player's
+        /// shop whose host copy has an empty product list counts as a seller of the items on its own self-reported list
+        /// (RivalClientSellers.cs); false/0/no/off = the game's own count alone (the behaviour before part E).</summary>
+        public static bool RivalClientSellersLive()
+        {
+            try
+            {
+                string v = GetLiveString("RivalClientSellers").Trim();
+                if (v.Length == 0) return true;
+                return !(v.Equals("false", StringComparison.OrdinalIgnoreCase) || v == "0"
+                         || v.Equals("no", StringComparison.OrdinalIgnoreCase) || v.Equals("off", StringComparison.OrdinalIgnoreCase));
+            }
+            catch { return true; }
+        }
+
         private static string GetLiveString(string key)
         {
             try

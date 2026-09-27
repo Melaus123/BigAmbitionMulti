@@ -77,7 +77,10 @@ namespace BigAmbitionsMP
         /// owner's machine - the only place the order history lives. RivalQualifying is the game's own
         /// RivalTimeline.GetPlayerValues test (decompile RivalTimeline.cs:290-293) in the same order; its RentedByPlayer
         /// half is the caller's (every row is a rented shop) and its neighbourhood half is the host's (it compares
-        /// Neighborhood). Sold7d / Selling: the last 7 days' sold amounts per item and the items on the price list.</summary>
+        /// Neighborhood). Sold7d: the sold amounts per item over the game's inclusive day-7..day window (8 days - the same
+        /// window the host's own sales use in TopSellingFor; fold B6). Selling (part E): the shop's own product list
+        /// (cachedAvailableProducts) - the list the game's seller count reads (ProductMarketHelper.cs:334-353), so the host
+        /// can count this shop as a seller once its own copy of the list is empty (RivalClientSellers).</summary>
         private static void FillRivalFields(BuildingRegistration reg, RivalBusinessInfo row)
         {
             try { row.Neighborhood = reg.Neighborhood ?? ""; } catch { }
@@ -102,7 +105,7 @@ namespace BigAmbitionsMP
                 if (reg.orderHistory != null)
                     foreach (var o in reg.orderHistory)
                     {
-                        if (o == null || o.dayNumber <= day - 7 || o.itemSales == null) continue;
+                        if (o == null || o.dayNumber < day - 7 || o.dayNumber > day || o.itemSales == null) continue;   // fold B6: inclusive day-7..day
                         foreach (var s in o.itemSales)
                         {
                             if (s == null || s.amountSold <= 0 || string.IsNullOrEmpty(s.itemName)) continue;
@@ -116,9 +119,9 @@ namespace BigAmbitionsMP
             try
             {
                 var selling = new List<string>();
-                if (reg.retailPrices != null)
-                    foreach (var rp in reg.retailPrices)
-                        if (rp != null && !string.IsNullOrEmpty(rp.itemName) && !selling.Contains(rp.itemName)) selling.Add(rp.itemName);
+                if (reg.cachedAvailableProducts != null)
+                    foreach (var it in reg.cachedAvailableProducts)
+                        if (!string.IsNullOrEmpty(it)) selling.Add(it);   // as the game's count walks it (:345), entry by entry
                 row.Selling = selling;
             }
             catch { }

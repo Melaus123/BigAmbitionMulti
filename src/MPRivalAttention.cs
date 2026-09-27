@@ -388,7 +388,7 @@ namespace BigAmbitionsMP
                             {
                                 if (e == null) continue;
                                 if (other && _store.ContainsKey(e.Key + "|" + e.RivalId)) continue;
-                                list.Add(new MpRivalAttnEntry { Key = e.Key, RivalId = e.RivalId, IsActive = e.IsActive, IsHostKey = !other, EverCounted = other, CopycatDone = e.CopycatDone,
+                                list.Add(new MpRivalAttnEntry { Key = e.Key, RivalId = e.RivalId, IsActive = e.IsActive, IsHostKey = !other, EverCounted = other && EntranceIn(e.RivalId, e.Sent), CopycatDone = e.CopycatDone,
                                                                 Completed = new List<string>(e.Completed ?? new List<string>()), Sent = new List<string>(e.Sent ?? new List<string>()) });
                             }
                     }
@@ -467,7 +467,7 @@ namespace BigAmbitionsMP
                 // A different person hosted when this manifest was written.
                 lock (_lock)
                     foreach (var e in hostRows)
-                        _store[e.Key + "|" + e.RivalId] = new State { IsActive = e.IsActive, EverCounted = true, CopycatDone = e.CopycatDone,
+                        _store[e.Key + "|" + e.RivalId] = new State { IsActive = e.IsActive, EverCounted = EntranceIn(e.RivalId, e.Sent), CopycatDone = e.CopycatDone,   // fold B1
                                                                       Completed = new List<string>(e.Completed ?? new List<string>()),
                                                                       Sent = new List<string>(e.Sent ?? new List<string>()) };
                 int moved = 0;
@@ -966,7 +966,8 @@ namespace BigAmbitionsMP
             {
                 var nst = RivalsHelper.GetSpecialRivalState(rid);
                 if (nst == null) return null;
-                return new State { IsActive = nst.isActive && !nst.isDefeated, EverCounted = true,
+                bool hcc; lock (_lock) hcc = _hostCopycat.Contains(rid);   // fold B4: the host key's copycat flag travels with its state
+                return new State { IsActive = nst.isActive && !nst.isDefeated, EverCounted = EntranceIn(rid, nst.sentMessageKeys), CopycatDone = hcc,   // fold B1
                                    Completed = new List<string>(nst.completedTimelineEntryIds ?? new List<string>()),
                                    Sent = new List<string>(nst.sentMessageKeys ?? new List<string>()) };
             }
@@ -1018,7 +1019,7 @@ namespace BigAmbitionsMP
                         var st = Get(hostBefore, rid, true);
                         lock (_lock)
                         {
-                            st.IsActive |= s.IsActive; st.EverCounted = true;
+                            st.IsActive |= s.IsActive; st.EverCounted |= s.EverCounted; st.CopycatDone |= s.CopycatDone;   // folds B1 / B4
                             foreach (var c in s.Completed) if (!st.Completed.Contains(c)) st.Completed.Add(c);
                             foreach (var x in s.Sent) if (!st.Sent.Contains(x)) st.Sent.Add(x);
                             if (defCp) st.IsActive = false;
@@ -1056,6 +1057,7 @@ namespace BigAmbitionsMP
                             foreach (var p in parts)
                             {
                                 act |= p.IsActive;
+                                if (p.CopycatDone) lock (_lock) _hostCopycat.Add(rid);   // fold B4: a merge carries the copycat flag into the host key
                                 foreach (var c in p.Completed) if (!nst.completedTimelineEntryIds.Contains(c)) nst.completedTimelineEntryIds.Add(c);
                                 foreach (var s in p.Sent) if (!nst.sentMessageKeys.Contains(s)) nst.sentMessageKeys.Add(s);   // in place: the game caches the list
                             }
@@ -1107,6 +1109,8 @@ namespace BigAmbitionsMP
                             foreach (var a in _attacks) if (a.Key == oldK) a.Key = heir;
                             foreach (var q in _warQ.Values) foreach (var x in q) if (x.Key == oldK) x.Key = heir;
                         }
+                        else
+                            foreach (var q in _warQ.Values) q.RemoveAll(x => x.Key == oldK);   // fold B2: nobody holds the key any more
                         if (heir == hostAfter) heir = "";   // the native timeline plans for the host key itself
                         foreach (var p in _planned)
                             if (p.Key == oldK) p.Key = heir;
@@ -1122,6 +1126,12 @@ namespace BigAmbitionsMP
                             }
                         foreach (var sk in new List<string>(_store.Keys))
                             if (sk.StartsWith(oldK + "|", System.StringComparison.Ordinal)) _store.Remove(sk);
+                    }
+                lock (_lock)
+                    foreach (var q in _warQ.Values)
+                    {
+                        var seenQ = new HashSet<string>(System.StringComparer.Ordinal);
+                        q.RemoveAll(x => !seenQ.Add(x.Key));   // fold B2: one place per key after the renames (the earliest kept)
                     }
                 MPServer.PublishRivalStateIfChanged("rivalattn-" + why);
             }
@@ -1337,6 +1347,28 @@ namespace BigAmbitionsMP
             return keys >= 2;
         }
 
+        /// <summary>Fold B1: a row derived from the HOST key's native state has counted for the rival exactly when GateOn's
+        /// host test holds - the rival's entrance message is among its sent keys.</summary>
+        private static bool EntranceIn(string rid, List<string> sent)
+        {
+            try
+            {
+                if (sent == null || string.IsNullOrEmpty(rid)) return false;
+                var sr = RivalsHelper.GetSpecialRival(rid);
+                return sr != null && !string.IsNullOrEmpty(sr.entranceMessageKey) && sent.Contains(sr.entranceMessageKey);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Fold B2: does anybody still hold this key (a member whose key it is now)?</summary>
+        private static bool KeyHeld(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return false;
+            if (key == HostKey) return true;
+            try { foreach (var s in StablesOfKey(key)) if (KeyOfStable(s) == key) return true; } catch { }
+            return false;
+        }
+
         private static bool CopycatDoneFor(string key, string rid)
         {
             if (key == HostKey) { lock (_lock) return _hostCopycat.Contains(rid); }
@@ -1497,18 +1529,45 @@ namespace BigAmbitionsMP
                 }
             int now = NowTotalMin();
             int pos = 0, len = 0;
+            // Fold B2: the queued keys' standing, read outside the lock (store and session reads).
+            var unheld = new HashSet<string>(System.StringComparer.Ordinal);
+            var offline = new HashSet<string>(System.StringComparer.Ordinal);
+            var qKeys = new List<string>();
+            lock (_lock) if (_warQ.TryGetValue(rid, out var q0)) foreach (var x in q0) if (x.Key != me && !qKeys.Contains(x.Key)) qKeys.Add(x.Key);
+            foreach (var k in qKeys)
+            {
+                if (!KeyHeld(k)) unheld.Add(k);
+                else if (OnlinePidsOfKey(k).Count == 0) offline.Add(k);
+            }
+            var skipped = new List<string>();
             lock (_lock)
             {
                 if (blocker.Length == 0)
                     foreach (var a in _attacks)
                         if (a.RivalId == rid && a.Mechanic == "PriceReduction" && a.Key != me) { blocker = a.Key; why = "its war awaits the restore check"; break; }
                 if (!_warQ.TryGetValue(rid, out var q)) { q = new List<MpRivalQueued>(); _warQ[rid] = q; }
-                while (q.Count > 0 && q[0].Key != me && now - q[0].LastTryMin > StaleQueueMin)
+                if (unheld.Count > 0)
                 {
-                    Plugin.Logger.LogInfo($"[RivalWar] queued war for {q[0].Key} on {rid} dropped from the head: not retried for {(now - q[0].LastTryMin) / 60} game hour(s).");
-                    q.RemoveAt(0);
+                    int gone = q.RemoveAll(x => unheld.Contains(x.Key));
+                    if (gone > 0) Plugin.Logger.LogInfo($"[RivalWar] {gone} queued war(s) on {rid} dropped: nobody holds [{string.Join(",", unheld)}] any more.");
                 }
-                if (blocker.Length == 0 && q.Count > 0 && q[0].Key != me) { blocker = q[0].Key; why = "it is first in the queue"; }
+                // Fold B2: rows ahead of this key - a key with no online member is skipped (it keeps its place, the next row
+                // may start); an online row not retried for 48 game hours leaves; the first other online row blocks.
+                int qi = 0;
+                while (qi < q.Count)
+                {
+                    var x = q[qi];
+                    if (x.Key == me) break;
+                    if (offline.Contains(x.Key)) { if (!skipped.Contains(x.Key)) skipped.Add(x.Key); qi++; continue; }
+                    if (now - x.LastTryMin > StaleQueueMin)
+                    {
+                        Plugin.Logger.LogInfo($"[RivalWar] queued war for {x.Key} on {rid} dropped from the queue: not retried for {(now - x.LastTryMin) / 60} game hour(s).");
+                        q.RemoveAt(qi);
+                        continue;
+                    }
+                    if (blocker.Length == 0) { blocker = x.Key; why = "it is ahead in the queue"; }
+                    break;
+                }
                 if (blocker.Length > 0)
                 {
                     int idx = q.FindIndex(x => x.Key == me);
@@ -1524,6 +1583,8 @@ namespace BigAmbitionsMP
                     if (mi >= 0) q.RemoveAt(mi);
                 }
             }
+            if (skipped.Count > 0)
+                Plugin.Logger.LogInfo($"[RivalWar] queued war(s) for [{string.Join(",", skipped)}] on {rid} skipped for {me}: no online member (they keep their place).");
             if (blocker.Length > 0)
             {
                 Plugin.Logger.LogInfo($"[RivalWar] war for {me} on {rid} WAITS (queue position {pos} of {len}): a war for {blocker} - {why}. Nothing cut.");
@@ -1581,7 +1642,8 @@ namespace BigAmbitionsMP
         /// <summary>Postfix body on RivalDefenseHelper.RunHourly (host): every recorded attack whose native state the
         /// game just ended. A war: the game re-priced the rival's shops (HandleDefenseStateEnd); each recorded item is
         /// compared with its pre-war price - still at or below snapshot x (1 - cut) + 2% = written back to the snapshot
-        /// (a warning; only with the manager's gate on, so a solo host stays native). The record leaves, so a queued war
+        /// (a warning; with the manager's gate on, or for a war aimed at a key other than the host's - fold B3; a solo host's
+        /// own war stays native). The record leaves, so a queued war
         /// for another key may start from the next try on.</summary>
         internal static void AfterDefenseClock()
         {
@@ -1604,6 +1666,7 @@ namespace BigAmbitionsMP
                         continue;
                     }
                     bool gate = GateOn(a.RivalId, out int nk);
+                    bool writeBack = gate || a.Key != HostKey;   // fold B3
                     int n = 0, wrote = 0, stillCut = 0;
                     float maxDev = 0f;
                     double sumPre = 0, sumNow = 0;
@@ -1617,7 +1680,7 @@ namespace BigAmbitionsMP
                         float cur = rp.price;
                         if (cur <= it.Pre * ((1f - a.Cut) + 0.02f))
                         {
-                            if (gate) { rp.price = it.Pre; cur = it.Pre; wrote++; }
+                            if (writeBack) { rp.price = it.Pre; cur = it.Pre; wrote++; }
                             else stillCut++;
                         }
                         float dev = System.Math.Abs(cur - it.Pre) / it.Pre * 100f;
@@ -1631,7 +1694,7 @@ namespace BigAmbitionsMP
                     }
                     int queued; string head;
                     lock (_lock) { queued = _warQ.TryGetValue(a.RivalId, out var q) ? q.Count : 0; head = queued > 0 ? _warQ[a.RivalId][0].Key : "-"; }
-                    Plugin.Logger.LogInfo($"[RivalWar] restored {n}, max deviation {maxDev:F1}% (war for {a.Key} on {a.RivalId} ended {FmtMin(a.EndMin)}; avg {(n > 0 ? sumPre / n : 0):F2} before the war -> {(n > 0 ? sumNow / n : 0):F2} now; {wrote} written back{(stillCut > 0 ? $", {stillCut} still cut (gate off: native re-price only)" : "")}; gate {(gate ? "on" : "off")} ({nk} key(s)); queue {queued}, head {head}).");
+                    Plugin.Logger.LogInfo($"[RivalWar] restored {n}, max deviation {maxDev:F1}% (war for {a.Key} on {a.RivalId} ended {FmtMin(a.EndMin)}; avg {(n > 0 ? sumPre / n : 0):F2} before the war -> {(n > 0 ? sumNow / n : 0):F2} now; {wrote} written back{(stillCut > 0 ? $", {stillCut} still cut (gate off, the host's own war: native re-price only)" : "")}; gate {(gate ? "on" : "off")} ({nk} key(s)); queue {queued}, head {head}).");
                 }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalWar] error in the restore check for {a.Key} on {a.RivalId}: {ex.GetType().Name}: {ex.Message}"); }
             }
@@ -1665,7 +1728,10 @@ namespace BigAmbitionsMP
                         }
                 if (added >= LowDemandTotalCap)
                 {
-                    Plugin.Logger.LogInfo($"[RivalWave] wave for {me} on {rid} refused: {added} of {LowDemandTotalCap} copycat shops already added in {nb} (total cap).");
+                    // Fold B5: at the cap no wave can ever open here - the due entry completes silently (as the once-per-key
+                    // refusal below does) instead of re-planning daily. The spacing refusal above keeps re-planning.
+                    string doneCap = me == HostKey && !_forcing ? CompleteHostWaveEntrySilently(rival, nst, aggr) : "";
+                    Plugin.Logger.LogInfo($"[RivalWave] wave for {me} on {rid} refused: {added} of {LowDemandTotalCap} copycat shops already added in {nb} (total cap){(doneCap.Length > 0 ? $" - the due native entry {doneCap} completed silently" : "")}.");
                     return false;
                 }
                 if (CopycatDoneFor(me, rid))
@@ -1748,6 +1814,16 @@ namespace BigAmbitionsMP
                 lock (_lock) if (!st.Completed.Contains(eid)) st.Completed.Add(eid);
                 Plugin.Logger.LogInfo($"[RivalAttn] entry {eid} (LowDemand) for {key} on {rid} completed silently: the key already had its copycat wave (once per key, {nk} keys counted).");
                 return true;
+            }
+            if (mech == DefensiveMechanic.LowDemand && !forced && GateOn(rid, out int nkc))
+            {
+                int addedC; lock (_lock) _copyAdded.TryGetValue(rid, out addedC);
+                if (addedC >= LowDemandTotalCap)
+                {
+                    lock (_lock) if (!st.Completed.Contains(eid)) st.Completed.Add(eid);
+                    Plugin.Logger.LogInfo($"[RivalAttn] entry {eid} (LowDemand) for {key} on {rid} completed silently: {addedC} of {LowDemandTotalCap} copycat shops already added in {nb} (total cap, fold B5; {nkc} keys counted).");
+                    return true;
+                }
             }
             var q = RivalDefenseHelper.SpecialMessagesTmpQueue;
             int qBefore = q.Count;
@@ -1981,6 +2057,33 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[RivalAttn] DEV: surrender of rival {rs.rivalData.id} scheduled on the per-player path (income gate skipped).");
                     return $"OK rivalattn surrender rival={rs.rivalData.id} scheduled";
                 }
+                if (tk.Length >= 1 && tk[0] == "hostchange")
+                {
+                    // DEV (fold B1 test): `rivalattn hostchange <p:key|g:key>` - SettleLoad's HOST-CHANGE branch now, as a hostload
+                    // of this world saved while <key> hosted would run it: this host's native rows (as of now) become <key>'s
+                    // stored rows, and this host's own stored rows are copied into the native state. Nothing is saved.
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    if (tk.Length != 2 || tk[1].Length < 3 || !(tk[1].StartsWith("p:", System.StringComparison.Ordinal) || tk[1].StartsWith("g:", System.StringComparison.Ordinal)))
+                        return "ERR usage: rivalattn hostchange <p:key|g:key>";
+                    EnsureBound();
+                    string hkNow = HostKey;
+                    if (tk[1] == hkNow) return "ERR that is this host's own key";
+                    RefreshHostRowsCache();
+                    int nrows;
+                    lock (_lock)
+                    {
+                        var rowsH = new List<MpRivalAttnEntry>();
+                        foreach (var h in _hostRowsCache)
+                            rowsH.Add(new MpRivalAttnEntry { Key = tk[1], RivalId = h.RivalId, IsActive = h.IsActive, IsHostKey = true, CopycatDone = _hostCopycat.Contains(h.RivalId),
+                                                              Completed = new List<string>(h.Completed), Sent = new List<string>(h.Sent) });
+                        _manifestHostRows = rowsH; _manifestHostKey = tk[1]; nrows = rowsH.Count;
+                    }
+                    SettleLoad();
+                    RefreshHostRowsCache();
+                    Plugin.Logger.LogInfo($"[RivalAttn] DEV: host change replayed: {nrows} native row(s) now belong to {tk[1]} (a previous host), this host {hkNow} took its stored rows.");
+                    MPServer.PublishRivalStateIfChanged("rivalattn-dev");
+                    return $"OK rivalattn hostchange from={tk[1]} to={hkNow} rows={nrows}";
+                }
                 if (tk.Length >= 1 && tk[0] == "sweep")
                 {
                     if (!MPServer.IsRunning) return "ERR host only";
@@ -2198,12 +2301,23 @@ namespace BigAmbitionsMP
                 bool ok;
                 if (key == HostKey)
                 {
+                    var fq = RivalDefenseHelper.SpecialMessagesTmpQueue;
+                    int fqBefore = fq.Count;
                     _forcing = true;
                     try
                     {
                         ok = mech == DefensiveMechanic.PriceReduction ? RivalDefenseHelper.ActivatePriceReduction(nb, pr) : RivalDefenseHelper.ActivateLowDemand(nb, pr);
                     }
                     finally { _forcing = false; }
+                    if (ok && fq.Count > fqBefore)
+                    {
+                        // Fold B7: no timeline entry completes a forced attack, so nothing would dequeue its special message
+                        // (native CompleteEntry does) - it is taken off the shared queue as the mod path (FireFor) does.
+                        var arr = fq.ToArray();
+                        fq.Clear();
+                        for (int i = 0; i < arr.Length - 1; i++) fq.Enqueue(arr[i]);
+                        Plugin.Logger.LogInfo($"[RivalAttn] DEV: rivalforce for the host key: special message '{arr[arr.Length - 1]?.messageKey ?? "-"}' taken off the shared queue (no entry completes a forced attack).");
+                    }
                 }
                 else
                 {

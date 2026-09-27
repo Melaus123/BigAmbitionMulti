@@ -1,6 +1,6 @@
 {
   "id": "T-RIVALS-B",
-  "title": "H-RIVALPARITY-1 part B (2026-09-27): attacks aimed at one player - a price war for Client1 cuts Client1's best sellers on both machines; a war for another key WAITS in the queue; after the war ends the game re-prices and the part-B check logs '[RivalWar] restored n, max deviation x%' (host and client prices equal); the queued war may start after; the war and its attribution survive a save/reload; copycat waves: once per key, one at a time, total cap 10; solo host = native (0 mod-path firings, gate off)",
+  "title": "H-RIVALPARITY-1 part B (2026-09-27): attacks aimed at one player - a price war for Client1 cuts Client1's best sellers on both machines; a war for another key WAITS in the queue; after the war ends the game re-prices and the part-B check logs '[RivalWar] restored n, max deviation x%' (host and client prices equal); the queued war may start after; the war and its attribution survive a save/reload; copycat waves: once per key, one at a time, total cap 10; solo host = native (0 mod-path firings, gate off) + fold B1 (2026-09-27): after a host change (DEV rivalattn hostchange = the settle a hostload of a save hosted by another runs) the gate stays OFF for a rival only one key counted",
   "preconditions": "Fixture save1 (host melaus, client Client1 with qualifying shops in Murray Hill; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA==; loads day 133 12:00). Dev build with part B levers (rivalforce, rivalq, rivalq end, rivalprices). Writes ONE scratch slot (the -auto rotation sibling); the fixture's own save1 is never overwritten.",
   "instances": 2,
   "vars": {
@@ -700,6 +700,57 @@
     },
     {
       "seq": 83,
+      "role": "both",
+      "cmd": "mark TEST RIVALSB HOSTCHANGE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 84,
+      "role": "h",
+      "cmd": "rivalq",
+      "expect_result": "^OK rivalq ",
+      "capture": {
+        "r2": "([A-Za-z0-9+/=]+)\\{[^}]*\\}: gate=0\\([01]\\)"
+      },
+      "note": "FOLD B1 PREMISE: a rival for which at most ONE key has counted (not the Murray Hill rival: host + Client1 counted it)"
+    },
+    {
+      "seq": 85,
+      "role": "h",
+      "cmd": "rivalattn hostchange p:fakea",
+      "expect_result": "^OK rivalattn hostchange from=p:fakea to=${hostKey} rows=[1-9]",
+      "note": "FOLD B1 (DEV): the host-change settle a hostload of a save hosted by p:fakea runs - this host's native rows become p:fakea's; the host's own stored rows (none) become the native state"
+    },
+    {
+      "seq": 86,
+      "role": "h",
+      "cmd": "rivalattn hostchange p:fakeb",
+      "expect_result": "^OK rivalattn hostchange from=p:fakeb to=${hostKey} rows=[1-9]",
+      "note": "FOLD B1 (DEV): a second host change at once - the native rows are now EMPTY (no entrance sent for any rival), so p:fakeb has counted for NO rival"
+    },
+    {
+      "seq": 87,
+      "role": "h",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "p:fakea\\{\\}\\|[^;]*\\|ever=1\\|.*p:fakeb\\{\\}\\|[^;]*\\|ever=0\\|",
+      "note": "FOLD B1: a host-derived row counts only where the rival's entrance was sent to that host (p:fakea yes - the host had counted the Murray Hill rival; p:fakeb no). Before the fold every host-derived row read ever=1"
+    },
+    {
+      "seq": 88,
+      "role": "h",
+      "cmd": "rivalq ${r2}",
+      "expect_result": "^OK rivalq .*gate=0\\(",
+      "note": "FOLD B1 TEST: the gate stays OFF for a rival only one key counted - before the fold p:fakea + p:fakeb both counted every rival (gate=1(2+))"
+    },
+    {
+      "seq": 89,
+      "role": "h",
+      "cmd": "rivalattn ${r2}",
+      "expect_result": "^OK rivalattn host ",
+      "note": "REPORT: the rows of that rival after the host changes"
+    },
+    {
+      "seq": 90,
       "role": "both",
       "cmd": "mark TEST RIVALSB END",
       "expect_result": "OK MARK"
