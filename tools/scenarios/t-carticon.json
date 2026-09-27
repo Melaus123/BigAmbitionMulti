@@ -1,0 +1,393 @@
+{
+  "id": "T-CARTICON",
+  "title": "H-CARTICON-1 (verbal 0.3.1: a cart left inside a store keeps its icon forever). The OWNER (host melaus) leaves his EMPTY flatbed inside a shop and walks out: the game clears it natively (street data wiped, object destroyed, lastSeen set). ASSERT the owner stops broadcasting it (CARTICON line) and the partner outdoors holds NO copy and NO kept pin for it, while the host's car parked outside is still shown. The client's flatbed WITH cargo, left inside 3 Fifth Avenue in the fixture, keeps its tag natively and is still held by the host (hidden outdoors, shown inside - GHOSTPIN behaviour). The host re-enters the shop: report what the game reloads and what the partner then holds. NO save.",
+  "preconditions": "Fixture fx-hq1 (merged pair melaus + Client1, keepMerger). Host-owned, live outdoors at load (census, run T-STANDINTILL-BLIP-20260927-111317): flatbed vars.emptyCart (empty), car vars.car; flatbed m9z3 (cargo) reads 'in use' by the host in this fixture (run T-CARTICON-20260927-123759) so it is not touched. Client-owned, dormant: flatbed vars.cargoCart with cargo, tagged vars.cargoBldg. Dev build with 'cartstrand <vid> [sideMeters]' (moves MY live hand vehicle next to me inside the current building + native release-indoors street data) and 'cartstate <vid>' (OK cartstate vid= own= live= tag='' lastSeen= cargo= cleared= omitted= ghost=on|off|null|none pin=on|off|none).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "shop": "11 ba:street_tenthavenue",
+    "emptyCart": "7LWpFXkWM02sxuWz1L30Og==",
+    "cargoCart": "VZQslPT1hUaQfCSL5SFyA==",
+    "car": "OU4P8aEngUetBRQoP0Itww==",
+    "cargoBldg": "3 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "HarmonyException",
+    "Patching exception",
+    "(?<!swallowed )NullReferenceException",
+    "\\[Pins\\] kept pin \\S+: .* - pin dropped"
+  ],
+  "oracles_report": [
+    "\\[Vehicle\\] CARTICON",
+    "\\[TestDrive\\] cartstrand",
+    "\\[Vehicle\\] Despawned ghost",
+    "\\[Pins\\] kept pin (7LWp|m9z3)",
+    "\\[InteriorMask\\] ghost 'ba:vehicletype_flatbed'",
+    "\\[Vehicle\\] CARTICON '7LWp"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST CARTICON START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "both outdoors; the host's ghosts settle on the client with kept pins"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True",
+      "note": "PREMISE: merged pair"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "cartstate ${emptyCart}",
+      "expect_result": "^OK cartstate .* own=Y live=Y tag='' .*cargo=0 ",
+      "note": "PREMISE: the empty flatbed is the host's, live outdoors"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "cartstate ${emptyCart}",
+      "expect_result": "^OK cartstate .* ghost=on pin=",
+      "note": "PREMISE: the client outdoors holds a shown copy of it"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "cartstate ${car}",
+      "expect_result": "^OK cartstate .* ghost=on ",
+      "note": "PREMISE: the host's outdoor car is shown"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "cartstate ${cargoCart}",
+      "expect_result": "^OK cartstate .* ghost=off pin=(off|none)$",
+      "note": "PREMISE (GHOSTPIN): the client's cargo flatbed left inside 3 Fifth Avenue is held by the host, hidden outdoors"
+    },
+    {
+      "seq": 14,
+      "role": "both",
+      "cmd": "mark TEST CARTICON STRAND",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] enterbuilding '${shop}' . OK",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "cartstrand ${emptyCart} -1.5",
+      "expect_result": "^OK cartstrand .*tag='${shop}' cargo=0"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "cartstate ${emptyCart}",
+      "expect_result": "^OK cartstate .* ghost=off ",
+      "note": "left inside the shop, still loaded: tagged for the shop, hidden outdoors (GHOSTPIN)"
+    },
+    {
+      "seq": 20,
+      "role": "both",
+      "cmd": "mark TEST CARTICON OWNER WALKS OUT",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Vehicle\\] CARTICON '${emptyCart}': an empty hand vehicle the game cleared",
+          "within_s": 40
+        },
+        {
+          "role": "c",
+          "regex": "\\[Vehicle\\] Despawned ghost '${emptyCart}'",
+          "within_s": 50
+        }
+      ]
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "cartstate ${emptyCart}",
+      "expect_result": "^OK cartstate .* own=Y live=N tag='' lastSeen=Y cargo=0 cleared=Y omitted=Y ",
+      "note": "OWNER: the game's own cleared-on-exit state, and not broadcast"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "cartstate ${cargoCart}",
+      "expect_result": "^OK cartstate .* own=Y live=N tag='${cargoBldg}' .*cleared=N omitted=N ",
+      "note": "OWNER (client): a cargo flatbed left inside keeps its tag natively and stays broadcast"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "cartstate ${emptyCart}",
+      "expect_result": "^OK cartstate .* ghost=none pin=none$",
+      "note": "THE FIX: the partner outdoors holds no copy and no kept pin"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "pinstate",
+      "expect_result": "^OK pinstate .* mismatched=0 ",
+      "note": "no kept pin differs from its ghost (the empty cart's id must be absent - checked by the report)"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "cartstate ${car}",
+      "expect_result": "^OK cartstate .* ghost=on ",
+      "note": "the car parked outside is still shown"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "cartstate ${cargoCart}",
+      "expect_result": "^OK cartstate .* ghost=off pin=(off|none)$",
+      "note": "GHOSTPIN: the cargo cart is still held, hidden outdoors with its pin"
+    },
+    {
+      "seq": 29,
+      "role": "both",
+      "cmd": "mark TEST CARTICON PARTNER ENTERS",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${shop}' . OK",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "sleep_s": 8
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "cartstate ${car}",
+      "expect_result": "^OK cartstate .* ghost=(on|off) ",
+      "note": "context only: the '' tag rule hides only CARTS from an indoor viewer, so the host's street car stays shown (run T-CARTICON-20260927-124206)"
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "cartstate ${emptyCart}",
+      "expect_result": "^OK cartstate .* ghost=none pin=none$",
+      "note": "the cleared cart does not come back inside either (the owner's game has it unloaded)"
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding"
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "sleep_s": 8
+    },
+    {
+      "seq": 36,
+      "role": "both",
+      "cmd": "mark TEST CARTICON OWNER RE-ENTERS",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] enterbuilding '${shop}' . OK",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "sleep_s": 10
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "cartstate ${emptyCart}",
+      "expect_result": "^OK cartstate",
+      "note": "REPORT: does the game load the cleared cart again (native SpawnPlayerVehicles(address) keys on the wiped street data)"
+    },
+    {
+      "seq": 40,
+      "role": "c",
+      "cmd": "cartstate ${emptyCart}",
+      "expect_result": "^OK cartstate",
+      "note": "REPORT: the partner's copy follows the owner's state"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "cartstate ${emptyCart}",
+      "expect_result": "^OK cartstate .* ghost=none pin=none$",
+      "note": "still no copy after the second walk-out"
+    },
+    {
+      "seq": 44,
+      "role": "c",
+      "cmd": "cartstate ${car}",
+      "expect_result": "^OK cartstate .* ghost=on "
+    },
+    {
+      "seq": 45,
+      "role": "both",
+      "cmd": "mark TEST CARTICON END",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "cmd": "enterbuilding ${cargoBldg}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] enterbuilding '${cargoBldg}' . OK",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 48,
+      "role": "h",
+      "cmd": "cartstate ${cargoCart}",
+      "expect_result": "^OK cartstate .* ghost=on ",
+      "note": "GHOSTPIN: inside its building the cargo cart copy is shown"
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding"
+    },
+    {
+      "seq": 50,
+      "role": "h",
+      "sleep_s": 10
+    }
+  ]
+}

@@ -706,12 +706,18 @@ namespace BigAmbitionsMP
                     {
                         var live = new HashSet<string>();
                         foreach (var e in fleet.Vehicles) live.Add(e.VehicleId);
+                        var clearedNow = new HashSet<string>();   // H-CARTICON-1
                         foreach (var inst in insts)
                         {
                             try
                             {
                                 if (inst == null || string.IsNullOrEmpty(inst.id) || live.Contains(inst.id)) continue;
                                 if (inst.id.StartsWith("BAMP_") && !inst.id.StartsWith("BAMP_TESTRIG")) continue;   // leaked ghosts: never re-broadcast
+                                // H-CARTICON-1 (2026-09-27): an EMPTY hand vehicle the game itself cleared when its
+                                // owner walked out of the building it was left in (VehicleController.OnExitBuilding)
+                                // is gone from the owner's world and map - mirror that for partners: not broadcast,
+                                // so their copy and its kept pin despawn through the ordinary 'no longer listed' path.
+                                if (IsClearedHandVehicle(inst)) { clearedNow.Add(inst.id); continue; }
                                 var dNested = new System.Collections.Generic.List<VehicleCargoNested>();
                                 string dCargo = BuildCargoManifest(inst.cargoInstances, dNested);   // CARTBAG-1: one builder
                                 int dCarried = 0; try { dCarried = inst.cargoIds?.Count ?? 0; } catch { }
@@ -741,6 +747,7 @@ namespace BigAmbitionsMP
                             }
                             catch { }   // one malformed instance must not gut the pass
                         }
+                        NoteClearedHandVehicles(clearedNow, live, insts);   // H-CARTICON-1: log on change only
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] dormant fleet pass: {ex.Message}"); }
@@ -2711,6 +2718,121 @@ namespace BigAmbitionsMP
 
         /// <summary>Write a "N ba:street_x" address key (or "" = outdoors) into the instance's
         /// native street data — the same fields every native door transition maintains.</summary>
+        // -- H-CARTICON-1 (user-approved 2026-09-27; verbal 0.3.1: 'if people park their carts inside of stores
+        // instead of returning them, the icon for the cart will stay there forever'). Natively, walking out of a
+        // building clears an EMPTY hand vehicle left inside it: VehicleController.OnExitBuilding (:188-204) wipes
+        // its street data (SetStreetData("", 0)), destroys the object (OnDestroy :241-246 takes the owner's own
+        // map pin with it) and stamps lastSeen; the saved record stays until AutoDestroyVehicle removes it (that
+        // component only runs on a LOADED vehicle). The dormant fleet pass used to keep broadcasting that record
+        // with an empty tag, so partners outdoors saw a cart + kept pin floating at interior coordinates.
+        private static readonly HashSet<string> _clearedOmitted = new();
+        private static int _clearedLogged;
+
+        /// <summary>H-CARTICON-1: is this saved (not loaded) vehicle one the game has cleared as an abandoned
+        /// hand vehicle? Keys only on the game's own 'cleared on exit' state: the ishandvehicle type tag (the test
+        /// OnExitBuilding :197 uses), empty street data (:200), lastSeen stamped (:203; non-zero, the gate
+        /// AutoDestroyVehicle.Update :13 applies) and the body of AutoDestroyVehicle.ShouldDestroyVehicle with no
+        /// time floor (not SaveGameManager.Current.ActiveVehicleId, no cargoInstances[].paid). The body is restated,
+        /// NOT called: the mod's own postfix on it (Patch_AutoDestroy_RemoteBorrowGuard) answers false whenever ANY
+        /// session player stands within 30 m of the record AND re-stamps lastSeen - rig run T-CARTICON-20260927-124800
+        /// showed a partner walking into the shop re-listing the cleared cart that way. A cart a partner is pushing
+        /// (_ownedFollowing) never counts. Call only for records with no live controller (the dormant pass).</summary>
+        internal static bool IsClearedHandVehicle(VehicleInstance inst)
+        {
+            try
+            {
+                if (inst == null || string.IsNullOrEmpty(inst.id)) return false;
+                if (!string.IsNullOrEmpty(inst.streetName)) return false;
+                var vt = inst.VehicleType;
+                if (vt == null || !vt.HasTag(BigAmbitions.Tags.TagRef.Vehicletag.ishandvehicle)) return false;
+                var ls = inst.lastSeen;
+                if (ls == null || ls.GetTotalMinutes() == 0f) return false;
+                if (_ownedFollowing.ContainsKey(inst.id)) return false;
+                if (SaveGameManager.Current?.ActiveVehicleId == inst.id) return false;
+                var cis = inst.cargoInstances;
+                if (cis != null)
+                    foreach (var c in cis)
+                        if (c != null && c.paid) return false;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static void NoteClearedHandVehicles(HashSet<string> now, HashSet<string> live, IEnumerable<VehicleInstance> insts)
+        {
+            try
+            {
+                foreach (var id in now)
+                    if (_clearedOmitted.Add(id) && _clearedLogged++ < 200)
+                        Plugin.Logger.LogInfo($"[Vehicle] CARTICON '{id}': an empty hand vehicle the game cleared on building exit "
+                            + "(street data wiped, lastSeen set, not loaded, no paid cargo) - no longer broadcast; partners drop its copy and pin (H-CARTICON-1).");
+                if (_clearedOmitted.Count == 0) return;
+                foreach (var id in _clearedOmitted.Where(x => !now.Contains(x)).ToList())
+                {
+                    _clearedOmitted.Remove(id);
+                    if (_clearedLogged++ >= 200) continue;
+                    string why;
+                    if (live.Contains(id)) why = "the game loaded it again (live).";
+                    else
+                    {
+                        VehicleInstance? r = null;
+                        foreach (var x in insts) if (x != null && x.id == id) { r = x; break; }
+                        if (r == null) why = "its record is gone from the save (removed).";
+                        else
+                        {
+                            string ls = "?", paid = "?";
+                            try { ls = r.lastSeen == null ? "null" : r.lastSeen.GetTotalMinutes().ToString("F0"); } catch { }
+                            try { paid = r.cargoInstances == null ? "0" : r.cargoInstances.Count(c => c != null && c.paid).ToString(); } catch { }
+                            why = $"its record changed: tag='{(string.IsNullOrEmpty(r.streetName) ? "" : $"{r.streetNumber} {r.streetName}")}' lastSeenMin={ls} "
+                                + $"cargo={r.cargoInstances?.Count ?? 0} paid={paid} active={SaveGameManager.Current?.ActiveVehicleId == id} following={_ownedFollowing.ContainsKey(id)}.";
+                        }
+                    }
+                    Plugin.Logger.LogInfo($"[Vehicle] CARTICON '{id}': broadcast again - {why} (H-CARTICON-1)");
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>DEV rig readout (TestDrive 'cartstate', H-CARTICON-1): this machine's view of one vehicle id -
+        /// its OWN saved record (live controller? street tag, lastSeen stamped, cargo, cleared, omitted from the
+        /// broadcast) and any partner COPY held here (ghost on/off/none, kept pin on/off/none).</summary>
+        internal static string CartStateReadout(string vid)
+        {
+            string own = "N", live = "N", tag = "-", seen = "-", clr = "-", cargo = "-";
+            string ghost = "none", pin = "none";
+            try
+            {
+                var dl = SaveGameManager.Current?.VehicleInstances;
+                if (dl != null)
+                    foreach (var inst in dl)
+                    {
+                        if (inst == null || inst.id != vid) continue;
+                        own = "Y";
+                        tag = string.IsNullOrEmpty(inst.streetName) ? "" : $"{inst.streetNumber} {inst.streetName}";
+                        try { seen = inst.lastSeen != null && inst.lastSeen.GetTotalMinutes() != 0f ? "Y" : "N"; } catch { }
+                        try { cargo = (inst.cargoInstances?.Count ?? 0).ToString(); } catch { }
+                        clr = IsClearedHandVehicle(inst) ? "Y" : "N";
+                        break;
+                    }
+                var list = VehicleHelper.AllPlayerVehicles;
+                if (list != null)
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var vc = list[i];
+                        if (vc != null && vc.vehicleInstance != null && vc.vehicleInstance.id == vid
+                            && vc.GetComponentInParent<ModGhostMarker>() == null) { live = "Y"; break; }
+                    }
+                if (_remoteVehicles.TryGetValue(vid, out var rv) && rv != null)
+                {
+                    ghost = rv.Go == null ? "null" : (rv.Go.activeSelf ? "on" : "off");
+                    if (rv.Poi != null) { try { pin = rv.Poi.hidden ? "off" : "on"; } catch { pin = "err"; } }
+                }
+            }
+            catch (Exception ex) { return $"vid={vid} ERR {ex.Message}"; }
+            return $"vid={vid} own={own} live={live} tag='{tag}' lastSeen={seen} cargo={cargo} cleared={clr} "
+                 + $"omitted={(_clearedOmitted.Contains(vid) ? "Y" : "N")} ghost={ghost} pin={pin}";
+        }
+
         private static void ApplyStreetData(VehicleInstance inst, string bldg)
         {
             try

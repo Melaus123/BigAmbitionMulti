@@ -4335,6 +4335,58 @@ namespace BigAmbitionsMP
                     return "ERR not in a car";
                 }
 
+                case "cartstate":
+                {
+                    // H-CARTICON-1 rig readout (read-only): VehicleManager.CartStateReadout for one vehicle id.
+                    if (arg.Length == 0 || arg.IndexOf(' ') >= 0) return "ERR usage: cartstate <vid>";
+                    return "OK cartstate " + VehicleManager.CartStateReadout(arg);
+                }
+
+                case "cartstrand":
+                {
+                    // H-CARTICON-1 rig lever (DEV). Stands in for 'push my hand vehicle into this shop and let go': moves
+                    // one of MY live, parked hand vehicles next to me inside the building I am in, saves its position the
+                    // way native does (VehicleController.SavePosition) and stamps the building's street data exactly as
+                    // native release-indoors does (VehicleController :346-350). The clearing itself is left to the game's
+                    // own OnExitBuilding when the player walks out ('exitbuilding').
+                    try
+                    {
+                        var ca = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (ca.Length < 1 || ca.Length > 2) return "ERR usage: cartstrand <vid> [sideMeters]";
+                        float side = 0f;
+                        if (ca.Length == 2 && !float.TryParse(ca[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out side))
+                            return "ERR sideMeters not a number";
+                        if (!BuildingManager.IsInsideBuilding) return "ERR not inside a building";
+                        var bld = InstanceBehavior<BuildingManager>.Instance?.cityBuildingController?.building;
+                        if (bld == null) return "ERR no current building";
+                        VehicleController? cvc = null;
+                        var clist = Helpers.VehicleHelper.AllPlayerVehicles;
+                        if (clist != null)
+                            for (int i = 0; i < clist.Count; i++)
+                            {
+                                var v = clist[i];
+                                if (v != null && v.vehicleInstance != null && v.vehicleInstance.id == ca[0]
+                                    && v.GetComponentInParent<ModGhostMarker>() == null) { cvc = v; break; }
+                            }
+                        if (cvc == null) return $"ERR '{ca[0]}' is not a live vehicle of mine";
+                        if (cvc.controlledByPlayer) return "ERR vehicle in use";
+                        if (!cvc.vehicleType.HasTag(BigAmbitions.Tags.TagRef.Vehicletag.ishandvehicle)) return "ERR not a hand vehicle";
+                        var pt = InstanceBehavior<GameManager>.Instance.playerController.transform;
+                        UnityEngine.Vector3 cpos = pt.position + pt.forward * 2.5f + pt.right * side;
+                        cvc.transform.position = cpos;
+                        cvc.transform.rotation = pt.rotation;
+                        var rb = cvc.GetComponent<UnityEngine.Rigidbody>();
+                        if (rb != null) { rb.position = cpos; rb.rotation = pt.rotation; if (!rb.isKinematic) rb.velocity = UnityEngine.Vector3.zero; }
+                        UnityEngine.Physics.SyncTransforms();
+                        cvc.SavePosition();
+                        cvc.vehicleInstance.SetStreetData(bld.StreetName ?? string.Empty, bld.StreetNumber);
+                        string ctag = $"{bld.StreetNumber} {bld.StreetName}";
+                        Plugin.Logger.LogInfo($"[TestDrive] cartstrand '{ca[0]}' left inside '{ctag}' at {cpos} cargo={cvc.vehicleInstance.cargoInstances?.Count ?? 0}.");
+                        return $"OK cartstrand vid={ca[0]} tag='{ctag}' cargo={cvc.vehicleInstance.cargoInstances?.Count ?? 0}";
+                    }
+                    catch (Exception ex) { return $"ERR cartstrand: {ex.Message}"; }
+                }
+
                 case "pinstate":
                 {
                     // H-GHOSTPIN-1 rig readout (read-only). Per KEPT partner pin: is its ghost active, is the pin drawn.
