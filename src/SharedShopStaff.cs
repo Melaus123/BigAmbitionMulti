@@ -326,6 +326,9 @@ namespace BigAmbitionsMP
                 // rise that comes with it can round to the same two decimals. Without this the copies would keep
                 // showing 'No tasks' through the whole session and the finish would arrive late or not at all.
                 sb.Append('|').Append(s.TrainingSkill).Append('|').Append(s.TrainingStartDay);
+                // H-ROSTERTOOLTIP-1: the bench copy's tooltip demands (and hours) - neither drifts per tick.
+                sb.Append('|').Append(s.AssignedWeeklyHours).Append('|').Append(s.Demands != null ? string.Join(",", s.Demands) : "~");
+                sb.Append('|').Append(s.AssignedWeeklyDays != null ? string.Join(",", s.AssignedWeeklyDays) : "~");   // fold: weekly days
                 sb.Append(';');
             }
             string sig = sb.ToString();

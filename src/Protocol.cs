@@ -1314,6 +1314,21 @@ namespace BigAmbitionsMP
         // which is a different record entirely: that one moves a REAL employee between saves.)
         public string TrainingSkill    { get; set; } = "";
         public int    TrainingStartDay { get; set; } = -1;
+        // H-ROSTERTOOLTIP-1 (additive, rides PROTOCOL 26): the two things the native employee tooltip reads besides
+        // name/age/skills/satisfaction - EmployeeInstance.demands (decompile EmployeeTooltip.cs:36) and
+        // EmployeeInstance.assignedWeeklyHours (EmployeeTooltip.cs:44; MyEmployees.cs:462 / EmployeeModel.cs:31 read the
+        // same two). Same shapes the transfer record carries (EmployeeEditPayload.Demands / AssignedWeeklyHours, filled
+        // by MergerEmployeeSync.RecordOf). ABSENT on the wire (an older sender) deserialises to null / -1, which the
+        // apply reads as "not sent" and leaves the copy exactly as it was before this field existed.
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public List<string>? Demands   { get; set; }
+        public int    AssignedWeeklyHours { get; set; } = -1;
+        // H-ROSTERTOOLTIP-1 fold: EmployeeInstance.assignedWeeklyDays - the tooltip ticks its demands met/unmet from the
+        // copy (EmployeeTooltip.cs:80), and DaysWorkingPerWeek (:19/:28) / FreeOnDays (:51) read this list. Same shape
+        // the transfer record carries (EmployeeEditPayload.AssignedWeeklyDays: DayOfWeekOrdered values as int).
+        // ABSENT on the wire (an older sender) = null = not sent, and the apply leaves the copy's list unchanged.
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public List<int>? AssignedWeeklyDays { get; set; }
     }
 
     public class CargoNestedInfo

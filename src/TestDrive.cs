@@ -2199,6 +2199,76 @@ namespace BigAmbitionsMP
                     return $"OK {etotal} employee(s){(arg.Length > 0 ? $" @ '{arg}'" : "")}: {esb}";
                 }
 
+                case "rostertip":
+                {
+                    // H-ROSTERTOOLTIP-1: what the native employee tooltip would print for every employee at one address, as
+                    // THIS machine holds them - assignedWeeklyHours (EmployeeTooltip.cs:44) and the demand list
+                    // (EmployeeTooltip.cs:36). Run on the owner (real records) and on the partner (display copies); the
+                    // sig is an md5 of the sorted rows, so equal sigs = the same hours and demands on both sides.
+                    // `rostertip pick` = the first (by key) shop truly mine with a real employee who has hours AND demands.
+                    // Fold: each row also carries w=<assignedWeeklyDays as ints> (DaysWorkingPerWeek/FreeOnDays read them for
+                    // the tooltip's demand ticks), and pick additionally requires that employee to have at least one day.
+                    try
+                    {
+                        var rgi = SaveGameManager.Current;
+                        if (rgi?.EmployeeInstances == null || rgi.BuildingRegistrations == null) return "ERR no save loaded";
+                        string rarg = arg.Trim();
+                        if (rarg.Length == 0) return "ERR usage: rostertip <num> <ba:street_x> | rostertip pick";
+                        Func<Entities.EmployeeInstance, string> rkey = e => { try { return e.assignedAddress != null ? (GameStateReader.AddressKey(e.assignedAddress) ?? "") : ""; } catch { return ""; } };
+                        if (rarg == "pick")
+                        {
+                            var rkeys = new System.Collections.Generic.List<string>();
+                            foreach (var reg in rgi.BuildingRegistrations)
+                            {
+                                if (reg == null) continue;
+                                bool rmine = false; try { rmine = MergerFlip.TrulyMine(reg); } catch { }
+                                if (rmine) { string k = GameStateReader.AddressKey(reg); if (!string.IsNullOrEmpty(k)) rkeys.Add(k); }
+                            }
+                            rkeys.Sort(StringComparer.Ordinal);
+                            foreach (var k in rkeys)
+                            {
+                                int rn = 0, rgood = 0;
+                                foreach (var e in rgi.EmployeeInstances)
+                                {
+                                    if (e == null || string.IsNullOrEmpty(e.id)) continue;
+                                    if (MPRegisterSync.IsSyntheticDuty(e.id) || MPRegisterSync.IsInjectedStaff(e.id)) continue;
+                                    if (!string.Equals(rkey(e), k, StringComparison.OrdinalIgnoreCase)) continue;
+                                    rn++;
+                                    try { if (e.assignedWeeklyHours > 0 && e.demands != null && e.demands.Count > 0 && e.assignedWeeklyDays != null && e.assignedWeeklyDays.Count > 0) rgood++; } catch { }
+                                }
+                                if (rgood > 0) return $"OK rostertip pick '{k}' staff={rn} withHoursAndDemands={rgood}";
+                            }
+                            return $"ERR rostertip pick: none of my {rkeys.Count} shop(s) has an employee with scheduled hours and demands";
+                        }
+                        var rrows = new System.Collections.Generic.List<string>();
+                        int rinj = 0;
+                        foreach (var e in rgi.EmployeeInstances)
+                        {
+                            if (e == null || string.IsNullOrEmpty(e.id)) continue;
+                            if (MPRegisterSync.IsSyntheticDuty(e.id)) continue;
+                            if (!string.Equals(rkey(e), rarg, StringComparison.OrdinalIgnoreCase)) continue;
+                            bool inj = false; try { inj = MPRegisterSync.IsInjectedStaff(e.id); } catch { }
+                            if (inj) rinj++;
+                            int hrs = -1; try { hrs = e.assignedWeeklyHours; } catch { }
+                            string dem = ""; try { if (e.demands != null) dem = string.Join(",", e.demands); } catch { }
+                            string wdy = ""; try { if (e.assignedWeeklyDays != null) { var wl = new System.Collections.Generic.List<string>(); foreach (var d in e.assignedWeeklyDays) wl.Add(((int)d).ToString()); wdy = string.Join(",", wl); } } catch { }
+                            rrows.Add($"{e.id}:h={hrs}:d={dem}:w={wdy}");
+                        }
+                        rrows.Sort(StringComparer.Ordinal);
+                        string rjoined = string.Join(" ; ", rrows);
+                        string rsig;
+                        using (var md = System.Security.Cryptography.MD5.Create())
+                        {
+                            var hb = md.ComputeHash(Encoding.UTF8.GetBytes(rjoined));
+                            var hsb = new StringBuilder(); for (int i = 0; i < 4; i++) hsb.Append(hb[i].ToString("x2"));
+                            rsig = hsb.ToString();
+                        }
+                        foreach (var row in rrows) Plugin.Logger.LogWarning($"[TestDrive] rostertip '{rarg}': {row}");
+                        return $"OK rostertip '{rarg}' n={rrows.Count} injected={rinj} sig={rsig} rows={rjoined}";
+                    }
+                    catch (Exception ex) { return $"ERR rostertip: {ex.GetType().Name}: {ex.Message}"; }
+                }
+
                 case "shift":
                 {
                     // ONE WorkShift in the exact shape SharedShopSchedule.ReplaceDay (:670) uses:

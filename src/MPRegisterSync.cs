@@ -2085,6 +2085,10 @@ namespace BigAmbitionsMP
                   // H-MERGERTRAIN-1: a training session that starts or ends changes nothing else on the record
                   // (the skill only moves at the FINISH), so without these two the copies would never be told.
                   .Append('|').Append(s.TrainingSkill).Append('|').Append(s.TrainingStartDay)
+                  // H-ROSTERTOOLTIP-1: a re-schedule moves only the hours, and a demand change moves nothing else either.
+                  .Append('|').Append(s.AssignedWeeklyHours).Append('|').Append(s.Demands != null ? string.Join(",", s.Demands) : "~")
+                  // fold: a re-schedule can move the days without moving the hours total.
+                  .Append('|').Append(s.AssignedWeeklyDays != null ? string.Join(",", s.AssignedWeeklyDays) : "~")
                   .Append(';');
             return sb.ToString();
         }
@@ -2124,6 +2128,7 @@ namespace BigAmbitionsMP
                         try { si.Satisfaction = e.satisfaction; } catch { }
                         try { si.AgeDays = e.characterData?.ageInDays ?? 0; } catch { }
                         try { if (e.trainingSession != null) { si.TrainingSkill = e.trainingSession.skill ?? ""; si.TrainingStartDay = e.trainingSession.startDay; } } catch { }   // H-MERGERTRAIN-1
+                        FillTooltipFields(si, e);   // H-ROSTERTOOLTIP-1
                         try
                         {
                             // characterData.skills is THE skill list (HasSkill/GetPrimarySkill read it;
@@ -2258,6 +2263,7 @@ namespace BigAmbitionsMP
                                 if (!string.IsNullOrEmpty(s.Name)) have.inst.characterData.name = s.Name;
                                 have.inst.isAbsent = !s.Available; have.inst.isReplaced = false;
                                 ApplyStaffFidelity(have.inst, s);   // slice 5: wage/skills/satisfaction stay current
+                                ApplyTooltipFields(have.inst, s);   // H-ROSTERTOOLTIP-1
                                 if (have.addr != addr)
                                 {
                                     // Shared-shop slice 3: a bench record (or one from another shop) now works HERE —
@@ -2310,6 +2316,7 @@ namespace BigAmbitionsMP
                         try { if (s.Gender >= 0) inst.characterData.gender = (BigAmbitions.Characters.Gender)s.Gender; } catch { }
                         inst.isAbsent = !s.Available; inst.isReplaced = false;
                         ApplyStaffFidelity(inst, s);          // slice 5: real wage/skills/satisfaction/age for display
+                        ApplyTooltipFields(inst, s);          // H-ROSTERTOOLTIP-1
                         for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)
                             if (gi.EmployeeInstances[i]?.id == inst.id) gi.EmployeeInstances.RemoveAt(i);
                         gi.EmployeeInstances.Add(inst);
@@ -2371,6 +2378,7 @@ namespace BigAmbitionsMP
             try { si.Satisfaction = e.satisfaction; } catch { }
             try { si.AgeDays = e.characterData?.ageInDays ?? 0; } catch { }
             try { if (e.trainingSession != null) { si.TrainingSkill = e.trainingSession.skill ?? ""; si.TrainingStartDay = e.trainingSession.startDay; } } catch { }   // H-MERGERTRAIN-1
+            FillTooltipFields(si, e);   // H-ROSTERTOOLTIP-1
             try
             {
                 var skills = e.characterData?.skills;
@@ -2416,6 +2424,7 @@ namespace BigAmbitionsMP
                             if (!string.IsNullOrEmpty(s.Name)) have.inst.characterData.name = s.Name;
                             have.inst.isAbsent = !s.Available; have.inst.isReplaced = false;
                             ApplyStaffFidelity(have.inst, s);
+                            ApplyTooltipFields(have.inst, s);   // H-ROSTERTOOLTIP-1 (bench copy)
                         }
                         catch { }
                         _injectedOwner[s.Id] = ownerPid;
@@ -2436,6 +2445,7 @@ namespace BigAmbitionsMP
                     try { if (s.Gender >= 0) inst.characterData.gender = (BigAmbitions.Characters.Gender)s.Gender; } catch { }
                     inst.isAbsent = !s.Available; inst.isReplaced = false;
                     ApplyStaffFidelity(inst, s);
+                    ApplyTooltipFields(inst, s);   // H-ROSTERTOOLTIP-1 (bench copy)
                     for (int i = gi.EmployeeInstances.Count - 1; i >= 0; i--)   // same de-dup as the roster path: never two list entries for one id
                         if (gi.EmployeeInstances[i]?.id == inst.id) gi.EmployeeInstances.RemoveAt(i);
                     gi.EmployeeInstances.Add(inst);
@@ -2588,6 +2598,38 @@ namespace BigAmbitionsMP
         /// <summary>Slice 5: apply the wire's display-fidelity fields to an injected record. Wage is
         /// safe to be real — the payroll skip keys on the injected-id registry, not on wage 0. Skills
         /// replace the placeholder so MyEmployees/BizMan show the partner staff's true role/levels.</summary>
+        /// <summary>H-ROSTERTOOLTIP-1, OWNER side: the tooltip's demands and weekly hours, read exactly as the transfer
+        /// record reads them (MergerEmployeeSync.RecordOf: e.demands, e.assignedWeeklyHours).</summary>
+        internal static void FillTooltipFields(StaffInfo si, EmployeeInstance e)
+        {
+            try { si.Demands = e.demands != null ? new List<string>(e.demands) : new List<string>(); } catch { }
+            try { si.AssignedWeeklyHours = e.assignedWeeklyHours; } catch { }
+            // fold: the weekly days (as MergerEmployeeSync.RecordOf reads them) - the demand ticks need them.
+            try { var wd = new List<int>(); if (e.assignedWeeklyDays != null) foreach (var d in e.assignedWeeklyDays) wd.Add((int)d); si.AssignedWeeklyDays = wd; } catch { }
+        }
+
+        /// <summary>H-ROSTERTOOLTIP-1, PARTNER side: put the owner's demands and weekly hours on a DISPLAY copy, as the
+        /// transfer apply does (MergerEmployeeSync :1092 demands clear+add when sent, :1140 assignedWeeklyHours). Not sent
+        /// (null / -1, an older sender) = the copy is left as it was. Only the display-copy sites call this; the sale
+        /// path's real records (EnsureRealStaff) keep their own behaviour.</summary>
+        private static void ApplyTooltipFields(EmployeeInstance inst, StaffInfo s)
+        {
+            try { if (s.Demands != null) { inst.demands.Clear(); inst.demands.AddRange(s.Demands); } } catch { }
+            try { if (s.AssignedWeeklyHours >= 0) inst.assignedWeeklyHours = s.AssignedWeeklyHours; } catch { }
+            try
+            {   // fold: the weekly days, through IList exactly as the transfer apply does (MergerEmployeeSync :1156) so the
+                // element type comes from the live list. Null (not sent) = the copy's list is left as it was.
+                var days = inst.assignedWeeklyDays as System.Collections.IList;
+                var et   = days?.GetType().GetGenericArguments();
+                if (s.AssignedWeeklyDays != null && days != null && et != null && et.Length == 1)
+                {
+                    days.Clear();
+                    foreach (var d in s.AssignedWeeklyDays) days.Add(System.Enum.ToObject(et[0], d));
+                }
+            }
+            catch { }
+        }
+
         private static void ApplyStaffFidelity(EmployeeInstance inst, StaffInfo s)
         {
             try
@@ -2702,6 +2744,7 @@ namespace BigAmbitionsMP
                     try { si.Satisfaction = e.satisfaction; } catch { }
                     try { si.AgeDays = e.characterData?.ageInDays ?? 0; } catch { }
                     try { if (e.trainingSession != null) { si.TrainingSkill = e.trainingSession.skill ?? ""; si.TrainingStartDay = e.trainingSession.startDay; } } catch { }   // H-MERGERTRAIN-1
+                    FillTooltipFields(si, e);   // H-ROSTERTOOLTIP-1
                     try
                     {
                         var skills = e.characterData?.skills;
