@@ -1272,6 +1272,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.CustomerVisitState:     // H-HANDOFF-1: the simulator's visit rows for my room (Final or stream)
+                {
+                    var vs = env.GetPayload<CustomerVisitStatePayload>();
+                    if (vs != null) GameStatePatcher.EnqueueOnMainThread(() => CustomerHandoff.Apply(vs));
+                    break;
+                }
+
                 case MessageType.ReleaseClaim:           // contested-tenancy arbitration: we lost — release (re-verified locally)
                     ContestedTenancy.ClientHandleRelease(env.GetPayload<BuildingOwnershipPayload>());
                     break;

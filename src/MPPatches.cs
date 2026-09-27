@@ -689,6 +689,8 @@ namespace BigAmbitionsMP
                         sdBefore = current.unprocessedCompletedOrders?.Count ?? 0;
                     }
                     catch { }
+                    // H-HANDOFF-1 fold F1: a handed-off entry this pass books loses its hand-off mark (first booking wins).
+                    var hoPass = CustomerHandoff.HourlyPassBegin(current, hour);
                     try
                     {
                         data.simulator.SetUp(current, hour);
@@ -711,6 +713,7 @@ namespace BigAmbitionsMP
                         catch (Exception exR) { Plugin.Logger.LogWarning($"[Rest] occupied-shop set-aside restore: {exR.Message}"); }
                     }
 
+                    CustomerHandoff.HourlyPassEnd(current, hoPass, hour, "skip");
                     try
                     {
                         sdAfter = current.unprocessedCompletedOrders?.Count ?? 0;

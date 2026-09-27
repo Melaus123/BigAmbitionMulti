@@ -781,6 +781,103 @@ namespace BigAmbitionsMP
                     return $"OK custevict asked={ceWant} evicted={ceDone} skipActive={MPRestSync.SkipActive} ids={ceIds}";
                 }
 
+                // ── H-HANDOFF-1 (batch 27): what each live customer's VISIT has reached, on THIS machine ──
+                case "custstate":
+                {
+                    // `custstate`        this interior's natives, each id:timeState:completed:done k/n:queue spot:
+                    //                    leaving:fee lines[:seat], and its copies (id:visit row known 1/0), plus
+                    //                    the last take-over's tallies. sig = md5 of the sorted id:k/n pairs.
+                    // `custstate arm <n>` log "[Handoff] armed count reached" ONCE, the moment this interior
+                    //                    holds n customers (natives when simulating, copies when following) -
+                    //                    a rig step waits on that line instead of guessing a sleep.
+                    string csArg = (arg ?? "").Trim();
+                    if (csArg.StartsWith("arm", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int csN;
+                        if (!int.TryParse(csArg.Substring(3).Trim(), out csN) || csN <= 0) return "ERR usage: custstate arm <n>";
+                        CustomerHandoff.Arm(csN);
+                        return $"OK custstate armed n={csN} bldg='{CustomerPuppets.MyBuilding}'";
+                    }
+                    string csAddr = CustomerPuppets.MyBuilding;
+                    string csFee = "";
+                    try { csFee = Helpers.BusinessTypeHelper.GetEntranceFeeNameForBusinessType(InstanceBehavior<BuildingManager>.Instance.businessType) ?? ""; } catch { }
+                    var csNatives = new System.Collections.Generic.List<string>();
+                    var csSigParts = new System.Collections.Generic.List<string>();
+                    int csNat = 0, csFeeMax = 0, csFeeMin = int.MaxValue, csDone = 0, csLeaving = 0;
+                    try
+                    {
+                        var csAll = IndoorCustomerSpawner.Customers;
+                        if (csAll != null)
+                            foreach (var csC in csAll)
+                            {
+                                if (csC == null || csC.isPlayer) continue;
+                                csNat++;
+                                string csId = CustomerPuppets.RowIdForCustomer(csC);
+                                int csItems = 0, csK = 0, csF = 0;
+                                if (csC.order != null && csC.order.entries != null)
+                                    foreach (var csE in csC.order.entries)
+                                        if (csE != null) { csItems++; if (csE.processed) csK++; if (csFee.Length > 0 && csE.itemName == csFee) csF++; }
+                                if (csF > csFeeMax) csFeeMax = csF;
+                                if (csF < csFeeMin) csFeeMin = csF;
+                                bool csCompleted = csC.order != null && csC.order.completed;
+                                if (csCompleted) csDone++;
+                                int csSpot = -1;
+                                try { csSpot = csC.assignedWaitingLine != null ? csC.currentWaitingLineSpot : -1; } catch { }
+                                bool csLv = CustomerHandoff.IsLeavingBody(csC);
+                                if (csLv) csLeaving++;
+                                csNatives.Add($"{csId}:{(int)csC.customerTimeState}:{(csCompleted ? 1 : 0)}:{csK}/{csItems}:{csSpot}:{(csLv ? 1 : 0)}:{csF}{(csC.isSittingOn != null ? ":seat" : "")}");
+                                csSigParts.Add($"{csId}:{csK}/{csItems}");
+                            }
+                    }
+                    catch (Exception exCs) { return "ERR custstate " + exCs.Message; }
+                    if (csFeeMin == int.MaxValue) csFeeMin = 0;
+                    var csCopies = new System.Collections.Generic.List<string>();
+                    int csCopyRows = 0;
+                    foreach (var csPid in CustomerPuppets.PuppetIds())
+                    {
+                        bool csHas = CustomerHandoff.HasRow(csPid);
+                        if (csHas) csCopyRows++;
+                        csCopies.Add($"{csPid}:{(csHas ? 1 : 0)}");
+                    }
+                    csSigParts.Sort(StringComparer.Ordinal);
+                    string csSig = "00000000";
+                    try
+                    {
+                        using (var md = System.Security.Cryptography.MD5.Create())
+                        {
+                            var hb = md.ComputeHash(Encoding.UTF8.GetBytes(string.Join(";", csSigParts)));
+                            var sbh = new StringBuilder();
+                            for (int i = 0; i < 4; i++) sbh.Append(hb[i].ToString("x2"));
+                            csSig = sbh.ToString();
+                        }
+                    }
+                    catch { }
+                    string csMode = CustomerPuppets.AwaitingFinalFrom.Length > 0 ? "waiting"
+                                  : CustomerPuppets.SpawnerSuppressedHere ? "follower" : "native";
+                    return $"OK custstate bldg='{csAddr}' sim='{CustomerPuppets.SimulatorFor(csAddr)}' mode={csMode} "
+                         + $"natives={csNat} done={csDone} leaving={csLeaving} feeMax={csFeeMax} feeMin={csFeeMin} copies={CustomerPuppets.PuppetCount} copyRows={csCopyRows} "
+                         + $"visitRows={CustomerHandoff.KnownRows} finalsRx={CustomerHandoff.FinalsReceived} finalsTx={CustomerHandoff.FinalsSent} "
+                         + $"streamRx={CustomerHandoff.StreamRowsReceived} streamTx={CustomerHandoff.StreamSends} handedOff={CustomerEntrySync.HandedOffCount} "
+                         + $"lastAdopt={CustomerPuppets.LastAdopted}/{CustomerPuppets.LastWithState}/{CustomerPuppets.LastLeaving}/{CustomerPuppets.LastWalked} "
+                         + $"lastMatched={CustomerPuppets.LastMatched} lastFrom='{CustomerPuppets.LastAdoptFrom}' lastVia={CustomerPuppets.LastAdoptVia} "
+                         + $"feeSup={CustomerHandoff.FeeSuppressed} compSup={CustomerHandoff.ComplaintSuppressed} "
+                         + $"sig={csSig} natList={string.Join(";", csNatives)} copyList={string.Join(";", csCopies)}";
+                }
+
+                // ── H-HANDOFF-1 folds: the till oracle on the machine that keeps the books ──
+                case "handoffbook":
+                {
+                    // `handoffbook <num> <ba:street_x>` - every customer that crossed a hand-off here: its till
+                    // references (entry Order or forward-booked Order) and whether the partner forwarded a sale
+                    // for it. identity=ok <=> booked == paid, no id booked twice, no forwarded sale unbooked.
+                    if (arg.Length == 0) return "ERR usage: handoffbook <num> <ba:street_x>";
+                    var hbReg = GameStatePatcher.FindRegistration(arg);
+                    if (hbReg == null) return $"ERR no registration at '{arg}'";
+                    string hbKey = arg; try { hbKey = GameStateReader.AddressKey(hbReg); } catch { }
+                    bool hbBooks = false; try { hbBooks = MergerFlip.BooksHere(hbReg); } catch { }
+                    return $"OK handoffbook {hbKey} books={hbBooks} " + CustomerHandoff.LedgerReport(hbReg);
+                }
+
                 case "skipvote":
                 {
                     // A scriptable consensus-skip vote. SetSkipRequest needs Seated || Loitering, and a rig

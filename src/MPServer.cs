@@ -3036,6 +3036,17 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.CustomerVisitState:    // H-HANDOFF-1: a client simulator's visit rows (Final or stream) - apply + relay like 144
+                {
+                    var vs = env.GetPayload<CustomerVisitStatePayload>();
+                    if (vs != null && vs.SimulatorPid == senderPid)
+                    {
+                        GameStatePatcher.EnqueueOnMainThread(() => CustomerHandoff.Apply(vs));
+                        BroadcastCustomerVisitState(vs, peer.Id);
+                    }
+                    break;
+                }
+
                 case MessageType.RegisterServe:         // a client simulator's serve beat — apply + relay
                 {
                     var rs = env.GetPayload<RegisterServePayload>();
@@ -5541,6 +5552,13 @@ namespace BigAmbitionsMP
         {
             if (!_running || p == null) return;
             SendToBuildingSubscribers(MessageType.CustomerPuppetState, p.AddressKey, p, exceptPeerId);
+        }
+
+        /// <summary>H-HANDOFF-1: visit rows go where the puppet stream goes - the players inside, minus the sender.</summary>
+        public static void BroadcastCustomerVisitState(CustomerVisitStatePayload p, int exceptPeerId = -1)
+        {
+            if (!_running || p == null) return;
+            SendToBuildingSubscribers(MessageType.CustomerVisitState, p.AddressKey, p, exceptPeerId);
         }
 
         /// <summary>Round-119: relay a serve beat so whoever is working that till performs it —

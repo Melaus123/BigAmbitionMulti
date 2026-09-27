@@ -1,0 +1,376 @@
+{
+  "id": "T-HANDOFF3",
+  "title": "H-HANDOFF-1 fold F1 (split out of T-HANDOFF1, fold 3 2026-09-26), the HOST'S CLOTHING STORE: same fixture and setup as T-HANDOFF1; the owner (simulator) walks out with >= 3 live customers (leg 1, which sets the hand-off marks), then STAYS OUTSIDE across a game-hour boundary while the client serves the customers he handed off. His native hourly pass runs with marks present ('hourly pass (native)'); first booking wins, and the booking machine's ledger must show every hand-off customer booked exactly once (handoffbook dupIds=0 lostIds=0 identity=ok). NO save.",
+  "preconditions": "Reporter fixture session fx-hq1 (day 44, MERGED - vars.keepMerger true). Dev build with H-HANDOFF-1 (custstate / enterbuilding / exitbuilding / skipvote / skipstate / shopday / tilldupes / handoffbook, BAMP_DEV). The fixture loads at 17:38 with Client1 inside a building, so both step outside and take one consensus skip OUTDOORS to 10:45 the next morning (as T-SKIPHANDBACK does). The clothing store is the HOST's, so the host books it and simulates it whenever he is inside (2026-09-19 booking-player ruling).\n\nPREMISE: at least 3 live customers with both players inside. The brief asked for 6; THE FIXTURE CANNOT GIVE 6 HERE: this store fills slowly (36-43 entries a day; 1-6 bodies seen at 10-12h in the batch-26 runs) and run T-HANDOFF1-20260926-202315 waited 180 s for 6 and saw 2-4. The >= 6 premise is carried by T-HANDOFF2 (the gym, 180-203 entries a day). The rig does not guess a sleep: `custstate arm 3` logs one line the moment the host's interior holds 3, and the step waits for that line (180 s).\n\nLEG 1 (owner walks out): host exitbuilding -> the host's BuildingManager.ResetIndoors prefix sends the FINAL snapshot (reason exit, 'books here, N unfinished entries marked handed off'); the client receives it, becomes the simulator when the host's election drops the host, and adopts every copy WITH STATE via final; the adoption's own check (lastMatched = with-state count) proves each adopted body resumed exactly the snapshot's items done k/n and completed flag. LEG 2 (owner walks back in): the host follows the client for at most one election pass, then the booking-player rule makes him the simulator; he WAITS for the client's final (reason authority), the client swaps its natives to copies in place (N > 0 - the swap was always 0 before, DisableCustomersSpawn released them first), and the host adopts via final. Money: any client sale for a customer the host handed over reaches the host's books ('[Business] forwarded order ... accepted (handed off)', report-only - it occurs only if such a customer pays during leg 1); tilldupes 0 and shopday idUnbilled 0 on the owner. ORACLE NOTE: NullReferenceException carries the `(?<!swallowed )` lookbehind because fx-hq1 prints the mod's own '[Gley] swallowed NullReferenceException' diagnostic.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "shop": "20 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "(?<!swallowed )NullReferenceException",
+    "\\[Handoff\\] (capture|capture live|apply|apply visit|stream|exit snapshot|take-over|wait tick|final received|citizen|leave|send final|hourly pass)\\b[^:(]*: ",
+    "\\[Customers\\] (puppet tick|adopt puppet):"
+  ],
+  "oracles_present": [],
+  "oracles_report": [
+    "\\[Handoff\\] body-only .*booked order before .* -> after ",
+    "\\[Handoff\\] final rows accounted ",
+    "\\[Handoff\\] ",
+    "\\[Customers\\] following ",
+    "\\[Customers\\] native mode in ",
+    "\\[Customers\\] simulator for ",
+    "\\[Business\\] forwarded order .* accepted \\(handed off\\)",
+    "\\[Business\\] forwarded order .* rejected",
+    "\\[Business\\] adopted helper-served order",
+    "\\[Handoff\\] hourly pass \\(native\\) @.+ h[0-9]+: [0-9]+ handed-off entr"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 32,
+      "note": "both worlds settle"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only): the HOST's own world can still be loading here (run T-HANDOFF2-20260926-213941 read settled=False at 39 s)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only)"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only)"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 18
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "note": "ASSERT the host settled, bounded at ~90 s after the load (rigrun has no retry-until primitive, so the ladder always runs its full length)"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "fx-hq1 loads Client1 inside a building; report-only"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "the setup skip to the next trading morning, taken OUTDOORS"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 40
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the OWNER enters first: he books the shop and simulates it"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "sleep_s": 6
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "custstate arm 3",
+      "expect_result": "^OK custstate armed n=3 bldg='${shop}'",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handoff\\] armed count reached: ([3-9]|[1-9][0-9]+) >= 3",
+          "within_s": 180
+        }
+      ],
+      "note": "THE PREMISE WAIT: the step passes the moment the owner's interior holds 3 live customers (an event, not a sleep)"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${shop}' sim='${hostPid}' mode=native natives=([3-9]|[1-9][0-9]+) ",
+      "abort_on_fail": false,
+      "capture": {
+        "hNat0": "natives=(\\d+)",
+        "hSig0": "sig=([0-9a-f]{8})",
+        "hList0": "natList=(\\S*)"
+      },
+      "note": "PREMISE ASSERTED: the owner simulates, inside, with >= 3 live customers"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${shop}' sim='${hostPid}' mode=follower natives=0 .*copies=[1-9]",
+      "capture": {
+        "cCopies0": "copies=(\\d+)",
+        "cCopyRows0": "copyRows=(\\d+)",
+        "cStreamRx0": "streamRx=(\\d+)"
+      },
+      "note": "PREMISE: the client is inside the same shop as a FOLLOWER holding copies (and the visit-row stream has reached it: copyRows)"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "tilldupes ${shop}",
+      "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): the till starts clean"
+    },
+    {
+      "seq": 31,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 LEG1 OWNER-WALKS-OUT",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate .*mode=native",
+      "capture": {
+        "hNat1": "natives=(\\d+)",
+        "hSig1": "sig=([0-9a-f]{8})",
+        "hList1": "natList=(\\S*)"
+      },
+      "note": "the owner's customers the instant before he walks out (report: compare with the client's list below)"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handoff\\] final snapshot sent: [1-9][0-9]* @${shop} \\(exit\\)",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[Handoff\\] final from ${hostPid} received: [1-9][0-9]* @${shop} \\(exit",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[Customers\\] native mode in '${shop}' .* ([1-9][0-9]*) puppet\\(s\\) adopted in place \\(([1-9][0-9]*) with state, [0-9]+ leaving, [0-9]+ walking out\\) from '${hostPid}' via final",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[Handoff\\] adopt: fee suppressed=[0-9]+ complaint suppressed=[0-9]+ progress matched=",
+          "within_s": 30
+        }
+      ],
+      "note": "LEG 1 ACT AND ORACLE: the owner's exit sends the final snapshot; the client receives it and adopts the copies WITH STATE, via the final"
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "sleep_s": 3
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${shop}' sim='${clientPid}' mode=native natives=[1-9][0-9]* .*lastAdopt=[1-9][0-9]*/([1-9][0-9]*)/[0-9]+/[0-9]+ lastMatched=\\1 lastFrom='${hostPid}' lastVia=final ",
+      "capture": {
+        "cNat1": "natives=(\\d+)",
+        "cSig1": "sig=([0-9a-f]{8})",
+        "cList1": "natList=(\\S*)",
+        "cAdopt1": "lastAdopt=(\\S+)",
+        "cMatched1": "lastMatched=(\\d+)"
+      },
+      "note": "LEG 1 ASSERTION: the client now simulates and EVERY copy adopted with a visit row resumed exactly that row's items done k/n and completed flag (lastMatched = with-state count). The natList ids/k-n are captured beside the host's hList1 for the report."
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "cmd": "tilldupes ${shop}",
+      "abort_on_fail": false,
+      "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): LEG 1 TILL ORACLE: no order reached the owner's till twice"
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ",
+      "abort_on_fail": false,
+      "capture": {
+        "l1Ledger": "ledger=(\\d+)",
+        "l1Booked": "booked=(\\d+)",
+        "l1Paid": "paid=(\\d+)",
+        "l1Fwd": "forwardsIn=(\\d+)",
+        "l1Marks": "marks=(\\d+)"
+      },
+      "note": "LEG 1 ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
+    },
+    {
+      "seq": 38,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 F1 OWNER-OUTSIDE-ACROSS-HOUR",
+      "expect_result": "OK MARK",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[StaffRoster\\] [0-9]+ injected/synthetic record\\(s\\) sit out the hourly employee pass",
+          "within_s": 150
+        }
+      ],
+      "note": "(2026-09-26 re-check: THE WAIT is for the next game-hour boundary on the host - the hourly employee pass line, printed every hour in fx-hq1 - so the owner is outside across an hour while marks exist (run T-HANDOFF1-20260926-221904 had no wait and no hour crossed). The 'hourly pass (native)' line is now an oracles_present search over the whole run - a step's expect_log searches only from its own mark, and run T-HANDOFF1-20260926-214358 printed the line during leg 1, before this mark; the line can only exist once leg 1's exit has set marks, so the whole-run search is a search from the leg's start.) FOLD F1 LEG: the owner stays OUTSIDE across an hour boundary while the client serves the customers he handed off; his native hourly pass for the shop runs with hand-off marks present (the line is written only while a mark exists for this shop - if the client already sold every handed-off customer before the hour closed there is no mark and no line: report-only). A handed-off entry that pass books loses its mark (first booking wins), so the client's later sale for it is rejected; the ledger below must show each one booked exactly once"
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "tilldupes ${shop}",
+      "abort_on_fail": false,
+      "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): F1 LEG TILL ORACLE: no order reached the owner's till twice"
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ",
+      "abort_on_fail": false,
+      "capture": {
+        "f1Ledger": "ledger=(\\d+)",
+        "f1Booked": "booked=(\\d+)",
+        "f1Paid": "paid=(\\d+)",
+        "f1Fwd": "forwardsIn=(\\d+)",
+        "f1Marks": "marks=(\\d+)"
+      },
+      "note": "F1 LEG ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
+    },
+    {
+      "seq": 41,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

@@ -55,6 +55,7 @@ namespace BigAmbitionsMP
             public float lastSeen;
             public bool leaving;
             public float leaveAt;
+            public float holdUntil;   // H-HANDOFF-1: named in the old simulator's Final - kept in place (no stale walk-out) until the take-over
             public string held = "";
             public int fill = -1;
             public GameObject? heldGo;
@@ -93,6 +94,32 @@ namespace BigAmbitionsMP
         // (field: adopted customers teleported and bolted in odd directions).
         private static readonly List<(Customer c, Vector3 pos, float until)> _warpHolds = new();
 
+        // H-HANDOFF-1 (batch 27, 2026-09-26): hand-off bookkeeping (CustomerHandoff carries the visit rows).
+        //   _prevSim        - the simulator this machine last FOLLOWED in _myBldg: the one a take-over takes over FROM;
+        //   _lastReactSim   - the authority ReactToAuthority saw on its previous call (was it me? only then is
+        //                     there a crowd of mine to hand over);
+        //   _awaitFinalFrom - while not "", this machine IS the simulator but waits for that player's Final
+        //                     snapshot: it stays in follower mode (spawner off, rows still applied) and streams
+        //                     nothing, because an empty batch would walk the other machine's copies out.
+        private static string _prevSim = "", _lastReactSim = "", _awaitFinalFrom = "";
+        private static string _staleHoldLoggedFor = "";   // fold D1: the building whose stale-copy hold was already logged (once)
+        private static string _heldForGone = "";   // the followed simulator whose DISCONNECT already froze my copies (once)
+        // Fold R0 (run T-HANDOFF1-20260926-204839, leg 2): a take-over that is due while THIS interior is still
+        // loading (the owner walked in: ShopCtx, the follow and the Final all land before EnterBuildingCoroutine
+        // has moved the player in, so every SpawnCustomer met no navmesh - "0 adopted, 4 walking out"). The via
+        // it will run with; HandoffWaitTick runs it once IndoorReady() holds, copies held meanwhile.
+        private static string _readyPendingVia = "";
+        private static float _awaitSince;
+        private const float AwaitFinalTimeout = 5f;   // floor of the floor: never leave a shop unsimulated longer
+        private const float AwaitLeftGrace = 1.5f;    // an EXITING simulator's Final is sent from ResetIndoors and may still be in flight
+        internal static int LastAdopted, LastWithState, LastLeaving, LastWalked, LastMatched;   // custstate lever
+        internal static string LastAdoptFrom = "", LastAdoptVia = "";
+        internal static string MyBuilding => _myBldg;
+        internal static string AwaitingFinalFrom => _awaitFinalFrom;
+        internal static string PreviousSimulator => _prevSim;
+        internal static int PuppetCount => _puppets.Count;
+        internal static List<string> PuppetIds() => new List<string>(_puppets.Keys);
+
         public static void Reset()
         {
             try
@@ -104,6 +131,9 @@ namespace BigAmbitionsMP
                 _looksById.Clear();
                 _looksSent.Clear();
                 _myBldg = "";
+                _prevSim = ""; _lastReactSim = ""; _awaitFinalFrom = ""; _heldForGone = ""; _staleHoldLoggedFor = ""; _readyPendingVia = "";   // H-HANDOFF-1 step 11
+                try { CustomerHandoff.Reset(); } catch { }
+                try { CustomerEntrySync.ClearHandedOff(); } catch { }
                 try { SkipPaceBodies.RestoreAll(); } catch { }   // D-SKIPPACE-1: leaving the building / session end - no body keeps a scaled speed
                 if (_followerHere) { try { IndoorCustomerSpawner.EnableCustomersSpawn(); } catch { } }
                 _followerHere = false;
@@ -123,7 +153,12 @@ namespace BigAmbitionsMP
                 }
                 if (MPServer.IsRunning) HostElectionTick();
                 TrackMyBuilding();
+                HandoffWaitTick();       // H-HANDOFF-1 step 5: a take-over waiting for the old simulator's Final
                 SimulatorStreamTick();
+                HandoffStreamTick();     // H-HANDOFF-1 (ruling a): visit rows on change, <= 1/s
+#if BAMP_DEV
+                try { if (_myBldg.Length > 0) CustomerHandoff.ArmTick(_followerHere ? 0 : LiveCustomerCount, _puppets.Count); } catch { }
+#endif
                 UpdatePuppets();
                 TickWarpHolds();
                 ChurnTick();
@@ -324,6 +359,9 @@ namespace BigAmbitionsMP
             // re-ship exactly once per episode, mirroring the cache's lifecycle.
             _looksSent.Clear();
             _myBldg = cur;
+            // H-HANDOFF-1 step 11: the hand-off state belongs to the building I was in.
+            _prevSim = ""; _lastReactSim = ""; _awaitFinalFrom = ""; _heldForGone = ""; _staleHoldLoggedFor = ""; _readyPendingVia = "";
+            try { CustomerHandoff.OnBuildingChanged(cur); } catch { }
             ReactToAuthority();
         }
 
@@ -332,18 +370,29 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(_myBldg)) return;
             _authority.TryGetValue(_myBldg, out var sim);
             bool follow = !string.IsNullOrEmpty(sim) && sim != MPConfig.PlayerId;
+            // H-HANDOFF-1: was I this building's simulator until now? Only then is there a crowd of mine to hand
+            // over (a player who just walked in and follows has only his own entry spawns, not the shop's crowd).
+            bool wasSim = _lastReactSim == MPConfig.PlayerId;
+            _lastReactSim = sim ?? "";
+            if (follow) _prevSim = sim ?? "";
             if (follow && !_followerHere)
             {
                 _followerHere = true;
+                _awaitFinalFrom = "";
                 _rigDiagLogged = false;   // one rig-diagnostic line per follow session (P-PUPPET-RIG)
-                try { IndoorCustomerSpawner.DisableCustomersSpawn(); } catch { }
+                // H-HANDOFF-1 step 1 (batch 27): DisableCustomersSpawn used to run HERE, before the swap - and its
+                // CleanCustomers (IndoorCustomerSpawner.cs:309-314 -> :122-133) released every live customer, so the
+                // loop below always met an empty list ("0 native(s) swapped") and no body was ever handed over in
+                // place. It now runs AFTER the loop, and each body's visit row is captured before its release.
                 // Round-43 SMOOTH HANDOFF (losing side): swap each native customer for a puppet AT ITS
                 // POSITION — the new simulator adopts the same entries in place, so its stream picks
                 // these bodies up where they stand instead of despawn/respawn churn.
                 int swapped = 0, dropped = 0;
+                var finalRows = new List<CustomerVisitRow>();
+                BuildingRegistration? reg = null;
                 try
                 {
-                    var reg = FindReg(_myBldg);
+                    reg = FindReg(_myBldg);
                     var mine = new List<Customer>(IndoorCustomerSpawner.Customers);
                     foreach (var c in mine)
                     {
@@ -353,6 +402,10 @@ namespace BigAmbitionsMP
                         float yaw = c.transform.eulerAngles.y;
                         var (held, heldFill) = HeldStateOf(c);
                         var look = CaptureLook(c.tpc);
+                        if (!c.isPlayer && !id.StartsWith("i", StringComparison.Ordinal))
+                        {
+                            try { var vr = CustomerHandoff.Capture(c, id); if (vr != null) finalRows.Add(vr); } catch { }
+                        }
                         try { c.ReleaseCustomer(); } catch { }
                         if (!id.StartsWith("i", StringComparison.Ordinal) && !_puppets.ContainsKey(id))
                         {
@@ -371,64 +424,546 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch { }
+                try { IndoorCustomerSpawner.DisableCustomersSpawn(); } catch { }   // step 1: after the swap (see above)
                 Plugin.Logger.LogInfo($"[Customers] following '{sim}' in '{_myBldg}' — spawner suppressed; {swapped} native(s) swapped to puppets in place{(dropped > 0 ? $", {dropped} without identity dropped" : "")}.");
+                if (wasSim) CustomerHandoff.SendFinal(_myBldg, reg, finalRows, "authority");
             }
             else if (!follow && _followerHere)
             {
-                _followerHere = false;
-                try { IndoorCustomerSpawner.EnableCustomersSpawn(); } catch { }
-                // Round-43 SMOOTH HANDOFF (gaining side): adopt each puppet's schedule entry as a REAL
-                // customer AT the puppet's position — bodies stay put, the AI resumes its routine from
-                // there (a mid-checkout customer re-approaches; the agreed settle behavior). Puppets
-                // whose entry can't be found locally walk out (the churn fallback).
-                int adopted = 0, walked = 0;
-                var regNow = FindReg(_myBldg);
-                var keys = new List<string>(_puppets.Keys);
-                foreach (var key in keys)
+                // H-HANDOFF-1 step 5: the old simulator's Final snapshot is what makes the adoption resume each
+                // visit. When it has not arrived yet and that player is still connected (the booking player
+                // walked in: the old simulator only learns of the change from this same broadcast; or it is
+                // walking out and its exit Final is still in flight), stay a follower - spawner off, rows still
+                // applied, nothing streamed - until it arrives (OnFinalReceived), that player disconnects or has
+                // been outside for AwaitLeftGrace, authority moves elsewhere, or AwaitFinalTimeout passes
+                // (HandoffWaitTick). A disconnected simulator is not waited for: its stream rows are all there is.
+                if (_awaitFinalFrom.Length > 0 || _readyPendingVia.Length > 0) return;   // already waiting (an authority resend)
+                if (_prevSim.Length > 0 && _prevSim != MPConfig.PlayerId && !CustomerHandoff.HasFreshFinal(_prevSim)
+                    && CustomerHandoff.InLobby(_prevSim))
                 {
-                    var pup = _puppets[key];
-                    if (AdoptPuppetAsNative(regNow, key, pup))
+                    _awaitFinalFrom = _prevSim;
+                    _awaitSince = Time.unscaledTime;
+                    Plugin.Logger.LogInfo($"[Handoff] simulator for '{_myBldg}' is me now - waiting for the final snapshot from '{_prevSim}' before adopting {_puppets.Count} cop(ies).");
+                    return;
+                }
+                TakeOver(CustomerHandoff.HasFreshFinal(_prevSim) ? "final" : "no-final");
+            }
+        }
+
+        /// <summary>H-HANDOFF-1 step 5, every frame: the fallback floor of a waiting take-over.</summary>
+        private static void HandoffWaitTick()
+        {
+            // The simulator I follow DISCONNECTED: no Final can come, and the host's election reacts only after its
+            // disconnect bookkeeping (a save, T-HANDOFF2-20260926-203637: every copy had timed out and walked out
+            // first, "0 puppet(s) adopted"). Freeze the copies once, so the take-over adopts them from the stream rows.
+            if (_followerHere && _prevSim.Length > 0 && _heldForGone != _prevSim && !CustomerHandoff.InLobby(_prevSim))
+            {
+                _heldForGone = _prevSim;
+                HoldForHandoff(null, _prevSim, "its simulator disconnected");
+            }
+            // Fold R0: a take-over waiting for this interior to finish loading - polled here, every frame, on the
+            // game's own state (IndoorReady), never a timer. The copies stay held until it runs.
+            if (_readyPendingVia.Length > 0)
+            {
+                try
+                {
+                    if (!_followerHere || !IAmSimulatorFor(_myBldg))
                     {
+                        Plugin.Logger.LogInfo($"[Handoff] dropped the take-over waiting for the interior of '{_myBldg}' - authority moved on.");
+                        _readyPendingVia = "";
+                        return;
+                    }
+                    if (IndoorReady())
+                    {
+                        string pv = _readyPendingVia;
+                        if (pv != "final" && CustomerHandoff.HasFreshFinal(_prevSim)) pv = "final";
+                        TakeOver(pv);
+                        return;
+                    }
+                    float hnow = Time.unscaledTime;
+                    foreach (var hp in _puppets.Values)
+                        if (hp != null && hp.holdUntil < hnow + 2f) hp.holdUntil = hnow + 2f;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] wait tick: {ex.Message}"); _readyPendingVia = ""; }
+                return;
+            }
+            if (_awaitFinalFrom.Length == 0) return;
+            try
+            {
+                if (!_followerHere || !IAmSimulatorFor(_myBldg))
+                {
+                    Plugin.Logger.LogInfo($"[Handoff] stopped waiting for '{_awaitFinalFrom}' in '{_myBldg}' - authority moved on.");
+                    _awaitFinalFrom = "";
+                    return;
+                }
+                float waited = Time.unscaledTime - _awaitSince;
+                if (CustomerHandoff.HasFreshFinal(_awaitFinalFrom)) TakeOver("final");
+                else if (!CustomerHandoff.InLobby(_awaitFinalFrom)) TakeOver("left");
+                else if (waited > AwaitLeftGrace && !CustomerHandoff.PlayerInside(_awaitFinalFrom, _myBldg)) TakeOver("left");
+                else if (waited > AwaitFinalTimeout) TakeOver("timeout");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] wait tick: {ex.Message}"); _awaitFinalFrom = ""; }
+        }
+
+        /// <summary>H-HANDOFF-1: the simulator I follow sent its Final - it streams nothing more, and the election
+        /// that makes a new simulator can take several seconds (T-HANDOFF1-20260926-202315: a vehicle exit plus an
+        /// autosave; every copy had timed out and walked out, "0 puppet(s) adopted"). The copies it names stay
+        /// where they are (a walk-out already started is stopped) for HandoffHoldSeconds, so the take-over
+        /// adopts them in place.</summary>
+        private const float HandoffHoldSeconds = 20f;
+        internal static void HoldForHandoff(List<CustomerVisitRow>? rows, string from, string why = "final received")
+        {
+            try
+            {
+                if (!_followerHere || string.IsNullOrEmpty(from) || from != _prevSim) return;
+                float now = Time.unscaledTime;
+                int held = 0, stopped = 0;
+                // rows == null: every copy (a disconnect names none).
+                var ids = new List<string>();
+                if (rows != null) { foreach (var r in rows) if (r != null && !string.IsNullOrEmpty(r.Id)) ids.Add(r.Id); }
+                else ids.AddRange(_puppets.Keys);
+                foreach (var id in ids)
+                {
+                    if (!_puppets.TryGetValue(id, out var pup) || pup.go == null) continue;
+                    pup.holdUntil = now + HandoffHoldSeconds;
+                    pup.lastSeen = now;
+                    if (pup.leaving) { pup.leaving = false; pup.target = pup.go.transform.position; stopped++; }
+                    held++;
+                }
+                Plugin.Logger.LogInfo($"[Handoff] holding {held} cop(ies) in place for the take-over ({stopped} walk-out(s) stopped) - {why}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] hold: {ex.Message}"); }
+        }
+
+        /// <summary>H-HANDOFF-1 step 4: a Final arrived (CustomerHandoff.Apply) - complete a take-over waiting for it.</summary>
+        internal static void OnFinalReceived(string pid)
+        {
+            try
+            {
+                if (_awaitFinalFrom.Length > 0 && pid == _awaitFinalFrom && _followerHere && IAmSimulatorFor(_myBldg))
+                    TakeOver("final");
+                else if (_readyPendingVia.Length > 0 && pid == _prevSim) _readyPendingVia = "final";   // fold R0: it runs at ready
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] final received: {ex.Message}"); }
+        }
+
+        /// <summary>The gaining side of a hand-off (was the inline branch of ReactToAuthority).</summary>
+        private static void TakeOver(string via)
+        {
+            // Fold R0: never adopt into an interior that is still loading - SpawnCustomer places each body at an exit
+            // zone and warps its NavMeshAgent, which fails with no navmesh under it. Wait for the game's own
+            // "entered" state; HandoffWaitTick completes this take-over.
+            if (!IndoorReady())
+            {
+                if (_readyPendingVia.Length == 0)
+                    Plugin.Logger.LogInfo($"[Handoff] take-over of '{_myBldg}' ({via}) waits for this interior to finish loading - {_puppets.Count} cop(ies) held.");
+                _readyPendingVia = via;
+                _awaitFinalFrom = "";
+                return;
+            }
+            _readyPendingVia = "";
+            string from = _prevSim;
+            _awaitFinalFrom = "";
+            _followerHere = false;
+            // Round-43 SMOOTH HANDOFF (gaining side): adopt each puppet's schedule entry as a REAL
+            // customer AT the puppet's position — bodies stay put, the AI resumes its routine from
+            // there (a mid-checkout customer re-approaches; the agreed settle behavior). Puppets
+            // whose entry can't be found locally walk out (the churn fallback).
+            // H-HANDOFF-1: each copy with a visit row from the old simulator resumes that visit (step 6), and
+            // the copies are adopted in the source's QUEUE ORDER (spot 0 first, not queued last) so re-queueing
+            // bodies take their places in the same order.
+            int adopted = 0, walked = 0, withState = 0, leaving = 0, matched = 0, bodyOnly = 0, noCopy = 0, unmarked = 0, reopened = 0;
+            int fee0 = CustomerHandoff.FeeSuppressed, comp0 = CustomerHandoff.ComplaintSuppressed;
+            // Fold K6 (2026-09-26): what became of every id this take-over looked at - adopted / bodyOnly / spawned /
+            // leaving / refused:<reason> - for the accounting line below (every Final row must be accounted for).
+            var outcome = new Dictionary<string, string>();
+            try
+            {
+                var regNow = FindReg(_myBldg);
+                // Fold K4: a hand-off mark is spent only for a customer this machine really has back (adopted) or whose
+                // order is already booked here; a refused customer that is NOT booked goes back to the native spawner.
+                var spent = new HashSet<string>();
+                var refusedOpen = new List<string>();
+                var todo = new List<(string key, CustomerVisitRow? v)>();
+                foreach (var k in _puppets.Keys) todo.Add((k, CustomerHandoff.RowFrom(k, from)));
+                todo.Sort((a, b) => SpotKey(a.v).CompareTo(SpotKey(b.v)));
+                foreach (var (key, v) in todo)
+                {
+                    if (!_puppets.TryGetValue(key, out var pup)) continue;
+                    if (AdoptPuppetAsNative(regNow, key, pup, v, out bool st, out bool lv, out bool mt, out bool bo))
+                    {
+                        if (bo) bodyOnly++;
                         try { if (pup.heldGo != null) UnityEngine.Object.Destroy(pup.heldGo); } catch { }
                         try { if (pup.go != null) UnityEngine.Object.Destroy(pup.go); } catch { }
                         _puppets.Remove(key);
                         adopted++;
+                        if (st) withState++;
+                        if (lv) leaving++;
+                        if (st && mt) matched++;
+                        spent.Add(key);
+                        outcome[key] = bo ? "bodyOnly" : (lv ? "leaving" : "adopted");
                     }
-                    else { StartLeaving(pup); walked++; }
+                    else
+                    {
+                        StartLeaving(pup); walked++;
+                        if (_adoptBooked) spent.Add(key); else refusedOpen.Add(key);
+                        outcome[key] = "refused:" + _adoptWhy;
+                    }
                 }
-                Plugin.Logger.LogInfo($"[Customers] native mode in '{_myBldg}' — spawner restored; {adopted} puppet(s) adopted in place{(walked > 0 ? $", {walked} walking out (no local entry)" : "")}.");
+                var handled = new HashSet<string>();
+                foreach (var t in todo) handled.Add(t.key);
+                // Fold F5: a Final row with NO copy here (its copy timed out, or never streamed to this machine) used
+                // to be dropped - the visit lost, the entry later respawned fresh. It is spawned at the entrance
+                // WITH its state, when the entry is still this machine's to spawn (not consumed here, or one this
+                // machine handed off itself).
+                // Fold K6 (rig run T-HANDOFF2-20260926-213941 leg 2: 12 rows, 8 vanished): a visit is over when the
+                // customer is LEAVING, not when the order is completed - a gym order is completed at the door
+                // (GymCustomer.Init -> PayEntranceFee -> CompleteOrder) while the workout goes on. Only leaving rows
+                // are skipped; the money side stays exactly-once inside AdoptPuppetAsNative.
+                if (from.Length > 0)
+                    foreach (var r in CustomerHandoff.FinalRowsFrom(from))
+                    {
+                        if (r == null || string.IsNullOrEmpty(r.Id) || handled.Contains(r.Id)) continue;
+                        if (r.Leaving) { outcome[r.Id] = "leaving"; continue; }
+                        handled.Add(r.Id);
+                        if (AdoptPuppetAsNative(regNow, r.Id, null, r, out bool st2, out bool lv2, out bool mt2, out bool bo2))
+                        {
+                            adopted++; noCopy++;
+                            if (bo2) bodyOnly++;
+                            if (st2) withState++;
+                            if (lv2) leaving++;
+                            if (st2 && mt2) matched++;
+                            spent.Add(r.Id);
+                            outcome[r.Id] = bo2 ? "bodyOnly" : (lv2 ? "leaving" : "spawned");
+                        }
+                        else
+                        {
+                            if (_adoptBooked) spent.Add(r.Id); else refusedOpen.Add(r.Id);
+                            outcome[r.Id] = "refused:" + _adoptWhy;
+                        }
+                    }
+                // Fold F4: the booking machine has these customers back - a hand-off mark it set for one of them is
+                // spent (a partner forward for it would now be a second booking). Every one goes into the till ledger.
+                // Fold K4: ONLY the ones adopted or already booked; before, a refused customer's mark was cleared too
+                // and that visit was lost.
+                bool booksNow = false;
+                try { booksNow = regNow != null && MergerFlip.BooksHere(regNow); } catch { }
+                if (booksNow)
+                {
+                    foreach (var id in handled) CustomerHandoff.LedgerAdd(id, regNow);
+                    foreach (var id in spent)
+                        if (CustomerEntrySync.UnmarkHandedOff(id, "adopted back by the machine that keeps the books")) unmarked++;
+                }
+                // Fold K4: a refused, NOT booked customer this machine handed off: its entry was consumed here when it
+                // was first spawned and no body carries it now - opened again, so the native spawner brings it back.
+                foreach (var id in refusedOpen)
+                {
+                    try
+                    {
+                        if (!CustomerEntrySync.IsHandedOff(id)) continue;
+                        var e = CustomerEntrySync.TryFindEntry(regNow, id);
+                        if (e == null || !e.completed) continue;
+                        e.completed = false;
+                        reopened++;
+                        outcome.TryGetValue(id, out var oc);
+                        Plugin.Logger.LogInfo($"[Handoff] {id}: {oc} and not booked - its entry is open again, the native spawner brings that customer back.");
+                    }
+                    catch (Exception rx) { Plugin.Logger.LogWarning($"[Handoff] reopen {id}: {rx.Message}"); }
+                }
+                // Fold K6: every row of the Final accounted for: adopted + bodyOnly + spawned + leaving + refused = rows.
+                if (from.Length > 0)
+                {
+                    try
+                    {
+                        var finalRows = CustomerHandoff.FinalRowsFrom(from);
+                        if (finalRows.Count > 0)
+                        {
+                            int nA = 0, nB = 0, nS = 0, nL = 0, nR = 0, noWhy = 0, unacc = 0, rows = 0;
+                            var whys = new Dictionary<string, int>();
+                            foreach (var r in finalRows)
+                            {
+                                if (r == null || string.IsNullOrEmpty(r.Id)) continue;
+                                rows++;
+                                if (!outcome.TryGetValue(r.Id, out var oc)) { unacc++; continue; }
+                                if (oc == "adopted") nA++;
+                                else if (oc == "bodyOnly") nB++;
+                                else if (oc == "spawned") nS++;
+                                else if (oc == "leaving") nL++;
+                                else
+                                {
+                                    nR++;
+                                    string why = oc.StartsWith("refused:", StringComparison.Ordinal) ? oc.Substring(8) : "";
+                                    if (why.Length == 0) noWhy++;
+                                    else { whys.TryGetValue(why, out var wn); whys[why] = wn + 1; }
+                                }
+                            }
+                            bool ok = unacc == 0 && noWhy == 0 && nA + nB + nS + nL + nR == rows;
+                            var wl = new List<string>();
+                            foreach (var kv in whys) wl.Add($"{kv.Key} x{kv.Value}");
+                            Plugin.Logger.LogInfo($"[Handoff] final rows accounted @{_myBldg} from '{from}': rows={rows} adopted={nA} bodyOnly={nB} spawned={nS} leaving={nL} refused={nR} noReason={noWhy} unaccounted={unacc} accounted={(ok ? "ok" : "BAD")}{(wl.Count > 0 ? " (refused: " + string.Join("; ", wl) + ")" : "")}.");
+                        }
+                    }
+                    catch (Exception ax) { Plugin.Logger.LogWarning($"[Handoff] accounting: {ax.Message}"); }
+                }
             }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] take-over: {ex.Message}"); }
+            try { IndoorCustomerSpawner.EnableCustomersSpawn(); } catch { }   // step 5: spawning back on AFTER the adoption
+            CustomerHandoff.ConsumeFinal(from);
+            LastAdopted = adopted; LastWithState = withState; LastLeaving = leaving; LastWalked = walked; LastMatched = matched;
+            LastAdoptFrom = from; LastAdoptVia = via;
+            Plugin.Logger.LogInfo($"[Customers] native mode in '{_myBldg}' — spawner restored; {adopted} puppet(s) adopted in place ({withState} with state, {leaving} leaving, {walked} walking out) from '{from}' via {via}; {bodyOnly} body-only (order already booked), {noCopy} spawned without a copy, {unmarked} hand-off mark(s) cleared, {reopened} refused entr(ies) reopened.");
+            if (withState > 0 || via != "no-final")
+                Plugin.Logger.LogInfo($"[Handoff] adopt: fee suppressed={CustomerHandoff.FeeSuppressed - fee0} complaint suppressed={CustomerHandoff.ComplaintSuppressed - comp0} progress matched={matched}/{withState}.");
+        }
+
+        /// <summary>Fold R0: the game's own "this interior is in": BuildingManager.EnterBuildingCoroutine
+        /// (:549-621) sets enteringBuilding at its start and clears it only after LoadBuilding, LoadItems, the move
+        /// to the spawn point, onEnterBuilding, DelayedEnterBuildingActions and the fade-in - and it is the
+        /// building this machine tracks.</summary>
+        private static bool IndoorReady()
+        {
+            try
+            {
+                if (!BuildingManager.IsInsideBuilding) return false;
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || bm.enteringBuilding) return false;
+                var r = bm.buildingRegistration;
+                return r != null && GameStateReader.AddressKey(r) == _myBldg;
+            }
+            catch { return false; }
+        }
+
+        private static int SpotKey(CustomerVisitRow? v) => v == null || v.Spot < 0 ? int.MaxValue : v.Spot;
+
+        /// <summary>H-HANDOFF-1 (ruling a): the continuous visit-row stream, only while I simulate here.</summary>
+        private static void HandoffStreamTick()
+        {
+            if (string.IsNullOrEmpty(_myBldg) || _awaitFinalFrom.Length > 0 || _followerHere) return;
+            if (!IAmSimulatorFor(_myBldg) || _myBldg == CustomerHandoff.StoppedStreamingFor) return;
+            CustomerHandoff.StreamTick(_myBldg, _captureForStream);
+        }
+        private static readonly Func<(BuildingRegistration? reg, List<CustomerVisitRow> rows)> _captureForStream = () =>
+        {
+            var reg = FindReg(_myBldg);
+            return (reg, CaptureLiveRows(reg));
+        };
+
+        /// <summary>H-HANDOFF-1: a visit row for every live customer with a cross-machine id (the exit snapshot
+        /// and the stream; the authority swap captures inline, just before each release).</summary>
+        internal static List<CustomerVisitRow> CaptureLiveRows(BuildingRegistration? reg)
+        {
+            var rows = new List<CustomerVisitRow>();
+            try
+            {
+                foreach (var c in IndoorCustomerSpawner.Customers)
+                {
+                    if (c == null || c.isPlayer) continue;
+                    string id = RowIdOf(c, reg);
+                    if (id.StartsWith("i", StringComparison.Ordinal)) continue;
+                    var r = CustomerHandoff.Capture(c, id);
+                    if (r != null) rows.Add(r);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] capture live: {ex.Message}"); }
+            return rows;
         }
 
         /// <summary>Round-43: spawn the puppet's schedule entry as a real customer and move the body to
         /// the puppet's spot. Uses the game's own (private) SpawnCustomer(CustomerEntry).</summary>
         private static readonly HashSet<string> _outOnce = new();   // pids whose building read "" on the last election pass (HIGH-1)
 
-        private static bool AdoptPuppetAsNative(BuildingRegistration? reg, string entryId, Puppet pup)
+        /// <summary>Folds K4/K6: why the last AdoptPuppetAsNative refused, and whether that customer's order is
+        /// already booked on this machine (then its hand-off mark is spent even though no body was adopted).</summary>
+        private static string _adoptWhy = "";
+        private static bool _adoptBooked;
+
+        /// <summary>Fold K6: an order that holds nothing but entrance-fee lines - a gym visit, completed at the door
+        /// while the workout goes on (the native hourly pass can append a second fee line: still fee-only).</summary>
+        private static bool FeeOnly(List<Entities.OrderEntry>? l, string fee)
         {
+            if (string.IsNullOrEmpty(fee) || l == null || l.Count == 0) return false;
+            foreach (var e in l) if (e == null || e.itemName != fee) return false;
+            return true;
+        }
+
+        /// <summary>Fold K1: a detached copy of a booked order for the adopted body - Customer.Init (:197-200 the demand
+        /// score) and SelfServiceCustomer.Init (:12 a basket-less shop REPLACES the item list with one random item)
+        /// write the order they are handed, and a booked order sits in the till (IndoorCustomerSpawner.cs:266-272
+        /// hands the entry's own Order to the body).</summary>
+        private static Order CloneOrder(Order o)
+        {
+            var c = new Order
+            {
+                timestamp = o.timestamp, completed = o.completed, customerServiceSkill = o.customerServiceSkill,
+                cleanliness = o.cleanliness, customerDemandScore = o.customerDemandScore,
+            };
+            c.entries = new List<Entities.OrderEntry>();
+            if (o.entries != null)
+                foreach (var e in o.entries)
+                    if (e != null)
+                        c.entries.Add(new Entities.OrderEntry
+                        {
+                            itemName = e.itemName, price = e.price, wholesalePrice = e.wholesalePrice, available = e.available,
+                            priceAccceptable = e.priceAccceptable, paid = e.paid, processed = e.processed,
+                        });
+            c.customerDemandTypes = o.customerDemandTypes != null ? new List<string>(o.customerDemandTypes) : new List<string>();
+            return c;
+        }
+
+        private static string OrderSig(Order? o)
+        {
+            if (o == null) return "none";
+            int n = 0, paid = 0; float total = 0f;
+            if (o.entries != null) foreach (var e in o.entries) if (e != null) { n++; total += e.price; if (e.paid) paid++; }
+            return $"items={n} paid={paid} total=${total:F2} completed={o.completed} score={o.customerDemandScore:F2}";
+        }
+
+        private static bool AdoptPuppetAsNative(BuildingRegistration? reg, string entryId, Puppet? pup, CustomerVisitRow? v,
+                                                out bool withState, out bool leftNow, out bool matched, out bool bodyOnly)
+        {
+            withState = false; leftNow = false; matched = false; bodyOnly = false;
+            _adoptWhy = ""; _adoptBooked = false;
             try
             {
-                if (pup.go == null || entryId.StartsWith("i", StringComparison.Ordinal)) return false;
+                if (pup != null && pup.go == null) { _adoptWhy = "copy has no body"; return false; }
+                if (entryId.StartsWith("i", StringComparison.Ordinal)) { _adoptWhy = "local-only id"; return false; }
                 var entry = CustomerEntrySync.TryFindEntry(reg, entryId);
-                if (entry == null) return false;
+                if (entry == null) { _adoptWhy = "entry not in this machine's table (claimed by a forward, or rotated)"; return false; }
+                if (entry.order == null) { _adoptWhy = "entry has no order"; return false; }
+                // Fold F5: no copy (pup == null) - spawned only from a row, and only when the entry is still this
+                // machine's to spawn: not consumed here, or consumed by a body this machine handed off itself.
+                if (pup == null && v == null) { _adoptWhy = "no visit row"; return false; }
+                if (pup == null && entry.completed && !CustomerEntrySync.IsHandedOff(entryId)) { _adoptWhy = "entry consumed on this machine"; return false; }
+                string fee = "";
+                try { fee = BusinessTypeHelper.GetEntranceFeeNameForBusinessType(InstanceBehavior<BuildingManager>.Instance.businessType) ?? ""; } catch { }
+                // Fold F2 (2026-09-26): on the machine that keeps the books, an order that is already DONE here or
+                // already IN THE TILL (the owner's hourly pass booked it while he was outside - RetailBusinessSimulator
+                // .ProcessCustomer :229-273 - or his own body finished it) is never overwritten: the row's items and
+                // completed flag are not applied, no fee line is added or charged (a gym's PayEntranceFee would
+                // CompleteOrder it into the till again, Customer.cs:224-238/:385-397). The body alone is adopted.
+                bool books = false;
+                try { books = reg != null && MergerFlip.BooksHere(reg); } catch { }
+                bool booked = false;
+                if (books)
+                {
+                    if (entry.order.completed) booked = true;
+                    else
+                    {
+                        var till = reg!.unprocessedCompletedOrders;
+                        if (till != null) foreach (var t in till) if (ReferenceEquals(t, entry.order)) { booked = true; break; }
+                    }
+                }
+                _adoptBooked = booked;
+                // Fold K6: a booked FEE-ONLY order (a gym visit paid at the door) is a visit that goes on - the body is
+                // adopted and stays. A booked retail order walks out (fold F2 below); with no copy there is no body to
+                // walk, so it is not spawned at all.
+                bool feeOnlyBooked = booked && FeeOnly(entry.order.entries, fee);
+                if (booked && pup == null && !feeOnlyBooked) { _adoptWhy = "order already booked here (retail visit, would only walk out)"; return false; }
+                bodyOnly = booked;
                 // NOT guarded on entry.completed, deliberately: that flag means 'consumed by the spawner on this
                 // machine' (native sets it at spawn, paid or not), so it is true for every live shopper this machine
-                // ever spawned. A sale this machine already BOOKED cannot reach here: the owner's forward-adopt
-                // removes the claimed entry from the table, so TryFindEntry above returns null.
+                // ever spawned. A sale this machine already BOOKED through a forward cannot reach here: the owner's
+                // forward-adopt removes the claimed entry from the table, so TryFindEntry above returns null.
+                //
+                // H-HANDOFF-1 step 6: load the old simulator's visit row BEFORE the spawn, so the native Init reads
+                // it: the visit clock (Customer.SetCurrentTimeState :593-611 and the subclasses read
+                // customerEntry.spawnTime - the "already in action" branches resume the visit), the order's items
+                // with their done/paid flags, and completed. The item list is changed IN PLACE and the Order is
+                // never replaced: EntryIdForOrder finds an entry by the order REFERENCE (CustomerEntrySync.cs:141).
+                // SelfServiceCustomer.Init (:9-14) then only reorders a basket shop's list, or keeps one item of a
+                // basket-less shop's single-item list - which is the source's own item. No patch needed.
+                bool feeInSnapshot = false, recharge = false;
+                if (v != null)
+                {
+                    try
+                    {
+                        if (v.SpawnMin >= 0f) entry.spawnTime = new BigAmbitions.DayNightCycle.Timestamp(v.SpawnMin);
+                        var ord = entry.order;
+                        if (ord != null && !booked)   // fold F2: a booked order is left exactly as it is
+                        {
+                            if (v.Entries != null && v.Entries.Count > 0 && ord.entries != null)
+                            {
+                                ord.entries.Clear();
+                                foreach (var ve in v.Entries)
+                                    if (ve != null)
+                                        ord.entries.Add(new Entities.OrderEntry
+                                        {
+                                            itemName = ve.ItemName ?? "", price = ve.Price, wholesalePrice = ve.WholesalePrice,
+                                            available = ve.Available, priceAccceptable = ve.Acceptable, paid = ve.Paid, processed = ve.Processed,
+                                        });
+                            }
+                            ord.completed = v.Completed;
+                            if (fee.Length > 0 && ord.entries != null)
+                                foreach (var oe in ord.entries) if (oe != null && oe.itemName == fee) { feeInSnapshot = true; break; }
+                            // Fold F3: the fee line in a row does not mean the fee was CHARGED - a merged member's
+                            // machine adds it without keeping the books. When this machine books and the row's
+                            // source did not, the fee is charged HERE once.
+                            // Fold K5 (2026-09-26): not by re-running the native check - that judges the fee with a NEW
+                            // random citizen (IndoorCustomerSpawner.cs:293-306) and can refuse a shopper already inside.
+                            // The snapshot's own fee line stays, paid as the snapshot says; it is booked with the order
+                            // (a gym's PayEntranceFee still runs and completes a fee-only order into the till here).
+                            if (feeInSnapshot && books && !CustomerHandoff.RowSourceBooks(entryId))
+                            {
+                                recharge = true;
+                                CustomerHandoff.FeeRecharged++;
+                            }
+                        }
+                        withState = !booked;
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] apply visit {entryId}: {ex.Message}"); }
+                }
                 int before = IndoorCustomerSpawner.Customers.Count;
                 _spawnCustomerM ??= HarmonyLib.AccessTools.Method(typeof(IndoorCustomerSpawner), "SpawnCustomer",
                     new[] { typeof(AI.Customers.CustomerEntries.CustomerEntry) });
-                if (_spawnCustomerM == null) return false;
-                _spawnCustomerM.Invoke(null, new object[] { entry });
-                entry.completed = true;   // consumed — the regular spawner must not spawn it again
+                if (_spawnCustomerM == null) { withState = false; bodyOnly = false; _adoptWhy = "SpawnCustomer not found"; return false; }
+                // H-HANDOFF-1 step 7: Init runs synchronously inside SpawnCustomer (IndoorCustomerSpawner.cs:272), so
+                // this scope covers the entrance fee, PayEntranceFee and the arrival complaint (CustomerHandoff).
+                // F2: never add or charge a fee on an order that is already booked. F3/K5: the fee CHECK is suppressed
+                // whenever the snapshot holds the fee line; the gym's fee PAYMENT only when the source charged it or
+                // no money is kept here.
+                bool suppressCheck = booked || (withState && feeInSnapshot);
+                bool suppressPay = booked || (withState && feeInSnapshot && !recharge);
+                // Fold K1 (2026-09-26): a body-only adoption hands the body a DETACHED COPY of the booked order, so the
+                // native Init cannot re-value the Order object that sits in the till; the entry keeps its own Order.
+                Order? tillOrder = null;
+                string tillBefore = "";
+                if (booked)
+                {
+                    tillOrder = entry.order;
+                    tillBefore = OrderSig(tillOrder);
+                    entry.order = CloneOrder(tillOrder);
+                }
+                CustomerHandoff.BeginAdopt(withState || booked, suppressCheck, suppressPay);
+                try { _spawnCustomerM.Invoke(null, new object[] { entry }); }
+                finally
+                {
+                    CustomerHandoff.EndAdopt();
+                    if (tillOrder != null) entry.order = tillOrder;
+                }
+                if (tillOrder != null)
+                {
+                    string tillAfter = OrderSig(tillOrder);
+                    Plugin.Logger.LogInfo($"[Handoff] body-only {entryId}: booked order before {tillBefore} -> after {tillAfter} ({(tillAfter == tillBefore ? "untouched" : "CHANGED")}); the body carries a detached copy{(feeOnlyBooked ? " - fee-only visit, it stays" : "")}.");
+                }
                 var list = IndoorCustomerSpawner.Customers;
-                if (list.Count <= before) return false;   // spawn refused (capacity etc.)
+                if (list.Count <= before) { withState = false; bodyOnly = false; _adoptWhy = "spawn refused (capacity or fee)"; return false; }   // the entry stays unconsumed
+                // Consumed — the regular spawner must not spawn it again. H-HANDOFF-1 (C3): set only AFTER the
+                // success check; before, a refused spawn still consumed the entry and that shopper never came.
+                entry.completed = true;
                 var c = list[list.Count - 1];
                 if (c == null) return true;
+                // Fold F2, rig run T-HANDOFF1-20260926-212003: a body whose order is already BOOKED walks out even
+                // when its row was not leaving - adopted in place it went back to the till and Customer.CompleteOrder
+                // (:385-397, no completed check) put the SAME order in the till a second time (tilldupes +2).
+                // Fold K6: except a fee-only (gym) visit - its order was completed at the door and the visit goes on.
+                bool leave = (booked && !feeOnlyBooked) || (v != null && v.Leaving && (withState || booked));
+                if (pup != null && pup.go != null)   // fold F5: a body without a copy stays where SpawnCustomer put it (the entrance)
+                {
                 Vector3 pos = pup.go.transform.position;
                 // Round-44: HOLD the position — the native spawn-init repositions the body + assigns
                 // objectives over the next frames; a single warp raced it (field: teleport + bolting).
-                _warpHolds.Add((c, pos, Time.unscaledTime + 0.75f));
+                // (H-HANDOFF-1: not for a body that walks straight out - the hold would drag it back.)
+                if (!leave) _warpHolds.Add((c, pos, Time.unscaledTime + 0.75f));
                 try
                 {
                     var ag = c.tpc != null ? c.tpc.navmeshAgent : null;
@@ -438,10 +973,54 @@ namespace BigAmbitionsMP
                 catch { c.transform.position = pos; }
                 // Round-44: the adopted native KEEPS the puppet's look (looks survive handoffs).
                 if (pup.look != null) ApplyLookTo(c.tpc, pup.look);
+                }
                 _custEntryIds[c.GetInstanceID()] = (c.order, entryId);   // identity continuity for my own stream
+                if (withState && v != null)
+                {
+                    // H-HANDOFF-1 step 6: the SAME person - SpawnCustomer drew a random citizen
+                    // (IndoorCustomerSpawner.cs:255) and the Init Postfix recorded it for the price check
+                    // (BusinessPatches.cs Patch_Customer_Init_HelperComplaints), so both are overwritten.
+                    // SetAppearance is left alone (GymCustomer keeps characterDataAtStart from it); the look
+                    // above already dresses the body.
+                    try
+                    {
+                        if (!string.IsNullOrEmpty(v.NationalID) || !string.IsNullOrEmpty(v.Name))
+                        {
+                            c.citizenData = new AI.Citizens.CitizenData
+                            {
+                                NationalID = v.NationalID ?? "", Name = v.Name ?? "", Age = v.Age, Neighbourhood = v.Neighbourhood ?? "",
+                                SocialClass = (AI.Citizens.SocialClass)v.SocialClass, Gender = (BigAmbitions.Characters.Gender)v.Gender,
+                            };
+                            if (c.order != null) CustomerEntrySync.RecordCitizen(c.order, c.citizenData);
+                        }
+                    }
+                    catch (Exception cx) { Plugin.Logger.LogWarning($"[Handoff] citizen {entryId}: {cx.Message}"); }
+                    try { matched = SameProgress(c.order, v); } catch { }
+                }
+                if (leave)
+                {
+                    {
+                        // Already walking out on the source: its order was finished there, so nothing goes back on
+                        // a shelf and nothing is billed (Customer.Leave :309 and ForceFinishOrder :366 both skip a
+                        // completed order) - completed is forced for a source that could not set it.
+                        try { if (c.order != null) c.order.completed = true; c.Leave(); leftNow = true; }
+                        catch (Exception lx) { Plugin.Logger.LogWarning($"[Handoff] leave {entryId}: {lx.Message}"); }
+                    }
+                }
                 return true;   // ([AdoptProbe] retired 2026-07-07 — adoption field-confirmed healthy)
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] adopt puppet: {ex.Message}"); return false; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] adopt puppet: {ex.Message}"); _adoptWhy = "error: " + ex.Message; return false; }
+        }
+
+        /// <summary>H-HANDOFF-1 readout: the adopted body's order reached exactly the visit row's progress
+        /// (item count, items done, completed).</summary>
+        private static bool SameProgress(Order? o, CustomerVisitRow v)
+        {
+            if (o == null || o.entries == null || v == null) return false;
+            int n = 0, k = 0, vn = 0, vk = 0;
+            foreach (var e in o.entries) if (e != null) { n++; if (e.processed) k++; }
+            foreach (var e in v.Entries) if (e != null) { vn++; if (e.Processed) vk++; }
+            return n == vn && k == vk && o.completed == v.Completed;
         }
 
         /// <summary>Round-44: keep adopted bodies pinned while the native spawn-init settles.</summary>
@@ -553,6 +1132,13 @@ namespace BigAmbitionsMP
         {
             if (string.IsNullOrEmpty(_myBldg)) return;
             if (!_authority.TryGetValue(_myBldg, out var sim) || sim != MPConfig.PlayerId) return;
+            // H-HANDOFF-1 step 5: while waiting for the old simulator's Final this machine has no customers of its
+            // own yet, and an EMPTY batch would walk every copy on the other machine out. Same after an EXIT Final
+            // (CustomerHandoff.StoppedStreamingFor): the interior is being torn down but the election has not
+            // moved yet.
+            if (_awaitFinalFrom.Length > 0) return;
+            if (_readyPendingVia.Length > 0) return;   // fold R0: same - a take-over is due once the interior is ready
+            if (_myBldg == CustomerHandoff.StoppedStreamingFor) return;
             if (Time.unscaledTime < _nextStreamAt) return;
             _nextStreamAt = Time.unscaledTime + StreamInterval;
 
@@ -1265,6 +1851,33 @@ namespace BigAmbitionsMP
             catch { }
         }
 
+        /// <summary>Fold D1 (manager decision 2026-09-26, run T-HANDOFF2-20260926-221137 leg 3): a simulator whose game
+        /// is closing stops streaming positions many seconds before its disconnect is seen (15 s there), and every copy
+        /// walked out on staleness first - "0 adopted via no-final". A copy whose simulator is STILL CONNECTED and sent a
+        /// visit row (stream or Final) for it within StaleHoldSeconds stays in place. The hold ends when (a) that
+        /// simulator disconnects - HandoffWaitTick holds every copy and the take-over adopts from the stream rows;
+        /// (b) its position rows resume (lastSeen fresh again); (c) authority moves elsewhere; or (d) StaleHoldSeconds
+        /// pass without a row - the ordinary stale walk-out.</summary>
+        private const float StaleHoldSeconds = 30f;
+        private static bool StaleHoldApplies(string id, float now)
+        {
+            try
+            {
+                if (!_followerHere || string.IsNullOrEmpty(_myBldg) || string.IsNullOrEmpty(id)) return false;
+                if (!_authority.TryGetValue(_myBldg, out var sim) || string.IsNullOrEmpty(sim) || sim == MPConfig.PlayerId) return false;   // (c)
+                if (!CustomerHandoff.InLobby(sim)) return false;                                                                             // (a)
+                float age = CustomerHandoff.RowAgeFrom(id, sim);
+                if (age > StaleHoldSeconds) return false;                                                                                     // (d)
+                if (_staleHoldLoggedFor != _myBldg)
+                {
+                    _staleHoldLoggedFor = _myBldg;
+                    Plugin.Logger.LogInfo($"[Handoff] holding stale cop(ies) in place in '{_myBldg}' - simulator '{sim}' still connected, visit row {age:0.0} s old (until it disconnects, its rows resume, authority moves, or {StaleHoldSeconds:0} s without a row).");
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
         private static void UpdatePuppets()
         {
             if (_puppets.Count == 0) return;
@@ -1275,7 +1888,8 @@ namespace BigAmbitionsMP
                 var pup = kv.Value;
                 if (pup.go == null) { dead.Add(kv.Key); continue; }
                 // Stale stream (simulator disconnect / hitch) → walk out rather than freeze mid-stride.
-                if (!pup.leaving && now - pup.lastSeen > 2.5f) { _leaveStale++; _leaveStaleTotal++; StartLeaving(pup); }
+                // Fold D1: not while the simulator is still connected and sent a visit row for this copy lately.
+                if (!pup.leaving && now - pup.lastSeen > 2.5f && now > pup.holdUntil && !StaleHoldApplies(kv.Key, now)) { _leaveStale++; _leaveStaleTotal++; StartLeaving(pup); }
 
                 var tr = pup.go.transform;
                 Vector3 to = pup.target - tr.position;

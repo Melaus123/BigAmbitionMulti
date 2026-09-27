@@ -343,6 +343,82 @@ namespace BigAmbitionsMP
         /// <summary>Idempotency ledger — every forwarded EntryId is processed at most once per session.</summary>
         private static readonly HashSet<string> _processedForwards = new();
 
+        // H-HANDOFF-1 step 8 (batch 27): entries whose live customer THIS (booking) machine handed to a partner
+        // at a hand-off. The spawner marked each one completed here when it spawned the body, and the body is
+        // gone without completing, so the partner's sale for it is the only one there will ever be - a forward
+        // for such an entry is claimable ONCE instead of rejected as "already consumed". Filled by
+        // CustomerHandoff.SendFinal (only for orders not yet complete); cleared by CustomerPuppets.Reset (session /
+        // scene). A mark ends when it is used ONCE: the partner's forward claims it, the owner's own hourly pass
+        // books the entry first (fold F1 - first booking wins, CustomerHandoff.HourlyPassEnd), or this machine
+        // adopts that customer back (fold F4, CustomerPuppets.TakeOver).
+        // Fold F6 (2026-09-26): a mark no longer dies on the day roll - a 23:50 hand-off paid at 00:05 is still
+        // accepted once. It lives 24 game-hours from when it was set (value = absolute game minute).
+        private static readonly Dictionary<string, int> _handedOff = new();
+        private const int HandedOffLifeMinutes = 24 * 60;
+        internal static int HandedOffCount { get { HandedOffPrune(); return _handedOff.Count; } }
+        private static int GameMinuteNow()
+        {
+            try { var t = TimeHelper.Now(); return t.Day * 1440 + t.Hour * 60 + (int)t.Minute; } catch { return 0; }
+        }
+        private static void HandedOffPrune()
+        {
+            try
+            {
+                if (_handedOff.Count == 0) return;
+                int now = GameMinuteNow();
+                List<string>? old = null;
+                foreach (var kv in _handedOff) if (now - kv.Value > HandedOffLifeMinutes) (old ??= new List<string>()).Add(kv.Key);
+                if (old != null) foreach (var k in old) _handedOff.Remove(k);
+            }
+            catch { }
+        }
+        internal static void MarkHandedOff(string entryId)
+        {
+            try { if (string.IsNullOrEmpty(entryId)) return; HandedOffPrune(); _handedOff[entryId] = GameMinuteNow(); } catch { }
+        }
+        internal static bool IsHandedOff(string entryId)
+        {
+            try { if (string.IsNullOrEmpty(entryId)) return false; HandedOffPrune(); return _handedOff.ContainsKey(entryId); } catch { return false; }
+        }
+        /// <summary>Folds F1/F4: the mark is spent - a later forward for that entry is rejected as before.</summary>
+        internal static bool UnmarkHandedOff(string entryId, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(entryId) || !_handedOff.Remove(entryId)) return false;
+                Plugin.Logger.LogInfo($"[Handoff] hand-off mark cleared: {entryId} ({why}).");
+                return true;
+            }
+            catch { return false; }
+        }
+        internal static void ClearHandedOff() { try { _handedOff.Clear(); } catch { } }
+
+        /// <summary>Fold F1: the marked entries of <paramref name="reg"/> whose spawn hour is <paramref name="hour"/> -
+        /// the ones an hourly pass for that hour will book (RetailBusinessSimulator.CacheCustomersForCurrentHour
+        /// :200-212 takes every entry of the hour, completed or not). null = this building holds no mark at all;
+        /// an empty list = it holds marks, none of this hour.</summary>
+        internal static List<KeyValuePair<CustomerEntry, string>>? HandedOffEntriesAt(BuildingRegistration? reg, int hour)
+        {
+            try
+            {
+                if (reg == null || _handedOff.Count == 0) return null;
+                HandedOffPrune();
+                var table = Table();
+                if (table == null || !table.TryGetValue(reg.Address, out var entries) || entries == null) return null;
+                List<KeyValuePair<CustomerEntry, string>>? r = null;
+                bool any = false;
+                foreach (var e in entries)
+                {
+                    if (e == null || !_ownerIds.TryGetValue(e, out var id) || !_handedOff.ContainsKey(id)) continue;
+                    any = true;
+                    r ??= new List<KeyValuePair<CustomerEntry, string>>();
+                    if (e.spawnTime != null && e.spawnTime.Hour == hour) r.Add(new KeyValuePair<CustomerEntry, string>(e, id));
+                }
+                return any ? r : null;
+            }
+            catch { return null; }
+        }
+
         // Recheck B1 (helper side): live citizen per order, recorded at Customer.Init so the forward
         // at Order.Pay can judge price acceptability without a scene sweep. Weak-keyed — orders die
         // with their customers.
@@ -394,8 +470,10 @@ namespace BigAmbitionsMP
                 }
 
                 // Claim. Completed on MY table = my spawner consumed that customer (I'm inside; my live
-                // body will/did complete it natively) — reject so it counts exactly once.
-                bool claimed = false, known = false;
+                // body will/did complete it natively) — reject so it counts exactly once. H-HANDOFF-1 step 8:
+                // EXCEPT an entry whose body this machine handed to the partner at a hand-off (_handedOff) -
+                // that body left here without completing, so the partner's sale is the only one; claimed once.
+                bool claimed = false, known = false, handedOff = false;
                 CustomerEntry? claimedEntry = null;
                 var table = Table();
                 List<CustomerEntry>? entries = null;
@@ -404,15 +482,23 @@ namespace BigAmbitionsMP
                     {
                         if (e == null || !_ownerIds.TryGetValue(e, out var id) || id != p.EntryId) continue;
                         known = true;
-                        if (e.completed) { _processedForwards.Add(p.EntryId); }
-                        else             { e.completed = true; claimed = true; claimedEntry = e; }
+                        if (e.completed)
+                        {
+                            HandedOffPrune();
+                            if (_handedOff.Remove(p.EntryId)) { claimed = true; claimedEntry = e; handedOff = true; }
+                            else _processedForwards.Add(p.EntryId);
+                        }
+                        else { e.completed = true; claimed = true; claimedEntry = e; }
                         break;
                     }
                 if (known && !claimed)
                 {
                     Plugin.Logger.LogInfo($"[Business] forwarded order {p.EntryId} rejected — entry already consumed on the owner's machine (counts natively).");
+                    CustomerHandoff.NoteForward(p.EntryId, null);   // H-HANDOFF-1 till ledger (rig oracle)
                     return;
                 }
+                if (handedOff)
+                    Plugin.Logger.LogInfo($"[Business] forwarded order {p.EntryId} accepted (handed off) — this machine gave that customer to '{p.PlayerId}' at a hand-off without completing it.");
                 // Recheck B2 (double-book): the owner's hourly abstract simulator processes every entry
                 // of the hour with NO completed filter (RetailBusinessSimulator.ProcessAllCustomersFromThisHour
                 // :171-186, ProcessCustomer :207+), so a claimed-but-listed entry was booked AGAIN at the
@@ -445,12 +531,37 @@ namespace BigAmbitionsMP
                 // anyway (a helper's synced copy can lag a re-price), so price here from it, and
                 // take the cost basis from the shelf slot the unit is actually deducted from.
                 // The forwarded Price is kept only as an audit figure in the log line below.
-                int sold = 0, dropped = 0, refused = 0;
+                int sold = 0, dropped = 0, refused = 0, feeLines = 0;
                 float forwardedTotal = 0f, repricedTotal = 0f;
+                // Fold K3 (2026-09-26): a PAID entrance-fee line rides in the sale of a fee shop (the fee was judged and
+                // paid at the door - IndoorCustomerSpawner.TryToProcessEntranceFeeEntryToOrder :284-307). It is no
+                // shelf item, so DeductDisplayStock never finds it: it was dropped, and a fee-only sale was dropped
+                // whole as 'no coverable items' while its entry was consumed above. It is booked at the OWNER's price,
+                // without touching stock and without a paper bag.
+                string feeName = "";
+                try { feeName = BusinessTypeHelper.GetEntranceFeeNameForBusinessType(BusinessTypeHelper.GetData(reg)) ?? ""; } catch { }
                 if (p.Items != null)
                     foreach (var it in p.Items)
                     {
                         if (it == null || string.IsNullOrEmpty(it.ItemName)) continue;
+                        if (feeName.Length > 0 && it.ItemName == feeName)
+                        {
+                            try
+                            {
+                                float feePrice;
+                                try { feePrice = ItemHelper.GetPrice(feeName, reg); } catch { feePrice = it.Price; }
+                                if (feePrice <= 0f) feePrice = it.Price;
+                                forwardedTotal += it.Price; repricedTotal += feePrice;
+                                o.entries.Add(new OrderEntry
+                                {
+                                    itemName = feeName, price = feePrice, wholesalePrice = 0f,
+                                    available = true, priceAccceptable = true, paid = true, processed = true,
+                                });
+                                sold++; feeLines++;
+                            }
+                            catch (Exception fx) { Plugin.Logger.LogWarning($"[Business] forwarded fee line {p.EntryId}: {fx.Message}"); }
+                            continue;
+                        }
                         // Recheck B1: the helper judged this item too expensive for that customer —
                         // native returns it to the shelf unsold (ReturnUnacceptablePriceItems), so it
                         // is neither deducted nor booked here.
@@ -488,8 +599,9 @@ namespace BigAmbitionsMP
                 bool bagged = false;
                 try
                 {
-                    bool needsBags = true;
-                    try { needsBags = BusinessTypeHelper.GetData(reg)?.HasTag(BigAmbitions.Tags.TagRef.Businesstag.customersneedpaperbags) ?? true; } catch { }
+                    bool needsBags = sold > feeLines;   // fold K3: a fee-only sale takes no bag
+                    if (needsBags)
+                        try { needsBags = BusinessTypeHelper.GetData(reg)?.HasTag(BigAmbitions.Tags.TagRef.Businesstag.customersneedpaperbags) ?? true; } catch { }
                     if (needsBags)
                         foreach (var kv in reg.itemInstances)
                         {
@@ -508,6 +620,7 @@ namespace BigAmbitionsMP
 
                 reg.unprocessedCompletedOrders.Add(o);
                 _processedForwards.Add(p.EntryId);
+                CustomerHandoff.NoteForward(p.EntryId, o);   // H-HANDOFF-1 till ledger (rig oracle)
                 float orderRevenue = 0f;
                 foreach (var oe in o.entries) if (oe != null && oe.paid) orderRevenue += oe.price;
                 _adoptedTally.TryGetValue(p.AddressKey, out var tally);
@@ -516,7 +629,7 @@ namespace BigAmbitionsMP
                 _adoptedSession[p.AddressKey] = adoptedSoFar + 1;
                 BuildingStorageSync.OwnerBusinessTail(reg);
                 InteriorSync.PushOwnedBuildingNow(p.AddressKey);
-                Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s) ${repricedTotal:F2} (forwarded at ${forwardedTotal:F2}){(bagged ? " +bag" : "")}{(refused > 0 ? $" ({refused} refused on price)" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}."
+                Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s) ${repricedTotal:F2} (forwarded at ${forwardedTotal:F2}){(bagged ? " +bag" : "")}{(feeLines > 0 ? $" (incl. {feeLines} entrance-fee line(s), no stock)" : "")}{(refused > 0 ? $" ({refused} refused on price)" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}."
                     + (claimedEntry != null ? $" [PROBE:P-HELPER-DOUBLEBOOK] entry retired from the live table; {leftThisHour} unserved left this hour." : (known ? "" : " [PROBE:P-HELPER-DOUBLEBOOK] entry unknown — nothing to retire; quota relies on the adopted order's timestamp.")));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] adopt forwarded order: {ex.Message}"); }
