@@ -3094,6 +3094,13 @@ namespace BigAmbitionsMP
                     return MPRivalAttention.TimelineLever(arg);
                 }
 
+                // H-RIVALPARITY-1 part D (2026-09-27): the rent block per player - find / gate / try / force / host.
+                case "rivalrent":
+                {
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    return MPRivalAttention.RentLever(arg);
+                }
+
                 // -- H-RIVALPARITY-1 item C levers (user-approved 2026-09-27). ALL READ-ONLY. -----------
                 // Do a CLIENT's shops count as sellers in the HOST's market/demand calculation?  The game builds
                 // its seller count per (item, neighbourhood) in ProductMarketHelper.FillProvidersDictionary

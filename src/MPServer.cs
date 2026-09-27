@@ -1333,6 +1333,16 @@ namespace BigAmbitionsMP
         // CONCURRENT: written on the poll thread (RivalsStatsRequest handler),
         // enumerated on the main thread (rival-fairness patches, snapshot build).
         private static readonly ConcurrentDictionary<string, RivalsStatsRequestPayload> _clientSelfStats = new();
+        /// <summary>H-RIVALPARITY-1 D F8: when each player's latest self-report arrived (UTC).</summary>
+        private static readonly ConcurrentDictionary<string, DateTime> _clientSelfStatsAt = new();
+
+        /// <summary>Real seconds since this player's latest self-report arrived (MaxValue = none).</summary>
+        internal static double SelfReportAgeSeconds(string pid)
+        {
+            try { if (!string.IsNullOrEmpty(pid) && _clientSelfStatsAt.TryGetValue(pid, out var at)) return (DateTime.UtcNow - at).TotalSeconds; }
+            catch { }
+            return double.MaxValue;
+        }
 
         /// <summary>H-RIVALPARITY-1 A (P3): a player's latest self-reported business rows (empty if none). The payload
         /// object is replaced WHOLE on every report, never mutated, so reading its list on the main thread is safe.</summary>
@@ -1463,7 +1473,8 @@ namespace BigAmbitionsMP
             BuildingRealEstateOwners.Clear(); // bought-real-estate ledger — same per-session lifecycle (the load path re-seeds it from the manifest); was leaking across a new game and locking fresh-world buildings un-buyable
             CashByStableId.Clear();   // owners/cash; the load path re-seeds from the manifest
             _characterNamesByPlayerId.Clear();   // per-session: a returning player must not collide with a stale name
-            _clientSelfStats.Clear();            // …or stale self-reported stats (feeds rival-fairness targeting)
+            _clientSelfStats.Clear();
+            _clientSelfStatsAt.Clear();            // …or stale self-reported stats (feeds rival-fairness targeting)
             // H-HOSTPORT-1 (bundle 20260924-001424): a busy UDP port used to end hosting right here - BEFORE the
             // Steam listener below, which needs no UDP port. Now: the configured port, then the next ten; the first
             // that binds hosts. If none binds, the session still hosts through Steam (invites / Steam joins).
@@ -2195,7 +2206,22 @@ namespace BigAmbitionsMP
                 {
                     var tr = env.GetPayload<TakeoverPayload>();
                     var pidCapture = senderPid;
-                    if (tr != null) GameStatePatcher.EnqueueOnMainThread(() => MPTakeover.HostHandleRequest(pidCapture, tr));
+                    if (tr != null) GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        // H-RIVALPARITY-1 D: the game's own overtake gate (BizManPresentation.SendOvertakeOffer :751-764, the
+                        // special rival owning the building is active) never runs for a client - MPTakeover.ClientOfferPrefix
+                        // replaces that flow - so the authority applies it here, for the REQUESTING player's key.
+                        try
+                        {
+                            if (MPRivalAttention.HostRefusesFor(GameStatePatcher.FindRegistration(tr.AddressKey ?? ""), tr.AddressKey ?? "", pidCapture, "overtake", false, out var _))
+                            {
+                                SendHubTo(pidCapture, MessageType.TakeoverResult, new TakeoverPayload { AddressKey = tr.AddressKey ?? "", Accepted = false, MinPrice = 0f });
+                                return;
+                            }
+                        }
+                        catch (Exception ox) { Plugin.Logger.LogWarning($"[RivalSync] overtake rival gate for '{tr.AddressKey}': {ox.Message}"); }
+                        MPTakeover.HostHandleRequest(pidCapture, tr);
+                    });
                     break;
                 }
 
@@ -2650,6 +2676,7 @@ namespace BigAmbitionsMP
                         && SenderIs(req.PlayerId, senderPid, env.Type))
                     {
                         _clientSelfStats[req.PlayerId] = req;
+                        _clientSelfStatsAt[req.PlayerId] = DateTime.UtcNow;   // H-RIVALPARITY-1 D F8
                         string nameForClient = _characterNamesByPlayerId.TryGetValue(req.PlayerId, out var nm) && !string.IsNullOrWhiteSpace(nm) ? nm : req.PlayerId;
                         var selfInfo = new RivalStatsInfo
                         {
@@ -5316,22 +5343,18 @@ namespace BigAmbitionsMP
                     // thing: the rival RUNNING the shop inside the building (a rival's shop may sit in a
                     // building another rival owns), and the mod also stamps PLAYER pids into that field -
                     // so it is the wrong field for this gate and would deny rents it should not.
+                    // H-RIVALPARITY-1 D (2026-09-27): "active" is PER PLAYER now - the gate reads the REQUESTING player's
+                    // key (MPRivalAttention.IsActiveFor: the host key = native state, any other key its own), so a
+                    // rival's building is blocked only for the players the rival is active for - the same answer the
+                    // client's own gate gives from its per-peer R3 state. Logs "[RivalSync] rent ... refused/allowed for <key>".
                     try
                     {
                         var rivalReg = GameStatePatcher.FindRegistration(req.AddressKey);
-                        if (BigAmbitions.Rivals.RivalsHelper.IsFeatureEnabled && rivalReg != null && !rivalReg.BuildingOwnedByPlayer)
+                        if (MPRivalAttention.HostRefusesFor(rivalReg, req.AddressKey, senderPid, "rent", true, out var _))
                         {
-                            var buildingRival = BigAmbitions.Rivals.RivalsHelper.GetSpecialRival(rivalReg.buildingOwnerRivalId);
-                            string activeRivalId = "";
-                            try { activeRivalId = buildingRival?.rivalData?.id ?? ""; } catch { }
-                            if (buildingRival != null && activeRivalId.Length > 0
-                                && BigAmbitions.Rivals.RivalsHelper.GetSpecialRivalState(activeRivalId)?.isActive == true)
-                            {
-                                req.DenyReason = "owned by an active rival";
-                                Send(peer, MessageEnvelope.Create(MessageType.RentDeny, "host", req));
-                                Plugin.Logger.LogInfo($"[RivalSync] rent of '{req.AddressKey}' by '{senderPid}' refused at the host: the building's rival '{activeRivalId}' is active.");
-                                return;
-                            }
+                            req.DenyReason = "owned by an active rival";
+                            Send(peer, MessageEnvelope.Create(MessageType.RentDeny, "host", req));
+                            return;
                         }
                     }
                     catch (Exception rvx) { Plugin.Logger.LogWarning($"[RivalSync] rent rival gate for '{req.AddressKey}': {rvx.Message}"); }
@@ -6939,6 +6962,7 @@ namespace BigAmbitionsMP
                         }
                     if (grantsRemoved > 0)
                         Plugin.Logger.LogInfo($"[Merger] permissions removed between the new co-members: {grantsRemoved} grant(s) (the merger replaces them; nothing comes back at unmerge).");
+                    var rivalKeyMove = MPRivalAttention.BeginMembershipChange(futureMembers);   // H-RIVALPARITY-1 D F3: the members' rival keys join the company key
                     // D4-3 UNION, one host call, no observer can see a member in two groups: neither side in a
                     // company mints a pair; one side in a company takes the other in; BOTH in companies merges
                     // them into the OLDER group (its id, its founder, its join order first) and pools the wallets.
@@ -6969,6 +6993,7 @@ namespace BigAmbitionsMP
                         // the validator asks the store what is still answerable rather than guessing per case.
                         MergerSync.StoreUnion(group, other);
                         MarkMergerStateAuthoritative();   // X3: a UNION is this process deciding the merger state
+                        MPRivalAttention.EndMembershipChange(rivalKeyMove, "merge");
                         // r2 (review #3): cooldowns keyed on the absorbed id follow it to the survivor.
                         var rekey = new List<string>();
                         foreach (var ck in _mergerCooldown.Keys) if (ck.EndsWith("|" + other, StringComparison.Ordinal)) rekey.Add(ck);
@@ -7002,6 +7027,7 @@ namespace BigAmbitionsMP
                         break;
                     }
                     MarkMergerStateAuthoritative();   // X3: a company was FORMED or GROWN here — the live store is now the truth
+                    MPRivalAttention.EndMembershipChange(rivalKeyMove, "merge");
                     PruneOffers("unanswerable after a merger accept");
                     RefreshGrantsAndBroadcast();   // carries the pruned offer table with the new membership
                     break;
@@ -7122,7 +7148,9 @@ namespace BigAmbitionsMP
                     else if (lset != null)
                         foreach (var mem in lset) if (!string.IsNullOrEmpty(mem)) exStables.Add(mem);
 
+                    var rivalKeyMove = MPRivalAttention.BeginMembershipChange(lset != null ? new List<string>(lset) { s } : new List<string> { s });   // H-RIVALPARITY-1 D F3
                     MergerSync.StoreRemove(s);
+                    MPRivalAttention.EndMembershipChange(rivalKeyMove, dissolves ? "dissolve" : "leave");
                     MarkMergerStateAuthoritative();   // X3: a leave — and the DISSOLVE it may be — is this process deciding the merger state, so the empty store it can leave behind must be persisted, not kept off disk
                     foreach (var xp in exPids)
                     {
@@ -10727,15 +10755,17 @@ namespace BigAmbitionsMP
 
         /// <summary>H-RIVALPARITY-1 A (per-peer R3, design (g)): the rival state ONE player should hold - the world's rows
         /// (defeat, running attacks) with that player's OWN key's isActive / sent keys / completed ids (MPRivalAttention).
-        /// The host's key - and a player the host cannot key yet - gets the native state unchanged.</summary>
+        /// The host's key gets the native state unchanged; a player the host cannot key gets inactive, empty rows (part D F7).</summary>
         public static List<CbRivalState> BuildRivalStatesFor(string pid)
         {
             var list = BuildRivalStates();
             try
             {
-                if (!IsRunning || string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) return list;
-                string key = MPRivalAttention.KeyOfPid(pid);
-                if (key.Length == 0 || key == MPRivalAttention.HostKey) return list;
+                if (!IsRunning || pid == MPConfig.PlayerId) return list;
+                // H-RIVALPARITY-1 D F7: a peer with no name / no known stable id has NO key - its rows read inactive with
+                // empty lists (OverlayFor of an unknown key), never the host's native row.
+                string key = string.IsNullOrEmpty(pid) ? "" : MPRivalAttention.KeyOfPid(pid);
+                if (key.Length > 0 && key == MPRivalAttention.HostKey) return list;
                 foreach (var r in list) MPRivalAttention.OverlayFor(key, r);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalSync] BuildRivalStatesFor '{pid}': {ex.Message}"); }

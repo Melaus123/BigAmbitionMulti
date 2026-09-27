@@ -242,7 +242,7 @@
       "cmd": "rivalsig ${clientPid}",
       "expect_result": "^OK rivalsig ",
       "capture": {
-        "sigC": "^OK rivalsig (.*)$"
+        "sigC": "^OK rivalsig .*(ju1yVbREcE2B5ymg6q5tyA==\\|\\d\\d\\|\\d+)\\|s"
       },
       "note": "the per-peer signature the host expects on Client1"
     },
@@ -250,8 +250,8 @@
       "seq": 30,
       "role": "c",
       "cmd": "rivalsig",
-      "expect_result": "^OK rivalsig ${sigC}$",
-      "note": "Client1 holds exactly its own key's state (sent keys + completed ids applied in place)"
+      "expect_result": "^OK rivalsig .*${sigC}\\|s(?=[^|]*_entrance)(?=[^|]*_activation)",
+      "note": "Client1 holds its own key's state for the rival: the host's active / defeated / defense part exactly, and AT LEAST the key's sent keys (entrance + activation). Part D F1 (2026-09-27) made the client's apply ADD-ONLY, so keys the client recorded itself (or its served save already held) stay - an exact whole-signature match no longer holds by design"
     },
     {
       "seq": 31,
@@ -263,7 +263,7 @@
       "seq": 32,
       "role": "c",
       "cmd": "rivalattn ${rival}",
-      "expect_result": "active=1 sent=2 completed=0"
+      "expect_result": "active=1 sent=[2-9]\\d* completed=0"
     },
     {
       "seq": 33,

@@ -1,0 +1,357 @@
+{
+  "id": "T-RIVALS-D",
+  "title": "H-RIVALPARITY-1 part D (2026-09-27): the rent block per player - a rival's building is blocked only for the players the rival is active for, on both machines (client gate = its per-key R3 state; host refusal reads the REQUESTING player's key); F1: a client-recorded rent-refusal key survives the next per-peer R3 update; solo host unchanged",
+  "preconditions": "Fixture save1 (host melaus, client Client1; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA==). Dev build with part D levers (rivalrent find|gate|try|force|host, rivalattn setactive). NOTHING is saved: the forced client rent is refused and rolled back; the host's native state is set back at the end.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "rival": "ju1yVbREcE2B5ymg6q5tyA=="
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[RivalAttn\\] (sweep|tick|step|check|count|snapshot|settle load|host rows|manifest restore|set active|sweep postfix|merged host count|text|key move|defeat)[^\\]]*:",
+    "\\[RivalSync\\] (rent|overtake) rival gate"
+  ],
+  "oracles_report": [
+    "\\[TestDrive\\] .* 'rivalrent ",
+    "\\[TestDrive\\] .* 'rivalattn",
+    "\\[RivalAttn\\] ",
+    "\\[RivalSync\\] (rent|overtake|host rival state published)",
+    "\\[Client\\] Rent DENIED"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "the host's world loads; NO client yet - the SOLO-HOST phase (test 5)"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "mark TEST RIVALSD SOLO",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "rivalattn",
+      "expect_result": "^OK rivalattn host hostKey=p:\\S+ keys=0 firings=0 sig=\\S+ rivals=\\[[^;]*\\]$",
+      "capture": {
+        "hostKey": "hostKey=(\\S+)"
+      },
+      "note": "TEST 5: solo host = the host key only, no mod-path firing"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "rivalrent find ${rival}",
+      "expect_result": "^OK rivalrent find rival=${rival} owned=\\d+ forrent=[1-9]",
+      "capture": {
+        "addr": "first=(.+?) \\["
+      },
+      "note": "a for-rent building the Murray Hill rival OWNS (buildingOwnerRivalId, the field the game's gate reads)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "rivalattn setactive ${hostPid} ${rival} 0",
+      "expect_result": "^OK rivalattn setactive key=${hostKey} rival=${rival} active=0 host=1",
+      "note": "PREMISE: the host key (native state) is NOT active for the rival"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "rivalrent gate ${addr}",
+      "expect_result": "^OK rivalrent gate=allowed .*rival=${rival} free=True",
+      "note": "TEST 5: solo host, rival inactive: the game's own gate lets the host rent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "rivalattn",
+      "expect_result": "^OK rivalattn host hostKey=${hostKey} keys=0 firings=0 ",
+      "note": "TEST 5: still solo, 0 firings"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "sleep_s": 60,
+      "note": "the client is served its save and settles"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 15,
+      "role": "both",
+      "cmd": "mark TEST RIVALSD CLIENT-ACTIVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "^OK rivalattn local pid=${clientPid} rivals=\\[${rival}\\{",
+      "note": "REPORT: the client's starting state (active / sent / rentsent) after the join R3"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "rivalattn floor ${clientPid} ${rival} 3",
+      "expect_result": "^OK rivalattn floor key=p:\\S+ rival=${rival} n=3",
+      "note": "the DEV floor keeps a natural hourly check from deactivating Client1 on its real count during the test"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "rivalattn setactive ${clientPid} ${rival} 1",
+      "expect_result": "^OK rivalattn setactive key=p:\\S+ rival=${rival} active=1 host=0",
+      "capture": {
+        "cKey": "key=(\\S+)"
+      },
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalSync\\] host rival state published: .* -> '${clientPid}' key ",
+          "within_s": 10
+        }
+      ],
+      "note": "Client1 active for the rival, the host not"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "rivalstate",
+      "expect_result": "${rival}:A:",
+      "note": "active on Client1's machine (per-peer R3)"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "rivalstate",
+      "expect_result": "${rival}:-:",
+      "note": "not active on the host's own state"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "rivalrent gate ${addr}",
+      "expect_result": "^OK rivalrent gate=blocked .*rival=${rival} free=True",
+      "note": "TEST 1: the client's own (native) gate blocks"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "rivalrent try ${addr}",
+      "expect_result": "^OK rivalrent try=blocked .*rival=${rival} msg=\\S+",
+      "note": "TEST 1/3: the game's own refusal on the client - RivalsHelper.SendRentBuildingMessage (its monologue records the key on the client)"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "rivalrent force ${addr}",
+      "expect_result": "^OK rivalrent force sent .*localgate=blocked",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalSync\\] rent of '${addr}' by '${clientPid}' refused for ${cKey}: the building's rival '${rival}' is active for that key",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] Rent DENIED for ${addr} ",
+          "within_s": 20
+        }
+      ],
+      "note": "TEST 1: past the local gate, the HOST refuses too, naming Client1's key; the client rolls its optimistic rent back"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "rivalrent gate ${addr}",
+      "expect_result": "free=True",
+      "note": "TEST 1: no change - the building is on the market again on the client"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "rivalrent gate ${addr}",
+      "expect_result": "^OK rivalrent gate=allowed .*free=True",
+      "note": "TEST 1: the HOST renting the same building is allowed (its own gate, rival not active for it); nothing rented"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "rivalrent host ${addr} ${hostPid}",
+      "expect_result": "^OK rivalrent host=allowed ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalSync\\] rent of '${addr}' by '${hostPid}' allowed for ${hostKey}: ",
+          "within_s": 5
+        }
+      ],
+      "note": "TEST 1: the authority's gate for the host's key: allowed"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "sleep_s": 40,
+      "note": "the rent-building monologue plays out on the client and records its key"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "active=1 .*rentsent=1",
+      "note": "TEST 3 premise: the client holds the rent-refusal key it recorded itself"
+    },
+    {
+      "seq": 31,
+      "role": "both",
+      "cmd": "mark TEST RIVALSD REVERSE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "rivalattn floor ${clientPid} ${rival} 0",
+      "expect_result": "^OK rivalattn floor"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "rivalattn setactive ${clientPid} ${rival} 0",
+      "expect_result": "^OK rivalattn setactive key=${cKey} rival=${rival} active=0 host=0",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalSync\\] host rival state published: .* -> '${clientPid}' key ",
+          "within_s": 10
+        }
+      ],
+      "note": "TEST 3: a per-peer R3 update to Client1 (its own key's sent list does NOT hold the rent key)"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "rivalstate",
+      "expect_result": "${rival}:-:",
+      "note": "the update landed: inactive on Client1"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "active=0 .*rentsent=1",
+      "note": "TEST 3 (F1): the key Client1 recorded itself survived the update (add-only) - the monologue cannot replay"
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "cmd": "rivalattn setactive ${hostPid} ${rival} 1",
+      "expect_result": "^OK rivalattn setactive key=${hostKey} rival=${rival} active=1 host=1",
+      "note": "TEST 2: the reverse - the host active, Client1 not"
+    },
+    {
+      "seq": 38,
+      "role": "c",
+      "cmd": "rivalrent gate ${addr}",
+      "expect_result": "^OK rivalrent gate=allowed .*rival=${rival}",
+      "note": "TEST 2: the client's own gate allows"
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "rivalrent host ${addr} ${clientPid}",
+      "expect_result": "^OK rivalrent host=allowed ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalSync\\] rent of '${addr}' by '${clientPid}' allowed for ${cKey}: ",
+          "within_s": 5
+        }
+      ],
+      "note": "TEST 2: the host's authority gate allows Client1 (its key), although the host itself is active"
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "rivalrent gate ${addr}",
+      "expect_result": "^OK rivalrent gate=blocked .*rival=${rival}",
+      "note": "TEST 2: ...while the host's own gate blocks the host"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "rivalattn setactive ${hostPid} ${rival} 0",
+      "expect_result": "^OK rivalattn setactive",
+      "note": "restore the host's native state (nothing is saved)"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "^OK rivalattn host ",
+      "note": "REPORT"
+    },
+    {
+      "seq": 43,
+      "role": "both",
+      "cmd": "mark TEST RIVALSD END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

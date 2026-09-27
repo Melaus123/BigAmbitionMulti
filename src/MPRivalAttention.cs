@@ -175,6 +175,18 @@ namespace BigAmbitionsMP
         }
 
         // ── counting (P3) ───────────────────────────────────────────────────────────────────────
+        /// <summary>Part D F8: an OFFLINE member's self-report rows count only while the report is at most this old
+        /// (real seconds since the host received it). Online members and the host always count.</summary>
+        internal const double OfflineRowsCutoffS = 600.0;
+
+        private static bool RowsCount(string pid)
+        {
+            if (string.IsNullOrEmpty(pid)) return false;
+            if (pid == MPConfig.PlayerId) return true;
+            try { if (MPServer.IsOnlinePid(pid)) return true; } catch { }
+            return MPServer.SelfReportAgeSeconds(pid) <= OfflineRowsCutoffS;
+        }
+
         /// <summary>The key's OWN qualifying shops in the rival's neighbourhood and their weekly income, from the
         /// owners' self-report rows (RivalQualifying = the native GetPlayerValues test run on the owner's machine).
         /// The host's own shops are never counted here - the host key is the native path.</summary>
@@ -190,6 +202,8 @@ namespace BigAmbitionsMP
                 {
                     if (stable == MPConfig.StableId) continue;
                     foreach (var pid in PidsOfStable(stable))
+                    {
+                        if (!RowsCount(pid)) continue;   // part D F8: an offline member's report older than the cut-off
                         foreach (var row in MPServer.SelfReportRows(pid))
                         {
                             if (row == null || !row.RivalQualifying || row.Neighborhood != nb) continue;
@@ -197,6 +211,7 @@ namespace BigAmbitionsMP
                             count++;
                             income += row.WeeklyIncome;
                         }
+                    }
                 }
                 lock (_lock) _extra.TryGetValue(key + "|" + rid, out extra);
             }
@@ -210,7 +225,11 @@ namespace BigAmbitionsMP
         {
             var gi = SaveGameManager.Current;
             if (gi == null) return false;
-            if (ReferenceEquals(gi, _boundGi)) return true;
+            if (ReferenceEquals(gi, _boundGi))
+            {
+                if (_manifestHostRows != null || _migrationPending) SettleLoad();   // part D F4: a settle deferred at the bind
+                return true;
+            }
             lock (_lock)
             {
                 if (_armed)
@@ -226,6 +245,7 @@ namespace BigAmbitionsMP
                 }
                 _boundGi = gi;
             }
+            SettleLoad();   // part D F4: settle at the bind, not at the first sweep - a manifest write in between must not drop the previous host's rows
             return true;
         }
 
@@ -241,6 +261,7 @@ namespace BigAmbitionsMP
                 {
                     _store.Clear(); _planned.Clear(); _pending.Clear(); _extra.Clear();
                     _manifestHostRows = null; _manifestHostKey = ""; _migrationPending = false;
+                    _hostRowsCache = new List<MpRivalAttnEntry>();   // part D F4: the previous world's host rows must never be written for this one
                     var seenKeys = new HashSet<string>(System.StringComparer.Ordinal);
                     if (m?.RivalAttention == null) _migrationPending = true;
                     else
@@ -281,12 +302,28 @@ namespace BigAmbitionsMP
             var list = new List<MpRivalAttnEntry>();
             try
             {
-                if (refreshHost) RefreshHostRowsCache();
+                if (refreshHost) { EnsureBound(); RefreshHostRowsCache(); }   // part D F4: main-thread caller - bind (and settle) first
+                string hkNow = HostKey;
                 lock (_lock)
                 {
                     foreach (var h in _hostRowsCache)
                         list.Add(new MpRivalAttnEntry { Key = h.Key, RivalId = h.RivalId, IsActive = h.IsActive, IsHostKey = true,
                                                         Completed = new List<string>(h.Completed), Sent = new List<string>(h.Sent) });
+                    // part D F4: manifest host rows not settled yet travel on unchanged in meaning - the previous host's
+                    // rows as an ordinary player key (what SettleLoad turns them into), this host's own as host rows
+                    // only while no native read exists.
+                    if (_manifestHostRows != null)
+                    {
+                        bool other = _manifestHostKey != hkNow;
+                        if (other || _hostRowsCache.Count == 0)
+                            foreach (var e in _manifestHostRows)
+                            {
+                                if (e == null) continue;
+                                if (other && _store.ContainsKey(e.Key + "|" + e.RivalId)) continue;
+                                list.Add(new MpRivalAttnEntry { Key = e.Key, RivalId = e.RivalId, IsActive = e.IsActive, IsHostKey = !other, EverCounted = other,
+                                                                Completed = new List<string>(e.Completed ?? new List<string>()), Sent = new List<string>(e.Sent ?? new List<string>()) });
+                            }
+                    }
                     foreach (var kv in _store)
                     {
                         int bar = kv.Key.LastIndexOf('|');
@@ -349,8 +386,15 @@ namespace BigAmbitionsMP
                 }
                 List<MpRivalAttnEntry> hostRows;
                 string mk;
-                lock (_lock) { hostRows = _manifestHostRows; mk = _manifestHostKey; _manifestHostRows = null; }
-                if (hostRows == null || mk == hk) return;
+                lock (_lock) { hostRows = _manifestHostRows; mk = _manifestHostKey; }
+                if (hostRows == null) return;
+                if (mk != hk)
+                {
+                    var gi2 = SaveGameManager.Current;
+                    if (gi2?.specialRivalStates == null || gi2.specialRivalStates.Count == 0) return;   // part D F4: the world's rival states are not loaded yet - settle on the next call (Snapshot keeps the rows meanwhile)
+                }
+                lock (_lock) _manifestHostRows = null;
+                if (mk == hk) return;
                 // A different person hosted when this manifest was written.
                 lock (_lock)
                     foreach (var e in hostRows)
@@ -516,21 +560,60 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    var keys = new List<string>();
-                    lock (_lock)
-                        foreach (var kv in _store)
-                            if (kv.Value.IsActive && kv.Key.EndsWith("|" + rid, System.StringComparison.Ordinal)) keys.Add(kv.Key.Substring(0, kv.Key.Length - rid.Length - 1));
-                    foreach (var k in keys) DeliverOnce(k, rival, rival.timeline?.surrenderMessageKey, "surrender");
-                    lock (_lock)
-                        foreach (var kv in _store)
-                            if (kv.Key.EndsWith("|" + rid, System.StringComparison.Ordinal)) kv.Value.IsActive = false;
-                    Plugin.Logger.LogInfo($"[RivalAttn] rival {rid} surrenders (per-player path, {keys.Count} active key(s)) - the host runs DefeatRival once.");
+                    Plugin.Logger.LogInfo($"[RivalAttn] rival {rid} surrenders (per-player path) - the host runs DefeatRival once; its postfix tells every key that had the rival active.");
                     RivalsHelper.DefeatRival(rd);
                     MPServer.PublishRivalStateIfChanged("rivalattn-surrender");
                 }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] surrender {rid}: {ex.Message}"); }
             });
             return true;
+        }
+
+        /// <summary>Part D F5 (HOST): the rival is defeated - by either path (the native host timeline or the per-player
+        /// replay). EVERY key that had it active gets the surrender text (online members; nobody online = not sent)
+        /// and goes inactive, whether or not a check reached that key in the sweep. Idempotent: a second call finds
+        /// no active key.</summary>
+        internal static void OnRivalDefeated(RivalData rd)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || rd == null) return;
+                string rid = rd.id ?? "";
+                if (rid.Length == 0) return;
+                var nst = RivalsHelper.GetSpecialRivalState(rid);
+                if (nst == null || !nst.isDefeated) return;
+                var sr = RivalsHelper.GetSpecialRival(rid);
+                if (sr == null) return;
+                var keys = new List<string>();
+                lock (_lock)
+                {
+                    foreach (var kv in _store)
+                        if (kv.Value.IsActive && kv.Key.EndsWith("|" + rid, System.StringComparison.Ordinal)) keys.Add(kv.Key.Substring(0, kv.Key.Length - rid.Length - 1));
+                    _planned.RemoveAll(p => p.RivalId == rid);
+                }
+                if (keys.Count == 0) return;
+                var told = new List<string>();
+                foreach (var k in keys)
+                {
+                    if (DeliverOnce(k, sr, sr.timeline?.surrenderMessageKey, "surrender")) told.Add(k);
+                    var st = Get(k, rid, false);
+                    if (st != null) lock (_lock) st.IsActive = false;
+                }
+                Plugin.Logger.LogInfo($"[RivalAttn] rival {rid} defeated: surrender text to {told.Count} of {keys.Count} key(s) that had it active [{string.Join(",", told)}]; all set inactive.");
+                MPServer.PublishRivalStateIfChanged("rivalattn-defeat");
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] defeat: {ex.Message}"); }
+        }
+
+        [HarmonyPatch(typeof(RivalsHelper), "DefeatRival", new[] { typeof(RivalData) })]
+        public static class Patch_DefeatRival_TellEveryKey
+        {
+            static void Postfix(RivalData rival)
+            {
+                if (!MPServer.IsRunning || rival == null) return;
+                try { OnRivalDefeated(rival); }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] defeat postfix: {ex.Message}"); }
+            }
         }
 
         /// <summary>CheckTriggers (:205-239) for a key: same thresholds, same planning times.</summary>
@@ -634,6 +717,200 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── rent block per player (g) - part D ──────────────────────────────────────────────────
+        /// <summary>Is the rival active FOR THIS KEY? The host key reads the native state; any other key its own
+        /// stored state; an empty key (a peer the host cannot key) is never active. Defeated = never active.</summary>
+        internal static bool IsActiveFor(string rivalId, string key)
+        {
+            if (string.IsNullOrEmpty(rivalId) || string.IsNullOrEmpty(key)) return false;
+            try
+            {
+                var nst = RivalsHelper.GetSpecialRivalState(rivalId);
+                if (nst != null && nst.isDefeated) return false;
+                if (key == HostKey) return nst != null && nst.isActive;
+                var st = Get(key, rivalId, false);
+                if (st == null) return false;
+                lock (_lock) return st.IsActive;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>HOST: the authority's copy of the game's rent / overtake rival gate (BizManPresentation.cs:538-551 /
+        /// :751-764: the special rival that owns the BUILDING, active) - read for the REQUESTING player's key.
+        /// Logs one line when the building belongs to a special rival. True = refuse.</summary>
+        internal static bool HostRefusesFor(BuildingRegistration reg, string addressKey, string pid, string via, bool skipPlayerOwned, out string rivalId)
+        {
+            rivalId = "";
+            try
+            {
+                if (reg == null || !RivalsHelper.IsFeatureEnabled) return false;
+                if (skipPlayerOwned && reg.BuildingOwnedByPlayer) return false;
+                var rival = RivalsHelper.GetSpecialRival(reg.buildingOwnerRivalId);
+                rivalId = rival?.rivalData?.id ?? "";
+                if (rivalId.Length == 0) return false;
+                string key = KeyOfPid(pid);
+                bool refuse = IsActiveFor(rivalId, key);
+                Plugin.Logger.LogInfo($"[RivalSync] {via} of '{addressKey}' by '{pid}' {(refuse ? "refused" : "allowed")} for {(key.Length > 0 ? key : "<no key>")}: the building's rival '{rivalId}' is {(refuse ? "active" : "not active")} for that key{(key.Length > 0 && key == HostKey ? " (the host key: native state)" : "")}.");
+                return refuse;
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalSync] {via} rival gate for '{addressKey}': {ex.Message}"); return false; }
+        }
+
+        // ── merged companies (h) - key moves at merge / dissolve (part D F3) ────────────────────
+        internal sealed class KeyMove
+        {
+            public Dictionary<string, string> Before = new Dictionary<string, string>(System.StringComparer.Ordinal);
+            public string HostBefore = "";
+        }
+
+        /// <summary>HOST, BEFORE a merger store change: every named member's key now (store reads only, any thread).</summary>
+        internal static KeyMove BeginMembershipChange(IEnumerable<string> stables)
+        {
+            var mv = new KeyMove();
+            try
+            {
+                mv.HostBefore = HostKey;
+                if (stables != null)
+                    foreach (var s in stables)
+                        if (!string.IsNullOrEmpty(s) && !mv.Before.ContainsKey(s)) mv.Before[s] = KeyOfStable(s);
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] key move begin: {ex.Message}"); }
+            return mv;
+        }
+
+        /// <summary>HOST, AFTER the store change: read the new keys now, move the state on the main thread.</summary>
+        internal static void EndMembershipChange(KeyMove mv, string why)
+        {
+            try
+            {
+                if (mv == null || mv.Before.Count == 0 || !MPServer.IsRunning) return;
+                var after = new Dictionary<string, string>(System.StringComparer.Ordinal);
+                foreach (var s in mv.Before.Keys) after[s] = KeyOfStable(s);
+                string hostAfter = HostKey;
+                bool any = false;
+                foreach (var kv in mv.Before) if (after[kv.Key] != kv.Value) { any = true; break; }
+                if (!any) return;
+                GameStatePatcher.EnqueueOnMainThread(() => ApplyKeyMove(mv, after, hostAfter, why));
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] key move end: {ex.Message}"); }
+        }
+
+        private static State ReadKeyState(string key, string rid, string hostKeyThen)
+        {
+            if (key == hostKeyThen)
+            {
+                var nst = RivalsHelper.GetSpecialRivalState(rid);
+                if (nst == null) return null;
+                return new State { IsActive = nst.isActive && !nst.isDefeated, EverCounted = true,
+                                   Completed = new List<string>(nst.completedTimelineEntryIds ?? new List<string>()),
+                                   Sent = new List<string>(nst.sentMessageKeys ?? new List<string>()) };
+            }
+            var st = Get(key, rid, false);
+            if (st == null) return null;
+            lock (_lock) return new State { IsActive = st.IsActive, CopycatDone = st.CopycatDone, EverCounted = st.EverCounted,
+                                            Completed = new List<string>(st.Completed), Sent = new List<string>(st.Sent) };
+        }
+
+        /// <summary>MERGE: every old key feeding one new key is joined into it (active if any was; completed and sent
+        /// lists joined; planned entries and the DEV floor moved). DISSOLVE: each member's new key gets a copy of
+        /// the company's state; the next check re-counts. The host key's state is the native one (written in place,
+        /// add-only). A key nobody holds any more leaves the store.</summary>
+        private static void ApplyKeyMove(KeyMove mv, Dictionary<string, string> after, string hostAfter, string why)
+        {
+            try
+            {
+                string hostBefore = mv.HostBefore;
+                var sources = new Dictionary<string, List<string>>(System.StringComparer.Ordinal);   // new key -> old keys
+                var targetsOfOld = new Dictionary<string, HashSet<string>>(System.StringComparer.Ordinal);
+                foreach (var kv in mv.Before)
+                {
+                    string oldK = kv.Value, newK = after[kv.Key];
+                    if (oldK == newK || oldK.Length == 0 || newK.Length == 0) continue;
+                    if (!sources.TryGetValue(newK, out var l)) { l = new List<string>(); sources[newK] = l; }
+                    if (!l.Contains(oldK)) l.Add(oldK);
+                    if (!targetsOfOld.TryGetValue(oldK, out var ts)) { ts = new HashSet<string>(System.StringComparer.Ordinal); targetsOfOld[oldK] = ts; }
+                    ts.Add(newK);
+                }
+                if (sources.Count == 0) return;
+                var stillUsed = new HashSet<string>(after.Values, System.StringComparer.Ordinal) { hostAfter };
+                var rivals = new List<string>();
+                foreach (var r in RivalsHelper.GetSpecialRivals()) { string id = r?.rivalData?.id ?? ""; if (id.Length > 0 && !rivals.Contains(id)) rivals.Add(id); }
+
+                foreach (var tgt in sources)
+                {
+                    int rows = 0;
+                    var activeOn = new List<string>();
+                    foreach (var rid in rivals)
+                    {
+                        var parts = new List<State>();
+                        foreach (var oldK in tgt.Value) { var s = ReadKeyState(oldK, rid, hostBefore); if (s != null) parts.Add(s); }
+                        if (parts.Count == 0) continue;
+                        var nst = RivalsHelper.GetSpecialRivalState(rid);
+                        bool defeated = nst != null && nst.isDefeated;
+                        if (tgt.Key == hostAfter)
+                        {
+                            if (nst == null) continue;
+                            bool act = nst.isActive;
+                            if (nst.completedTimelineEntryIds == null) nst.completedTimelineEntryIds = new List<string>();
+                            if (nst.sentMessageKeys == null) nst.sentMessageKeys = new List<string>();
+                            foreach (var p in parts)
+                            {
+                                act |= p.IsActive;
+                                foreach (var c in p.Completed) if (!nst.completedTimelineEntryIds.Contains(c)) nst.completedTimelineEntryIds.Add(c);
+                                foreach (var s in p.Sent) if (!nst.sentMessageKeys.Contains(s)) nst.sentMessageKeys.Add(s);   // in place: the game caches the list
+                            }
+                            if (!defeated) nst.isActive = act;
+                            if (nst.isActive) activeOn.Add(rid);
+                        }
+                        else
+                        {
+                            var st = Get(tgt.Key, rid, true);
+                            lock (_lock)
+                            {
+                                foreach (var p in parts)
+                                {
+                                    st.IsActive |= p.IsActive; st.CopycatDone |= p.CopycatDone; st.EverCounted |= p.EverCounted;
+                                    foreach (var c in p.Completed) if (!st.Completed.Contains(c)) st.Completed.Add(c);
+                                    foreach (var s in p.Sent) if (!st.Sent.Contains(s)) st.Sent.Add(s);
+                                }
+                                if (defeated) st.IsActive = false;
+                                if (st.IsActive) activeOn.Add(rid);
+                            }
+                        }
+                        rows++;
+                    }
+                    string kind = tgt.Value.Count > 1 || tgt.Key.StartsWith("g:", System.StringComparison.Ordinal) ? "merge" : "dissolve";
+                    Plugin.Logger.LogInfo($"[RivalAttn] {kind} ({why}): {string.Join(" + ", tgt.Value)} -> {tgt.Key}{(tgt.Key == hostAfter ? " (host key: native state)" : "")}: {rows} rival row(s) combined, active on [{string.Join(",", activeOn)}].");
+                }
+
+                // Keys nobody holds any more: planned entries / DEV floor follow a single successor; the rows leave the store.
+                lock (_lock)
+                    foreach (var o in targetsOfOld)
+                    {
+                        string oldK = o.Key;
+                        if (stillUsed.Contains(oldK)) continue;
+                        string heir = o.Value.Count == 1 ? new List<string>(o.Value)[0] : "";
+                        if (heir == hostAfter) heir = "";   // the native timeline plans for the host key itself
+                        foreach (var p in _planned)
+                            if (p.Key == oldK) p.Key = heir;
+                        _planned.RemoveAll(p => string.IsNullOrEmpty(p.Key));
+                        var seenPlan = new HashSet<string>(System.StringComparer.Ordinal);
+                        _planned.RemoveAll(p => !seenPlan.Add(p.Key + "|" + p.RivalId + "|" + p.EntryId));   // one per key+entry after the move
+                        _pending.RemoveAll(p => p.Tag != null && p.Tag.StartsWith(oldK + "|", System.StringComparison.Ordinal));
+                        foreach (var ek in new List<string>(_extra.Keys))
+                            if (ek.StartsWith(oldK + "|", System.StringComparison.Ordinal))
+                            {
+                                int v = _extra[ek]; _extra.Remove(ek);
+                                if (heir.Length > 0) { string nk = heir + ek.Substring(oldK.Length); _extra.TryGetValue(nk, out var have); _extra[nk] = System.Math.Max(have, v); }
+                            }
+                        foreach (var sk in new List<string>(_store.Keys))
+                            if (sk.StartsWith(oldK + "|", System.StringComparison.Ordinal)) _store.Remove(sk);
+                    }
+                MPServer.PublishRivalStateIfChanged("rivalattn-" + why);
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] key move ({why}): {ex.GetType().Name}: {ex.Message}"); }
+        }
+
         // ── merged host: co-members' qualifying shops join the native count (h) ──────────────────
         /// <summary>Replaces the pooled Patch_RivalSeesAllPlayers: on the host, a MERGED host key adds only its
         /// co-members' qualifying shops (their own machines' native test) to the game's GetPlayerValues. A host
@@ -656,6 +933,8 @@ namespace BigAmbitionsMP
                     {
                         if (stable == MPConfig.StableId) continue;
                         foreach (var pid in PidsOfStable(stable))
+                        {
+                            if (!RowsCount(pid)) continue;   // part D F8
                             foreach (var row in MPServer.SelfReportRows(pid))
                             {
                                 if (row == null || !row.RivalQualifying || row.Neighborhood != nb) continue;
@@ -665,6 +944,7 @@ namespace BigAmbitionsMP
                                 income += row.WeeklyIncome;
                                 added++;
                             }
+                        }
                     }
                     if (added > 0) __result = (list, income);
                 }
@@ -763,6 +1043,34 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[RivalAttn] DEV: the count for {kx} on {rx.rivalData.id} reads at least {nx} (0 = the real count).");
                     return $"OK rivalattn floor key={kx} rival={rx.rivalData.id} n={nx}";
                 }
+                if (tk.Length >= 1 && tk[0] == "setactive")
+                {
+                    // DEV (part D): `rivalattn setactive <pid> <rival> 0|1` - the key of <pid> reads the rival active / not
+                    // (the host key = the native isActive; any other key its stored state). No text, no timeline step.
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    if (tk.Length != 4 || (tk[3] != "0" && tk[3] != "1")) return "ERR usage: rivalattn setactive <pid> <rival> 0|1";
+                    var ra = FindRival(tk[2]);
+                    if (ra == null) return $"ERR unknown rival '{tk[2]}'";
+                    EnsureBound();
+                    string ka = KeyOfPid(tk[1]);
+                    if (ka.Length == 0) return $"ERR no stable id for '{tk[1]}'";
+                    bool on = tk[3] == "1";
+                    string rida = ra.rivalData.id;
+                    if (ka == HostKey)
+                    {
+                        var nsa = RivalsHelper.GetSpecialRivalState(rida);
+                        if (nsa == null) return $"ERR no native state for '{rida}'";
+                        nsa.isActive = on;
+                    }
+                    else
+                    {
+                        var sa = Get(ka, rida, true);
+                        lock (_lock) { sa.IsActive = on; sa.EverCounted = true; if (!on) _planned.RemoveAll(p => p.Key == ka && p.RivalId == rida); }
+                    }
+                    Plugin.Logger.LogInfo($"[RivalAttn] DEV: rival {rida} set {(on ? "ACTIVE" : "inactive")} for {ka}{(ka == HostKey ? " (host key: native state)" : "")}.");
+                    MPServer.PublishRivalStateIfChanged("rivalattn-dev");
+                    return $"OK rivalattn setactive key={ka} rival={rida} active={(on ? 1 : 0)} host={(ka == HostKey ? 1 : 0)}";
+                }
                 if (tk.Length >= 1 && tk[0] == "sweep")
                 {
                     if (!MPServer.IsRunning) return "ERR host only";
@@ -785,7 +1093,8 @@ namespace BigAmbitionsMP
                         try { var pv = rival.timeline.GetPlayerValues(rival); nc = pv.Item1?.Count ?? 0; ni = pv.Item2; } catch { }
                         int rq = myRows.Count(r => r != null && r.RivalQualifying && r.Neighborhood == nb);
                         var st = RivalsHelper.GetSpecialRivalState(rival.rivalData.id);
-                        rows.Add($"{rival.rivalData.id}{{{nb}}}: native count={nc} income={ni:F0} reported={rq} active={(st?.isActive == true ? 1 : 0)} sent={st?.sentMessageKeys?.Count ?? 0} completed={st?.completedTimelineEntryIds?.Count ?? 0}");
+                        bool rentSent = st?.sentMessageKeys != null && !string.IsNullOrEmpty(rival.rentBuildingMessageKey) && st.sentMessageKeys.Contains(rival.rentBuildingMessageKey);
+                        rows.Add($"{rival.rivalData.id}{{{nb}}}: native count={nc} income={ni:F0} reported={rq} active={(st?.isActive == true ? 1 : 0)} sent={st?.sentMessageKeys?.Count ?? 0} completed={st?.completedTimelineEntryIds?.Count ?? 0} rentsent={(rentSent ? 1 : 0)}");
                     }
                     return $"OK rivalattn local pid={MPConfig.PlayerId} rivals=[{string.Join(" ; ", rows)}]";
                 }
@@ -836,6 +1145,88 @@ namespace BigAmbitionsMP
                 return $"OK rivalattn host hostKey={hk} keys={online.Count} firings={ModPathFirings} sig={StoreSig()} rivals=[{string.Join(" || ", rows)}]";
             }
             catch (System.Exception ex) { return $"ERR rivalattn: {ex.GetType().Name}: {ex.Message}"; }
+        }
+
+        /// <summary>DEV (part D) `rivalrent`:
+        ///   find &lt;rival&gt;        - for-rent buildings the rival OWNS on this machine (the field the game's gate reads);
+        ///   gate &lt;addr&gt;         - the game's own rent gate on THIS machine, no side effect;
+        ///   try &lt;addr&gt;          - the game's own gate WITH its side effect: blocked = RivalsHelper.SendRentBuildingMessage
+        ///                         (the rival's own monologue, recorded in this machine's sent keys), nothing rented;
+        ///   force &lt;addr&gt;        - CLIENT: rent past the local gate (BuildingHelper.RentBuilding, the `rent` lever's path)
+        ///                         so the host's authority gate answers (a refusal rolls the local rent back);
+        ///   host &lt;addr&gt; &lt;pid&gt;   - HOST: the authority gate for that player's key, no side effect beyond its log line.</summary>
+        internal static string RentLever(string arg)
+        {
+            try
+            {
+                var tk = (arg ?? "").Split(new[] { ' ' }, System.StringSplitOptions.RemoveEmptyEntries);
+                if (tk.Length < 2) return "ERR usage: rivalrent find <rival> | gate <addr> | try <addr> | force <addr> | host <addr> <pid>";
+                string verb = tk[0];
+                if (verb == "find")
+                {
+                    var rv = FindRival(tk[1]);
+                    if (rv == null) return $"ERR unknown rival '{tk[1]}'";
+                    string rid = rv.rivalData.id;
+                    var gi = SaveGameManager.Current;
+                    var hits = new List<string>();
+                    int owned = 0;
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (reg == null) continue;
+                        SpecialRival br = null;
+                        try { br = RivalsHelper.GetSpecialRival(reg.buildingOwnerRivalId); } catch { }
+                        if (br?.rivalData?.id != rid) continue;
+                        owned++;
+                        bool free = false; try { free = reg.AvailableForRent && !reg.RentedByPlayer && !reg.BuildingOwnedByPlayer; } catch { }
+                        if (free) hits.Add(GameStateReader.AddressKey(reg));
+                    }
+                    hits.Sort(System.StringComparer.Ordinal);
+                    return $"OK rivalrent find rival={rid} owned={owned} forrent={hits.Count} first={(hits.Count > 0 ? hits[0] : "-")} [{string.Join(" ; ", hits)}]";
+                }
+                // every other verb: <addr> = the rest of the tokens (host: the last token is the pid)
+                string addr = verb == "host" && tk.Length >= 3 ? string.Join(" ", tk, 1, tk.Length - 2) : string.Join(" ", tk, 1, tk.Length - 1);
+                var rg = GameStatePatcher.FindRegistration(addr);
+                if (rg == null) return $"ERR no registration for '{addr}'";
+                bool isFree = false; try { isFree = rg.AvailableForRent && !rg.RentedByPlayer; } catch { }
+                if (verb == "host")
+                {
+                    if (!MPServer.IsRunning) return "ERR host only";
+                    string pid = tk[tk.Length - 1];
+                    bool refuse = HostRefusesFor(rg, addr, pid, "rent", true, out string hr);
+                    return $"OK rivalrent host={(refuse ? "refused" : "allowed")} addr='{addr}' pid={pid} key={KeyOfPid(pid)} rival={(hr.Length > 0 ? hr : "-")}";
+                }
+                // The game's own gate (BizManPresentation.cs:538-551), on THIS machine's state.
+                SpecialRival gr = null;
+                bool blocked = false;
+                if (RivalsHelper.IsFeatureEnabled && !rg.BuildingOwnedByPlayer)
+                {
+                    gr = RivalsHelper.GetSpecialRival(rg.buildingOwnerRivalId);
+                    blocked = gr != null && RivalsHelper.GetSpecialRivalState(gr.rivalData.id).isActive;
+                }
+                string gid = gr?.rivalData?.id ?? "-";
+                if (verb == "gate")
+                    return $"OK rivalrent gate={(blocked ? "blocked" : "allowed")} addr='{addr}' rival={gid} free={isFree} pid={MPConfig.PlayerId}";
+                if (verb == "try")
+                {
+                    if (!blocked) return $"OK rivalrent try=allowed addr='{addr}' rival={gid} (nothing rented)";
+                    RivalsHelper.SendRentBuildingMessage(gr);
+                    Plugin.Logger.LogInfo($"[RivalSync] rent of '{addr}' refused by this machine's own gate: rival '{gid}' is active here (the game's own rent-building message sent, key '{gr.rentBuildingMessageKey}').");
+                    return $"OK rivalrent try=blocked addr='{addr}' rival={gid} msg={gr.rentBuildingMessageKey}";
+                }
+                if (verb == "force")
+                {
+                    if (MPServer.IsRunning || !MPClient.IsConnected) return "ERR client only";
+                    if (!isFree) return $"ERR '{addr}' is not on the for-rent market on this machine";
+                    var bld = Helpers.BuildingHelper.GetBuilding(rg.Address);
+                    if (bld == null) return $"ERR no Building for '{addr}'";
+                    float rent = 0f; try { rent = bld.GetBuildingDailyMarketRent(); } catch { }
+                    if (rent <= 0f) rent = 100f;
+                    Helpers.BuildingHelper.RentBuilding(bld, rent, rent * 90f);
+                    return $"OK rivalrent force sent addr='{addr}' localgate={(blocked ? "blocked" : "allowed")} rival={gid}";
+                }
+                return $"ERR unknown verb '{verb}'";
+            }
+            catch (System.Exception ex) { return $"ERR rivalrent: {ex.GetType().Name}: {ex.Message}"; }
         }
 
         /// <summary>`rivaltimeline &lt;rival|nb&gt;`: the rival's allEntries (asset data, not in the decompile).</summary>

@@ -782,18 +782,22 @@ namespace BigAmbitionsMP
                     }
                     if (st.isActive   != s.IsActive)   { st.isActive   = s.IsActive;   changed++; }
                     if (st.isDefeated != s.IsDefeated) { st.isDefeated = s.IsDefeated; changed++; }
-                    // H-RIVALPARITY-1 A (per-peer R3): THIS player's own sent keys / completed ids, applied IN PLACE
-                    // (clear + add, never a new list) - the game caches RivalsHelper.SentMessages pointing at the
-                    // existing list (decompile RivalsHelper.cs:172-175). NULL = an older host: the lists are left alone.
+                    // H-RIVALPARITY-1 A (per-peer R3): THIS player's own sent keys / completed ids, applied IN PLACE (never a
+                    // new list) - the game caches RivalsHelper.SentMessages pointing at the existing list (decompile
+                    // RivalsHelper.cs:172-175). Part D F1: ADD-ONLY - a key missing here is added, nothing is ever removed:
+                    // this machine records keys of its own (the rent-refusal monologue, SendRentBuildingMessage ->
+                    // RivalsHelper.cs:585-601) that the host never hears of, and removing them replays that monologue.
+                    // Completed ids likewise (no reset exists: the host's per-key lists only ever grow).
+                    // NULL = an older host: the lists are left alone.
                     if (s.SentKeys != null)
                     {
                         if (st.sentMessageKeys == null) st.sentMessageKeys = new List<string>();
-                        if (!st.sentMessageKeys.SequenceEqual(s.SentKeys)) { st.sentMessageKeys.Clear(); st.sentMessageKeys.AddRange(s.SentKeys); changed++; }
+                        foreach (var k in s.SentKeys) if (!string.IsNullOrEmpty(k) && !st.sentMessageKeys.Contains(k)) { st.sentMessageKeys.Add(k); changed++; }
                     }
                     if (s.CompletedIds != null)
                     {
                         if (st.completedTimelineEntryIds == null) st.completedTimelineEntryIds = new List<string>();
-                        if (!st.completedTimelineEntryIds.SequenceEqual(s.CompletedIds)) { st.completedTimelineEntryIds.Clear(); st.completedTimelineEntryIds.AddRange(s.CompletedIds); changed++; }
+                        foreach (var c in s.CompletedIds) if (!string.IsNullOrEmpty(c) && !st.completedTimelineEntryIds.Contains(c)) { st.completedTimelineEntryIds.Add(c); changed++; }
                     }
 
                     if (DefensesDiffer(st.defenseStates, s.Defenses))
