@@ -1096,11 +1096,24 @@ namespace BigAmbitionsMP
                 CustomerHandoff.StockUndo? stockUndo = null;
                 if (books) stockUndo = CustomerHandoff.StockOnAdopt(reg, entryId, entry.order, booked, v != null && v.Leaving);
                 CustomerHandoff.BeginAdopt(withState || booked, suppressCheck, suppressPay);
+                bool spawnThrew = false;
                 try { _spawnCustomerM.Invoke(null, new object[] { entry }); }
+                catch { spawnThrew = true; throw; }
                 finally
                 {
                     CustomerHandoff.EndAdopt();
                     if (tillOrder != null) entry.order = tillOrder;
+                    // Fold S2 (2026-09-27): a throw skips the refused-spawn check below - the stock settlement is undone here,
+                    // unless a body was added before the throw (it keeps what it was settled with).
+                    if (spawnThrew)
+                    {
+                        try
+                        {
+                            if (IndoorCustomerSpawner.Customers.Count <= before) CustomerHandoff.StockAdoptUndo(reg, entryId, stockUndo);
+                            else Plugin.Logger.LogWarning($"[Stock] adopt {entryId}: the spawn threw after adding a body - its stock settlement is kept.");
+                        }
+                        catch { }
+                    }
                 }
                 if (tillOrder != null)
                 {

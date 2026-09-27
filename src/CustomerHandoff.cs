@@ -343,6 +343,7 @@ namespace BigAmbitionsMP
                         _visit[r.Id] = new Known { Row = r, From = p.SimulatorPid ?? "", At = now, Final = p.Final, SourceBooks = p.SourceBooks };
                         n++;
                         if (boReg != null) BookOnce.Register(boReg, r.Id, null, p.Final ? "final received" : "stream received");
+                        if (boReg != null && r.Leaving) ReturnUnsoldWalkOut(boReg, r);   // fold S4
                     }
                 if (_visit.Count > 400)
                     foreach (var key in new List<string>(_visit.Keys))
@@ -599,7 +600,17 @@ namespace BigAmbitionsMP
         }
         /// <summary>The booking machine's own Order of a visit whose units are OUT (a native hourly pass may complete it into
         /// the till as an unpaid snapshot, BookOnce.HourlyEnd - its taken lines are the out units, not lost ones).</summary>
-        internal static bool IsOutOrder(Order? o) { try { return o != null && _outOrders.TryGetValue(o, out _); } catch { return false; } }
+        internal static bool IsOutOrder(Order? o)
+        {
+            try
+            {
+                if (o == null) return false;
+                if (_outOrders.TryGetValue(o, out _)) return true;
+                var src = BookOnce.SnapOrigin(o);   // fold S1: a kept till snapshot of that Order too
+                return src != null && _outOrders.TryGetValue(src, out _);
+            }
+            catch { return false; }
+        }
 
         /// <summary>SendFinal on the booking machine: per open visit, the units this machine's shelves gave it.</summary>
         private static void NoteFinalStock(BuildingRegistration? reg, string addr, List<CustomerVisitRow> rows)
@@ -654,7 +665,8 @@ namespace BigAmbitionsMP
 
         /// <summary>Units taken here for a visit that nothing sold: back on a shelf (the native Leave -> ReturnItemsToShelf,
         /// Customer.cs:316-328). A bag handed out is gone, as natively.</summary>
-        internal static int ReturnLeftovers(BuildingRegistration? reg, List<KeyValuePair<string, float>>? l, string id, string why)
+        internal static int ReturnLeftovers(BuildingRegistration? reg, List<KeyValuePair<string, float>>? l, string id, string why,
+            List<KeyValuePair<string, float>>? done = null)
         {
             int n = 0;
             try
@@ -665,7 +677,7 @@ namespace BigAmbitionsMP
                     try
                     {
                         if (IsPaperBag(kv.Key)) continue;
-                        if (ItemHelper.ReturnToAShelf(new BigAmbitions.Items.CargoInstance(kv.Key, 1, kv.Value), reg.Address)) n++;
+                        if (ItemHelper.ReturnToAShelf(new BigAmbitions.Items.CargoInstance(kv.Key, 1, kv.Value), reg.Address)) { n++; done?.Add(kv); }
                     }
                     catch { }
                 }
@@ -676,11 +688,34 @@ namespace BigAmbitionsMP
             return n;
         }
 
-        /// <summary>What an adoption's stock settlement did, so a refused spawn can undo it.</summary>
+        /// <summary>What an adoption's stock settlement did, so a refused spawn can undo ALL of it (fold S2, 2026-09-27): the
+        /// units credited / deducted, the carried units put back on a shelf, the lines it marked, the line flags it
+        /// changed and the bag it settled.</summary>
         internal sealed class StockUndo
         {
             public string Addr = "";
-            public readonly List<KeyValuePair<string, float>> Credits = new(), Deducted = new();
+            public readonly List<KeyValuePair<string, float>> Credits = new(), Deducted = new(), Left = new(), Returned = new();
+            public readonly List<OrderEntry> Marked = new();
+            public readonly List<(OrderEntry e, bool available, bool paid, float ws)> Flags = new();
+            public Order? BagOrder;
+        }
+
+        // Fold S5 (2026-09-27): an adopted body whose paper bag is already settled - a booked visit (its booking carried the
+        // bag), a body that walks straight out (its forward's bag), or a bag credited from the units it carried from here.
+        // Neither a re-serve (FullServiceEmployee.ServeCustomer :91) nor the in-action catch-up takes a bag for it again.
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Order, object> _bagSettled = new();
+        internal static int StockBagSkips;
+        internal static bool ServeBagSkip;
+        internal static bool IsBagSettled(Order? o) { try { return o != null && _bagSettled.TryGetValue(o, out _); } catch { return false; } }
+        private static void MarkBagSettledFor(StockUndo u, Order? o)
+        {
+            try { if (o != null && !_bagSettled.TryGetValue(o, out _)) { _bagSettled.Add(o, _markObj); u.BagOrder = o; } } catch { }
+        }
+        private static void MarkTakenFor(StockUndo u, OrderEntry? e)
+        {
+            if (e == null || IsMarkedTaken(e)) return;
+            MarkTaken(e);
+            u.Marked.Add(e);
         }
 
         /// <summary>ADOPT on the booking machine, BEFORE the spawn (rig run T-HANDOFFSEAT-20260927-034255: the in-action
@@ -693,16 +728,20 @@ namespace BigAmbitionsMP
             try
             {
                 if (reg == null || o?.entries == null) return null;
+                var u = new StockUndo { Addr = GameStateReader.AddressKey(reg) };
                 if (!booked && (leaving || o.completed))
                 {
-                    foreach (var e in o.entries) MarkTaken(e);   // the coming forward uses this visit's credits (left in place)
-                    return null;
+                    foreach (var e in o.entries) MarkTakenFor(u, e);   // the coming forward uses this visit's credits (left in place)
+                    MarkBagSettledFor(u, o);   // fold S5: the forward's bag (a credit or the register) is this visit's bag
+                    return u;
                 }
                 var credits = TakeOut(id);
-                var u = new StockUndo { Addr = GameStateReader.AddressKey(reg) };
                 int fail = 0;
                 if (booked)
-                    foreach (var e in o.entries) MarkTaken(e);   // the booking (a forward, a checkout) took them
+                {
+                    foreach (var e in o.entries) MarkTakenFor(u, e);   // the booking (a forward, a checkout) took them
+                    MarkBagSettledFor(u, o);   // fold S5: the booking carried the bag
+                }
                 else
                     foreach (var e in o.entries)
                     {
@@ -710,22 +749,27 @@ namespace BigAmbitionsMP
                         float ws;
                         if (IsPaperBag(e.itemName))
                         {
-                            if (e.available && UseCredit(credits, e.itemName, out ws)) { MarkTaken(e); u.Credits.Add(new KeyValuePair<string, float>(e.itemName, ws)); }
+                            if (e.available && UseCredit(credits, e.itemName, out ws))
+                            {
+                                MarkTakenFor(u, e);
+                                u.Credits.Add(new KeyValuePair<string, float>(e.itemName, ws));
+                                MarkBagSettledFor(u, o);
+                            }
                             continue;
                         }
                         if (!TakenOe(e) || !CustomerEntrySync.IsShelfItem(reg, e.itemName)) continue;
-                        if (UseCredit(credits, e.itemName, out ws)) { MarkTaken(e); u.Credits.Add(new KeyValuePair<string, float>(e.itemName, ws)); continue; }
+                        if (UseCredit(credits, e.itemName, out ws)) { MarkTakenFor(u, e); u.Credits.Add(new KeyValuePair<string, float>(e.itemName, ws)); continue; }
                         if (CustomerEntrySync.DeductDisplayStock(reg, e.itemName, out ws))
                         {
-                            MarkTaken(e);
-                            if (e.wholesalePrice <= 0f && ws > 0f) e.wholesalePrice = ws;
+                            MarkTakenFor(u, e);
+                            if (e.wholesalePrice <= 0f && ws > 0f) { u.Flags.Add((e, e.available, e.paid, e.wholesalePrice)); e.wholesalePrice = ws; }
                             u.Deducted.Add(new KeyValuePair<string, float>(e.itemName, ws > 0f ? ws : e.wholesalePrice));
                         }
-                        else { e.available = false; e.paid = false; fail++; }   // the shop cannot give what it does not have
+                        else { u.Flags.Add((e, e.available, e.paid, e.wholesalePrice)); e.available = false; e.paid = false; fail++; }   // the shop cannot give what it does not have
                     }
                 int cred = u.Credits.Count, ded = u.Deducted.Count, left = credits.Count;
                 StockAdoptCredited += cred; StockAdoptDeducted += ded; StockAdoptFailed += fail;
-                if (left > 0) ReturnLeftovers(reg, credits, id, "adopted back without them");
+                if (left > 0) { u.Left.AddRange(credits); ReturnLeftovers(reg, credits, id, "adopted back without them", u.Returned); }
                 if (cred + ded + fail + left > 0)
                     Plugin.Logger.LogInfo($"[Stock] adopt {id}{(booked ? " (booked)" : "")}: {cred} unit(s) it carried from here, {ded} taken off a shelf now (picked on the partner's machine), {fail} unavailable, {left} returned.");
                 return u;
@@ -733,8 +777,9 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] adopt {id}: {ex.Message}"); return null; }
         }
 
-        /// <summary>The spawn was refused after the settlement: the units taken now go back on a shelf and the carried
-        /// units are out again.</summary>
+        /// <summary>The spawn was refused (or threw) after the settlement - fold S2: ALL of it is undone. The units taken now
+        /// go back on a shelf, the carried units put back on a shelf come off it again, every carried unit is out again,
+        /// and the marks, line flags and bag it set are restored.</summary>
         internal static void StockAdoptUndo(BuildingRegistration? reg, string id, StockUndo? u)
         {
             try
@@ -742,15 +787,56 @@ namespace BigAmbitionsMP
                 if (u == null || reg == null) return;
                 StockAdoptDeducted -= u.Deducted.Count; StockAdoptCredited -= u.Credits.Count;
                 if (u.Deducted.Count > 0) ReturnLeftovers(reg, u.Deducted, id, "spawn refused");
-                if (u.Credits.Count > 0)
+                foreach (var e in u.Marked) { try { if (e != null) _takenMark.Remove(e); } catch { } }
+                for (int i = u.Flags.Count - 1; i >= 0; i--)
+                {
+                    var f = u.Flags[i];
+                    if (f.e == null) continue;
+                    f.e.available = f.available; f.e.paid = f.paid; f.e.wholesalePrice = f.ws;
+                }
+                if (u.BagOrder != null) { try { _bagSettled.Remove(u.BagOrder); } catch { } }
+                var leftAgain = new List<KeyValuePair<string, float>>(u.Left);
+                int back = 0;
+                foreach (var kv in u.Returned)
+                {
+                    if (CustomerEntrySync.DeductDisplayStock(reg, kv.Key, out _)) back++;
+                    else UseCredit(leftAgain, kv.Key, out _);   // it went back on a shelf and is gone from there: not out any more
+                }
+                StockReturned -= back;
+                if (u.Credits.Count + leftAgain.Count > 0)
                 {
                     var ov = new OutVisit { Addr = u.Addr };
                     ov.Units.AddRange(u.Credits);
+                    ov.Units.AddRange(leftAgain);
                     _out[id] = ov;
                 }
+                if (u.Deducted.Count + u.Credits.Count + u.Left.Count + u.Marked.Count + u.Flags.Count > 0 || u.BagOrder != null)
+                    Plugin.Logger.LogInfo($"[Stock] adopt {id} undone (spawn refused): {u.Deducted.Count} unit(s) back on a shelf, {u.Credits.Count + leftAgain.Count} out again ({back}/{u.Returned.Count} carried unit(s) taken back off a shelf), {u.Marked.Count} mark(s), {u.Flags.Count} line flag(s){(u.BagOrder != null ? " and the bag" : "")} restored.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] adopt undo {id}: {ex.Message}"); }
         }
+
+        /// <summary>Fold S4 (2026-09-27): a visit row from the partner that is walking out with nothing paid ended UNSOLD - no
+        /// forward will come (Patch_Order_Pay_HelperForward sends only a paid basket). The units this machine's shelves
+        /// gave the visit (out with the body, or held by its kept till snapshot) go back on a shelf, as the native Leave
+        /// (Customer.cs:309-313) would put them. Reached only through a row this machine receives (the partner streams
+        /// while this machine's player is inside, or sends a Final); once per visit (the units are used up).</summary>
+        private static void ReturnUnsoldWalkOut(BuildingRegistration reg, CustomerVisitRow r)
+        {
+            try
+            {
+                if (r == null || string.IsNullOrEmpty(r.Id) || !r.Leaving) return;
+                if (r.Entries != null) foreach (var e in r.Entries) if (e != null && e.Paid) return;   // paid: its forward settles the units
+                if (BookOnce.IsBooked(r.Id)) return;
+                var units = TakeOut(r.Id);
+                foreach (var e in TillTakenOf(reg, r.Id)) { MarkCreditedLine(e); units.Add(new KeyValuePair<string, float>(e.itemName, e.wholesalePrice)); }
+                if (units.Count == 0) return;
+                StockUnsoldReturns++;
+                ReturnLeftovers(reg, units, r.Id, "the visit walked out unsold on the partner's machine");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] unsold walk-out {r?.Id}: {ex.Message}"); }
+        }
+        internal static int StockUnsoldReturns;
 
         /// <summary>A live body of a visit just booked by another Order is finished (CustomerPuppets.FinishLiveBodiesOf): the
         /// units it holds that the booking does not sell go back on a shelf; the booking sold the rest.</summary>
@@ -784,7 +870,30 @@ namespace BigAmbitionsMP
         // taken at the adoption, then 8 more by its forward).
         private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<OrderEntry, object> _creditedLines = new();
         internal static int StockFwdTillCredited;
-        internal static bool IsCreditedLine(OrderEntry? e) { try { return e != null && _creditedLines.TryGetValue(e, out _); } catch { return false; } }
+        internal static bool IsCreditedLine(OrderEntry? e)
+        {
+            try
+            {
+                if (e == null) return false;
+                if (_creditedLines.TryGetValue(e, out _)) return true;
+                var src = BookOnce.SnapLineOrigin(e);   // fold S1: a snapshot line whose frozen line was credited
+                return src != null && _creditedLines.TryGetValue(src, out _);
+            }
+            catch { return false; }
+        }
+        internal static void MarkCreditedLine(OrderEntry? e) { try { if (e != null && !_creditedLines.TryGetValue(e, out _)) _creditedLines.Add(e, _markObj); } catch { } }
+        /// <summary>Fold S1: a till snapshot's line keeps the stock marks its line had when it was frozen.</summary>
+        internal static void CopyLineMarks(OrderEntry? src, OrderEntry? dst)
+        {
+            try
+            {
+                if (src == null || dst == null) return;
+                if (IsPicked(src)) MarkPicked(dst);
+                if (IsMarkedTaken(src)) MarkTaken(dst);
+                if (IsCreditedLine(src)) MarkCreditedLine(dst);
+            }
+            catch { }
+        }
 
         internal static List<OrderEntry> TillTakenOf(BuildingRegistration? reg, string id)
         {
@@ -796,6 +905,7 @@ namespace BigAmbitionsMP
                 foreach (var o in till)
                 {
                     if (o?.entries == null || BookOnce.IdOf(o) != id) continue;
+                    if (IsOutOrder(o)) continue;   // its taken lines are the visit's out units - credited through TakeOut
                     foreach (var e in o.entries)
                         if (e != null && !string.IsNullOrEmpty(e.itemName) && !IsPaperBag(e.itemName) && TakenOe(e) && !IsCreditedLine(e))
                             l.Add(e);
@@ -821,7 +931,7 @@ namespace BigAmbitionsMP
         }
 
         internal static string StockReadout()
-            => $"once=out{StockOutUnits}/fwdCred{StockFwdCredited}/fwdLive{StockFwdLiveCredited}/fwdTill{StockFwdTillCredited}/adoptCred{StockAdoptCredited}/adoptDed{StockAdoptDeducted}/adoptFail{StockAdoptFailed}/ret{StockReturned}/skip{StockMarkSkips}";
+            => $"once=out{StockOutUnits}/fwdCred{StockFwdCredited}/fwdLive{StockFwdLiveCredited}/fwdTill{StockFwdTillCredited}/adoptCred{StockAdoptCredited}/adoptDed{StockAdoptDeducted}/adoptFail{StockAdoptFailed}/ret{StockReturned}/skip{StockMarkSkips}/bagSkip{StockBagSkips}/unsold{StockUnsoldReturns}";
 
 #if BAMP_DEV
         // ── DEV: `custstate arm <n>` - one log line the moment this interior holds n customers ────────
@@ -990,6 +1100,10 @@ namespace BigAmbitionsMP
                     var live = new Dictionary<string, int>(); var fwd = new Dictionary<string, int>();
                     var hour = new Dictionary<string, int>(); var oth = new Dictionary<string, int>();
                     var lost = new Dictionary<string, int>();
+                    // Fold S1 oracle: every lost unit needs a NAMED cause - exitNative (the native exit clean-up of a visit that
+                    // never crossed a hand-off: the game itself drops those units) or pending (a kept snapshot of a registered
+                    // visit not booked yet: its forward or its walk-out settles them). Anything else is unexplained -> stockOk=False.
+                    var lostExit = new Dictionary<string, int>(); var lostPend = new Dictionary<string, int>(); var lostUnx = new Dictionary<string, int>();
                     int newOrders = 0, nLive = 0, nFwd = 0, nHour = 0, nOth = 0;
                     foreach (var o in tillNow)
                     {
@@ -1004,7 +1118,14 @@ namespace BigAmbitionsMP
                         {
                             if (e == null || string.IsNullOrEmpty(e.itemName)) continue;
                             if (e.paid) SdAdd(cat, e.itemName, 1);
-                            else if (TakenOe(e) && !IsCreditedLine(e) && !IsOutOrder(o)) SdAdd(lost, e.itemName, 1);   // a line a forward carried is sold there
+                            else if (TakenOe(e) && !IsCreditedLine(e) && !IsOutOrder(o))   // a line a forward carried is sold there
+                            {
+                                SdAdd(lost, e.itemName, 1);
+                                string? vid = BookOnce.IdOf(o);
+                                if (vid == null && BookOnce.IsExitOrder(o)) SdAdd(lostExit, e.itemName, 1);
+                                else if (vid != null && BookOnce.IsSnapshot(o) && BookOnce.IsRegistered(vid) && !BookOnce.IsBooked(vid)) SdAdd(lostPend, e.itemName, 1);
+                                else SdAdd(lostUnx, e.itemName, 1);
+                            }
                         }
                     }
                     var names = new SortedSet<string>(StringComparer.Ordinal);
@@ -1012,6 +1133,7 @@ namespace BigAmbitionsMP
                         foreach (var k in dd.Keys) names.Add(k);
                     var per = new List<string>();
                     var bad = new List<string>();
+                    int lostExitT = 0, lostPendT = 0, lostUnxT = 0;
                     int dropT = 0, soldT = 0, lostT = 0, heldT = 0, outT = 0, liveT = 0, fwdT = 0, hourT = 0, othT = 0, made = 0, bagDrop = 0, bagSold = 0;
                     foreach (var nm in names)
                     {
@@ -1026,9 +1148,12 @@ namespace BigAmbitionsMP
                         dropT += drop; soldT += s; lostT += lo; heldT += hd; outT += od; liveT += L; fwdT += F; hourT += H; othT += O;
                         per.Add($"{sn}:{drop}={L}+{F}+{H}+{O}+{lo}+{hd}+{od}");
                         if (drop != s + lo + hd + od) bad.Add($"{sn}:{drop}!={s}+{lo}+{hd}+{od}");
+                        int lx = SdGet(lostExit, nm), lp = SdGet(lostPend, nm), lu = SdGet(lostUnx, nm);
+                        lostExitT += lx; lostPendT += lp; lostUnxT += lu;
+                        if (lu > 0) bad.Add($"{sn}:lost{lu}unexplained");
                     }
                     res = $"{key} since={_sdAt} at={now} newOrders={newOrders} orders=live{nLive}/fwd{nFwd}/hour{nHour}/other{nOth} dropTotal={dropT} soldTotal={soldT} "
-                        + $"tillLive={liveT} fwdSold={fwdT} hourSold={hourT} otherSold={othT} lostTotal={lostT} heldDelta={heldT} outDelta={outT} outNow={outSum} "
+                        + $"tillLive={liveT} fwdSold={fwdT} hourSold={hourT} otherSold={othT} lostTotal={lostT} lostNamed=exitNative{lostExitT}/pending{lostPendT} lostUnexplained={lostUnxT} heldDelta={heldT} outDelta={outT} outNow={outSum} "
                         + $"madeSold={made} bags={bagDrop}/{bagSold} {StockReadout()} stockOk={(bad.Count == 0 ? "True" : "False")} bad={(bad.Count == 0 ? "-" : string.Join(";", bad))} "
                         + $"per={(per.Count == 0 ? "-" : string.Join(";", per))} (per=item:drop=live+fwd+hour+other+lost+heldDelta+outDelta) {SdTakesReadout()}";
                 }
@@ -1242,6 +1367,7 @@ namespace BigAmbitionsMP
                     if (e.paid) anyPaid = true;
                     if (CustomerHandoff.IsPaperBag(e.itemName) && e.available && CustomerHandoff.IsMarkedTaken(e)) bagDone = true;
                 }
+                if (!bagDone && CustomerHandoff.IsBagSettled(o)) { bagDone = true; CustomerHandoff.StockBagSkips++; }   // fold S5
                 if (anyPaid)
                 {
                     if (!bagDone)
@@ -1327,6 +1453,57 @@ namespace BigAmbitionsMP
         static void Postfix(OrderEntry orderEntry, bool __result)
         {
             try { if (__result && orderEntry != null) CustomerHandoff.MarkPicked(orderEntry); } catch { }
+        }
+    }
+
+    /// <summary>Fold S5 (2026-09-27): a re-serve of an adopted body whose bag is already settled (CustomerHandoff.IsBagSettled)
+    /// takes no second paper bag - FullServiceEmployee.ServeCustomer :91 subtracts one from the register inside its own
+    /// MoveNext. While that MoveNext runs for such a body, the register's paper-bag subtract is skipped once.</summary>
+    [HarmonyPatch]
+    public static class Patch_FullServiceServe_BagOnce
+    {
+        private static System.Reflection.FieldInfo? _this;
+
+        static bool Prepare() => AccessTools.Method(typeof(FullServiceEmployee), "ServeCustomer") != null;
+
+        static System.Reflection.MethodBase TargetMethod()
+            => AccessTools.EnumeratorMoveNext(AccessTools.Method(typeof(FullServiceEmployee), "ServeCustomer"));
+
+        static void Prefix(object __instance)
+        {
+            try
+            {
+                CustomerHandoff.ServeBagSkip = false;
+                if (__instance == null) return;
+                _this ??= AccessTools.Field(__instance.GetType(), "<>4__this");
+                var emp = _this?.GetValue(__instance) as FullServiceEmployee;
+                var o = emp != null && emp.customer != null ? emp.customer.order : null;
+                if (o != null && CustomerHandoff.IsBagSettled(o)) CustomerHandoff.ServeBagSkip = true;
+            }
+            catch { CustomerHandoff.ServeBagSkip = false; }
+        }
+
+        static void Finalizer() { CustomerHandoff.ServeBagSkip = false; }
+    }
+
+    /// <summary>Fold S5: the paper-bag subtract a bag-settled re-serve would make (see Patch_FullServiceServe_BagOnce).</summary>
+    [HarmonyPatch(typeof(ItemHelper), nameof(ItemHelper.SubtractFromStock))]
+    public static class Patch_SubtractFromStock_BagOnce
+    {
+        [HarmonyPriority(Priority.First)]
+        static bool Prefix(BigAmbitions.Items.ItemInstance itemInstance, ref bool __result)
+        {
+            try
+            {
+                if (!CustomerHandoff.ServeBagSkip || itemInstance == null) return true;
+                var ci = itemInstance.GetStockInstance();
+                if (ci == null || !CustomerHandoff.IsPaperBag(ci.itemName)) return true;
+                CustomerHandoff.ServeBagSkip = false;
+                CustomerHandoff.StockBagSkips++;
+                __result = true;
+                return false;
+            }
+            catch { return true; }
         }
     }
 

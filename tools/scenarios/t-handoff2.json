@@ -78,6 +78,7 @@
       "expect_result": "^OK custstate bldg='${gym}' sim='${clientPid}' mode=follower natives=0 .*copies=[1-9]",
       "capture": { "hCopies0": "copies=(\\d+)", "hCopyRows0": "copyRows=(\\d+)" }
     },
+    {"seq": 101, "role": "c", "cmd": "stockdelta ${gym} mark", "expect_result": "^OK stockdelta .* marked ", "note": "STOCK ORACLE mark before the leg"},
     { "seq": 30, "role": "both", "cmd": "mark TEST T-HANDOFF2 LEG1 OWNER-WALKS-OUT", "expect_result": "OK MARK" },
     {
       "seq": 31, "role": "c", "cmd": "exitbuilding", "expect_result": "^OK",
@@ -105,6 +106,8 @@
       "capture": { "l1Ledger": "ledger=(\\d+)", "l1Booked": "booked=(\\d+)", "l1Paid": "paid=(\\d+)", "l1Fwd": "forwardsIn=(\\d+)", "l1BoReg": "boRegistered=(\\d+)", "l1BoSup": "boSuppressed=(\\d+)", "l1BoBy": "boBookedBy=(\\S+)", "l1BoSupBy": "boSuppressedBy=(\\S+)" },
       "note": "LEG 1 ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },
+    {"seq": 102, "role": "c", "cmd": "stockdelta ${gym}", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sdG1Lost": "lostTotal=(\\d+)", "sdG1LostNamed": "lostNamed=(\\S+)", "sdG1LostUnx": "lostUnexplained=(\\d+)", "sdG1Bad": "bad=(\\S+)", "sdG1Once": "once=(\\S+)"}, "note": "STOCK ORACLE (fold S1 2026-09-27, HARD): stockOk=True needs the per-unit identity AND lostUnexplained=0 (every lost unit has a named cause: exitNative / pending) - the leg before this step"},
+    {"seq": 103, "role": "c", "cmd": "stockdelta ${gym} mark", "expect_result": "^OK stockdelta .* marked ", "note": "STOCK ORACLE mark before the leg"},
     { "seq": 39, "role": "both", "cmd": "mark TEST T-HANDOFF2 LEG2 OWNER-WALKS-IN", "expect_result": "OK MARK" },
     {
       "seq": 40, "role": "c", "cmd": "enterbuilding ${gym}", "expect_result": "^OK enterbuilding",
@@ -132,6 +135,7 @@
       "capture": { "l2Ledger": "ledger=(\\d+)", "l2Booked": "booked=(\\d+)", "l2Paid": "paid=(\\d+)", "l2Fwd": "forwardsIn=(\\d+)", "l2BoReg": "boRegistered=(\\d+)", "l2BoSup": "boSuppressed=(\\d+)", "l2BoBy": "boBookedBy=(\\S+)", "l2BoSupBy": "boSuppressedBy=(\\S+)" },
       "note": "LEG 2 ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },
+    {"seq": 104, "role": "c", "cmd": "stockdelta ${gym}", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sdG2Lost": "lostTotal=(\\d+)", "sdG2LostNamed": "lostNamed=(\\S+)", "sdG2LostUnx": "lostUnexplained=(\\d+)", "sdG2Bad": "bad=(\\S+)", "sdG2Once": "once=(\\S+)"}, "note": "STOCK ORACLE (fold S1 2026-09-27, HARD): stockOk=True needs the per-unit identity AND lostUnexplained=0 (every lost unit has a named cause: exitNative / pending) - the leg before this step"},
     { "seq": 48, "role": "c", "sleep_s": 12, "note": "the owner simulates with the host inside: the on-change stream runs" },
     {
       "seq": 49, "role": "h", "cmd": "custstate",
