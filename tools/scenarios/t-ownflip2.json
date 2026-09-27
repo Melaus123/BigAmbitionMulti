@@ -1,7 +1,7 @@
 {
   "id": "T-OWNFLIP2",
-  "title": "H-MERGEROWNFLIP-1 part A, scenarios 2 + 4: (2) the HOST presses Rent (BizManPresentation.RentBuilding) on a building the ledger gives the merged client - refused silently with the log line, no host rent, host money unchanged, the ledger keeps the client; (4) P-LEASEPROBE: the world-ready Harmony patch-owner dump on both machines, and a CLIENT terminate (the BizMan confirm handler) writes enter/exit-or-throw lines and ONE deposit-return stack; afterwards the member's lapsed lease is NOT flipped on the member. Ends dissolved.",
-  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger). The client's shop is discovered on the host (first flipped key). Dev build with the H-MERGEROWNFLIP-1 levers `ownflip <addr>`, `bizrent <addr>`, `bizterminate <addr>` (they call the BizMan page's own handlers on a bare page object, so every Harmony patch runs; the terminate handler's last line re-enables the page's UI and throws on the bare object AFTER all lease state is written - the throw skips the native method's postfixes, including the vacate report, which reproduces bundle 222227's unreported lease end) plus forrent / rent / vacate / mergestatus.",
+  "title": "H-MERGEROWNFLIP-1 part A, scenarios 2 + 4: (2) the HOST presses Rent (BizManPresentation.RentBuilding) on a building the ledger gives the merged client - refused silently with the log line, no host rent, host money unchanged, the ledger keeps the client; (4) P-LEASEPROBE: the world-ready Harmony patch-owner dump on both machines, and a CLIENT terminate (the BizMan confirm handler) writes enter/exit-or-throw lines and ONE deposit-return stack; afterwards the member's lapsed lease is NOT flipped on the member. PART B: that terminate (whose confirm handler throws, skipping the vacate postfix) is reported to the host BY THE DEPOSIT-RETURN PATH - '[Client] Sent VacateRequest', the host releases, and neither machine's ledger names the client afterwards. Ends dissolved.",
+  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger). The client's shop is discovered on the host (first flipped key). Dev build with the H-MERGEROWNFLIP-1 levers `ownflip <addr>`, `bizrent <addr>`, `bizterminate <addr>` (they call the BizMan page's own handlers on a bare page object, so every Harmony patch runs; the terminate handler's last line re-enables the page's UI and throws on the bare object AFTER all lease state is written - the throw skips the native method's postfixes, including the vacate report, which reproduces bundle 222227's unreported lease end) plus forrent / rent / mergestatus. H-MERGEROWNFLIP-1 part B deployed (LeaseEndWatch).",
   "instances": 2,
   "vars": {
     "clientPid": "Client1",
@@ -17,7 +17,9 @@
     "\\[Merger\\] strip skipped own lease",
     "\\[Conflict\\] DOUBLE TENANCY",
     "\\[Merger\\] host rent backstop",
-    "\\[Patch\\] Host rented "
+    "\\[Patch\\] Host rented ",
+    "\\[Merger\\] deposit-return on a partner's building",
+    "\\[Lease\\] lease end seen via deposit-return .* -> skipped\\(error"
   ],
   "oracles_present": [
     {
@@ -36,7 +38,12 @@
     "\\[LeaseProbe\\] deposit-return ",
     "\\[Merger\\] host rent refused",
     "\\[Patch\\] Client unrented",
-    "\\[Merger\\] flip ON "
+    "\\[Merger\\] flip ON ",
+    "\\[Lease\\] lease end seen via deposit-return ",
+    "\\[Client\\] Sent VacateRequest for ",
+    "\\[Server\\] VacateRequest: ",
+    "\\[Patch\\] Unrent .* already sent",
+    "\\[Client\\] Building vacated: "
   ],
   "steps": [
     {
@@ -207,9 +214,24 @@
           "role": "c",
           "regex": "\\[LeaseProbe\\] (exit|throw) OnTerminateContractConfirm",
           "within_s": 5
+        },
+        {
+          "role": "c",
+          "regex": "\\[Lease\\] lease end seen via deposit-return ${newShop} -> vacate sent",
+          "within_s": 5
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] Sent VacateRequest for ${newShop}",
+          "within_s": 5
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] VacateRequest: ${newShop} by ${clientPid} .{1,3} releasing",
+          "within_s": 10
         }
       ],
-      "note": "THE ASSERTION (4): the probe brackets the terminate and names the deposit-return path with a stack"
+      "note": "THE ASSERTION (4): the probe brackets the terminate and names the deposit-return path with a stack. PART B: the handler's end-of-method throw skips the vacate postfix, so the VacateRequest can only come from the deposit-return path ([Lease] ... -> vacate sent), and the host releases the ledger entry"
     },
     {
       "seq": 23,
@@ -222,15 +244,16 @@
       "role": "c",
       "cmd": "ownflip ${newShop}",
       "expect_result": "^OK ownflip .* rented=False flipped=False ",
-      "note": "the lapsed OWN lease is NOT flipped into a 'partner building' (before the fix a flag-false company key flipped ON). If the throw skipped the vacate report the ledger still reads mine=True here - reported, not asserted"
+      "note": "the lapsed OWN lease is NOT flipped into a 'partner building'; PART B: the client's company ledger no longer names the client (the host's merger push dropped the key after the release)",
+      "refute_result": "ledger='${clientPid}'"
     },
     {
       "seq": 25,
-      "role": "c",
-      "cmd": "vacate ${newShop}",
-      "expect_result": "^OK",
-      "abort_on_fail": false,
-      "note": "clean the ledger (the vacate the throw skipped)"
+      "role": "h",
+      "cmd": "ownflip ${newShop}",
+      "expect_result": "^OK ownflip ",
+      "refute_result": "ledger='${clientPid}'",
+      "note": "PART B: the host's ledger no longer names the client for the terminated lease (no manual 'vacate' - the deposit-return path sent it)"
     },
     {
       "seq": 26,

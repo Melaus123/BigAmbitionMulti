@@ -107,6 +107,9 @@ namespace BigAmbitionsMP
 
         public static void Tick()
         {
+            // H-MERGEROWNFLIP-1 part B: EVERY FRAME, before the 1 Hz gate - a deposit-return queued last frame is
+            // resolved now (vacate report / host release), merged or not.
+            try { LeaseEndWatch.Tick(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Lease] tick: {ex.Message}"); }
             if (UnityEngine.Time.unscaledTime < _nextTick) return;
             _nextTick = UnityEngine.Time.unscaledTime + 1f;
             // H-MERGEROWNFLIP-1 fold F2: Reset may KEEP the table for the same save object; a table (or waiting list)
@@ -390,6 +393,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                try { LeaseEndWatch.ClearSent(key); } catch { }   // fold B-RERENT: a new lease reports its own end
                 if (string.IsNullOrEmpty(key) || !_flipped.TryGetValue(key, out var parked)) return;
                 _flipped.Remove(key);
                 _adopted[key] = UnityEngine.Time.unscaledTime;
@@ -621,6 +625,7 @@ namespace BigAmbitionsMP
             if (keep) Plugin.Logger.LogInfo($"[Merger] scene reset KEPT {_flipped.Count} flip(s): the same save's building records are still loaded.");
             else { _flipped.Clear(); _adopted.Clear(); _tableSave = null; _stripSkipLogged = 0; }
             _veilDepth = 0; _saveStrip = false;
+            try { LeaseEndWatch.Reset("scene/world change"); } catch { }   // H-MERGEROWNFLIP-1 fold B-L4
             // PHASE 4a: the books overlay clears its TRACKING on the same contract - no RemoveAll, because
             // by the time this runs a DIFFERENT save's records are already loaded (review r2 M2). The
             // active clear on dissolve/unmerge/disconnect is CompanyBooks.Tick's membership edge.

@@ -1,0 +1,263 @@
+{
+  "id": "T-OWNFLIP3",
+  "title": "H-MERGEROWNFLIP-1 part B, unmerged: (1) the CLIENT terminates its own new rental on the clean-click path (the confirm handler AND the vacate postfix both run, in the same frame as the deposit refund) - exactly ONE VacateRequest (the postfix sends, the deposit-return path logs 'already sent'), the host releases and its ledger no longer names the client; (2) the HOST terminates its own new rental with the handler's end-of-method throw (postfix skipped) - the deposit-return path releases the host's ledger entry and broadcasts the vacate once (the client sees one 'Building vacated').",
+  "preconditions": "Fixture save1 (host melaus + Client1, NOT merged). Dev build with H-MERGEROWNFLIP-1 part B (LeaseEndWatch) and the levers forrent / rent / ownflip / bizterminate <addr> [postfix] / mergestatus. NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "HarmonyException",
+    "Patching exception",
+    "Patch class .* FAILED",
+    "\\[Merger\\] deposit-return on a partner's building",
+    "\\[Lease\\] lease end seen via deposit-return .* -> skipped\\(error",
+    "\\[Server\\] VacateRequest .* denied",
+    "\\[Conflict\\] DOUBLE TENANCY"
+  ],
+  "oracles_report": [
+    "\\[Lease\\] ",
+    "\\[Client\\] Sent VacateRequest for ",
+    "\\[Server\\] VacateRequest: ",
+    "\\[Patch\\] (Client|Host) unrented ",
+    "\\[Patch\\] Unrent .* already sent",
+    "\\[Client\\] Building vacated: ",
+    "\\[LeaseProbe\\] deposit-return "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP3 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 75,
+      "note": "both worlds load and settle"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=False",
+      "note": "PREMISE: not merged"
+    },
+    {
+      "seq": 13,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP3 CLIENT-TERMINATE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "forrent retail",
+      "expect_result": "^OK [1-9][0-9]* for-rent: ",
+      "capture": {
+        "cNew": "for-rent: ([^|]+?)(?: \\||$)"
+      }
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "rent ${cNew}",
+      "expect_result": "^OK RentBuilding invoked"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "sleep_s": 8,
+      "note": "the host stamps the ledger"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "ownflip ${cNew}",
+      "expect_result": "^OK ownflip .*ledger='${clientPid}'",
+      "note": "PREMISE: the host's ledger names the client as tenant"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "bizterminate ${cNew} postfix",
+      "expect_result": "^OK bizterminate key='${cNew}' .* rented=False.* postfix=ran",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Client\\] Sent VacateRequest for ${cNew}",
+          "within_s": 5
+        },
+        {
+          "role": "c",
+          "regex": "\\[Patch\\] Client unrented ${cNew} locally",
+          "within_s": 5
+        },
+        {
+          "role": "c",
+          "regex": "\\[Lease\\] lease end seen via deposit-return ${cNew} -> skipped\\(already sent\\)",
+          "within_s": 5
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] VacateRequest: ${cNew} by ${clientPid} .{1,3} releasing",
+          "within_s": 10
+        }
+      ],
+      "note": "THE ASSERTION (unmerged regression): the clean-click path - the postfix sends, the deposit-return path stands down; the report counts '[Client] Sent VacateRequest' for exactly one"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "ownflip ${cNew}",
+      "expect_result": "^OK ownflip ",
+      "refute_result": "ledger='${clientPid}'",
+      "note": "the host's ledger no longer names the client"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "ownflip ${cNew}",
+      "expect_result": "^OK ownflip .* rented=False "
+    },
+    {
+      "seq": 22,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP3 HOST-TERMINATE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "forrent retail",
+      "expect_result": "^OK [1-9][0-9]* for-rent: ",
+      "capture": {
+        "hNew": "for-rent: ([^|]+?)(?: \\||$)"
+      }
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "rent ${hNew}",
+      "expect_result": "^OK RentBuilding invoked"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "ownflip ${hNew}",
+      "expect_result": "^OK ownflip .* rented=True .*ledger='${hostPid}' mine=True",
+      "note": "PREMISE: the host's own lease, ledger 'host' (= my id)"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "bizterminate ${hNew}",
+      "expect_result": "^OK bizterminate key='${hNew}' .* rented=False",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Lease\\] lease end seen via deposit-return ${hNew} -> released",
+          "within_s": 5
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] Building vacated: ${hNew}",
+          "within_s": 10
+        }
+      ],
+      "note": "THE ASSERTION (host): the handler throws at its end (postfix skipped); the deposit-return path releases the ledger entry and broadcasts once - the report counts 'Building vacated' on the client"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "ownflip ${hNew}",
+      "expect_result": "^OK ownflip .* rented=False ",
+      "refute_result": "ledger='${hostPid}'",
+      "note": "the host's ledger entry is gone"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 31,
+      "role": "both",
+      "cmd": "mark TEST OWNFLIP3 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

@@ -43,8 +43,16 @@ namespace BigAmbitionsMP
         {
             _pendingFinalize.Clear();
             _claimed.Clear();
+            _took.Clear();
             TransferInProgress = false;
         }
+
+        /// <summary>H-MERGEROWNFLIP-1 fold A-R1: addresses whose finalize takeover REACHED
+        /// BuildingRegistration.AddToPlayer with the tenancy set (MPPatches AddToPlayer postfix, recorded while
+        /// TransferInProgress). The rented flag alone cannot say 'the claim took' once a merger flip/adopt already
+        /// made it true. MAIN THREAD.</summary>
+        private static readonly HashSet<string> _took = new(StringComparer.OrdinalIgnoreCase);
+        internal static void NoteTook(string key) { if (!string.IsNullOrEmpty(key)) _took.Add(key); }
 
         /// <summary>HOST, main thread, called by MPHub.HostHandleAnswer AFTER the
         /// money moved for an accepted Kind="business" offer.</summary>
@@ -56,9 +64,6 @@ namespace BigAmbitionsMP
                 string buyer = offer.From, seller = offer.To;
                 if (string.IsNullOrEmpty(addr) || string.IsNullOrEmpty(buyer) || string.IsNullOrEmpty(seller)) return;
 
-                // Ledger re-key: tenancy moves to the buyer ("host" if the buyer IS the host).
-                MPServer.BuildingOwners[addr] = buyer == MPConfig.PlayerId ? "host" : buyer;
-
                 var p = new BizTransferPayload
                 {
                     OfferId = offer.Id, AddressKey = addr, BusinessName = offer.BusinessName ?? "",
@@ -67,15 +72,6 @@ namespace BigAmbitionsMP
                     Shifts = CollectShifts(addr),
                 };
                 try { p.ItemCount = GameStatePatcher.FindRegistration(addr)?.itemInstances?.Count ?? 0; } catch { }
-
-                // The buyer gets the shop's FULL interior with the sale. A client-buyer
-                // holds nothing for a shop it never visited (host→client interiors are
-                // on-demand; only client→host pushes are eager) — rig 2026-07-30: the
-                // bought shop was an empty shell. The host's copy is authoritative for
-                // every seller (its own save, or the seller-client's eager pushes).
-                if (buyer != MPConfig.PlayerId)
-                    try { InteriorSync.SendSnapshotToPlayer(addr, buyer, forceItemAuthority: true); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Offers] sale interior send: {ex.Message}"); }
-                Plugin.Logger.LogInfo($"[Offers] transfer LEDGERED: '{p.BusinessName}' at {addr} — {seller} → {buyer} for ${p.Amount:N0} ({p.Staff.Count} staff ride along).");
 
                 // Seller releases first (their machine is the interior/staff authority
                 // until the buyer claims; release is safe — the buyer's claim needs
@@ -87,6 +83,24 @@ namespace BigAmbitionsMP
                 // world exactly like a confirmed rent (off the market, owner stamped).
                 if (buyer != MPConfig.PlayerId)
                     GameStatePatcher.HostReflectPlayerRent(addr, buyer);
+
+                // Fold A-R2 (2026-09-26): the ledger re-key is the LAST write before the finalize is queued - an
+                // exception anywhere above (roster copy, release, hub send) no longer leaves the ledger naming a buyer
+                // no finalize will ever reach. Readers in between: RosterCopyFor / CollectShifts / SellerApplyRelease /
+                // HostReflectPlayerRent read no ledger; the sale snapshot (BuildSnapshotForHostSend reads the ledger
+                // for its owner stamp) moved below the write so it still sees the buyer, and its post-release content
+                // is exactly what HostTick re-sends every beat anyway.
+                // Ledger re-key: tenancy moves to the buyer ("host" if the buyer IS the host).
+                MPServer.BuildingOwners[addr] = buyer == MPConfig.PlayerId ? "host" : buyer;
+
+                // The buyer gets the shop's FULL interior with the sale. A client-buyer
+                // holds nothing for a shop it never visited (host→client interiors are
+                // on-demand; only client→host pushes are eager) — rig 2026-07-30: the
+                // bought shop was an empty shell. The host's copy is authoritative for
+                // every seller (its own save, or the seller-client's eager pushes).
+                if (buyer != MPConfig.PlayerId)
+                    try { InteriorSync.SendSnapshotToPlayer(addr, buyer, forceItemAuthority: true); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Offers] sale interior send: {ex.Message}"); }
+                Plugin.Logger.LogInfo($"[Offers] transfer LEDGERED: '{p.BusinessName}' at {addr} — {seller} → {buyer} for ${p.Amount:N0} ({p.Staff.Count} staff ride along).");
 
                 // ALWAYS through the pending table — remote buyers get the 5s re-send,
                 // and a host-as-buyer claim that throws retries the same way (rig
@@ -229,6 +243,7 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Offers] blueprint clear '{p.AddressKey}': {ex.Message}"); }
                 }
 
+                _took.Remove(p.AddressKey);   // fold A-R1: only THIS takeover's AddToPlayer counts
                 TransferInProgress = true;
                 MPPatches.AuthorizedPlayerBusinessTransfer = p.AddressKey;
                 try { BizManPresentation.OvertakeBusiness(reg); }
@@ -241,10 +256,12 @@ namespace BigAmbitionsMP
                 }
                 finally { TransferInProgress = false; MPPatches.AuthorizedPlayerBusinessTransfer = null; }
 
-                if (!reg.RentedByPlayer)
+                bool took = _took.Remove(p.AddressKey);
+                if (!reg.RentedByPlayer || !took)
                 {
-                    // The claim itself didn't land — leave unclaimed; the host's 5s re-send retries.
-                    Plugin.Logger.LogWarning($"[Offers] claim at '{p.AddressKey}' did not take (still not rented) — will retry.");
+                    // The claim itself didn't land — leave unclaimed; the host's 5s re-send retries. Fold A-R1: a
+                    // takeover that never reached AddToPlayer did not take, even when a flip/adopt set the flag.
+                    Plugin.Logger.LogWarning($"[Offers] claim at '{p.AddressKey}' did not take ({(!reg.RentedByPlayer ? "still not rented" : "the takeover never reached AddToPlayer")}) — will retry.");
                     return;
                 }
 

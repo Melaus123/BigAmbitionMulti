@@ -586,4 +586,195 @@ namespace BigAmbitionsMP
             return false;
         }
     }
+
+    /// <summary>H-MERGEROWNFLIP-1 part B (design_rental.md section 3 step 8; user-approved 2026-09-26 'vacate on the
+    /// deposit-return money event'): EVERY lease end reaches the host.
+    ///
+    /// WHY. The only vacate report used to be MPPatches.Patch_TerminateContract, a POSTFIX on the BizMan confirm
+    /// handler. A postfix does not run when the method throws, and the confirm handler throws at its very end in the
+    /// field (bundle 20260923-222227; rig run T-OWNFLIP2-20260926-183321): the lease was refunded and the flag cleared,
+    /// but no VacateRequest went out, so the host's ledger kept naming the tenant. Other paths end a lease with no
+    /// postfix at all (a copy of the terminate in another mod; SharedShopWorkTabs.ApplyRoutedTerminate).
+    ///
+    /// THE TRIGGER. Every lease end refunds the deposit through GameManager.ChangeMoney with the type
+    /// ba:transaction_depositreturn or ba:transaction_depositreturnfurniture, and that call carries the building's
+    /// address (the same choke point P-LEASEPROBE and the wallet forward observe). The address is queued; on the NEXT
+    /// frame (a per-frame check driven from MergerFlip.Tick, not a timer) the building is read:
+    ///   - still rented: a refund without a lease end - logged, nothing sent;
+    ///   - a vacate for it already went out (the terminate postfix ran first) - logged 'already sent';
+    ///   - the ledger names a PARTNER: logged loudly, nothing sent (this machine must not free another's lease);
+    ///   - the ledger names ME: a client sends the existing RequestVacateBuilding; the host releases its ledger entry
+    ///     and broadcasts the vacate exactly as the host-terminate postfix does.
+    /// A client that is not in a company has no copy of the ledger (MergerFlip.TryLedgerOwner answers only for the
+    /// company's buildings): there the host-pushed 'owned by another player' set is the only ledger it holds, and a
+    /// key outside it is reported to the host, which arbitrates (HandleVacateRequest denies a vacate of another's
+    /// building). Merged and unmerged, host and client. MAIN THREAD throughout.</summary>
+    internal static class LeaseEndWatch
+    {
+        /// <summary>How long a sent vacate suppresses the other trigger for the same address. The two triggers land
+        /// within a frame of each other; the window only has to outlive that.</summary>
+        private const float SentWindowSeconds = 10f;
+
+        private static readonly Dictionary<string, int>   _pending = new();   // address key -> frame its refund was seen
+        private static readonly Dictionary<string, float> _sent    = new();   // address key -> unscaledTime a vacate went out
+
+        /// <summary>Fold B-M1 (manager ruling 2026-09-26): the ONE ledger rule both lease-end triggers (this watch and
+        /// MPPatches.Patch_TerminateContract) apply. Mine = the ledger names this player. StandIn = the ledger names
+        /// another player AND this machine stands in for that absent owner's addresses (MergerAbsence.SimulatesHere) -
+        /// a sanctioned terminate (D27, MPPatches Patch_BizMan_TerminateContract_MergerDeedGuard) and a real lease end,
+        /// so it reaches the ledger exactly like the owner's own. Partner = the ledger gives it to a PRESENT partner:
+        /// log, never release. NoEntry = no ledger answer here.</summary>
+        internal enum Verdict { Mine, StandIn, Partner, NoEntry }
+
+        internal static Verdict Classify(string key, out string owner)
+        {
+            owner = "";
+            if (!MergerFlip.TryLedgerOwner(key, out owner)) return Verdict.NoEntry;
+            if (!string.IsNullOrEmpty(owner) && owner == MPConfig.PlayerId) return Verdict.Mine;
+            bool standIn = false; try { standIn = MergerAbsence.SimulatesHere(key); } catch { }
+            return standIn ? Verdict.StandIn : Verdict.Partner;
+        }
+
+        /// <summary>Fold B-L4: world change (MergerFlip.Reset, scene load) and session end (Tick below) drop both
+        /// tables - a queued refund or a 'sent' stamp never outlives the world it was seen in.</summary>
+        internal static void Reset(string why)
+        {
+            try
+            {
+                if (_pending.Count == 0 && _sent.Count == 0) return;
+                Plugin.Logger.LogInfo($"[Lease] cleared {_pending.Count} queued / {_sent.Count} sent record(s) ({why}).");
+                _pending.Clear(); _sent.Clear();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Lease] reset: {ex.Message}"); }
+        }
+
+        /// <summary>Fold B-RERENT: a native rent / takeover of this address starts a NEW lease - its 'sent' stamp
+        /// must not swallow that lease's own end if it comes within the window.</summary>
+        internal static void ClearSent(string key)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(key) || _sent.Count == 0) return;
+                if (_sent.Remove(key)) Plugin.Logger.LogInfo($"[Lease] {key} rented again - its earlier vacate record is cleared.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Lease] clear sent: {ex.Message}"); }
+        }
+
+        /// <summary>GameManager.ChangeMoney postfix: queue the address of every deposit-return money event.</summary>
+        internal static void OnMoney(string type, Address? address)
+        {
+            try
+            {
+                if (type != "ba:transaction_depositreturn" && type != "ba:transaction_depositreturnfurniture") return;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // single player: nothing to report
+                if (address == null) { Plugin.Logger.LogWarning($"[Lease] deposit-return {type} carried no address - cannot check the lease."); return; }
+                string key = GameStateReader.AddressKey(address) ?? "";
+                if (key.Length == 0) return;
+                if (!_pending.ContainsKey(key)) _pending[key] = UnityEngine.Time.frameCount;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Lease] deposit-return queue: {ex.Message}"); }
+        }
+
+        /// <summary>EVERY FRAME (from MergerFlip.Tick, before its 1 Hz gate): resolve each address queued on an
+        /// earlier frame. Nothing queued = one Count read.</summary>
+        internal static void Tick()
+        {
+            if (_pending.Count == 0 && _sent.Count == 0) return;
+            if (!MPServer.IsRunning && !MPClient.IsConnected) { Reset("session ended"); return; }   // fold B-L4
+            if (_pending.Count == 0) return;
+            int now = UnityEngine.Time.frameCount;
+            List<string>? due = null;
+            foreach (var kv in _pending) if (now > kv.Value) (due ??= new List<string>()).Add(kv.Key);
+            if (due == null) return;
+            foreach (var key in due)
+            {
+                _pending.Remove(key);
+                try { Resolve(key); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Lease] lease end seen via deposit-return {key} -> skipped(error: {ex.Message})"); }
+            }
+        }
+
+        /// <summary>Did a vacate for this address go out within the window? (Read by both triggers.)</summary>
+        internal static bool WasSent(string key)
+            => !string.IsNullOrEmpty(key) && _sent.TryGetValue(key, out var at) && UnityEngine.Time.unscaledTime - at < SentWindowSeconds;
+
+        /// <summary>Record that a vacate for this address WENT OUT (either trigger). Fold B-L2: called only after the
+        /// send / release actually happened, so a failed send leaves the address unmarked for the next trigger.</summary>
+        internal static void MarkSent(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            float now = UnityEngine.Time.unscaledTime;
+            if (_sent.Count > 32)
+            {
+                var old = new List<string>();
+                foreach (var kv in _sent) if (now - kv.Value >= SentWindowSeconds) old.Add(kv.Key);
+                foreach (var k in old) _sent.Remove(k);
+            }
+            _sent[key] = now;
+        }
+
+        private static void Skip(string key, string why, bool loud = false)
+        {
+            string line = $"[Lease] lease end seen via deposit-return {key} -> skipped({why})";
+            if (loud) Plugin.Logger.LogWarning(line); else Plugin.Logger.LogInfo(line);
+        }
+
+        private static void Resolve(string key)
+        {
+            if (!MPServer.IsRunning && !MPClient.IsConnected) { Skip(key, "no session"); return; }
+            var reg = GameStatePatcher.FindRegistration(key);
+            if (reg == null) { Skip(key, "no registration"); return; }
+            bool rented = true; try { rented = reg.RentedByPlayer; } catch { }
+            if (rented) { Skip(key, "still rented - a refund without a lease end"); return; }
+            if (WasSent(key)) { Skip(key, "already sent"); return; }
+
+            // Fold B-M1/B-M2: the one rule (Classify) - mine or stand-in for an absent owner is reported/released,
+            // a present partner's is logged and left.
+            var verdict = Classify(key, out var owner);
+            bool known = verdict != Verdict.NoEntry;
+            bool standIn = verdict == Verdict.StandIn;
+            if (!standIn) { try { standIn = MergerAbsence.SimulatesHere(key); } catch { } }
+            if (verdict == Verdict.Partner)
+            {
+                Plugin.Logger.LogWarning($"[Merger] deposit-return on a partner's building {key} - not vacated (ledger names '{owner}').");
+                Skip(key, $"partner '{owner}'", loud: true);
+                return;
+            }
+            string standInNote = standIn ? $" (stand-in for absent '{(owner.Length > 0 ? owner : MergerAbsence.OwnerSimulatedFor(key))}')" : "";
+
+            if (MPClient.IsConnected)
+            {
+                // No company answer here: the host-pushed 'another player's' set is this client's only ledger.
+                // A stand-in's report goes out regardless - the host checks it against its own absence record.
+                bool other = false; if (!standIn) { try { other = GrantSync.IsOtherOwned(key); } catch { } }
+                if (!known && other) { Skip(key, "the host attributes it to another player", loud: true); return; }
+                try { HamptonsAccess.InvalidateIconVerdicts(); } catch { }   // as the terminate postfix: our access answer changed
+                bool sent = false; string err = "";
+                try { sent = MPClient.RequestVacateBuilding(key); } catch (Exception sx) { err = sx.Message; }
+                if (sent) MarkSent(key);   // fold B-L2: only a send that went out suppresses the other trigger
+                Plugin.Logger.LogInfo($"[Lease] lease end seen via deposit-return {key} -> {(sent ? "vacate sent" : err.Length > 0 ? $"skipped(send failed: {err})" : "skipped(not connected)")}{standInNote}{(known ? "" : " (no company ledger here - the host arbitrates)")}");
+                return;
+            }
+
+            // HOST: mine, stand-in, or no ledger entry (the terminate postfix's behaviour: release + broadcast).
+            try { HamptonsAccess.InvalidateIconVerdicts(); } catch { }
+            MPServer.BuildingOwners.TryRemove(key, out _);
+            MPServer.BroadcastVacate(key);
+            MarkSent(key);   // fold B-L2: after the broadcast went out
+            MPServer.RefreshBuildingAccess();   // housing: drop guests' access to this now-vacated building
+            Plugin.Logger.LogInfo($"[Lease] lease end seen via deposit-return {key} -> released ({(known ? "ledger entry removed" : "no ledger entry")}, vacate broadcast){standInNote}");
+        }
+    }
+
+    /// <summary>H-MERGEROWNFLIP-1 part B: the deposit-return trigger's hook on the money choke point (private
+    /// GameManager.ChangeMoney, which every ChangeMoneySafe reaches). Postfix: the refund has been applied.</summary>
+    [HarmonyLib.HarmonyPatch]
+    internal static class Patch_GameManager_ChangeMoney_LeaseEnd
+    {
+        static System.Reflection.MethodBase? TargetMethod() => HarmonyLib.AccessTools.Method(typeof(GameManager), "ChangeMoney");
+        static void Postfix(TransactionInfo transactionInfo, Address address)
+        {
+            try { LeaseEndWatch.OnMoney(transactionInfo?.Type ?? "", address); } catch { }
+        }
+    }
 }

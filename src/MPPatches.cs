@@ -176,9 +176,14 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (__instance == null || !__instance.RentedByPlayer) return;
+                    string key = GameStateReader.AddressKey(__instance);
+                    // Fold A-R1: a hub-sale finalize's takeover REACHED AddToPlayer and the tenancy is set. Recorded
+                    // before every early return (the flag alone is blind once a flip/adopt already made it true).
+                    if (MPOffers.TransferInProgress) MPOffers.NoteTook(key);
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                    LeaseEndWatch.ClearSent(key);   // fold B-RERENT: a takeover starts a new lease
                     if (MergerFlip.FlippedCount == 0) return;
-                    MergerFlip.OnNativeRent(GameStateReader.AddressKey(__instance));
+                    MergerFlip.OnNativeRent(key);
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] takeover adopt hook: {ex.Message}"); }
             }
@@ -238,17 +243,42 @@ namespace BigAmbitionsMP
                     // access answer, on either role, before any ledger event reaches us.
                     try { HamptonsAccess.InvalidateIconVerdicts(); } catch { }
 
-                    if (MPClient.IsConnected)
+                    // H-MERGEROWNFLIP-1 part B: the deposit-return trigger (LeaseEndWatch) reports the same lease end;
+                    // whichever fires first sends, the other logs and stands down.
+                    if (LeaseEndWatch.WasSent(key))
                     {
-                        MPClient.RequestVacateBuilding(key);
-                        Plugin.Logger.LogInfo($"[Patch] Client unrented {key} locally + notifying host.");
+                        Plugin.Logger.LogInfo($"[Patch] Unrent {key}: vacate already sent (deposit-return path) - not sent again.");
                         return;
                     }
-                    // Host — released locally already; clear ownership + tell clients.
+                    // Fold B-L2: the 'sent' mark is set only AFTER the send / release actually went out.
+                    bool standIn = false; try { standIn = MergerAbsence.SimulatesHere(key); } catch { }
+
+                    if (MPClient.IsConnected)
+                    {
+                        // Owner or stand-in (fold B-M2): the host arbitrates (HandleVacateRequest).
+                        bool sent = false; string err = "";
+                        try { sent = MPClient.RequestVacateBuilding(key); } catch (Exception sx) { err = sx.Message; }
+                        if (sent) LeaseEndWatch.MarkSent(key);
+                        string who = standIn ? $" (as the stand-in for absent '{MergerAbsence.OwnerSimulatedFor(key)}')" : "";
+                        if (sent) Plugin.Logger.LogInfo($"[Patch] Client unrented {key} locally + notifying host{who}.");
+                        else Plugin.Logger.LogWarning($"[Patch] Client unrented {key} locally - vacate NOT sent ({(err.Length > 0 ? err : "not connected")}){who}; the deposit-return path may still report it.");
+                        return;
+                    }
+                    // Host — fold B-M1: the same rule as LeaseEndWatch. Mine, stand-in for an absent owner, or no ledger
+                    // entry: clear ownership + tell clients. A PRESENT partner's building: log, do not release.
+                    var verdict = LeaseEndWatch.Classify(key, out var lOwner);
+                    if (verdict == LeaseEndWatch.Verdict.Partner)
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] host terminate on a present partner's building {key} - not released (ledger names '{lOwner}').");
+                        return;
+                    }
                     MPServer.BuildingOwners.TryRemove(key, out _);
                     MPServer.BroadcastVacate(key);
+                    LeaseEndWatch.MarkSent(key);
                     MPServer.RefreshBuildingAccess();   // housing: drop guests' access to this now-vacated building
-                    Plugin.Logger.LogInfo($"[Patch] Host unrented {key}, broadcasted vacate to clients.");
+                    string why = verdict == LeaseEndWatch.Verdict.StandIn ? $" (stand-in for absent '{lOwner}')"
+                               : verdict == LeaseEndWatch.Verdict.NoEntry ? " (no ledger entry)" : "";
+                    Plugin.Logger.LogInfo($"[Patch] Host unrented {key}, broadcasted vacate to clients{why}.");
                 }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Patch] Patch_TerminateContract: {ex.Message}"); }
             }

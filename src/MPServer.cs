@@ -5249,7 +5249,11 @@ namespace BigAmbitionsMP
             // unrented on its own machine, so honour it).
             if (BuildingOwners.TryGetValue(req.AddressKey, out var current) && current != "" && current != senderPid)
             {
-                Plugin.Logger.LogWarning($"[Server] VacateRequest {req.AddressKey} from {senderPid} denied — owned by {current}.");
+                // H-MERGEROWNFLIP-1 fold B-M2: the one exception - the sender is the stand-in simulating the absent
+                // owner's addresses (D27 sanctions its terminate). The absence table is MAIN THREAD only, so the
+                // check (and the deny) runs there.
+                string sAddr = req.AddressKey, sOwner = current;
+                GameStatePatcher.EnqueueOnMainThread(() => HostVacateByStandIn(sAddr, senderPid, sOwner));
                 return;
             }
 
@@ -5263,6 +5267,44 @@ namespace BigAmbitionsMP
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectPlayerVacate(addr, ledgerNamedSender));
             BroadcastVacate(req.AddressKey);   // tell every client it's available again
             RefreshBuildingAccess();           // housing: drop guests' access to this now-vacated building
+        }
+
+        /// <summary>H-MERGEROWNFLIP-1 fold B-M2, MAIN THREAD: a vacate from a sender the ledger does not name. Released
+        /// only when the host's absence record (MergerAbsence.Marks) names the sender as the CURRENT simulator of this
+        /// address for the owner the ledger names, and that owner is still away (mark live, not OwnerBack). Everything
+        /// else keeps the owner-only rule and is denied as before.</summary>
+        private static void HostVacateByStandIn(string addr, string senderPid, string ledgerOwner)
+        {
+            try
+            {
+                if (!BuildingOwners.TryGetValue(addr, out var now) || now != ledgerOwner)
+                {
+                    Plugin.Logger.LogWarning($"[Server] VacateRequest {addr} from {senderPid} denied — the ledger changed meanwhile (was {ledgerOwner}, now '{now}').");
+                    return;
+                }
+                string absent = "";
+                foreach (var kv in MergerAbsence.Marks)
+                {
+                    var m = kv.Value;
+                    if (m == null || m.OwnerBack || string.IsNullOrEmpty(m.SimulatorPid) || m.SimulatorPid != senderPid || m.Addresses == null) continue;
+                    if (ledgerOwner != m.OwnerPid && ledgerOwner != m.OwnerStable) continue;
+                    foreach (var a in m.Addresses)
+                        if (string.Equals(a, addr, StringComparison.OrdinalIgnoreCase)) { absent = string.IsNullOrEmpty(m.OwnerPid) ? m.OwnerStable : m.OwnerPid; break; }
+                    if (absent.Length > 0) break;
+                }
+                if (absent.Length == 0)
+                {
+                    Plugin.Logger.LogWarning($"[Server] VacateRequest {addr} from {senderPid} denied — owned by {ledgerOwner}.");
+                    return;
+                }
+                Plugin.Logger.LogInfo($"[Server] VacateRequest {addr} by stand-in {senderPid} for absent {absent} - releasing");
+                BuildingOwners.TryRemove(addr, out _);
+                // The ledger named the absent tenant and the stand-in acts for them: the same tenancy end as the owner's.
+                GameStatePatcher.HostReflectPlayerVacate(addr, true);
+                BroadcastVacate(addr);
+                RefreshBuildingAccess();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] VacateRequest stand-in check '{addr}': {ex.Message}"); }
         }
 
         // Symmetric to HandleRentRequest, for BOUGHT real estate.  The client already

@@ -1,7 +1,7 @@
 {
   "id": "T-STANDINPUT",
   "title": "H-MERGERSTOCK-2 follow-up (review MEDIUM-2): a deposit into an ABSENT merged owner's shop is applied by the machine standing in for that owner. Three members (melaus + Client1 from the fixture, Client2 grown in); Client1 drops, the host stands in (a member host always simulates), and the THIRD member Client2 hand-deposits into Client1's fast food. Before the fix the host forwarded the op to the offline owner, SendHubTo logged 'not connected' and dropped it - the depositor kept the goods and nothing landed. NO save.",
-  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger true so tools/regress.py resets it with --keep-merger). Client1 owns the fast food at vars.shop (11 ba:street_tenthavenue - a staffed till, per t-shopday-paper-till). The third instance (role d, PlayerId Client2) has no slot in fx-hq1 and joins as a NEW player (charconfirm armed before hostload). Dev build with merge / mergestatus / absence / regstate / helperstate / stationroom / deposit / stockof / enterbuilding / exitbuilding. The host is a company member, so HostReconcileAbsence designates the HOST as the stand-in (MPServer ~:823) - this run proves the host-applies branch of RouteStorageOpForAbsentOwner; the forward-to-a-client-stand-in branch needs a company the host is NOT in plus a fourth member (three clients) and is not exercised here.",
+  "preconditions": "(H-MERGEROWNFLIP-1 fold B-M1 leg seq 37-41: levers ownflip / bizterminate <addr> postfix; the native confirm handler's known end-of-method NullReferenceException - logged by P-LEASEPROBE and echoed by the lever - is excluded from the NRE oracle.) Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger true so tools/regress.py resets it with --keep-merger). Client1 owns the fast food at vars.shop (11 ba:street_tenthavenue - a staffed till, per t-shopday-paper-till). The third instance (role d, PlayerId Client2) has no slot in fx-hq1 and joins as a NEW player (charconfirm armed before hostload). Dev build with merge / mergestatus / absence / regstate / helperstate / stationroom / deposit / stockof / enterbuilding / exitbuilding. The host is a company member, so HostReconcileAbsence designates the HOST as the stand-in (MPServer ~:823) - this run proves the host-applies branch of RouteStorageOpForAbsentOwner; the forward-to-a-client-stand-in branch needs a company the host is NOT in plus a fourth member (three clients) and is not exercised here.",
   "instances": 3,
   "vars": {
     "clientPid": "Client1",
@@ -14,9 +14,12 @@
   "oracles_absent": [
     "HarmonyException",
     "Patching exception",
-    "(?<!swallowed )NullReferenceException",
+    "^(?!.*(\\[LeaseProbe\\] throw OnTerminateContractConfirm|'bizterminate )).*(?<!swallowed )NullReferenceException",
     "\\[Store\\] storage op for offline owner .* dropped - no stand-in",
-    "\\[Store\\] RouteStorageOpForAbsentOwner:"
+    "\\[Store\\] RouteStorageOpForAbsentOwner:",
+    "\\[Lease\\] lease end seen via deposit-return 11 ba:street_tenthavenue -> released",
+    "\\[Merger\\] host terminate on a present partner's building",
+    "\\[Lease\\] lease end seen via deposit-return .* -> skipped\\(error"
   ],
   "oracles_report": [
     "\\[Server\\] hub message: 'Client1' not connected",
@@ -24,7 +27,10 @@
     "\\[DepositGuard\\]",
     "\\[BStore\\] owner applied PUT",
     "\\[Absence\\]",
-    "\\[Access\\] backstop"
+    "\\[Access\\] backstop",
+    "\\[Lease\\] ",
+    "\\[Patch\\] Host unrented ",
+    "\\[Client\\] Building vacated: "
   ],
   "steps": [
     {"seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK"},
@@ -72,7 +78,16 @@
     {"seq": 34, "role": "h", "cmd": "stockof ${shop}", "expect_result": "^OK stockof", "expect_gt": {"${depItem}:([0-9]+)": "${standBefore}"}, "note": "the goods are on the STAND-IN's station"},
     {"seq": 35, "role": "d", "cmd": "helperstate ${shop}", "expect_result": "hands=empty", "note": "the stand-in's OK consumed the depositor's held goods"},
     {"seq": 36, "role": "d", "cmd": "exitbuilding", "abort_on_fail": false},
-    {"seq": 37, "role": "d", "cmd": "merge leave", "expect_result": "OK merge leave sent", "abort_on_fail": false, "note": "FIXTURE HYGIENE: the newcomer leaves; the fixture pair stays as it was loaded. Nothing is saved"},
-    {"seq": 38, "role": "all", "cmd": "mark TEST STANDINPUT END", "expect_result": "OK MARK"}
+    {"seq": 37, "role": "all", "cmd": "mark TEST STANDINPUT TERMINATE", "expect_result": "OK MARK"},
+    {"seq": 38, "role": "h", "cmd": "ownflip ${shop}", "expect_result": "^OK ownflip ", "refute_result": "ledger='(\\?|${hostPid})'", "note": "PREMISE: the host's ledger still names the ABSENT owner as the shop's tenant"},
+    {"seq": 39, "role": "h", "cmd": "bizterminate ${shop} postfix", "expect_result": "^OK bizterminate key='${shop}' .* rented=False.* postfix=ran", "expect_log": [
+      {"role": "h", "regex": "\\[Patch\\] Host unrented ${shop}, broadcasted vacate to clients \\(stand-in for absent", "within_s": 5},
+      {"role": "h", "regex": "\\[Lease\\] lease end seen via deposit-return ${shop} -> skipped\\(already sent\\)", "within_s": 5},
+      {"role": "d", "regex": "\\[Client\\] Building vacated: ${shop}", "within_s": 10}],
+      "note": "H-MERGEROWNFLIP-1 fold B-M1: the STAND-IN (host) terminates the absent owner's lease (D27) - the postfix releases ONCE, the deposit-return path stands down (a second release is an absent-oracle); the report counts 'Building vacated' on the member"},
+    {"seq": 40, "role": "h", "sleep_s": 5},
+    {"seq": 41, "role": "h", "cmd": "ownflip ${shop}", "expect_result": "^OK ownflip .*ledger='\\?'", "note": "the host's ledger entry for the absent owner's shop is gone"},
+    {"seq": 42, "role": "d", "cmd": "merge leave", "expect_result": "OK merge leave sent", "abort_on_fail": false, "note": "FIXTURE HYGIENE: the newcomer leaves; the fixture pair stays as it was loaded. Nothing is saved"},
+    {"seq": 43, "role": "all", "cmd": "mark TEST STANDINPUT END", "expect_result": "OK MARK"}
   ]
 }

@@ -2116,7 +2116,7 @@ namespace BigAmbitionsMP
                     // presentation object carries only the page's business link (building + registration), which is all
                     // either handler reads. Money is read before and after in the same frame.
                     var bargs = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (bargs.Length < 2) return $"ERR usage: {verb} <num> <ba:street_x>";
+                    if (bargs.Length < 2) return $"ERR usage: {verb} <num> <ba:street_x>" + (verb == "bizterminate" ? " [postfix]" : "");
                     string baddr = bargs[0] + " " + bargs[1];
                     var bgi = SaveGameManager.Current;
                     if (bgi == null) return "ERR no game instance";
@@ -2139,10 +2139,24 @@ namespace BigAmbitionsMP
                         else HarmonyLib.AccessTools.Method(typeof(BizManPresentation), "OnTerminateContractConfirm").Invoke(bpres, null);
                     }
                     catch (Exception bex) { var be = bex.InnerException ?? bex; bErr = be.GetType().Name + ": " + be.Message; }
+                    // H-MERGEROWNFLIP-1 part B: `bizterminate <addr> postfix` also runs the vacate-report postfix the
+                    // bare page's end-of-method throw skips (MPPatches.Patch_TerminateContract), in the SAME frame as
+                    // the refund - the clean-click path, so both lease-end triggers fire and the de-dup is exercised.
+                    string bPost = "";
+                    if (verb == "bizterminate" && bargs.Length >= 3 && bargs[2] == "postfix")
+                    {
+                        try
+                        {
+                            var pm = HarmonyLib.AccessTools.Method(typeof(MPPatches.Patch_TerminateContract), "Postfix");
+                            if (pm == null) bPost = " postfix=notfound";
+                            else { pm.Invoke(null, new object[] { bpres }); bPost = " postfix=ran"; }
+                        }
+                        catch (Exception pex) { var pe = pex.InnerException ?? pex; bPost = $" postfix=threw({pe.GetType().Name})"; }
+                    }
                     float bAfter = bgi.Money;
                     var binv = System.Globalization.CultureInfo.InvariantCulture;
                     return $"OK {verb} key='{baddr}' money={bBefore.ToString("F2", binv)}->{bAfter.ToString("F2", binv)} same={(bBefore == bAfter)} "
-                         + $"rented={breg.RentedByPlayer} flipped={MergerFlip.IsFlipped(baddr)}" + (bErr.Length > 0 ? $" threw='{bErr}'" : "");
+                         + $"rented={breg.RentedByPlayer} flipped={MergerFlip.IsFlipped(baddr)}" + (bErr.Length > 0 ? $" threw='{bErr}'" : "") + bPost;
                 }
 
                 case "employees":
