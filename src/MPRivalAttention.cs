@@ -17,6 +17,45 @@ namespace BigAmbitionsMP
         public bool EverCounted { get; set; }
         public List<string> Completed { get; set; } = new List<string>();
         public List<string> Sent { get; set; } = new List<string>();
+        /// <summary>H-RIVALPARITY-1 part B: WORLD rows (Key = "*world", one per rival) carry the running attacks with
+        /// their attribution, the price-war queue and the copycat shops added so far. Null / 0 on every other row.</summary>
+        public List<MpRivalAttack> Attacks { get; set; }
+        public List<MpRivalQueued> Queue { get; set; }
+        public int CopycatAdded { get; set; }
+    }
+
+    /// <summary>H-RIVALPARITY-1 part B: one pre-war price of an item a war cut (the restore check's reference).</summary>
+    public class MpRivalWarItem
+    {
+        public string Addr { get; set; } = "";
+        public string Item { get; set; } = "";
+        public float Pre { get; set; }
+    }
+
+    /// <summary>H-RIVALPARITY-1 part B: one running attack and the key it is aimed at. EndMin = the native DefenseState's
+    /// end (Timestamp.GetTotalMinutes, rounded); with the rival and the mechanic it identifies the native state.</summary>
+    public class MpRivalAttack
+    {
+        public string Key { get; set; } = "";
+        public string RivalId { get; set; } = "";
+        public string Nb { get; set; } = "";
+        public string Mechanic { get; set; } = "";
+        public int Aggression { get; set; }
+        public string EntryId { get; set; } = "";
+        public int EndMin { get; set; }
+        public float Cut { get; set; }
+        public List<MpRivalWarItem> Items { get; set; } = new List<MpRivalWarItem>();
+        public List<string> Opened { get; set; } = new List<string>();
+    }
+
+    /// <summary>H-RIVALPARITY-1 part B: a price war waiting for the running one (first in, first out, per rival).</summary>
+    public class MpRivalQueued
+    {
+        public string Key { get; set; } = "";
+        public string EntryId { get; set; } = "";
+        public int Aggression { get; set; }
+        public int AtMin { get; set; }
+        public int LastTryMin { get; set; }
     }
 
     /// <summary>
@@ -34,8 +73,9 @@ namespace BigAmbitionsMP
     ///   activation    - :165-203 (only once the intro was sent; &lt;3 deactivates, &gt;=3 activates, after the delay);
     ///   surrender     - :134-163 (the host runs RivalsHelper.DefeatRival once, for everybody);
     ///   triggers      - :205-239 (same thresholds, same planning times).
-    /// PART A IS A DRY RUN FOR ATTACKS: a due entry only logs "[RivalAttn] would fire ..." and nothing is marked
-    /// completed (part B makes them real). Poaching stays OFF.
+    /// PART B (2026-09-27) MAKES THE ATTACKS REAL: a due entry fires through the game's own ActivatePriceReduction /
+    /// ActivateLowDemand aimed at the key (Target), is marked completed only on success, and its special message is
+    /// taken off the shared SpecialMessagesTmpQueue and routed to the key as text. Poaching stays OFF.
     /// SOLO HOST: with no other key online the postfix returns before doing anything - the native path alone runs.
     /// Host-only; main thread (the sweep postfix, the 3 s heartbeat tick, the rig levers).
     /// </summary>
@@ -66,6 +106,14 @@ namespace BigAmbitionsMP
         private static readonly List<Planned> _planned = new List<Planned>();
         private static readonly List<Pending> _pending = new List<Pending>();
         private static readonly Dictionary<string, int> _extra = new Dictionary<string, int>(System.StringComparer.Ordinal);      // DEV lever: key|rivalId -> count floor (rivalattn floor)
+        // H-RIVALPARITY-1 part B world data (host; written on the main thread under _lock; persisted as "*world" rows)
+        private static readonly List<MpRivalAttack> _attacks = new List<MpRivalAttack>();
+        private static readonly Dictionary<string, List<MpRivalQueued>> _warQ = new Dictionary<string, List<MpRivalQueued>>(System.StringComparer.Ordinal);   // rivalId -> FIFO
+        private static readonly Dictionary<string, int> _copyAdded = new Dictionary<string, int>(System.StringComparer.Ordinal);   // rivalId -> copycat shops added by every wave so far
+        private static readonly HashSet<string> _hostCopycat = new HashSet<string>(System.StringComparer.Ordinal);                 // rivalId: the HOST key's once-per-key copycat flag
+        internal const string WorldKey = "*world";
+        private const int LowDemandTotalCap = 10;        // the game's own LowDemandNewBusinessesCap (RivalDefenseHelper.cs:26), cumulative per neighbourhood
+        private const int StaleQueueMin = 48 * 60;       // a queued war not retried for 48 game hours leaves the head
         private static List<MpRivalAttnEntry> _hostRowsCache = new List<MpRivalAttnEntry>();
         private static List<MpRivalAttnEntry> _manifestHostRows;
         private static string _manifestHostKey = "";
@@ -257,7 +305,7 @@ namespace BigAmbitionsMP
                 }
                 else
                 {
-                    _store.Clear(); _planned.Clear(); _pending.Clear(); _extra.Clear();
+                    _store.Clear(); _planned.Clear(); _pending.Clear(); _extra.Clear(); ClearWorldLocked();
                     _manifestHostRows = null; _manifestHostKey = "";
                     _migrationPending = true;
                 }
@@ -274,10 +322,10 @@ namespace BigAmbitionsMP
         {
             try
             {
-                int n = 0, keys = 0, host = 0;
+                int n = 0, keys = 0, host = 0, world = 0;
                 lock (_lock)
                 {
-                    _store.Clear(); _planned.Clear(); _pending.Clear(); _extra.Clear();
+                    _store.Clear(); _planned.Clear(); _pending.Clear(); _extra.Clear(); ClearWorldLocked();
                     _manifestHostRows = null; _manifestHostKey = ""; _migrationPending = false;
                     _hostRowsCache = new List<MpRivalAttnEntry>();   // part D F4: the previous world's host rows must never be written for this one
                     var seenKeys = new HashSet<string>(System.StringComparer.Ordinal);
@@ -286,8 +334,10 @@ namespace BigAmbitionsMP
                         foreach (var e in m.RivalAttention)
                         {
                             if (e == null || string.IsNullOrEmpty(e.Key) || string.IsNullOrEmpty(e.RivalId)) continue;
+                            if (e.Key == WorldKey) { ApplyWorldRowLocked(e); world++; continue; }   // part B: attacks, queue, copycat count
                             if (e.IsHostKey)
                             {
+                                if (e.CopycatDone) _hostCopycat.Add(e.RivalId);   // part B (a host change re-reads it in SettleLoad)
                                 if (_manifestHostRows == null) _manifestHostRows = new List<MpRivalAttnEntry>();
                                 _manifestHostRows.Add(e); _manifestHostKey = e.Key; host++;
                                 continue;
@@ -308,7 +358,7 @@ namespace BigAmbitionsMP
                 if (m?.RivalAttention == null)
                     Plugin.Logger.LogInfo("[RivalAttn] manifest predates per-player rival attention - migration at world load (host key from native state, every other player starts fresh).");
                 else
-                    Plugin.Logger.LogInfo($"[RivalAttn] restored {n} key-rival row(s) for {keys} key(s) from the manifest (+{host} host row(s), host key '{_manifestHostKey}').");
+                    Plugin.Logger.LogInfo($"[RivalAttn] restored {n} key-rival row(s) for {keys} key(s) from the manifest (+{host} host row(s), host key '{_manifestHostKey}'; {world} world row(s): {_attacks.Count} running attack(s), {QueuedCountLocked()} queued war(s)).");
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] manifest restore: {ex.Message}"); }
         }
@@ -325,7 +375,7 @@ namespace BigAmbitionsMP
                 lock (_lock)
                 {
                     foreach (var h in _hostRowsCache)
-                        list.Add(new MpRivalAttnEntry { Key = h.Key, RivalId = h.RivalId, IsActive = h.IsActive, IsHostKey = true,
+                        list.Add(new MpRivalAttnEntry { Key = h.Key, RivalId = h.RivalId, IsActive = h.IsActive, IsHostKey = true, CopycatDone = _hostCopycat.Contains(h.RivalId),
                                                         Completed = new List<string>(h.Completed), Sent = new List<string>(h.Sent) });
                     // part D F4: manifest host rows not settled yet travel on unchanged in meaning - the previous host's
                     // rows as an ordinary player key (what SettleLoad turns them into), this host's own as host rows
@@ -338,7 +388,7 @@ namespace BigAmbitionsMP
                             {
                                 if (e == null) continue;
                                 if (other && _store.ContainsKey(e.Key + "|" + e.RivalId)) continue;
-                                list.Add(new MpRivalAttnEntry { Key = e.Key, RivalId = e.RivalId, IsActive = e.IsActive, IsHostKey = !other, EverCounted = other,
+                                list.Add(new MpRivalAttnEntry { Key = e.Key, RivalId = e.RivalId, IsActive = e.IsActive, IsHostKey = !other, EverCounted = other, CopycatDone = e.CopycatDone,
                                                                 Completed = new List<string>(e.Completed ?? new List<string>()), Sent = new List<string>(e.Sent ?? new List<string>()) });
                             }
                     }
@@ -351,6 +401,7 @@ namespace BigAmbitionsMP
                                                         CopycatDone = st.CopycatDone, EverCounted = st.EverCounted,
                                                         Completed = new List<string>(st.Completed), Sent = new List<string>(st.Sent) });
                     }
+                    list.AddRange(WorldRowsLocked());   // part B
                 }
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] snapshot: {ex.Message}"); }
@@ -416,10 +467,11 @@ namespace BigAmbitionsMP
                 // A different person hosted when this manifest was written.
                 lock (_lock)
                     foreach (var e in hostRows)
-                        _store[e.Key + "|" + e.RivalId] = new State { IsActive = e.IsActive, EverCounted = true,
+                        _store[e.Key + "|" + e.RivalId] = new State { IsActive = e.IsActive, EverCounted = true, CopycatDone = e.CopycatDone,
                                                                       Completed = new List<string>(e.Completed ?? new List<string>()),
                                                                       Sent = new List<string>(e.Sent ?? new List<string>()) };
                 int moved = 0;
+                lock (_lock) _hostCopycat.Clear();   // part B: the manifest's host flags were the previous host's (now in its store rows)
                 foreach (var rival in RivalsHelper.GetSpecialRivals())
                 {
                     string rid = rival?.rivalData?.id ?? "";
@@ -435,7 +487,7 @@ namespace BigAmbitionsMP
                     nst.completedTimelineEntryIds.Clear(); nst.completedTimelineEntryIds.AddRange(comp);
                     if (nst.sentMessageKeys == null) nst.sentMessageKeys = new List<string>();
                     nst.sentMessageKeys.Clear(); nst.sentMessageKeys.AddRange(sent);
-                    lock (_lock) _store.Remove(hk + "|" + rid);
+                    lock (_lock) { if (mine != null && mine.CopycatDone) _hostCopycat.Add(rid); _store.Remove(hk + "|" + rid); }
                     moved++;
                 }
                 Plugin.Logger.LogInfo($"[RivalAttn] host change: previous host key '{mk}' kept as a player key; this host's key '{hk}' copied into the native state for {moved} rival(s).");
@@ -554,7 +606,8 @@ namespace BigAmbitionsMP
                 {
                     if (st.IsActive == on) return;
                     st.IsActive = on;
-                    if (!on) _planned.RemoveAll(p => p.Key == key && p.RivalId == rid);
+                    // Part B (manager ruling 2026-09-27): planned entries are NOT dropped on deactivation - native keeps
+                    // firing them (RivalTimeline.PlannedEntriesCoroutine checks only IsCompleted).
                 }
                 var pids = OnlinePidsOfKey(key);
                 pids.Remove(MPConfig.PlayerId);
@@ -608,6 +661,7 @@ namespace BigAmbitionsMP
                     foreach (var kv in _store)
                         if (kv.Value.IsActive && kv.Key.EndsWith("|" + rid, System.StringComparison.Ordinal)) keys.Add(kv.Key.Substring(0, kv.Key.Length - rid.Length - 1));
                     _planned.RemoveAll(p => p.RivalId == rid);
+                    _warQ.Remove(rid);   // part B: no war waits on a defeated rival
                 }
                 if (keys.Count == 0) return;
                 var told = new List<string>();
@@ -710,11 +764,22 @@ namespace BigAmbitionsMP
                 {
                     var st = Get(p.Key, p.RivalId, false);
                     bool done;
-                    lock (_lock) done = st == null || !st.IsActive || st.Completed.Contains(p.EntryId);
+                    // Part B (manager ruling 2026-09-27): mirror native - a planned entry fires even after the key was
+                    // deactivated (PlannedEntriesCoroutine checks only IsCompleted); a defeat clears the plan.
+                    lock (_lock) done = st == null || st.Completed.Contains(p.EntryId);
                     if (done) continue;
-                    // PART A DRY RUN: nothing is fired and nothing is marked completed, so the next hourly check plans it again.
-                    ModPathFirings++;
-                    Plugin.Logger.LogInfo($"[RivalAttn] would fire {p.Mechanic} for {p.Key} on {p.RivalId} (entry {p.EntryId}; dry run - nothing fired, nothing completed).");
+                    try
+                    {
+                        var rival = RivalsHelper.GetSpecialRival(p.RivalId);
+                        var nst = RivalsHelper.GetSpecialRivalState(p.RivalId);
+                        if (rival?.rivalData == null || nst == null || nst.isDefeated) continue;
+                        TimelineEntry entry = null;
+                        if (rival.timeline?.allEntries != null)
+                            foreach (var e in rival.timeline.allEntries) if (e != null && e.id == p.EntryId) { entry = e; break; }
+                        if (entry == null) continue;
+                        FireFor(p.Key, rival, entry.defense, (int)entry.aggression, entry, false);
+                    }
+                    catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] error firing entry {p.EntryId} for {p.Key}: {ex.GetType().Name}: {ex.Message}"); }
                 }
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] tick: {ex.Message}"); }
@@ -978,6 +1043,11 @@ namespace BigAmbitionsMP
                         string oldK = o.Key;
                         if (stillUsed.Contains(oldK)) continue;
                         string heir = o.Value.Count == 1 ? new List<string>(o.Value)[0] : "";
+                        if (heir.Length > 0)   // part B: attacks and queue places move to the key that inherits (the host key too)
+                        {
+                            foreach (var a in _attacks) if (a.Key == oldK) a.Key = heir;
+                            foreach (var q in _warQ.Values) foreach (var x in q) if (x.Key == oldK) x.Key = heir;
+                        }
                         if (heir == hostAfter) heir = "";   // the native timeline plans for the host key itself
                         foreach (var p in _planned)
                             if (p.Key == oldK) p.Key = heir;
@@ -1066,6 +1136,698 @@ namespace BigAmbitionsMP
                     AfterNativeSweep(string.IsNullOrEmpty(nb) ? null : nb);
                 }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] sweep postfix: {ex.Message}"); }
+            }
+        }
+
+        // ── part B: attacks aimed at one key, the price-war queue, the restore check, copycat waves ──────────────
+        // design_rivals.md (c)(d)(e). HOST only (the attack calls and the defense clock run on the host alone).
+
+        /// <summary>The key the running ActivatePriceReduction / ActivateLowDemand call is aimed at. Null = the HOST key
+        /// (the game's own timeline, or a native console call). Set only around the mod path's own calls (FireFor).</summary>
+        internal static string Target;
+        private static string _targetEntry;
+        private static bool _forcing;          // rivalforce on the host key: no silent completion of a native entry
+        private static int _msgSeq;
+
+        internal sealed class WarCtx
+        {
+            public string Key, Rid, Nb;
+            public int Aggr, Before;
+            public Dictionary<string, float> Pre = new Dictionary<string, float>(System.StringComparer.Ordinal);
+        }
+
+        private sealed class WaveCtx
+        {
+            public string Key, Rid, Nb;
+            public int Aggr, CapLeft = -1, Before;
+            public bool Gate;
+            public List<string> Opened = new List<string>();
+        }
+        private static WaveCtx _wave;
+
+        private static string AttackerKey => string.IsNullOrEmpty(Target) ? HostKey : Target;
+
+        private static int EndMinOf(DefenseState ds)
+        {
+            try { return ds == null ? 0 : (int)System.Math.Round(ds.timestamp.GetTotalMinutes()); } catch { return 0; }
+        }
+
+        private static int NowTotalMin()
+        {
+            try { return (int)System.Math.Round(TimeHelper.NowInMinutes()); } catch { return 0; }
+        }
+
+        private static string FmtMin(int m) => m <= 0 ? "-" : $"d{m / 1440} {m % 1440 / 60:00}:{m % 60:00}";
+
+        private static string F2(float v) => v.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+
+        // ── world data (persisted as "*world" rows) ──
+        private static void ClearWorldLocked()
+        {
+            _attacks.Clear(); _warQ.Clear(); _copyAdded.Clear(); _hostCopycat.Clear();
+            _wave = null; Target = null; _targetEntry = null; _forcing = false;
+        }
+
+        private static int QueuedCountLocked()
+        {
+            int n = 0;
+            foreach (var q in _warQ.Values) n += q.Count;
+            return n;
+        }
+
+        private static MpRivalAttack CopyAttack(MpRivalAttack a)
+        {
+            var c = new MpRivalAttack { Key = a.Key, RivalId = a.RivalId, Nb = a.Nb, Mechanic = a.Mechanic, Aggression = a.Aggression,
+                                        EntryId = a.EntryId, EndMin = a.EndMin, Cut = a.Cut, Opened = new List<string>(a.Opened ?? new List<string>()) };
+            if (a.Items != null) foreach (var it in a.Items) if (it != null) c.Items.Add(new MpRivalWarItem { Addr = it.Addr, Item = it.Item, Pre = it.Pre });
+            return c;
+        }
+
+        private static void ApplyWorldRowLocked(MpRivalAttnEntry e)
+        {
+            string rid = e.RivalId;
+            if (e.Attacks != null) foreach (var a in e.Attacks) if (a != null && !string.IsNullOrEmpty(a.Key)) { var c = CopyAttack(a); c.RivalId = rid; _attacks.Add(c); }
+            if (e.Queue != null && e.Queue.Count > 0)
+            {
+                var q = new List<MpRivalQueued>();
+                foreach (var x in e.Queue) if (x != null && !string.IsNullOrEmpty(x.Key)) q.Add(new MpRivalQueued { Key = x.Key, EntryId = x.EntryId, Aggression = x.Aggression, AtMin = x.AtMin, LastTryMin = x.LastTryMin });
+                if (q.Count > 0) _warQ[rid] = q;
+            }
+            if (e.CopycatAdded > 0) _copyAdded[rid] = e.CopycatAdded;
+        }
+
+        private static List<MpRivalAttnEntry> WorldRowsLocked()
+        {
+            var rids = new List<string>();
+            foreach (var a in _attacks) if (!rids.Contains(a.RivalId)) rids.Add(a.RivalId);
+            foreach (var kv in _warQ) if (kv.Value.Count > 0 && !rids.Contains(kv.Key)) rids.Add(kv.Key);
+            foreach (var kv in _copyAdded) if (kv.Value > 0 && !rids.Contains(kv.Key)) rids.Add(kv.Key);
+            var rows = new List<MpRivalAttnEntry>();
+            foreach (var rid in rids)
+            {
+                var row = new MpRivalAttnEntry { Key = WorldKey, RivalId = rid, Attacks = new List<MpRivalAttack>(), Queue = new List<MpRivalQueued>() };
+                foreach (var a in _attacks) if (a.RivalId == rid) row.Attacks.Add(CopyAttack(a));
+                if (_warQ.TryGetValue(rid, out var q))
+                    foreach (var x in q) row.Queue.Add(new MpRivalQueued { Key = x.Key, EntryId = x.EntryId, Aggression = x.Aggression, AtMin = x.AtMin, LastTryMin = x.LastTryMin });
+                _copyAdded.TryGetValue(rid, out int added);
+                row.CopycatAdded = added;
+                rows.Add(row);
+            }
+            return rows;
+        }
+
+        // ── ownership, gate, copycat flag ──
+        /// <summary>Whose attack is this native state? The recorded attack with the same rival, mechanic and end. An
+        /// unrecorded state (started before part B, or by a native console call) is the HOST key's (migration rule).</summary>
+        private static string OwnerOfState(string rid, DefenseState ds)
+        {
+            if (ds == null) return HostKey;
+            int end = EndMinOf(ds);
+            string mech = ds.defensiveMechanic.ToString();
+            lock (_lock)
+                foreach (var a in _attacks)
+                    if (a.RivalId == rid && a.Mechanic == mech && a.EndMin == end) return a.Key;
+            return HostKey;
+        }
+
+        private static bool StateAlive(MpRivalAttack a)
+        {
+            var nst = RivalsHelper.GetSpecialRivalState(a.RivalId);
+            if (nst?.defenseStates == null) return false;
+            foreach (var ds in nst.defenseStates)
+                if (ds != null && ds.defensiveMechanic.ToString() == a.Mechanic && EndMinOf(ds) == a.EndMin) return true;
+            return false;
+        }
+
+        /// <summary>Manager ruling 2026-09-27: the once-per-key and cap rules (and the wave spacing) bind only when at
+        /// least 2 keys have EVER counted for the rival. The host key counts once the rival's entrance message was sent
+        /// to it (native sent keys); every other key by its EverCounted flag. A solo host: gate off = native.</summary>
+        internal static bool GateOn(string rid, out int keys)
+        {
+            keys = 0;
+            try
+            {
+                var nst = RivalsHelper.GetSpecialRivalState(rid);
+                var sr = RivalsHelper.GetSpecialRival(rid);
+                if (nst?.sentMessageKeys != null && sr != null && !string.IsNullOrEmpty(sr.entranceMessageKey) && nst.sentMessageKeys.Contains(sr.entranceMessageKey)) keys++;
+                string hk = HostKey;
+                lock (_lock)
+                    foreach (var kv in _store)
+                        if (kv.Value.EverCounted && kv.Key.EndsWith("|" + rid, System.StringComparison.Ordinal) && !kv.Key.StartsWith(hk + "|", System.StringComparison.Ordinal)) keys++;
+            }
+            catch { }
+            return keys >= 2;
+        }
+
+        private static bool CopycatDoneFor(string key, string rid)
+        {
+            if (key == HostKey) { lock (_lock) return _hostCopycat.Contains(rid); }
+            var st = Get(key, rid, false);
+            if (st == null) return false;
+            lock (_lock) return st.CopycatDone;
+        }
+
+        private static void SetCopycatDone(string key, string rid)
+        {
+            if (key == HostKey) { lock (_lock) _hostCopycat.Add(rid); return; }
+            var st = Get(key, rid, true);
+            lock (_lock) st.CopycatDone = true;
+        }
+
+        // ── (c) the aimed key's own shops / best sellers ──
+        /// <summary>The key's own shops in a neighbourhood (headquarters excluded) with the daily income native ranks by
+        /// (GetAvgDailyIncome(7)): the host's own from its registration, every other member's from its self-report row
+        /// (AvgDaily7). Ownership is the ledger / stamp - RentedByPlayer alone may have been raised for every player.</summary>
+        private static List<(BuildingRegistration reg, float daily)> KeyShopsIn(string key, string nb)
+        {
+            var list = new List<(BuildingRegistration reg, float daily)>();
+            var gi = SaveGameManager.Current;
+            if (gi?.BuildingRegistrations == null || string.IsNullOrEmpty(key)) return list;
+            var stables = StablesOfKey(key);
+            bool hostIn = stables.Contains(MPConfig.StableId);
+            var pids = new HashSet<string>(System.StringComparer.Ordinal);
+            var daily = new Dictionary<string, float>(System.StringComparer.Ordinal);
+            foreach (var s in stables)
+            {
+                if (s == MPConfig.StableId) continue;
+                foreach (var pid in PidsOfStable(s)) pids.Add(pid);
+                foreach (var pid in CountingPidsOfStable(s))
+                    foreach (var row in MPServer.SelfReportRows(pid))
+                        if (row != null && row.Neighborhood == nb && !string.IsNullOrEmpty(row.AddressKey)) daily[row.AddressKey] = row.AvgDaily7;
+            }
+            foreach (var reg in gi.BuildingRegistrations)
+            {
+                if (reg == null) continue;
+                try
+                {
+                    if (reg.Neighborhood != nb || reg.businessTypeName == "ba:businesstype_headquarters") continue;
+                    bool stamped = GameStatePatcher.IsAnyPlayerBusiness(reg);
+                    if (!reg.RentedByPlayer && !stamped) continue;
+                    string owner = MPRivalFairness.Patch_CompetitionSeesAllPlayers.OwnerPidOf(reg);
+                    if (owner.Length == 0 || owner == MPConfig.PlayerId)
+                    {
+                        if (hostIn && reg.RentedByPlayer) list.Add((reg, reg.GetAvgDailyIncome(7)));
+                    }
+                    else if (pids.Contains(owner))
+                    {
+                        string addr = GameStateReader.AddressKey(reg);
+                        if (!daily.TryGetValue(addr, out float d)) d = MPServer.SessionBusinessWeeklyIncome(addr) / 7f;
+                        list.Add((reg, d));
+                    }
+                }
+                catch { }
+            }
+            list.Sort((a, b) => b.daily.CompareTo(a.daily));
+            return list;
+        }
+
+        /// <summary>GetTopIncomeBusinesses for the aimed key: only that key's shops, highest daily income first. Null =
+        /// keep native's list (the host key, not merged, outside the tenancy raise - native is the host's own already).</summary>
+        internal static List<BuildingRegistration> TopIncomeFor(int topNumber, string nb, bool underRaise)
+        {
+            string key = AttackerKey;
+            if (key == HostKey && !key.StartsWith("g:", System.StringComparison.Ordinal) && !underRaise) return null;
+            var outList = new List<BuildingRegistration>();
+            foreach (var r in KeyShopsIn(key, nb)) { if (outList.Count >= topNumber) break; outList.Add(r.reg); }
+            return outList;
+        }
+
+        /// <summary>GetTopSellingProducts for the aimed key (RivalDefenseHelper.cs:214-227): the key's items sold in the
+        /// last 7 days (the host's own order history; every other member's self-report Sold7d), only items the rival
+        /// sells in the neighbourhood, most sold first, retail products only, topNumber. Null = native (the host key,
+        /// not merged: native already reads the host's own sales).</summary>
+        internal static List<string> TopSellingFor(int topNumber, string nb)
+        {
+            string key = AttackerKey;
+            if (key == HostKey && !key.StartsWith("g:", System.StringComparison.Ordinal)) return null;
+            var rival = RivalsHelper.GetSpecialRivalByNeighborhood(nb);
+            var gi = SaveGameManager.Current;
+            if (rival?.rivalData == null || gi?.BuildingRegistrations == null) return null;
+            string rid = rival.rivalData.id;
+            var rivalSells = new HashSet<string>(System.StringComparer.Ordinal);
+            foreach (var reg in gi.BuildingRegistrations)
+                if (reg != null && reg.Neighborhood == nb && reg.businessOwnerRivalId == rid)
+                    try { foreach (var it in reg.GetListOfItemsForSale()) if (!string.IsNullOrEmpty(it)) rivalSells.Add(it); } catch { }
+            var sums = new Dictionary<string, int>(System.StringComparer.Ordinal);
+            var order = new List<string>();
+            void Add(string item, int n)
+            {
+                if (n <= 0 || string.IsNullOrEmpty(item) || !rivalSells.Contains(item)) return;
+                if (!sums.ContainsKey(item)) { sums[item] = 0; order.Add(item); }
+                sums[item] += n;
+            }
+            var stables = StablesOfKey(key);
+            int day = gi.Day;
+            if (stables.Contains(MPConfig.StableId))
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null || !reg.RentedByPlayer || reg.Neighborhood != nb || reg.orderHistory == null) continue;
+                    string owner = MPRivalFairness.Patch_CompetitionSeesAllPlayers.OwnerPidOf(reg);
+                    if (owner.Length > 0 && owner != MPConfig.PlayerId) continue;
+                    foreach (var o in reg.orderHistory)
+                    {
+                        if (o == null || o.itemSales == null || o.dayNumber < day - 7 || o.dayNumber > day) continue;
+                        foreach (var s in o.itemSales) if (s != null) Add(s.itemName, s.amountSold);
+                    }
+                }
+            var seen = new HashSet<string>(System.StringComparer.Ordinal);
+            foreach (var s in stables)
+            {
+                if (s == MPConfig.StableId) continue;
+                foreach (var pid in CountingPidsOfStable(s))
+                    foreach (var row in MPServer.SelfReportRows(pid))
+                    {
+                        if (row == null || row.Neighborhood != nb || row.Sold7d == null || !seen.Add(row.AddressKey ?? "")) continue;
+                        foreach (var kv in row.Sold7d) Add(kv.Key, kv.Value);
+                    }
+            }
+            var result = new List<string>();
+            foreach (var item in order.OrderByDescending(i => sums[i]))
+            {
+                if (result.Count >= topNumber) break;
+                try
+                {
+                    var it = BigAmbitions.Items.ItemsGetter.GetByName(item);
+                    if (it == null || (it.type & BigAmbitions.Items.ItemType.RetailProduct) == 0) continue;
+                }
+                catch { continue; }
+                result.Add(item);
+            }
+            return result;
+        }
+
+        // ── (d) the price-war queue ──
+        /// <summary>Prefix body on ActivatePriceReduction (host). A running war for this rival that belongs to a
+        /// DIFFERENT key (or one ended but not yet through its restore check), or a queue whose head is another key =
+        /// refuse and queue (first in, first out). The host's own path waits by itself: the game re-plans hourly.
+        /// Otherwise the key leaves the queue and the rival's prices are noted for the restore check. True = run the game's own call.</summary>
+        internal static bool WarGate(string nb, int aggr, ref bool result, out WarCtx ctx)
+        {
+            ctx = null;
+            var rival = RivalsHelper.GetSpecialRivalByNeighborhood(nb);
+            if (rival?.rivalData == null) return true;
+            string rid = rival.rivalData.id ?? "";
+            string me = AttackerKey;
+            var nst = RivalsHelper.GetSpecialRivalState(rid);
+            string blocker = "", why = "";
+            if (nst?.defenseStates != null)
+                foreach (var ds in nst.defenseStates)
+                {
+                    if (ds == null || ds.defensiveMechanic != DefensiveMechanic.PriceReduction) continue;
+                    string o = OwnerOfState(rid, ds);
+                    if (o != me) { blocker = o; why = $"its war runs until {FmtMin(EndMinOf(ds))}"; break; }
+                }
+            int now = NowTotalMin();
+            int pos = 0, len = 0;
+            lock (_lock)
+            {
+                if (blocker.Length == 0)
+                    foreach (var a in _attacks)
+                        if (a.RivalId == rid && a.Mechanic == "PriceReduction" && a.Key != me) { blocker = a.Key; why = "its war awaits the restore check"; break; }
+                if (!_warQ.TryGetValue(rid, out var q)) { q = new List<MpRivalQueued>(); _warQ[rid] = q; }
+                while (q.Count > 0 && q[0].Key != me && now - q[0].LastTryMin > StaleQueueMin)
+                {
+                    Plugin.Logger.LogInfo($"[RivalWar] queued war for {q[0].Key} on {rid} dropped from the head: not retried for {(now - q[0].LastTryMin) / 60} game hour(s).");
+                    q.RemoveAt(0);
+                }
+                if (blocker.Length == 0 && q.Count > 0 && q[0].Key != me) { blocker = q[0].Key; why = "it is first in the queue"; }
+                if (blocker.Length > 0)
+                {
+                    int idx = q.FindIndex(x => x.Key == me);
+                    if (idx < 0) { q.Add(new MpRivalQueued { Key = me, EntryId = _targetEntry ?? "", Aggression = aggr, AtMin = now, LastTryMin = now }); idx = q.Count - 1; }
+                    else q[idx].LastTryMin = now;
+                    pos = idx + 1; len = q.Count;
+                }
+                else
+                {
+                    // Its turn: the attempt leaves the queue whatever the game's own call then does (a war with
+                    // nothing to cut ends the wait too - a later plan queues again behind whoever runs then).
+                    int mi = q.FindIndex(x => x.Key == me);
+                    if (mi >= 0) q.RemoveAt(mi);
+                }
+            }
+            if (blocker.Length > 0)
+            {
+                Plugin.Logger.LogInfo($"[RivalWar] war for {me} on {rid} WAITS (queue position {pos} of {len}): a war for {blocker} - {why}. Nothing cut.");
+                result = false;
+                return false;
+            }
+            ctx = new WarCtx { Key = me, Rid = rid, Nb = nb, Aggr = aggr, Before = nst?.defenseStates?.Count ?? 0 };
+            foreach (var reg in SaveGameManager.Current.BuildingRegistrations)
+            {
+                if (reg == null || reg.businessOwnerRivalId != rid || reg.retailPrices == null) continue;
+                string addr = GameStateReader.AddressKey(reg);
+                foreach (var rp in reg.retailPrices) if (rp != null && !string.IsNullOrEmpty(rp.itemName)) ctx.Pre[addr + "|" + rp.itemName] = rp.price;
+            }
+            return true;
+        }
+
+        /// <summary>Postfix body on ActivatePriceReduction: a war that started is recorded (key, entry, end, the pre-cut
+        /// price of every row it cut) and its key leaves the queue.</summary>
+        internal static void AfterWar(WarCtx ctx, bool ok)
+        {
+            if (ctx == null || !ok) return;
+            var list = RivalsHelper.GetSpecialRivalState(ctx.Rid)?.defenseStates;
+            if (list == null || list.Count <= ctx.Before) return;
+            var ds = list[list.Count - 1];
+            if (ds == null || ds.defensiveMechanic != DefensiveMechanic.PriceReduction) return;
+            float f = 1f;
+            try { f = RivalDefenseHelper.GetPriceReductionValues((Enums.Priority)ctx.Aggr).Item1; } catch { }
+            var atk = new MpRivalAttack { Key = ctx.Key, RivalId = ctx.Rid, Nb = ctx.Nb, Mechanic = "PriceReduction", Aggression = ctx.Aggr,
+                                          EntryId = _targetEntry ?? "", EndMin = EndMinOf(ds), Cut = 1f - f };
+            var affected = ds.affectedItems ?? new List<string>();
+            double sumPre = 0, sumNow = 0;
+            foreach (var reg in SaveGameManager.Current.BuildingRegistrations)
+            {
+                if (reg == null || reg.businessOwnerRivalId != ctx.Rid || reg.retailPrices == null) continue;
+                string addr = GameStateReader.AddressKey(reg);
+                foreach (var rp in reg.retailPrices)
+                {
+                    if (rp == null || !affected.Contains(rp.itemName)) continue;
+                    if (!ctx.Pre.TryGetValue(addr + "|" + rp.itemName, out float pre)) continue;
+                    atk.Items.Add(new MpRivalWarItem { Addr = addr, Item = rp.itemName, Pre = pre });
+                    sumPre += pre; sumNow += rp.price;
+                }
+            }
+            int queued;
+            lock (_lock)
+            {
+                _attacks.Add(atk);
+                if (_warQ.TryGetValue(ctx.Rid, out var q)) { int i = q.FindIndex(x => x.Key == ctx.Key); if (i >= 0) q.RemoveAt(i); }
+                queued = _warQ.TryGetValue(ctx.Rid, out var q2) ? q2.Count : 0;
+            }
+            int n = atk.Items.Count;
+            Plugin.Logger.LogInfo($"[RivalWar] war for {ctx.Key} on {ctx.Rid} STARTED: items [{string.Join(",", affected)}] on {n} price row(s), cut {atk.Cut * 100f:F0}% until {FmtMin(atk.EndMin)} (end {atk.EndMin}); avg price {(n > 0 ? sumPre / n : 0):F2} -> {(n > 0 ? sumNow / n : 0):F2}; entry {(atk.EntryId.Length > 0 ? atk.EntryId : "native")}; {queued} war(s) still queued.");
+        }
+
+        /// <summary>Postfix body on RivalDefenseHelper.RunHourly (host): every recorded attack whose native state the
+        /// game just ended. A war: the game re-priced the rival's shops (HandleDefenseStateEnd); each recorded item is
+        /// compared with its pre-war price - still at or below snapshot x (1 - cut) + 2% = written back to the snapshot
+        /// (a warning; only with the manager's gate on, so a solo host stays native). The record leaves, so a queued war
+        /// for another key may start from the next try on.</summary>
+        internal static void AfterDefenseClock()
+        {
+            var ended = new List<MpRivalAttack>();
+            lock (_lock)
+                for (int i = _attacks.Count - 1; i >= 0; i--)
+                {
+                    if (StateAlive(_attacks[i])) continue;
+                    ended.Insert(0, _attacks[i]);
+                    _attacks.RemoveAt(i);
+                }
+            foreach (var a in ended)
+            {
+                try
+                {
+                    if (a.Mechanic == "LowDemand")
+                    {
+                        int added; lock (_lock) _copyAdded.TryGetValue(a.RivalId, out added);
+                        Plugin.Logger.LogInfo($"[RivalWave] wave for {a.Key} on {a.RivalId} ended ({a.Opened?.Count ?? 0} shop(s) it opened stay; {added}/{LowDemandTotalCap} copycat shops added in {a.Nb}).");
+                        continue;
+                    }
+                    bool gate = GateOn(a.RivalId, out int nk);
+                    int n = 0, wrote = 0, stillCut = 0;
+                    float maxDev = 0f;
+                    double sumPre = 0, sumNow = 0;
+                    foreach (var it in a.Items)
+                    {
+                        var reg = GameStatePatcher.FindRegistration(it.Addr);
+                        if (reg?.retailPrices == null || reg.businessOwnerRivalId != a.RivalId || it.Pre <= 0f) continue;
+                        var rp = reg.retailPrices.FirstOrDefault(x => x != null && x.itemName == it.Item);
+                        if (rp == null) continue;
+                        n++;
+                        float cur = rp.price;
+                        if (cur <= it.Pre * ((1f - a.Cut) + 0.02f))
+                        {
+                            if (gate) { rp.price = it.Pre; cur = it.Pre; wrote++; }
+                            else stillCut++;
+                        }
+                        float dev = System.Math.Abs(cur - it.Pre) / it.Pre * 100f;
+                        if (dev > maxDev) maxDev = dev;
+                        sumPre += it.Pre; sumNow += cur;
+                    }
+                    if (wrote > 0)
+                    {
+                        try { ItemHelper.ClearPriceCaches(); } catch { }
+                        Plugin.Logger.LogWarning($"[RivalWar] war for {a.Key} on {a.RivalId}: {wrote} price(s) still at the cut after the game's re-price - written back to the pre-war value.");
+                    }
+                    int queued; string head;
+                    lock (_lock) { queued = _warQ.TryGetValue(a.RivalId, out var q) ? q.Count : 0; head = queued > 0 ? _warQ[a.RivalId][0].Key : "-"; }
+                    Plugin.Logger.LogInfo($"[RivalWar] restored {n}, max deviation {maxDev:F1}% (war for {a.Key} on {a.RivalId} ended {FmtMin(a.EndMin)}; avg {(n > 0 ? sumPre / n : 0):F2} before the war -> {(n > 0 ? sumNow / n : 0):F2} now; {wrote} written back{(stillCut > 0 ? $", {stillCut} still cut (gate off: native re-price only)" : "")}; gate {(gate ? "on" : "off")} ({nk} key(s)); queue {queued}, head {head}).");
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalWar] error in the restore check for {a.Key} on {a.RivalId}: {ex.GetType().Name}: {ex.Message}"); }
+            }
+            if (ended.Count > 0) MPServer.PublishRivalStateIfChanged("rivalwar-end");
+        }
+
+        // ── (e) copycat waves ──
+        /// <summary>Prefix body on ActivateLowDemand (host), before the site guard's raise. With the manager's gate on: one
+        /// wave per neighbourhood at a time (the previous wave's native state must have ended), a TOTAL of the game's own
+        /// 10 added shops per neighbourhood, once per key per rival (the host key's due timeline entry is then completed
+        /// silently). Then, always: refused when the aimed key has no shop there (native indexes [0] unchecked).</summary>
+        internal static bool WaveGate(string nb, int aggr)
+        {
+            _wave = null;
+            var rival = RivalsHelper.GetSpecialRivalByNeighborhood(nb);
+            if (rival?.rivalData == null) return true;
+            string rid = rival.rivalData.id ?? "";
+            string me = AttackerKey;
+            bool gate = GateOn(rid, out int nk);
+            var nst = RivalsHelper.GetSpecialRivalState(rid);
+            int added; lock (_lock) _copyAdded.TryGetValue(rid, out added);
+            int capLeft = -1;
+            if (gate)
+            {
+                if (nst?.defenseStates != null)
+                    foreach (var ds in nst.defenseStates)
+                        if (ds != null && ds.defensiveMechanic == DefensiveMechanic.LowDemand)
+                        {
+                            Plugin.Logger.LogInfo($"[RivalWave] wave for {me} on {rid} WAITS: the previous wave (for {OwnerOfState(rid, ds)}) runs until {FmtMin(EndMinOf(ds))}.");
+                            return false;
+                        }
+                if (added >= LowDemandTotalCap)
+                {
+                    Plugin.Logger.LogInfo($"[RivalWave] wave for {me} on {rid} refused: {added} of {LowDemandTotalCap} copycat shops already added in {nb} (total cap).");
+                    return false;
+                }
+                if (CopycatDoneFor(me, rid))
+                {
+                    string done = me == HostKey && !_forcing ? CompleteHostWaveEntrySilently(rival, nst, aggr) : "";
+                    Plugin.Logger.LogInfo($"[RivalWave] wave for {me} on {rid} refused: the key already had its copycat wave (once per key; {nk} keys counted){(done.Length > 0 ? $" - the due native entry {done} completed silently" : "")}.");
+                    return false;
+                }
+                capLeft = LowDemandTotalCap - added;
+            }
+            if (KeyShopsIn(me, nb).Count == 0)
+            {
+                Plugin.Logger.LogInfo($"[RivalWave] wave for {me} on {rid} refused: the key has no shop in {nb}.");
+                return false;
+            }
+            _wave = new WaveCtx { Key = me, Rid = rid, Nb = nb, Aggr = aggr, CapLeft = capLeft, Gate = gate, Before = nst?.defenseStates?.Count ?? 0 };
+            return true;
+        }
+
+        /// <summary>The host key's due LowDemand entry (same aggression, not completed) is marked completed, so the
+        /// game's own timeline stops re-planning it and speaks nothing (it never reaches CompleteEntry).</summary>
+        private static string CompleteHostWaveEntrySilently(SpecialRival rival, SpecialRivalState nst, int aggr)
+        {
+            try
+            {
+                if (nst == null || rival.timeline?.allEntries == null) return "";
+                if (nst.completedTimelineEntryIds == null) nst.completedTimelineEntryIds = new List<string>();
+                foreach (var e in rival.timeline.allEntries)
+                    if (e != null && e.defense == DefensiveMechanic.LowDemand && (int)e.aggression == aggr && !nst.completedTimelineEntryIds.Contains(e.id))
+                    {
+                        nst.completedTimelineEntryIds.Add(e.id);
+                        return e.id;
+                    }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalWave] error completing the host's wave entry: {ex.Message}"); }
+            return "";
+        }
+
+        /// <summary>Postfix body on ActivateLowDemand: a wave that opened shops is recorded and counted.</summary>
+        internal static void AfterWave(bool ok)
+        {
+            var w = _wave;
+            if (w == null || !ok) return;
+            int end = 0;
+            var list = RivalsHelper.GetSpecialRivalState(w.Rid)?.defenseStates;
+            if (list != null && list.Count > w.Before)
+            {
+                var ds = list[list.Count - 1];
+                if (ds != null && ds.defensiveMechanic == DefensiveMechanic.LowDemand) end = EndMinOf(ds);
+            }
+            int total;
+            lock (_lock)
+            {
+                _attacks.Add(new MpRivalAttack { Key = w.Key, RivalId = w.Rid, Nb = w.Nb, Mechanic = "LowDemand", Aggression = w.Aggr,
+                                                 EntryId = _targetEntry ?? "", EndMin = end, Opened = new List<string>(w.Opened) });
+                _copyAdded.TryGetValue(w.Rid, out total);
+                total += w.Opened.Count;
+                _copyAdded[w.Rid] = total;
+            }
+            SetCopycatDone(w.Key, w.Rid);
+            Plugin.Logger.LogInfo($"[RivalWave] wave for {w.Key} on {w.Rid} OPENED {w.Opened.Count} shop(s) [{string.Join(" ; ", w.Opened)}] until {FmtMin(end)}; copycat shops added in {w.Nb}: {total}/{LowDemandTotalCap}; gate {(w.Gate ? "on" : "off")}{(w.CapLeft >= 0 ? $", wave cap {w.CapLeft}" : "")}.");
+        }
+
+        internal static void WaveDone() { _wave = null; }
+
+        // ── (c) the mod path's firing ──
+        /// <summary>One attack for a NON-host key through the game's own call, aimed at the key. Success: the entry is
+        /// completed, the attack's own special message is taken off the shared SpecialMessagesTmpQueue (the game's
+        /// CompleteEntry for the host key dequeues from the same queue) and routed as TEXT to the key's online members
+        /// with the entry's own message (part C makes it spoken). Failure: nothing completed - the next hourly check
+        /// plans it again, as native does.</summary>
+        private static bool FireFor(string key, SpecialRival rival, DefensiveMechanic mech, int aggr, TimelineEntry entry, bool forced)
+        {
+            string rid = rival.rivalData.id ?? "", nb = rival.primaryNeighborhood ?? "";
+            string eid = entry?.id ?? "force";
+            ModPathFirings++;
+            var st = Get(key, rid, true);
+            if (mech == DefensiveMechanic.LowDemand && !forced && GateOn(rid, out int nk) && CopycatDoneFor(key, rid))
+            {
+                lock (_lock) if (!st.Completed.Contains(eid)) st.Completed.Add(eid);
+                Plugin.Logger.LogInfo($"[RivalAttn] entry {eid} (LowDemand) for {key} on {rid} completed silently: the key already had its copycat wave (once per key, {nk} keys counted).");
+                return true;
+            }
+            var q = RivalDefenseHelper.SpecialMessagesTmpQueue;
+            int qBefore = q.Count;
+            bool ok = false;
+            Target = key; _targetEntry = eid;
+            try
+            {
+                if (mech == DefensiveMechanic.PriceReduction) ok = RivalDefenseHelper.ActivatePriceReduction(nb, (Enums.Priority)aggr);
+                else if (mech == DefensiveMechanic.LowDemand) ok = RivalDefenseHelper.ActivateLowDemand(nb, (Enums.Priority)aggr);
+                else Plugin.Logger.LogInfo($"[RivalAttn] entry {eid} ({mech}) for {key} on {rid}: employee poaching stays OFF in MP - not fired.");
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] error firing {mech} for {key} on {rid}: {ex.GetType().Name}: {ex.Message}"); ok = false; }
+            finally { Target = null; _targetEntry = null; }
+            if (!ok)
+            {
+                Plugin.Logger.LogInfo($"[RivalAttn] fire {mech} for {key} on {rid} (entry {eid}): not done - nothing completed{(forced ? "" : "; the next hourly check plans it again")}.");
+                return false;
+            }
+            Entities.TextMessage special = null;
+            if (q.Count > qBefore)
+            {
+                var arr = q.ToArray();
+                q.Clear();
+                for (int i = 0; i < arr.Length - 1; i++) q.Enqueue(arr[i]);
+                special = arr[arr.Length - 1];
+            }
+            if (entry != null) lock (_lock) if (!st.Completed.Contains(entry.id)) st.Completed.Add(entry.id);
+            var pids = OnlinePidsOfKey(key);
+            pids.Remove(MPConfig.PlayerId);
+            int t1 = 0, t2 = 0;
+            if (entry != null && !string.IsNullOrEmpty(entry.messageLocalizationKey))
+            {
+                bool sent;
+                lock (_lock) sent = st.Sent.Contains(entry.messageLocalizationKey);
+                if (!sent)
+                {
+                    t1 = CompanyMessages.SendRivalTextToPids(rival, entry.messageLocalizationKey, false, pids);
+                    if (t1 > 0) lock (_lock) st.Sent.Add(entry.messageLocalizationKey);
+                }
+            }
+            if (special != null) t2 = SendRivalMessageToPids(rival, special, pids);
+            Plugin.Logger.LogInfo($"[RivalAttn] FIRED {mech} ({(Enums.Priority)aggr}) for {key} on {rid} (entry {eid}{(entry != null ? ", completed" : ", forced - no entry")}): special message '{special?.messageKey ?? "-"}' taken off the shared queue and sent as text to {t2} player(s); entry text to {t1}.");
+            MPServer.PublishRivalStateIfChanged("rivalattn-fire");
+            return true;
+        }
+
+        /// <summary>The part-A "rivalnews" text relay for a message that carries data (the attack's special message:
+        /// the cut products / the opened shops). The game's own key and data - no new text.</summary>
+        private static int SendRivalMessageToPids(SpecialRival rival, Entities.TextMessage msg, List<string> pids)
+        {
+            int n = 0;
+            try
+            {
+                if (rival == null || msg == null || string.IsNullOrEmpty(msg.messageKey) || pids == null) return 0;
+                string rid = rival.rivalData?.id ?? "";
+                string name = rival.rivalData?.rivalName ?? "";
+                if (name.Length == 0) return 0;
+                foreach (var pid in pids)
+                {
+                    if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId || !MPServer.IsOnlinePid(pid)) continue;
+                    var p = new CompanyMessagePayload
+                    {
+                        PlayerId = MPConfig.PlayerId, Action = "msg", Kind = "rivalnews", RivalId = rid,
+                        Neighborhood = rival.primaryNeighborhood ?? "",
+                        MessageId = "bamp-rivalnews-" + Fnv($"{rid}|{name}|{msg.messageKey}|{pid}|atk|{++_msgSeq}|{UnityEngine.Time.realtimeSinceStartup}"),
+                        OwnerPid = MPConfig.PlayerId, AddressKey = "", ContactId = name,
+                        ContactCategory = (int)UI.Smartphone.Apps.Contacts.ContactCategoryName.Rivals, ContactDescription = "rival",
+                        StreetName = "", StreetNumber = 0, MessageKey = msg.messageKey,
+                        Data = msg.messageData == null ? new Dictionary<string, string>() : new Dictionary<string, string>(msg.messageData),
+                        IsSpecial = msg.isSpecialMessage, IsNewInteraction = false, Notify = true, StampMinute = 0,
+                    };
+                    try { MPServer.SendToPid(pid, MessageEnvelope.Create(MessageType.CompanyMessages, "host", p)); n++; }
+                    catch (System.Exception sx) { Plugin.Logger.LogWarning($"[RivalAttn] error sending the attack message to '{pid}': {sx.Message}"); }
+                }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] error sending the attack message: {ex.Message}"); }
+            return n;
+        }
+
+        // ── part B patches ──
+        [HarmonyPatch(typeof(RivalDefenseHelper), "ActivatePriceReduction")]
+        public static class Patch_PriceWarQueue
+        {
+            static bool Prefix(string neighborhood, Enums.Priority aggression, ref bool __result, out WarCtx __state)
+            {
+                __state = null;
+                try
+                {
+                    if (!MPServer.IsRunning) return true;
+                    return WarGate(neighborhood, (int)aggression, ref __result, out __state);
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalWar] error in the war gate: {ex.GetType().Name}: {ex.Message}"); __state = null; return true; }
+            }
+
+            static void Postfix(bool __result, WarCtx __state)
+            {
+                try { if (__state != null) AfterWar(__state, __result); }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalWar] error recording the war: {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch(typeof(RivalDefenseHelper), "RunHourly")]
+        public static class Patch_WarRestoreCheck
+        {
+            static void Postfix()
+            {
+                try { if (MPServer.IsRunning) AfterDefenseClock(); }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalWar] error in the hourly check: {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch(typeof(RivalDefenseHelper), "GetLowDemandValues")]
+        public static class Patch_WaveCap
+        {
+            static void Postfix(ref int __result)
+            {
+                try
+                {
+                    var w = _wave;
+                    if (w == null || w.CapLeft < 0 || __result <= w.CapLeft) return;
+                    Plugin.Logger.LogInfo($"[RivalWave] wave for {w.Key} on {w.Rid} capped: {__result} -> {w.CapLeft} shop(s) (total cap {LowDemandTotalCap} per neighbourhood).");
+                    __result = w.CapLeft;
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalWave] error in the wave cap: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch(typeof(Helpers.CompetitionHelper), "StartNewCompetitorBusiness")]
+        public static class Patch_WaveOpened
+        {
+            static void Postfix(BuildingRegistration registration)
+            {
+                try
+                {
+                    var w = _wave;
+                    if (w != null && registration != null) w.Opened.Add(GameStateReader.AddressKey(registration));
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalWave] error noting an opened shop: {ex.Message}"); }
             }
         }
 
@@ -1342,6 +2104,182 @@ namespace BigAmbitionsMP
                 return $"ERR unknown verb '{verb}'";
             }
             catch (System.Exception ex) { return $"ERR rivalrent: {ex.GetType().Name}: {ex.Message}"; }
+        }
+
+        /// <summary>Part B DEV `rivalforce &lt;rival|nb&gt; &lt;pid|key|host&gt; price|lowdemand [low|medium|high]` (HOST): one attack
+        /// aimed at that key through the game's own call - the host key directly (the native path's gates apply), any
+        /// other key through the mod path (FireFor, no timeline entry). Default aggression High.</summary>
+        internal static string ForceLever(string arg)
+        {
+            try
+            {
+                if (!MPServer.IsRunning) return "ERR host only";
+                var tk = (arg ?? "").Split(new[] { ' ' }, System.StringSplitOptions.RemoveEmptyEntries);
+                if (tk.Length < 3) return "ERR usage: rivalforce <rival|nb> <pid|key|host> price|lowdemand [low|medium|high]";
+                var rival = FindRival(tk[0]);
+                if (rival?.rivalData == null) return $"ERR unknown rival '{tk[0]}'";
+                EnsureBound();
+                string who = tk[1];
+                string key = who == "host" ? HostKey : (who.StartsWith("p:", System.StringComparison.Ordinal) || who.StartsWith("g:", System.StringComparison.Ordinal)) ? who : KeyOfPid(who);
+                if (key.Length == 0) return $"ERR no key for '{who}'";
+                DefensiveMechanic mech;
+                if (tk[2] == "price") mech = DefensiveMechanic.PriceReduction;
+                else if (tk[2] == "lowdemand") mech = DefensiveMechanic.LowDemand;
+                else return "ERR mechanic must be price|lowdemand";
+                Enums.Priority pr = Enums.Priority.High;
+                if (tk.Length >= 4 && !System.Enum.TryParse(tk[3], true, out pr)) return $"ERR unknown aggression '{tk[3]}'";
+                string rid = rival.rivalData.id, nb = rival.primaryNeighborhood ?? "";
+                bool ok;
+                if (key == HostKey)
+                {
+                    _forcing = true;
+                    try
+                    {
+                        ok = mech == DefensiveMechanic.PriceReduction ? RivalDefenseHelper.ActivatePriceReduction(nb, pr) : RivalDefenseHelper.ActivateLowDemand(nb, pr);
+                    }
+                    finally { _forcing = false; }
+                }
+                else ok = FireFor(key, rival, mech, (int)pr, null, true);
+                int pos = 0;
+                lock (_lock) if (_warQ.TryGetValue(rid, out var q)) pos = q.FindIndex(x => x.Key == key) + 1;
+                Plugin.Logger.LogInfo($"[RivalAttn] DEV: rivalforce {tk[2]} ({pr}) for {key} on {rid}: result={ok}, queue position {pos}.");
+                return $"OK rivalforce key={key} rival={rid} mech={tk[2]} aggr={pr} result={ok} queued={pos} host={(key == HostKey ? 1 : 0)}";
+            }
+            catch (System.Exception ex) { return $"ERR rivalforce: {ex.GetType().Name}: {ex.Message}"; }
+        }
+
+        /// <summary>Part B `rivalq [rival|nb]` (HOST): running attacks with their keys, the war queue, the copycat count
+        /// and flags, the gate; war=&lt;key&gt;:&lt;items&gt; = the first running price war (for a capture); wsig = the
+        /// attribution signature (the save/reload oracle). `rivalq end &lt;rival&gt; price|lowdemand` (DEV): the rival's
+        /// running native states of that mechanic end NOW (their records follow), so the next game hour ends them.</summary>
+        internal static string QueueLever(string arg)
+        {
+            try
+            {
+                if (!MPServer.IsRunning) return "ERR host only";
+                EnsureBound();
+                var tk = (arg ?? "").Split(new[] { ' ' }, System.StringSplitOptions.RemoveEmptyEntries);
+                if (tk.Length >= 1 && tk[0] == "end")
+                {
+                    if (tk.Length != 3) return "ERR usage: rivalq end <rival> price|lowdemand";
+                    var re = FindRival(tk[1]);
+                    if (re?.rivalData == null) return $"ERR unknown rival '{tk[1]}'";
+                    var mechE = tk[2] == "price" ? DefensiveMechanic.PriceReduction : tk[2] == "lowdemand" ? DefensiveMechanic.LowDemand : DefensiveMechanic.None;
+                    if (mechE == DefensiveMechanic.None) return "ERR mechanic must be price|lowdemand";
+                    var nsE = RivalsHelper.GetSpecialRivalState(re.rivalData.id);
+                    int moved = 0;
+                    if (nsE?.defenseStates != null)
+                        foreach (var ds in nsE.defenseStates)
+                        {
+                            if (ds == null || ds.defensiveMechanic != mechE) continue;
+                            int old = EndMinOf(ds);
+                            ds.timestamp = TimeHelper.Now();
+                            int now = EndMinOf(ds);
+                            lock (_lock) foreach (var a in _attacks) if (a.RivalId == re.rivalData.id && a.Mechanic == mechE.ToString() && a.EndMin == old) a.EndMin = now;
+                            moved++;
+                        }
+                    Plugin.Logger.LogInfo($"[RivalAttn] DEV: {moved} running {mechE} state(s) of {re.rivalData.id} end now ({FmtMin(NowTotalMin())}) - the next game hour ends them.");
+                    MPServer.PublishRivalStateIfChanged("rivalq-end");
+                    return $"OK rivalq end rival={re.rivalData.id} mech={mechE} moved={moved}";
+                }
+                if (tk.Length >= 1 && tk[0] == "added")
+                {
+                    // DEV (part B): `rivalq added <rival> <n>` - the copycat shops counted as already added for the rival.
+                    if (tk.Length != 3 || !int.TryParse(tk[2], out int na) || na < 0) return "ERR usage: rivalq added <rival> <n>";
+                    var ra = FindRival(tk[1]);
+                    if (ra?.rivalData == null) return $"ERR unknown rival '{tk[1]}'";
+                    lock (_lock) { if (na == 0) _copyAdded.Remove(ra.rivalData.id); else _copyAdded[ra.rivalData.id] = na; }
+                    Plugin.Logger.LogInfo($"[RivalAttn] DEV: copycat shops added for {ra.rivalData.id} set to {na}/{LowDemandTotalCap}.");
+                    return $"OK rivalq added rival={ra.rivalData.id} n={na}";
+                }
+                SpecialRival only = tk.Length >= 1 ? FindRival(tk[0]) : null;
+                if (tk.Length >= 1 && only == null) return $"ERR unknown rival '{tk[0]}'";
+                var rows = new List<string>();
+                var sigParts = new List<string>();
+                string war = "-";
+                foreach (var rival in RivalsHelper.GetSpecialRivals())
+                {
+                    if (rival?.rivalData == null) continue;
+                    if (only != null && rival != only) continue;
+                    string rid = rival.rivalData.id;
+                    bool gate = GateOn(rid, out int nk);
+                    var atk = new List<string>();
+                    var qs = new List<string>();
+                    var cc = new List<string>();
+                    int added, native = 0;
+                    var nst = RivalsHelper.GetSpecialRivalState(rid);
+                    if (nst?.defenseStates != null)
+                        foreach (var ds in nst.defenseStates) if (ds != null && ds.defensiveMechanic != DefensiveMechanic.None) native++;
+                    lock (_lock)
+                    {
+                        foreach (var a in _attacks)
+                        {
+                            if (a.RivalId != rid) continue;
+                            var items = new List<string>();
+                            foreach (var it in a.Items) if (!items.Contains(it.Item)) items.Add(it.Item);
+                            items.Sort(System.StringComparer.Ordinal);
+                            atk.Add($"{a.Key}/{a.Mechanic}/{(Enums.Priority)a.Aggression}/end={FmtMin(a.EndMin)}/entry={(a.EntryId.Length > 0 ? a.EntryId : "native")}/items={string.Join(",", items)}/rows={a.Items.Count}/opened={a.Opened?.Count ?? 0}");
+                            sigParts.Add($"a|{rid}|{a.Key}|{a.Mechanic}|{a.EndMin}|{string.Join(",", items)}|{a.Items.Count}|{a.Opened?.Count ?? 0}");
+                            if (war == "-" && a.Mechanic == "PriceReduction" && StateAlive(a)) war = $"{a.Key}:{string.Join(",", items)}";
+                        }
+                        if (_warQ.TryGetValue(rid, out var q))
+                            for (int i = 0; i < q.Count; i++) { qs.Add($"{i + 1}:{q[i].Key}"); sigParts.Add($"q|{rid}|{i}|{q[i].Key}"); }
+                        _copyAdded.TryGetValue(rid, out added);
+                        sigParts.Add($"c|{rid}|{added}");
+                        if (_hostCopycat.Contains(rid)) cc.Add(HostKey);
+                        foreach (var kv in _store) if (kv.Value.CopycatDone && kv.Key.EndsWith("|" + rid, System.StringComparison.Ordinal)) cc.Add(kv.Key.Substring(0, kv.Key.Length - rid.Length - 1));
+                    }
+                    rows.Add($"{rid}{{{rival.primaryNeighborhood}}}: gate={(gate ? 1 : 0)}({nk}) native={native} added={added}/{LowDemandTotalCap} copycat=[{string.Join(",", cc)}] attacks=[{string.Join(" ; ", atk)}] queue=[{string.Join(",", qs)}]");
+                }
+                sigParts.Sort(System.StringComparer.Ordinal);
+                return $"OK rivalq hostKey={HostKey} firings={ModPathFirings} war={war} wsig={Fnv(string.Join(";", sigParts))}/{sigParts.Count} rivals=[{string.Join(" || ", rows)}]";
+            }
+            catch (System.Exception ex) { return $"ERR rivalq: {ex.GetType().Name}: {ex.Message}"; }
+        }
+
+        /// <summary>Part B `rivalprices &lt;rival|nb&gt; [item,item,...]` (either machine): the rival's retail prices on THIS
+        /// machine (every shop it owns, city-wide - the rows a war cuts), optionally only the named items: rows, a
+        /// signature over address|item|price (2 decimals) and per item avg/min/max. Equal sig on host and client =
+        /// equal prices.</summary>
+        internal static string PricesLever(string arg)
+        {
+            try
+            {
+                var tk = (arg ?? "").Split(new[] { ' ' }, System.StringSplitOptions.RemoveEmptyEntries);
+                if (tk.Length < 1) return "ERR usage: rivalprices <rival|nb> [item,item,...]";
+                var rival = FindRival(tk[0]);
+                if (rival?.rivalData == null) return $"ERR unknown rival '{tk[0]}'";
+                string rid = rival.rivalData.id;
+                HashSet<string> filter = null;
+                if (tk.Length >= 2 && tk[1] != "-") filter = new HashSet<string>(tk[1].Split(new[] { ',' }, System.StringSplitOptions.RemoveEmptyEntries), System.StringComparer.Ordinal);
+                var lines = new List<string>();
+                var stat = new Dictionary<string, List<float>>(System.StringComparer.Ordinal);
+                foreach (var reg in SaveGameManager.Current.BuildingRegistrations)
+                {
+                    if (reg == null || reg.businessOwnerRivalId != rid || reg.retailPrices == null) continue;
+                    string addr = GameStateReader.AddressKey(reg);
+                    foreach (var rp in reg.retailPrices)
+                    {
+                        if (rp == null || string.IsNullOrEmpty(rp.itemName)) continue;
+                        if (filter != null && !filter.Contains(rp.itemName)) continue;
+                        lines.Add($"{addr}|{rp.itemName}|{F2(rp.price)}");
+                        if (!stat.TryGetValue(rp.itemName, out var l)) { l = new List<float>(); stat[rp.itemName] = l; }
+                        l.Add(rp.price);
+                    }
+                }
+                lines.Sort(System.StringComparer.Ordinal);
+                var names = new List<string>(stat.Keys);
+                names.Sort(System.StringComparer.Ordinal);
+                var parts = new List<string>();
+                foreach (var nm in names)
+                {
+                    if (filter == null && parts.Count >= 6) break;
+                    var l = stat[nm];
+                    parts.Add($"{nm}:n={l.Count},avg={F2(l.Average())},min={F2(l.Min())},max={F2(l.Max())}");
+                }
+                return $"OK rivalprices rival={rid} rows={lines.Count} sig={Fnv(string.Join(";", lines))} pid={MPConfig.PlayerId} items=[{string.Join(" ; ", parts)}]";
+            }
+            catch (System.Exception ex) { return $"ERR rivalprices: {ex.GetType().Name}: {ex.Message}"; }
         }
 
         /// <summary>`rivaltimeline &lt;rival|nb&gt;`: the rival's allEntries (asset data, not in the decompile).</summary>

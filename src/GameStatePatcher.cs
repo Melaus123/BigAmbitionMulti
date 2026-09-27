@@ -5702,6 +5702,24 @@ namespace BigAmbitionsMP
             });
         }
 
+        // H-RIVALPARITY-1 part B: the AI-price apply clears the price caches at most once per frame (a join
+        // snapshot applies ~300 tables in one go); the log line is capped.
+        private static int _aiPriceCacheClearFrame = -1;
+        private static int _aiPriceCacheClears;
+        private static void ClearAiPriceCachesOncePerFrame()
+        {
+            try
+            {
+                int f = UnityEngine.Time.frameCount;
+                if (f == _aiPriceCacheClearFrame) return;
+                _aiPriceCacheClearFrame = f;
+                ItemHelper.ClearPriceCaches();
+                if (++_aiPriceCacheClears <= 5 || _aiPriceCacheClears % 100 == 0)
+                    Plugin.Logger.LogInfo($"[Patcher] AI retail prices changed on the host's word - price caches cleared (#{_aiPriceCacheClears}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] AI price cache clear: {ex.Message}"); }
+        }
+
         // Round-247: capped counter for the own-tenancy runner-stamp guard's log line.
         private static int _ownRunnerGuardLogged;
         private static int _layoutMirrorLogged;   // H-ENTRY-1: stale-layout clear lines, capped per load (reset in ResetTenancyConflictLog)
@@ -5906,9 +5924,20 @@ namespace BigAmbitionsMP
                     {
                         if (info.Prices != null && info.Prices.Count > 0)
                         {
+                            // H-RIVALPARITY-1 part B (design (d)): a CHANGED table (a rival's war cut or its end re-price)
+                            // clears the price caches, as the game's own ActivatePriceReduction / HandleDefenseStateEnd do on
+                            // the host - else the client's cached lowest market price keeps the old value until the daily clear.
+                            bool pricesChanged = reg.retailPrices.Count != info.Prices.Count;
+                            for (int pi = 0; !pricesChanged && pi < info.Prices.Count; pi++)
+                            {
+                                var have = reg.retailPrices[pi];
+                                var want = info.Prices[pi];
+                                if (have == null || want == null || have.itemName != want.ItemName || have.price != want.Price) pricesChanged = true;
+                            }
                             reg.retailPrices.Clear();
                             foreach (var rp in info.Prices)
                                 reg.retailPrices.Add(new RetailPrice { itemName = rp.ItemName, price = rp.Price });
+                            if (pricesChanged) ClearAiPriceCachesOncePerFrame();
                         }
                         // Round-291: a building the host reports EMPTY must lose its price table
                         // here too. Native ShutdownBusiness (BusinessHelper.cs:863) empties the

@@ -1,0 +1,708 @@
+{
+  "id": "T-RIVALS-B",
+  "title": "H-RIVALPARITY-1 part B (2026-09-27): attacks aimed at one player - a price war for Client1 cuts Client1's best sellers on both machines; a war for another key WAITS in the queue; after the war ends the game re-prices and the part-B check logs '[RivalWar] restored n, max deviation x%' (host and client prices equal); the queued war may start after; the war and its attribution survive a save/reload; copycat waves: once per key, one at a time, total cap 10; solo host = native (0 mod-path firings, gate off)",
+  "preconditions": "Fixture save1 (host melaus, client Client1 with qualifying shops in Murray Hill; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA==; loads day 133 12:00). Dev build with part B levers (rivalforce, rivalq, rivalq end, rivalprices). Writes ONE scratch slot (the -auto rotation sibling); the fixture's own save1 is never overwritten.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "rival": "ju1yVbREcE2B5ymg6q5tyA=="
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[RivalWar\\] error",
+    "\\[RivalWave\\] error",
+    "\\[RivalAttn\\] error",
+    "\\[RivalAttn\\] (sweep|tick|step|check|count|snapshot|settle load|host rows|manifest restore|set active|sweep postfix|merged host count|text|key move|defeat)[^\\]]*:",
+    "\\[RivalFair\\] GetTop",
+    "\\[Patcher\\] AI price cache clear"
+  ],
+  "oracles_report": [
+    "\\[TestDrive\\] .* 'rival(q|force|prices|attn)",
+    "\\[RivalWar\\] ",
+    "\\[RivalWave\\] ",
+    "\\[RivalGuard\\] low-demand",
+    "\\[RivalAttn\\] (FIRED|fire |DEV|entry |planned|ACTIVATED|deactivated|restored|migration)",
+    "\\[Patcher\\] AI retail prices changed"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "the host's world loads; NO client yet - the SOLO phase"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "mark TEST RIVALSB SOLO",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "rivalattn",
+      "expect_result": "^OK rivalattn host hostKey=p:\\S+ keys=0 firings=0 sig=\\S+ rivals=\\[[^;]*\\]$",
+      "capture": {
+        "hostKey": "hostKey=(\\S+)"
+      },
+      "note": "SOLO: the host key only, 0 mod-path firings"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "rivalq ${rival}",
+      "expect_result": "^OK rivalq hostKey=${hostKey} firings=0 .*gate=0\\(",
+      "note": "SOLO: the manager's gate is off (fewer than 2 keys ever counted) - the copycat rules and the price write-back do not bind; REPORT the fixture's running attacks (native, credited to the host key)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "rivalattn sweep",
+      "expect_result": "^OK rivalattn sweep ran"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "sleep_s": 35,
+      "note": "longer than the 10-30 s native delay"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "rivalattn",
+      "expect_result": "^OK rivalattn host hostKey=${hostKey} keys=0 firings=0 ",
+      "note": "SOLO after a sweep: 0 mod-path firings"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "rivalprices ${rival}",
+      "expect_result": "^OK rivalprices rival=${rival} rows=[1-9]",
+      "note": "REPORT: the rival's prices, solo"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "sleep_s": 110,
+      "note": "the client is served its save and settles"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "rivalattn report",
+      "expect_result": "^OK rivalattn report sent",
+      "note": "Client1's self-report now (Sold7d / AvgDaily7 / RivalQualifying)"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "^OK rivalattn local ",
+      "note": "REPORT: Client1's own native count in Murray Hill"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "rivalattn sweep",
+      "expect_result": "^OK rivalattn sweep ran",
+      "note": "Client1's key is checked (counted = EverCounted)"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "\\{${clientPid}\\}\\|count=[1-9]",
+      "note": "Client1 has qualifying shops in Murray Hill"
+    },
+    {
+      "seq": 21,
+      "role": "both",
+      "cmd": "mark TEST RIVALSB B1",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "rivalq ${rival}",
+      "expect_result": "^OK rivalq ",
+      "note": "REPORT: the attacks and the queue before B1"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "rivalprices ${rival}",
+      "expect_result": "^OK rivalprices rival=${rival} rows=[1-9]",
+      "capture": {
+        "preSig": "sig=(\\S+)"
+      },
+      "note": "B1: the rival's prices before the war (host)"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "rivalforce ${rival} ${clientPid} price",
+      "expect_result": "^OK rivalforce key=p:\\S+ rival=${rival} mech=price aggr=High result=True queued=0 host=0",
+      "capture": {
+        "cKey": "key=(\\S+)"
+      },
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalWar\\] war for p:\\S+ on ${rival} STARTED: items \\[",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] FIRED PriceReduction \\(High\\) for p:\\S+ on ${rival} \\(entry force",
+          "within_s": 10
+        }
+      ],
+      "note": "B1: a war aimed at Client1 through the game's own ActivatePriceReduction (Client1's best sellers the rival also sells)"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "rivalq ${rival}",
+      "expect_result": "war=${cKey}:\\S+ ",
+      "capture": {
+        "witems": "war=[pg]:[^:\\s]+:(\\S+) "
+      },
+      "note": "B1: the running war is Client1's; its items"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "rivalprices ${rival} ${witems}",
+      "expect_result": "^OK rivalprices rival=${rival} rows=[1-9]",
+      "capture": {
+        "cutSig": "sig=(\\S+)"
+      },
+      "note": "B1: the cut prices on the host"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "sleep_s": 10,
+      "note": "the business scan (2 s) carries the AI prices to the client"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "rivalprices ${rival} ${witems}",
+      "expect_result": "sig=${cutSig} ",
+      "note": "B1: the cut prices are EQUAL on the client"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "rivalforce ${rival} host price",
+      "expect_result": "^OK rivalforce key=${hostKey} rival=${rival} mech=price aggr=High result=False queued=1 host=1",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalWar\\] war for ${hostKey} on ${rival} WAITS \\(queue position 1 of 1\\): a war for ${cKey}",
+          "within_s": 10
+        }
+      ],
+      "note": "B1: a war for the host while Client1's runs WAITS in the queue - nothing cut"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "rivalprices ${rival} ${witems}",
+      "expect_result": "sig=${cutSig} ",
+      "note": "B1: the queued war cut nothing"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "^OK",
+      "capture": {
+        "b1H": "hour=(\\d+)\\."
+      },
+      "note": "B1 end: the current game hour"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "rivalq end ${rival} price",
+      "expect_result": "^OK rivalq end rival=${rival} mech=\\S+ moved=[1-9]",
+      "note": "B1 end: DEV - the running price state(s) end now (the 'clock past the war end' lever: the clock lever only moves within today)"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "clock ${b1H}:59",
+      "expect_result": "^OK clock ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalWar\\] restored [1-9]\\d*, max deviation [0-9.]+% \\(war for ${cKey} on ${rival}",
+          "within_s": 150
+        }
+      ],
+      "note": "B1 end: the clock to :59 - the next game hour runs RivalDefenseHelper.RunHourly (the game ends the state and re-prices), then the part-B check"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "sleep_s": 10
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "rivalprices ${rival} ${witems}",
+      "expect_result": "^OK rivalprices ",
+      "capture": {
+        "restSig": "sig=(\\S+)"
+      },
+      "note": "B1: the restored prices on the host (REPORT against the cut ones)"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "rivalprices ${rival} ${witems}",
+      "expect_result": "sig=${restSig} ",
+      "note": "B1: the client holds the SAME restored prices (host's restore line gives the tolerance)"
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "cmd": "rivalforce ${rival} host price",
+      "expect_result": "^OK rivalforce key=${hostKey} rival=${rival} mech=price aggr=High result=(True|False) queued=0 host=1",
+      "note": "B1: after the restore line the queued host war may start (True = started and left the queue; False = the host sells none of the rival's items in Murray Hill - the game's own refusal; either way its turn ends the wait)"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "rivalq ${rival}",
+      "expect_result": "^OK rivalq ",
+      "note": "REPORT: after B1"
+    },
+    {
+      "seq": 39,
+      "role": "both",
+      "cmd": "mark TEST RIVALSB B2",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "rivalq end ${rival} price",
+      "expect_result": "^OK rivalq end ",
+      "note": "B2 prep: a running host war (if B1 started one) ends at the next hour"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "^OK",
+      "capture": {
+        "b2pH": "hour=(\\d+)\\."
+      }
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "clock ${b2pH}:59",
+      "expect_result": "^OK clock "
+    },
+    {
+      "seq": 43,
+      "role": "h",
+      "sleep_s": 15,
+      "note": "the hour rolls: any host war ends and passes its restore check"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "rivalforce ${rival} ${clientPid} price",
+      "expect_result": "^OK rivalforce key=${cKey} rival=${rival} mech=price aggr=High result=True queued=0",
+      "note": "B2: a fresh war for Client1"
+    },
+    {
+      "seq": 45,
+      "role": "h",
+      "cmd": "rivalq ${rival}",
+      "expect_result": "war=${cKey}:\\S+ ",
+      "capture": {
+        "wsig": "wsig=(\\S+)",
+        "witems2": "war=[pg]:[^:\\s]+:(\\S+) "
+      },
+      "note": "B2: attribution signature before the save"
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "cmd": "rivalprices ${rival} ${witems2}",
+      "expect_result": "^OK rivalprices ",
+      "capture": {
+        "cutSig2": "sig=(\\S+)"
+      }
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "cmd": "autosave",
+      "expect_result": "^OK HostSaveNow\\('autosave'\\) invoked slot=[^ ]+",
+      "capture": {
+        "slot": "slot=([^ ]+)"
+      }
+    },
+    {
+      "seq": 48,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the client's upload reaches the host and the slot manifest is stamped"
+    },
+    {
+      "seq": 49,
+      "role": "both",
+      "cmd": "mark TEST RIVALSB RELOAD",
+      "expect_result": "OK MARK"
+    },
+    {
+      "role": "c",
+      "drop": true,
+      "note": "an in-game client served a reload exits to the menu: the member leaves, the host loads, the member comes back"
+    },
+    {
+      "seq": 50,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 51,
+      "role": "h",
+      "cmd": "hostload ${slot}",
+      "expect_result": "^OK StartLoadGame\\('${slot}'\\) invoked",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] restored \\d+ key-rival row\\(s\\) .*world row\\(s\\): [1-9]\\d* running attack",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 52,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "the host's world loads"
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "cmd": "rivalq ${rival}",
+      "expect_result": "war=${cKey}:${witems2} wsig=${wsig} ",
+      "note": "B2: the attribution SURVIVED the save/reload (same war, same key, same signature)"
+    },
+    {
+      "seq": 54,
+      "role": "h",
+      "cmd": "rivalprices ${rival} ${witems2}",
+      "expect_result": "sig=${cutSig2} ",
+      "note": "B2: the cut prices came back with the world save"
+    },
+    {
+      "role": "c",
+      "relaunch": true,
+      "note": "the member returns"
+    },
+    {
+      "seq": 55,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 56,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 57,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 58,
+      "role": "c",
+      "sleep_s": 60
+    },
+    {
+      "seq": 59,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 60,
+      "role": "c",
+      "cmd": "rivalprices ${rival} ${witems2}",
+      "expect_result": "sig=${cutSig2} ",
+      "note": "B2: the client sees the same cut prices after the reload"
+    },
+    {
+      "seq": 61,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "^OK",
+      "capture": {
+        "b2H": "hour=(\\d+)\\."
+      },
+      "note": "B2 end: the current game hour"
+    },
+    {
+      "seq": 62,
+      "role": "h",
+      "cmd": "rivalq end ${rival} price",
+      "expect_result": "^OK rivalq end rival=${rival} mech=\\S+ moved=[1-9]",
+      "note": "B2 end: DEV - the running price state(s) end now (the 'clock past the war end' lever: the clock lever only moves within today)"
+    },
+    {
+      "seq": 63,
+      "role": "h",
+      "cmd": "clock ${b2H}:59",
+      "expect_result": "^OK clock ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalWar\\] restored [1-9]\\d*, max deviation [0-9.]+% \\(war for ${cKey} on ${rival}",
+          "within_s": 150
+        }
+      ],
+      "note": "B2 end: the clock to :59 - the next game hour runs RivalDefenseHelper.RunHourly (the game ends the state and re-prices), then the part-B check"
+    },
+    {
+      "seq": 64,
+      "role": "h",
+      "sleep_s": 10
+    },
+    {
+      "seq": 65,
+      "role": "h",
+      "cmd": "rivalprices ${rival} ${witems2}",
+      "expect_result": "^OK rivalprices ",
+      "capture": {
+        "restSig2": "sig=(\\S+)"
+      }
+    },
+    {
+      "seq": 66,
+      "role": "c",
+      "cmd": "rivalprices ${rival} ${witems2}",
+      "expect_result": "sig=${restSig2} ",
+      "note": "B2: restored on both machines after the reload"
+    },
+    {
+      "seq": 67,
+      "role": "both",
+      "cmd": "mark TEST RIVALSB B3",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 68,
+      "role": "c",
+      "cmd": "rivalattn report",
+      "expect_result": "^OK rivalattn report sent"
+    },
+    {
+      "seq": 69,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 70,
+      "role": "h",
+      "cmd": "rivalattn sweep",
+      "expect_result": "^OK rivalattn sweep ran"
+    },
+    {
+      "seq": 71,
+      "role": "h",
+      "cmd": "rivalq ${rival}",
+      "expect_result": "gate=1\\(",
+      "note": "B3 PREMISE: 2 keys have counted - the copycat rules bind"
+    },
+    {
+      "seq": 72,
+      "role": "h",
+      "cmd": "rivalq added ${rival} 8",
+      "expect_result": "^OK rivalq added rival=${rival} n=8",
+      "note": "B3 CAP (DEV): 8 copycat shops count as already added in Murray Hill (the fixture's host has no shop there, so only Client1's one wave can meet the cap)"
+    },
+    {
+      "seq": 73,
+      "role": "h",
+      "cmd": "rivalforce ${rival} ${clientPid} lowdemand",
+      "expect_result": "^OK rivalforce key=${cKey} rival=${rival} mech=lowdemand aggr=High result=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalWave\\] wave for ${cKey} on ${rival} capped: \\d+ -> 2 shop",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[RivalWave\\] wave for ${cKey} on ${rival} OPENED 2 shop\\(s\\) .*added in \\S+: 10/10; gate on",
+          "within_s": 10
+        }
+      ],
+      "note": "B3: Client1's copycat wave (its most profitable type), capped to the 2 shops left under the total of 10"
+    },
+    {
+      "seq": 74,
+      "role": "h",
+      "cmd": "rivalforce ${rival} host lowdemand",
+      "expect_result": "result=False",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalWave\\] wave for ${hostKey} on ${rival} WAITS: the previous wave \\(for ${cKey}\\)",
+          "within_s": 10
+        }
+      ],
+      "note": "B3 SPACING: another key's wave waits while Client1's runs"
+    },
+    {
+      "seq": 75,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "^OK",
+      "capture": {
+        "b3H": "hour=(\\d+)\\."
+      },
+      "note": "B3 wave end: the current game hour"
+    },
+    {
+      "seq": 76,
+      "role": "h",
+      "cmd": "rivalq end ${rival} lowdemand",
+      "expect_result": "^OK rivalq end rival=${rival} mech=\\S+ moved=[1-9]",
+      "note": "B3 wave end: DEV - the running lowdemand state(s) end now (the 'clock past the war end' lever: the clock lever only moves within today)"
+    },
+    {
+      "seq": 77,
+      "role": "h",
+      "cmd": "clock ${b3H}:59",
+      "expect_result": "^OK clock ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalWave\\] wave for ${cKey} on ${rival} ended",
+          "within_s": 150
+        }
+      ],
+      "note": "B3 wave end: the clock to :59 - the next game hour runs RivalDefenseHelper.RunHourly (the game ends the state and re-prices), then the part-B check"
+    },
+    {
+      "seq": 78,
+      "role": "h",
+      "cmd": "rivalforce ${rival} ${clientPid} lowdemand",
+      "expect_result": "result=False",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalWave\\] wave for ${cKey} on ${rival} refused: 10 of 10 copycat shops already added",
+          "within_s": 10
+        }
+      ],
+      "note": "B3 CAP: at 10 added no wave opens"
+    },
+    {
+      "seq": 79,
+      "role": "h",
+      "cmd": "rivalq added ${rival} 0",
+      "expect_result": "^OK rivalq added rival=${rival} n=0",
+      "note": "B3 (DEV): the count reset so the once-per-key rule answers alone"
+    },
+    {
+      "seq": 80,
+      "role": "h",
+      "cmd": "rivalforce ${rival} ${clientPid} lowdemand",
+      "expect_result": "result=False",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalWave\\] wave for ${cKey} on ${rival} refused: the key already had its copycat wave",
+          "within_s": 10
+        }
+      ],
+      "note": "B3 ONCE PER KEY: Client1's second wave is refused"
+    },
+    {
+      "seq": 81,
+      "role": "h",
+      "cmd": "rivalforce ${rival} host lowdemand",
+      "expect_result": "result=False",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalWave\\] wave for ${hostKey} on ${rival} refused: the key has no shop",
+          "within_s": 10
+        }
+      ],
+      "note": "B3 SAFETY: a key with no shop in the neighbourhood gets no wave (native would index an empty list)"
+    },
+    {
+      "seq": 82,
+      "role": "h",
+      "cmd": "rivalq ${rival}",
+      "expect_result": "copycat=\\[${cKey}\\]",
+      "note": "B3 REPORT: Client1 flagged once, the host not"
+    },
+    {
+      "seq": 83,
+      "role": "both",
+      "cmd": "mark TEST RIVALSB END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

@@ -3190,6 +3190,25 @@ namespace BigAmbitionsMP
                     return MPRivalAttention.TimelineLever(arg);
                 }
 
+                // H-RIVALPARITY-1 part B levers (2026-09-27): an attack aimed at one key, the war queue / attacks, the rival's prices.
+                case "rivalforce":
+                {
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    return MPRivalAttention.ForceLever(arg);
+                }
+
+                case "rivalq":
+                {
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    return MPRivalAttention.QueueLever(arg);
+                }
+
+                case "rivalprices":
+                {
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    return MPRivalAttention.PricesLever(arg);
+                }
+
                 // H-RIVALPARITY-1 part D (2026-09-27): the rent block per player - find / gate / try / force / host.
                 case "rivalrent":
                 {

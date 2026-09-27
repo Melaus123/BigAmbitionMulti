@@ -75,7 +75,12 @@ namespace BigAmbitionsMP
         // other player's rival attention is counted and checked per key in
         // MPRivalAttention.
 
-        // ── Price-war targeting: include what session players sell ───────────
+        // ── Price-war targeting: the AIMED key's own best sellers ─────────────
+        // H-RIVALPARITY-1 part B (2026-09-27, design (c)): the pooled top-up (any
+        // session player's price-list items appended) is gone. A war is aimed at ONE
+        // key (MPRivalAttention.Target; null = the host key): its items sold in the
+        // last 7 days that the rival also sells, retail products only, most sold
+        // first - the host's own list is native's untouched (solo = native).
         [HarmonyPatch(typeof(RivalDefenseHelper), "GetTopSellingProducts")]
         public static class Patch_PriceWarSeesAllPlayers
         {
@@ -84,26 +89,8 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning) return;
                 try
                 {
-                    if (__result == null) __result = new List<string>();
-                    if (__result.Count >= topNumber) return;   // host sales already filled it
-                    foreach (var reg in SessionRegsIn(neighborhood))
-                    {
-                        var prices = reg.retailPrices;
-                        if (prices == null) continue;
-                        for (int i = 0; i < prices.Count && __result.Count < topNumber; i++)
-                        {
-                            var rp = prices[i];
-                            if (rp == null || string.IsNullOrEmpty(rp.itemName) || __result.Contains(rp.itemName)) continue;
-                            try
-                            {
-                                var item = BigAmbitions.Items.ItemsGetter.GetByName(rp.itemName);
-                                if (item == null || (item.type & BigAmbitions.Items.ItemType.RetailProduct) == 0) continue;
-                            }
-                            catch { continue; }
-                            __result.Add(rp.itemName);   // rival only cuts items IT also sells — extra names match nothing
-                        }
-                        if (__result.Count >= topNumber) break;
-                    }
+                    var aimed = MPRivalAttention.TopSellingFor(topNumber, neighborhood);
+                    if (aimed != null) __result = aimed;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalFair] GetTopSellingProducts: {ex.Message}"); }
             }
@@ -134,7 +121,15 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Competing-store targeting: rank session shops by bridged income ──
+        // ── Competing-store targeting: the AIMED key's own shops ──────────────
+        // H-RIVALPARITY-1 part B (2026-09-27, design (c)): a copycat wave copies the
+        // most profitable type of the key it is aimed at (MPRivalAttention.Target;
+        // null = the host key) - that key's shops only, ranked on one daily scale
+        // (the host's own GetAvgDailyIncome(7), a member's self-reported AvgDaily7).
+        // Under the R1 tenancy raise native's own list would hold EVERY player's
+        // shop, so it is always rebuilt then; the host key outside the raise keeps
+        // native's list (solo = native). MPRivalAttention.WaveGate refuses a wave
+        // for a key with no shop, so the caller's unchecked [0] never meets empty.
         [HarmonyPatch(typeof(RivalDefenseHelper), "GetTopIncomeBusinesses")]
         public static class Patch_CompetitionSeesAllPlayers
         {
@@ -143,95 +138,17 @@ namespace BigAmbitionsMP
                 if (!MPServer.IsRunning) return;
                 try
                 {
-                    if (__result == null) __result = new List<BuildingRegistration>();
-                    // R1 INTERACTION (review r1 MINOR-3): while Patch_AiPass_TenancyRaise is up, every
-                    // player-held registration reads RentedByPlayer == true, so native's own filter
-                    // (`where x.RentedByPlayer`, RivalDefenseHelper.cs:229-235) already fills topNumber
-                    // from ANY player's shop - but ranked by the HOST's replica GetAvgDailyIncome(7),
-                    // which for a client shop is empty/stale.  And SessionRegsIn SKIPS RentedByPlayer
-                    // regs (:46), which under the raise is all of them, so the top-up below contributes
-                    // nothing at all.  Under the raise, rebuild the whole list on one honest scale.
-                    if (Patch_AiPass_TenancyRaise.RaisedIn(neighborhood) > 0)
-                    {
-                        RebuildUnderRaise(topNumber, neighborhood, ref __result);
-                        return;
-                    }
-                    var candidates = new List<(BuildingRegistration reg, float wk)>();
-                    foreach (var reg in SessionRegsIn(neighborhood))
-                    {
-                        if (reg.businessTypeName == "ba:businesstype_headquarters") continue;
-                        float wk = MPServer.SessionBusinessWeeklyIncome(GameStateReader.AddressKey(reg));
-                        if (wk > 0f) candidates.Add((reg, wk));
-                    }
-                    if (candidates.Count == 0) return;
-                    candidates.Sort((a, b) => b.wk.CompareTo(a.wk));
-                    foreach (var c in candidates)
-                    {
-                        if (__result.Count >= topNumber) break;
-                        if (!__result.Contains(c.reg)) __result.Add(c.reg);
-                    }
-                    // NOTE: also self-heals a latent native crash — with only
-                    // CLIENT businesses triggering the rivalry, the native list
-                    // is empty and the caller indexes [0].
+                    var aimed = MPRivalAttention.TopIncomeFor(topNumber, neighborhood, Patch_AiPass_TenancyRaise.RaisedIn(neighborhood) > 0);
+                    if (aimed != null) __result = aimed;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalFair] GetTopIncomeBusinesses: {ex.Message}"); }
-            }
-
-            /// <summary>Under the R1 raise only: one ranked list of the host's OWN rented shops plus
-            /// every session shop in the neighbourhood, headquarters excluded, highest first, capped at
-            /// topNumber.  Ownership CANNOT be read from RentedByPlayer here - the raise set it true for
-            /// everyone - so the owner lookup is the same one CompanyMessages.PlayersWithBusinessIn
-            /// uses: the host's ownership ledger MPServer.BuildingOwners keyed by address, falling back
-            /// to the player pid the mod stamps into businessOwnerRivalId (GameStatePatcher
-            /// .IsAnyPlayerBusiness gates that fallback so an AI rival's stamp can never match).
-            /// SCALE: native ranks by GetAvgDailyIncome(7), a DAILY average, while the session bridge
-            /// MPServer.SessionBusinessWeeklyIncome reports a WEEKLY figure - so the weekly one is
-            /// divided by 7 to meet it.  (The pre-raise top-up never ranked the two against each other,
-            /// it only appended session shops after the native ones, so there was no existing
-            /// convention to preserve; this is the first place the two scales actually meet.)
-            /// A client shop whose owner is unknown AND whose stats have not arrived ranks 0 and sorts
-            /// to the bottom - the same place native's stale replica income would have put it.</summary>
-            private static void RebuildUnderRaise(int topNumber, string neighborhood, ref List<BuildingRegistration> __result)
-            {
-                var gi = SaveGameManager.Current;
-                if (gi?.BuildingRegistrations == null) return;
-                var ranked = new List<(BuildingRegistration reg, float daily)>();
-                foreach (var reg in gi.BuildingRegistrations)
-                {
-                    if (reg == null) continue;
-                    try
-                    {
-                        if (reg.Neighborhood != neighborhood) continue;
-                        if (!reg.RentedByPlayer) continue;                                   // AI / unrented: native never lists it either
-                        if (reg.businessTypeName == "ba:businesstype_headquarters") continue;
-                        string owner = OwnerPidOf(reg);
-                        if (owner.Length > 0 && owner != MPConfig.PlayerId)
-                            ranked.Add((reg, MPServer.SessionBusinessWeeklyIncome(GameStateReader.AddressKey(reg)) / 7f));
-                        else
-                            ranked.Add((reg, reg.GetAvgDailyIncome(7)));                     // truly the host's own: native's own measure
-                    }
-                    catch { }
-                }
-                ranked.Sort((a, b) => b.daily.CompareTo(a.daily));
-                var rebuilt = new List<BuildingRegistration>();
-                foreach (var c in ranked)
-                {
-                    if (rebuilt.Count >= topNumber) break;
-                    rebuilt.Add(c.reg);
-                }
-                // Fold d (re-check r2): never hand native FEWER entries than its own filter produced - the
-                // caller indexes [0] unchecked (RivalDefenseHelper.ActivateLowDemand :108). Native's own
-                // filter (RentedByPlayer + neighbourhood + not HQ) and ours agree, so this is a guard
-                // against a rebuild that finds nothing where native found something, not an expected path.
-                if (rebuilt.Count == 0 && __result != null && __result.Count > 0) return;
-                __result = rebuilt;
             }
 
             /// <summary>Host-side owner of a registration, valid even while the tenancy raise makes
             /// RentedByPlayer meaningless: the ownership ledger first (authoritative, and it survives a
             /// disconnect), then the pid stamped into businessOwnerRivalId.  Empty = the host's own (or
             /// a shop not yet stamped).</summary>
-            private static string OwnerPidOf(BuildingRegistration reg)
+            internal static string OwnerPidOf(BuildingRegistration reg)
             {
                 try { if (MPServer.BuildingOwners.TryGetValue(GameStateReader.AddressKey(reg), out var o) && !string.IsNullOrEmpty(o)) return o; } catch { }
                 try { if (GameStatePatcher.IsAnyPlayerBusiness(reg)) return reg.businessOwnerRivalId ?? ""; } catch { }
@@ -260,12 +177,15 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(RivalDefenseHelper), "ActivateLowDemand")]
         public static class Patch_LowDemandSiteGuard
         {
-            static void Prefix(string neighborhood, ref bool __state)
+            static bool Prefix(string neighborhood, Enums.Priority aggression, ref bool __result, ref bool __state)
             {
                 __state = false;
                 try
                 {
-                    if (!MPServer.IsRunning) return;
+                    if (!MPServer.IsRunning) return true;
+                    // H-RIVALPARITY-1 part B (design (e)): the aimed key's copycat rules (no shop / once per key /
+                    // one wave at a time / total cap) decide BEFORE anything is raised - a refusal runs nothing.
+                    if (!MPRivalAttention.WaveGate(neighborhood, (int)aggression)) { __result = false; return false; }
                     __state = true;   // set BEFORE the raise: the Finalizer must lower it even if this throws
                     Patch_AiPass_TenancyRaise.Begin("low-demand site guard");
                     int n = Patch_AiPass_TenancyRaise.RaisedIn(neighborhood);
@@ -274,12 +194,20 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[RivalGuard] low-demand wave in '{neighborhood}': {n} player-held building(s) shielded from site selection.");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalGuard] low-demand prefix: {ex.Message}"); }
+                return true;
+            }
+
+            static void Postfix(bool __result)
+            {
+                try { if (MPServer.IsRunning) MPRivalAttention.AfterWave(__result); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalWave] error recording the wave: {ex.Message}"); }
             }
 
             static Exception Finalizer(Exception __exception, bool __state)
             {
                 try { if (__state) Patch_AiPass_TenancyRaise.End(); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalGuard] low-demand finalizer: {ex.Message}"); }
+                try { MPRivalAttention.WaveDone(); } catch { }
                 return __exception;
             }
         }
