@@ -1,0 +1,329 @@
+{
+  "id": "T-RIVALSELLERS2",
+  "title": "H-RIVALPARITY-1 item C part 2 (measurement, user-approved 2026-09-27): BEFORE/AFTER the host's own daily rebuild of the seller table. Run 1 found the host's CACHED count for energy drink in Murray Hill = 7 (built at load) while a live walk by the same rule = 5 (the client's two shops have an EMPTY product list on the host). This run reads the host's demand for every item the client's Murray Hill liquor store / gym stock, rolls the host past midnight (NewDay -> CompetitionHelper.RunDaily :103-104 rebuilds the table and demand), and reads again on both machines. READ-ONLY levers; NO save",
+  "preconditions": "Fixture save1 (host melaus, client Client1). Levers providers / marketdemand / rivalincome deployed on BOTH machines. The client's shops 56 ba:street_fifthavenue (liquor store) and 21 ba:street_fourthstreet (gym) in Murray Hill were found by T-RIVALSELLERS' runtime providers-scan; their shelves are ASSERTED on the client here. The clock lever moves the host to 23:57 through RunMainGameTick; live time then crosses midnight. NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception"
+  ],
+  "oracles_report": [
+    "\\[Suppress\\] CompetitionHelper.RunDaily skipped on client",
+    "\\[AiRaise\\] "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 90,
+      "note": "the client joins and settles"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST RIVALSELLERS2 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "stockof 56 ba:street_fifthavenue",
+      "expect_result": "^OK stockof .*ba:itemname_beer:[1-9].*ba:itemname_whisky:[1-9]",
+      "note": "PREMISE ASSERTED: the client's own liquor store in Murray Hill (found by run 1's providers-scan) holds the measured items on its shelves"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "stockof 21 ba:street_fourthstreet",
+      "expect_result": "^OK stockof .*ba:itemname_energydrink:[1-9]",
+      "note": "PREMISE ASSERTED: the client's own gym in Murray Hill holds energy drinks"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "regstate 56 ba:street_fifthavenue",
+      "expect_result": "^OK rented=True ",
+      "note": "PREMISE: the client's own tenancy on the client"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "regstate 56 ba:street_fifthavenue",
+      "expect_result": "^OK rented=False stamp='${clientPid}'",
+      "note": "PREMISE: the host holds the same shop as Client1's"
+    },
+    {
+      "seq": 11,
+      "role": "both",
+      "cmd": "mark TEST RIVALSELLERS2 BEFORE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "marketdemand beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand ",
+      "capture": {
+        "day0": "day=(\\d+)"
+      },
+      "note": "BEFORE: the host's demand values come from the cache built at load"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "marketdemand bottleofwine ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "marketdemand cigar ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "marketdemand cigarette ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "marketdemand whisky ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "marketdemand martini ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "marketdemand margarita ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "marketdemand sodacan ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "marketdemand energydrink ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "providers beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers "
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "providers whisky ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers "
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "providers energydrink ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers "
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "rivalincome ba:neighborhood_murrayhill",
+      "expect_result": "^OK rivalincome "
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "marketdemand beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "marketdemand whisky ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 27,
+      "role": "both",
+      "cmd": "mark TEST RIVALSELLERS2 ROLL",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "clock 23:57",
+      "expect_result": "^OK clock ",
+      "note": "the host's own clock path up to 3 game-minutes before midnight"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "live time crosses midnight: NewDay -> CompetitionHelper.RunDaily -> FillProvidersDictionary + UpdateMarketDemands on the HOST (GameManager.cs:649, CompetitionHelper.cs:103-104)"
+    },
+    {
+      "seq": 30,
+      "role": "both",
+      "cmd": "mark TEST RIVALSELLERS2 AFTER",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "marketdemand beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand ",
+      "expect_gt": {
+        "day=(\\d+)": "${day0}"
+      },
+      "note": "AFTER: the day really rolled on the host (the premise of the AFTER reads)"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "marketdemand bottleofwine ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "marketdemand cigar ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "marketdemand cigarette ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "marketdemand whisky ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "cmd": "marketdemand martini ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "cmd": "marketdemand margarita ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "marketdemand sodacan ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "marketdemand energydrink ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "providers beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers "
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "providers whisky ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers "
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "providers energydrink ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers "
+    },
+    {
+      "seq": 43,
+      "role": "h",
+      "cmd": "rivalincome ba:neighborhood_murrayhill",
+      "expect_result": "^OK rivalincome "
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "sleep_s": 70,
+      "note": "one host market snapshot (every 60s) reaches the client"
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "marketdemand beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 46,
+      "role": "c",
+      "cmd": "marketdemand whisky ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 47,
+      "role": "c",
+      "cmd": "marketdemand energydrink ba:neighborhood_murrayhill",
+      "expect_result": "^OK marketdemand "
+    },
+    {
+      "seq": 48,
+      "role": "c",
+      "cmd": "providers energydrink ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers "
+    },
+    {
+      "seq": 49,
+      "role": "both",
+      "cmd": "mark TEST RIVALSELLERS2 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

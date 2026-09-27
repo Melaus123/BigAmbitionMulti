@@ -2882,6 +2882,134 @@ namespace BigAmbitionsMP
                     return $"OK rivalsig {MPServer.RivalStateSignature()}";
                 }
 
+                // -- H-RIVALPARITY-1 item C levers (user-approved 2026-09-27). ALL READ-ONLY. -----------
+                // Do a CLIENT's shops count as sellers in the HOST's market/demand calculation?  The game builds
+                // its seller count per (item, neighbourhood) in ProductMarketHelper.FillProvidersDictionary
+                // (decompile :329-356), reads it through the private GetProviders (:358-361), turns it into demand
+                // in CalculateDemand (:403-410) via UpdateMarketDemand (:220-275), and a rival's weekly income is
+                // the sum of its shops' dailyIncomes (RivalData.WeeklyIncome, RivalData.cs:29-42), each filled
+                // daily from GetEstimatedWeeklyIncome (EstimatedWeeklyIncomeHelper.cs:26-45, via
+                // CompetitionHelper.UpdateDailyValuation :225-236), which reads GetNeighborhoodDemand (:134).
+                // NOTHING here writes: the live seller walk RE-READS the same fields FillProvidersDictionary
+                // reads instead of calling it (calling it would rebuild the game's cached table).
+                case "providers":
+                {
+                    try
+                    {
+                        if (SaveGameManager.Current == null) return "ERR no world loaded";
+                        var pvTk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (pvTk.Length != 2) return "ERR usage: providers <item|*> <neighbourhood|*>";
+                        string pvItem = MktItem(pvTk[0]);
+                        string pvNb   = MktNb(pvTk[1]);
+                        if (pvItem == "*") return MktScan(pvNb);
+                        if (pvNb == "*") return "ERR providers: a neighbourhood is required with an item";
+                        int pvCached = MktCachedProviders(pvItem, pvNb);
+                        var pvRows = new System.Collections.Generic.List<string>();
+                        int pvLive = MktLiveProviders(pvItem, pvNb, pvRows, out int pvPlayerNot);
+                        string pvStored = "?", pvDemand = "?";
+                        try
+                        {
+                            var pvNd = Helpers.ProductMarketHelper.GetNeighborhoodDemand(pvItem, pvNb);
+                            if (pvNd != null) { pvStored = pvNd.providers.ToString(); pvDemand = pvNd.demand.ToString(); }
+                        }
+                        catch { }
+                        return $"OK providers item={pvItem} nb={pvNb} cached={pvCached} live={pvLive} stored={pvStored} demand={pvDemand} "
+                             + $"playerStockedNotCounted={pvPlayerNot} rows={pvRows.Count} [{string.Join(" ; ", pvRows)}]";
+                    }
+                    catch (Exception pvEx) { return $"ERR providers: {pvEx.GetType().Name}: {pvEx.Message}"; }
+                }
+
+                case "marketdemand":
+                {
+                    try
+                    {
+                        if (SaveGameManager.Current == null) return "ERR no world loaded";
+                        var mdTk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (mdTk.Length != 2) return "ERR usage: marketdemand <item> <neighbourhood>";
+                        string mdItem = MktItem(mdTk[0]);
+                        string mdNb   = MktNb(mdTk[1]);
+                        var mdIt = BigAmbitions.Items.ItemsGetter.GetByName(mdItem);
+                        if (mdIt == null) return $"ERR marketdemand: unknown item '{mdItem}'";
+                        bool mdCan = false;
+                        try { mdCan = Helpers.ProductMarketHelper.CanNeighborhoodHaveItemDemand(mdNb, mdItem); } catch { }
+                        // The value every consumer reads (EstimatedWeeklyIncomeHelper.cs:134): GetNeighborhoodDemand (:745).
+                        var mdNd = Helpers.ProductMarketHelper.GetNeighborhoodDemand(mdItem, mdNb);
+                        int mdOpt = MktOptimal(mdIt);
+                        int mdCached = MktCachedProviders(mdItem, mdNb);
+                        int mdLive = MktLiveProviders(mdItem, mdNb, new System.Collections.Generic.List<string>(), out int mdNot);
+                        // CalculateDemand :408 - active market events on this item here (or city-wide).
+                        int mdEv = 0, mdEvN = 0;
+                        try
+                        {
+                            foreach (var me in SaveGameManager.Current.marketEvents)
+                            {
+                                if (me == null || !me.IsActive || me.itemName != mdItem) continue;
+                                if (!string.IsNullOrEmpty(me.neighbourhood) && me.neighbourhood != mdNb) continue;
+                                mdEv += me.demandImpact; mdEvN++;
+                            }
+                        }
+                        catch { }
+                        return $"OK marketdemand item={mdItem} nb={mdNb} canHaveDemand={mdCan} demand={mdNd?.demand} storedProviders={mdNd?.providers} "
+                             + $"monopoly={mdNd?.hasPlayerMonopoly} lastDaySold={mdNd?.lastDaySold} optimal={mdOpt} cachedProviders={mdCached} "
+                             + $"liveProviders={mdLive} playerStockedNotCounted={mdNot} events={mdEvN}:{mdEv} "
+                             + $"formulaCached={MktFormula(mdCached, mdOpt)} formulaLive={MktFormula(mdLive, mdOpt)} day={SaveGameManager.Current.Day}";
+                    }
+                    catch (Exception mdEx) { return $"ERR marketdemand: {mdEx.GetType().Name}: {mdEx.Message}"; }
+                }
+
+                case "rivalincome":
+                {
+                    try
+                    {
+                        if (SaveGameManager.Current == null) return "ERR no world loaded";
+                        string riArg = arg.Trim();
+                        if (riArg.Length == 0) return "ERR usage: rivalincome <rivalId|neighbourhood>";
+                        bool riNbMode = riArg.StartsWith("ba:neighborhood_", StringComparison.Ordinal);
+                        var riIds = new System.Collections.Generic.List<string>();
+                        string riSpecial = "";
+                        if (riNbMode)
+                        {
+                            try { riSpecial = BigAmbitions.Rivals.RivalsHelper.GetSpecialRivalByNeighborhood(riArg)?.rivalData?.id ?? ""; } catch { }
+                            if (riSpecial.Length > 0) riIds.Add(riSpecial);
+                            foreach (var rr in SaveGameManager.Current.BuildingRegistrations)
+                            {
+                                if (rr == null) continue;
+                                string rrNb = ""; try { rrNb = Helpers.BuildingHelper.GetBuilding(rr.Address)?.Neighbourhood ?? ""; } catch { }
+                                if (rrNb != riArg) continue;
+                                string rrOwner = ""; try { rrOwner = rr.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                                if (rrOwner.Length == 0 || GameStatePatcher.IsSessionPlayerRivalId(rrOwner) || riIds.Contains(rrOwner)) continue;
+                                riIds.Add(rrOwner);
+                            }
+                        }
+                        else riIds.Add(riArg);
+                        var riRows = new System.Collections.Generic.List<string>();
+                        foreach (var rid in riIds)
+                        {
+                            if (riRows.Count >= 10) { riRows.Add("..."); break; }
+                            BigAmbitions.Rivals.RivalData? rd = null;
+                            try { rd = BigAmbitions.Rivals.RivalsHelper.GetRivalData(rid); } catch { }
+                            if (rd == null) { riRows.Add($"{rid}|nodata"); continue; }
+                            string rWi = "?"; float rWiF = 0f;
+                            try { rWiF = rd.WeeklyIncome; rWi = rWiF.ToString("F0"); } catch (Exception rwx) { rWi = "ERR:" + rwx.GetType().Name; }
+                            var rRo = rd.ownedRetailOfficeBusinesses;
+                            int rN = rRo?.Count ?? -1, rInNb = 0, rEstN = 0;
+                            float rEst = 0f;
+                            if (rRo != null)
+                                foreach (var rb in rRo)
+                                {
+                                    if (rb == null) continue;
+                                    try { if (riNbMode && Helpers.BuildingHelper.GetBuilding(rb.Address)?.Neighbourhood == riArg) rInNb++; } catch { }
+                                    try { rEst += Helpers.EstimatedWeeklyIncomeHelper.GetEstimatedWeeklyIncome(rb); rEstN++; } catch { }
+                                }
+                            // RivalTimeline.CheckSurrender :134-137 - past the income gate when no retail/office shop or income < 2000.
+                            bool rUnder = !(rN > 0 && !(rWiF < 2000f));
+                            riRows.Add($"{rid}|name={rd.rivalName}|weeklyIncome={rWi}|retailOffice={rN}|inNb={rInNb}|liveEstimate={rEst:F0}({rEstN})|underSurrenderLine={rUnder}");
+                        }
+                        return $"OK rivalincome arg={riArg} specialRival='{riSpecial}' rivals={riRows.Count} [{string.Join(" ; ", riRows)}]";
+                    }
+                    catch (Exception riEx) { return $"ERR rivalincome: {riEx.GetType().Name}: {riEx.Message}"; }
+                }
+
                 case "rivalfire":
                 {
                     if (!MPServer.IsRunning) return "ERR host only";
@@ -4401,6 +4529,171 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[DEV] work off FAILED: exception {ex.Message}");
                 return "ERR work off: " + ex.Message;
             }
+        }
+
+        // -- H-RIVALPARITY-1 item C helpers (READ-ONLY) ------------------------------------------------
+        private static string MktItem(string s) => (s == "*" || s.StartsWith("ba:", StringComparison.Ordinal)) ? s : "ba:itemname_" + s;
+        private static string MktNb(string s)   => (s == "*" || s.StartsWith("ba:", StringComparison.Ordinal)) ? s : "ba:neighborhood_" + s;
+
+        private static System.Reflection.MethodInfo? _mktGetProviders;
+
+        /// <summary>The game's CACHED seller count - ProductMarketHelper.GetProviders (private static, :358-361), the
+        /// number UpdateMarketDemand (:249) feeds CalculateDemand. Rebuilt by the game only in FillProvidersDictionary
+        /// (daily from CompetitionHelper.RunDaily :103, and on load).</summary>
+        private static int MktCachedProviders(string item, string nb)
+        {
+            _mktGetProviders ??= HarmonyLib.AccessTools.Method(typeof(Helpers.ProductMarketHelper), "GetProviders");
+            if (_mktGetProviders == null) return -2;
+            return (int)_mktGetProviders.Invoke(null, new object[] { item, nb });
+        }
+
+        /// <summary>item.GetOptimalProviders() (BigAmbitions.dll; CalculateDemand :405). Reflection: instance method or
+        /// a static extension in the item's own assembly.</summary>
+        private static int MktOptimal(object item)
+        {
+            try
+            {
+                var t = item.GetType();
+                var m = HarmonyLib.AccessTools.Method(t, "GetOptimalProviders", Type.EmptyTypes);
+                if (m != null && !m.IsStatic) return (int)m.Invoke(item, null);
+                foreach (var st in t.Assembly.GetTypes())
+                {
+                    if (!st.IsAbstract || !st.IsSealed) continue;
+                    foreach (var sm in st.GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static))
+                    {
+                        if (sm.Name != "GetOptimalProviders") continue;
+                        var ps = sm.GetParameters();
+                        if (ps.Length == 1 && ps[0].ParameterType.IsAssignableFrom(t)) return (int)sm.Invoke(null, new object[] { item });
+                    }
+                }
+            }
+            catch { }
+            return -1;
+        }
+
+        /// <summary>CalculateDemand :405-406 without its +-1 jitter and before events: 100 - providers*100/optimal,
+        /// or the random 29..34 floor below 30.</summary>
+        private static string MktFormula(int providers, int optimal)
+        {
+            if (optimal <= 0 || providers < 0) return "?";
+            int n = 100 - providers * 100 / optimal;
+            return n < 30 ? "29..34" : Math.Min(n, 100).ToString();
+        }
+
+        /// <summary>Who holds this registration, from THIS machine's view: own (the local player's tenancy),
+        /// player:&lt;pid&gt; (another session player - GameStatePatcher.IsAnyPlayerBusiness), or ai:&lt;rivalId|-&gt;.</summary>
+        private static string MktWho(BuildingRegistration reg)
+        {
+            string owner = ""; try { owner = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+            bool foreign = false; try { foreign = GameStatePatcher.IsForeignPlayerBusiness(reg); } catch { }
+            if (reg.RentedByPlayer && !foreign) return "own";
+            bool player = false; try { player = GameStatePatcher.IsAnyPlayerBusiness(reg); } catch { }
+            if (player || foreign) return "player:" + (owner.Length > 0 ? owner : "?");
+            return "ai:" + (owner.Length > 0 ? owner : "-");
+        }
+
+        /// <summary>Shelf stock per item at one registration - the same walk as the `stockof` lever
+        /// (BuildingHelper.GetItemsWithStock, BuildingHelper.cs:446-455).</summary>
+        private static System.Collections.Generic.SortedDictionary<string, int> MktStockAll(BuildingRegistration reg)
+        {
+            var tot = new System.Collections.Generic.SortedDictionary<string, int>(StringComparer.Ordinal);
+            if (reg.itemInstances == null) return tot;
+            foreach (var kv in reg.itemInstances)
+            {
+                var ii = kv.Value;
+                if (ii?.cargoInstances == null) continue;
+                foreach (var c in ii.cargoInstances)
+                {
+                    if (c == null || c.amount <= 0) continue;
+                    if (c.nestedCargoInstances != null && c.nestedCargoInstances.Count > 0) continue;
+                    string n = c.itemName ?? "";
+                    if (n.Length == 0) continue;
+                    int prev; tot.TryGetValue(n, out prev);
+                    tot[n] = prev + c.amount;
+                }
+            }
+            return tot;
+        }
+
+        /// <summary>The LIVE seller count for (item, nb) by FillProvidersDictionary's own rule (:333-353): a registration
+        /// not for rent, with a non-empty cachedAvailableProducts, not a special service, whose list holds the item, in
+        /// that neighbourhood, counts if RentedByPlayer or PlayerItemPurchaser.GetShelfFillState(item, reg) &gt; 0.
+        /// One row per such seller, plus every player-held registration here with shelf stock of the item (counted or
+        /// not); playerStockedNotCounted = player-held shops holding the item that the rule does NOT count.</summary>
+        private static int MktLiveProviders(string item, string nb, System.Collections.Generic.List<string> rows, out int playerStockedNotCounted)
+        {
+            int live = 0; playerStockedNotCounted = 0;
+            foreach (var reg in SaveGameManager.Current.BuildingRegistrations)
+            {
+                if (reg == null) continue;
+                Buildings.Building? b = null;
+                try { b = Helpers.BuildingHelper.GetBuilding(reg.Address); } catch { }
+                if (b == null || b.Neighbourhood != nb) continue;
+                var list = reg.cachedAvailableProducts;
+                int listN = list?.Count ?? 0;
+                bool listHas = list != null && list.Contains(item);
+                bool player = false; try { player = GameStatePatcher.IsAnyPlayerBusiness(reg); } catch { }
+                bool held = player || reg.RentedByPlayer;
+                int stock = 0; try { MktStockAll(reg).TryGetValue(item, out stock); } catch { }
+                if (!listHas && !(held && stock > 0)) continue;
+                bool special = false; try { special = b.SpecialService != null; } catch { }
+                bool counted = false; string fill = "-";
+                if (!reg.AvailableForRent && listN > 0 && !special && listHas)
+                {
+                    if (reg.RentedByPlayer) counted = true;
+                    else
+                    {
+                        float f = -1f;
+                        try { f = Controllers.PlayerItemPurchaser.GetShelfFillState(item, reg); } catch { }
+                        fill = f.ToString("F2");
+                        counted = f > 0f;
+                    }
+                }
+                if (counted) live++;
+                else if (held && stock > 0) playerStockedNotCounted++;
+                string key = ""; try { key = GameStateReader.AddressKey(reg); } catch { }
+                rows.Add($"{key}|{MktWho(reg)}|rented={reg.RentedByPlayer}|forRent={reg.AvailableForRent}|special={special}|list={listN}|listHas={listHas}|fill={fill}|stock={stock}|counted={counted}");
+            }
+            return live;
+        }
+
+        /// <summary>`providers * &lt;nb|*&gt;` - FIXTURE DISCOVERY: every player-held registration (own or another
+        /// session player's) in nb with a product list or shelf stock, and the local player's OWN best-stocked
+        /// demand-capable item (firstStocked*), preferring one its product list also names.</summary>
+        private static string MktScan(string nb)
+        {
+            var rows = new System.Collections.Generic.List<string>();
+            string first = "", firstAt = "", firstNb = ""; int firstAmt = 0; bool firstList = false;
+            foreach (var reg in SaveGameManager.Current.BuildingRegistrations)
+            {
+                if (reg == null) continue;
+                string rnb = ""; try { rnb = Helpers.BuildingHelper.GetBuilding(reg.Address)?.Neighbourhood ?? ""; } catch { }
+                if (nb != "*" && rnb != nb) continue;
+                bool player = false; try { player = GameStatePatcher.IsAnyPlayerBusiness(reg); } catch { }
+                if (!player && !reg.RentedByPlayer) continue;
+                var st = MktStockAll(reg);
+                var list = reg.cachedAvailableProducts;
+                if (st.Count == 0 && (list == null || list.Count == 0)) continue;
+                string key = ""; try { key = GameStateReader.AddressKey(reg); } catch { }
+                string who = MktWho(reg);
+                var sts = new System.Collections.Generic.List<string>();
+                foreach (var kv in st) sts.Add($"{kv.Key}:{kv.Value}");
+                string ls = list == null ? "null" : string.Join(",", list.Count > 12 ? list.GetRange(0, 12) : list) + (list.Count > 12 ? ",..." : "");
+                rows.Add($"{key}|{who}|nb={rnb}|rented={reg.RentedByPlayer}|type={reg.businessTypeName}|list=[{ls}]|stock=[{string.Join(",", sts)}]");
+                if (who != "own") continue;
+                foreach (var kv in st)
+                {
+                    bool can = false;
+                    try { can = Helpers.ProductMarketHelper.CanNeighborhoodHaveItemDemand(rnb, kv.Key); } catch { }
+                    if (!can) continue;
+                    bool inList = list != null && list.Contains(kv.Key);
+                    bool better = first.Length == 0 || (inList && !firstList) || (inList == firstList && kv.Value > firstAmt);
+                    if (!better) continue;
+                    first = kv.Key; firstAt = key; firstNb = rnb; firstAmt = kv.Value; firstList = inList;
+                }
+            }
+            return $"OK providers-scan nb={nb} shops={rows.Count} firstStocked={first} firstStockedAt='{firstAt}' firstStockedNb={firstNb} "
+                 + $"firstStockedAmt={firstAmt} firstStockedInList={firstList} [{string.Join(" ; ", rows)}]";
         }
 
         /// <summary>Armed by 'charconfirm'. Runs on the 0.5s tick cadence: waits for

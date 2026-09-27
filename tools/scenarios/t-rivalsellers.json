@@ -1,0 +1,68 @@
+{
+  "id": "T-RIVALSELLERS",
+  "title": "H-RIVALPARITY-1 item C (measurement, user-approved 2026-09-27): does a CLIENT's shop count as a seller in the HOST's market/demand calculation? READ-ONLY levers providers / marketdemand / rivalincome on BOTH machines for an item the client's own shop really stocks, plus the host-owned control. NO save",
+  "preconditions": "Fixture save1 (host melaus, client Client1; 4 rivals). Build with the H-RIVALPARITY-1 levers (providers, marketdemand, rivalincome) deployed on BOTH machines. THE ITEM IS DISCOVERED AT RUNTIME: `providers * *` on the CLIENT names the client's OWN best-stocked demand-capable item (preferring one its own product list also names) and the shop holding it; `stockof` on the client then ASSERTS the premise (the client's shelf really holds that item). The host-owned control is discovered the same way on the host. No lever here writes; no stocking lever exists that is not itself a mutation, so the A/B is ACROSS MACHINES (the same item and neighbourhood read on host and client) rather than before/after a restock. NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception"
+  ],
+  "oracles_report": [
+    "\\[TestDrive\\] .* 'providers ",
+    "\\[TestDrive\\] .* 'marketdemand ",
+    "\\[TestDrive\\] .* 'rivalincome "
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 4, "role": "h", "sleep_s": 90, "note": "the client joins and settles" },
+    { "seq": 5, "role": "both", "cmd": "mark TEST RIVALSELLERS START", "expect_result": "OK MARK" },
+    { "seq": 6, "role": "c", "cmd": "status", "expect_result": "settled=True" },
+    {
+      "seq": 7, "role": "h", "cmd": "rivalstate",
+      "expect_result": "^OK rivalstate rivals=[1-9]\\d* active=\\d+ defenses=\\d+",
+      "capture": { "rival0": "\\[(.+?):[A-]:[D-]:\\d+" },
+      "note": "the host's rival state exists (fixture: 4 rivals)"
+    },
+    { "seq": 8, "role": "c", "cmd": "providers * ba:neighborhood_midtown", "expect_result": "^OK providers-scan", "note": "REPORT: the client's view of the player-held shops in Midtown (the rival read says Client1 has shops there)" },
+    {
+      "seq": 9, "role": "c", "cmd": "providers * *",
+      "expect_result": "^OK providers-scan .*firstStocked=ba:\\S+ ",
+      "capture": { "cItem": "firstStocked=(\\S+)", "cShop": "firstStockedAt='([^']+)'", "cNb": "firstStockedNb=(\\S+)" },
+      "note": "RUNTIME DISCOVERY on the CLIENT: its own best-stocked demand-capable item and the shop holding it"
+    },
+    { "seq": 10, "role": "c", "cmd": "stockof ${cShop}", "expect_result": "^OK stockof .*${cItem}:[1-9]", "note": "PREMISE ASSERTED: the client's own shelf in that shop holds the item" },
+    { "seq": 11, "role": "c", "cmd": "regstate ${cShop}", "expect_result": "^OK rented=True ", "note": "PREMISE: the shop is the client's own tenancy on the client" },
+    { "seq": 12, "role": "both", "cmd": "mark TEST RIVALSELLERS MEASURE", "expect_result": "OK MARK" },
+    { "seq": 13, "role": "h", "cmd": "regstate ${cShop}", "expect_result": "^OK ", "note": "REPORT: the same shop as the host holds it (tenancy flag, owner stamp)" },
+    { "seq": 14, "role": "h", "cmd": "stockof ${cShop}", "expect_result": "^OK stockof", "note": "REPORT: the host's replica of that shop's shelves" },
+    { "seq": 15, "role": "h", "cmd": "providers ${cItem} ${cNb}", "expect_result": "^OK providers ", "note": "THE MEASUREMENT (host): is the client's shop a counted seller?" },
+    { "seq": 16, "role": "h", "cmd": "marketdemand ${cItem} ${cNb}", "expect_result": "^OK marketdemand ", "note": "the demand value the host's game uses" },
+    { "seq": 17, "role": "c", "cmd": "providers ${cItem} ${cNb}", "expect_result": "^OK providers ", "note": "the same read on the client" },
+    { "seq": 18, "role": "c", "cmd": "marketdemand ${cItem} ${cNb}", "expect_result": "^OK marketdemand ", "note": "the same read on the client (demand is host-authoritative there)" },
+    { "seq": 19, "role": "h", "cmd": "rivalincome ${cNb}", "expect_result": "^OK rivalincome ", "note": "the rivals selling in that neighbourhood, host view" },
+    { "seq": 20, "role": "c", "cmd": "rivalincome ${cNb}", "expect_result": "^OK rivalincome ", "note": "client view" },
+    { "seq": 21, "role": "h", "cmd": "rivalincome ${rival0}", "expect_result": "^OK rivalincome ", "note": "the first rival by id (host)" },
+    { "seq": 22, "role": "h", "cmd": "rivalincome ba:neighborhood_midtown", "expect_result": "^OK rivalincome ", "note": "Midtown rivals (host)" },
+    { "seq": 23, "role": "both", "cmd": "mark TEST RIVALSELLERS CONTROL", "expect_result": "OK MARK" },
+    {
+      "seq": 24, "role": "h", "cmd": "providers * *",
+      "expect_result": "^OK providers-scan .*firstStocked=ba:\\S+ ",
+      "capture": { "hItem": "firstStocked=(\\S+)", "hShop": "firstStockedAt='([^']+)'", "hNb": "firstStockedNb=(\\S+)" },
+      "note": "HOST-OWNED CONTROL discovery: the host's own best-stocked item and shop"
+    },
+    { "seq": 25, "role": "h", "cmd": "stockof ${hShop}", "expect_result": "^OK stockof .*${hItem}:[1-9]", "note": "control premise: the host's own shelf holds it" },
+    { "seq": 26, "role": "h", "cmd": "providers ${hItem} ${hNb}", "expect_result": "^OK providers ", "note": "CONTROL: the host's own shop in the host's count" },
+    { "seq": 27, "role": "h", "cmd": "marketdemand ${hItem} ${hNb}", "expect_result": "^OK marketdemand " },
+    { "seq": 28, "role": "c", "cmd": "providers ${hItem} ${hNb}", "expect_result": "^OK providers ", "note": "mirror: does the CLIENT count the HOST's shop?" },
+    { "seq": 29, "role": "c", "cmd": "marketdemand ${hItem} ${hNb}", "expect_result": "^OK marketdemand " },
+    { "seq": 30, "role": "both", "cmd": "mark TEST RIVALSELLERS END", "expect_result": "OK MARK" }
+  ]
+}
