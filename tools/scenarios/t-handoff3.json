@@ -11,6 +11,7 @@
     "shop": "20 ba:street_fifthavenue"
   },
   "oracles_absent": [
+    "\\[BookOnce\\] (register|book|till watch|hourly begin|hourly restore|hourly end)\\b[^:]*: ",
     "\\[TickIso\\]",
     "\\[Guard\\]",
     "(?<!swallowed )NullReferenceException",
@@ -19,6 +20,7 @@
   ],
   "oracles_present": [],
   "oracles_report": [
+    "\\[BookOnce\\] ",
     "\\[Handoff\\] body-only .*booked order before .* -> after ",
     "\\[Handoff\\] final rows accounted ",
     "\\[Handoff\\] ",
@@ -325,7 +327,7 @@
         "l1Booked": "booked=(\\d+)",
         "l1Paid": "paid=(\\d+)",
         "l1Fwd": "forwardsIn=(\\d+)",
-        "l1Marks": "marks=(\\d+)"
+        "l1BoReg": "boRegistered=(\\d+)", "l1BoSup": "boSuppressed=(\\d+)", "l1BoBy": "boBookedBy=(\\S+)", "l1BoSupBy": "boSuppressedBy=(\\S+)"
       },
       "note": "LEG 1 ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },
@@ -362,7 +364,7 @@
         "f1Booked": "booked=(\\d+)",
         "f1Paid": "paid=(\\d+)",
         "f1Fwd": "forwardsIn=(\\d+)",
-        "f1Marks": "marks=(\\d+)"
+        "f1BoReg": "boRegistered=(\\d+)", "f1BoSup": "boSuppressed=(\\d+)", "f1BoBy": "boBookedBy=(\\S+)", "f1BoSupBy": "boSuppressedBy=(\\S+)"
       },
       "note": "F1 LEG ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },

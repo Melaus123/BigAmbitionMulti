@@ -343,78 +343,21 @@ namespace BigAmbitionsMP
         /// <summary>Idempotency ledger — every forwarded EntryId is processed at most once per session.</summary>
         private static readonly HashSet<string> _processedForwards = new();
 
-        // H-HANDOFF-1 step 8 (batch 27): entries whose live customer THIS (booking) machine handed to a partner
-        // at a hand-off. The spawner marked each one completed here when it spawned the body, and the body is
-        // gone without completing, so the partner's sale for it is the only one there will ever be - a forward
-        // for such an entry is claimable ONCE instead of rejected as "already consumed". Filled by
-        // CustomerHandoff.SendFinal (only for orders not yet complete); cleared by CustomerPuppets.Reset (session /
-        // scene). A mark ends when it is used ONCE: the partner's forward claims it, the owner's own hourly pass
-        // books the entry first (fold F1 - first booking wins, CustomerHandoff.HourlyPassEnd), or this machine
-        // adopts that customer back (fold F4, CustomerPuppets.TakeOver).
-        // Fold F6 (2026-09-26): a mark no longer dies on the day roll - a 23:50 hand-off paid at 00:05 is still
-        // accepted once. It lives 24 game-hours from when it was set (value = absolute game minute).
-        private static readonly Dictionary<string, int> _handedOff = new();
-        private const int HandedOffLifeMinutes = 24 * 60;
-        internal static int HandedOffCount { get { HandedOffPrune(); return _handedOff.Count; } }
-        private static int GameMinuteNow()
-        {
-            try { var t = TimeHelper.Now(); return t.Day * 1440 + t.Hour * 60 + (int)t.Minute; } catch { return 0; }
-        }
-        private static void HandedOffPrune()
-        {
-            try
-            {
-                if (_handedOff.Count == 0) return;
-                int now = GameMinuteNow();
-                List<string>? old = null;
-                foreach (var kv in _handedOff) if (now - kv.Value > HandedOffLifeMinutes) (old ??= new List<string>()).Add(kv.Key);
-                if (old != null) foreach (var k in old) _handedOff.Remove(k);
-            }
-            catch { }
-        }
-        internal static void MarkHandedOff(string entryId)
-        {
-            try { if (string.IsNullOrEmpty(entryId)) return; HandedOffPrune(); _handedOff[entryId] = GameMinuteNow(); } catch { }
-        }
-        internal static bool IsHandedOff(string entryId)
-        {
-            try { if (string.IsNullOrEmpty(entryId)) return false; HandedOffPrune(); return _handedOff.ContainsKey(entryId); } catch { return false; }
-        }
-        /// <summary>Folds F1/F4: the mark is spent - a later forward for that entry is rejected as before.</summary>
-        internal static bool UnmarkHandedOff(string entryId, string why)
-        {
-            try
-            {
-                if (string.IsNullOrEmpty(entryId) || !_handedOff.Remove(entryId)) return false;
-                Plugin.Logger.LogInfo($"[Handoff] hand-off mark cleared: {entryId} ({why}).");
-                return true;
-            }
-            catch { return false; }
-        }
-        internal static void ClearHandedOff() { try { _handedOff.Clear(); } catch { } }
+        /// <summary>H-HANDOFF-1 book-once (2026-09-27): a forward for this id was adopted here and put an Order in the
+        /// till. The hand-off marks that used to live here (step 8, folds F1/F4/F6) are replaced by BookOnce.</summary>
+        private static readonly HashSet<string> _bookedForwards = new();
+        internal static bool ForwardBooked(string entryId)
+            => !string.IsNullOrEmpty(entryId) && _bookedForwards.Contains(entryId);
 
-        /// <summary>Fold F1: the marked entries of <paramref name="reg"/> whose spawn hour is <paramref name="hour"/> -
-        /// the ones an hourly pass for that hour will book (RetailBusinessSimulator.CacheCustomersForCurrentHour
-        /// :200-212 takes every entry of the hour, completed or not). null = this building holds no mark at all;
-        /// an empty list = it holds marks, none of this hour.</summary>
-        internal static List<KeyValuePair<CustomerEntry, string>>? HandedOffEntriesAt(BuildingRegistration? reg, int hour)
+        /// <summary>BookOnce's hourly set-aside: this machine's live schedule list for a shop (the list the native
+        /// simulators read through CustomerEntriesHelper.GetEntriesByAddress). Null when it holds none.</summary>
+        internal static List<CustomerEntry>? EntriesOf(BuildingRegistration? reg)
         {
             try
             {
-                if (reg == null || _handedOff.Count == 0) return null;
-                HandedOffPrune();
                 var table = Table();
-                if (table == null || !table.TryGetValue(reg.Address, out var entries) || entries == null) return null;
-                List<KeyValuePair<CustomerEntry, string>>? r = null;
-                bool any = false;
-                foreach (var e in entries)
-                {
-                    if (e == null || !_ownerIds.TryGetValue(e, out var id) || !_handedOff.ContainsKey(id)) continue;
-                    any = true;
-                    r ??= new List<KeyValuePair<CustomerEntry, string>>();
-                    if (e.spawnTime != null && e.spawnTime.Hour == hour) r.Add(new KeyValuePair<CustomerEntry, string>(e, id));
-                }
-                return any ? r : null;
+                if (reg == null || table == null || !table.TryGetValue(reg.Address, out var entries)) return null;
+                return entries;
             }
             catch { return null; }
         }
@@ -470,10 +413,20 @@ namespace BigAmbitionsMP
                 }
 
                 // Claim. Completed on MY table = my spawner consumed that customer (I'm inside; my live
-                // body will/did complete it natively) — reject so it counts exactly once. H-HANDOFF-1 step 8:
-                // EXCEPT an entry whose body this machine handed to the partner at a hand-off (_handedOff) -
-                // that body left here without completing, so the partner's sale is the only one; claimed once.
-                bool claimed = false, known = false, handedOff = false;
+                // body will/did complete it natively) - reject so it counts exactly once.
+                // H-HANDOFF-1 BOOK ONCE (2026-09-27): a visit that crossed a hand-off is registered in BookOnce, and the
+                // registry alone decides: booked already (by a checkout, an hourly pass, a gym fee or an earlier forward)
+                // -> this forward is suppressed; not booked yet -> this forward books it, whatever the entry's
+                // 'consumed by the spawner' flag says (that flag is set at every spawn, paid or not).
+                bool registered = BookOnce.IsRegistered(p.EntryId);
+                if (registered && BookOnce.IsBooked(p.EntryId))
+                {
+                    BookOnce.TryBook(p.EntryId, "forwarded sale", null);   // logs the suppression
+                    _processedForwards.Add(p.EntryId);
+                    CustomerHandoff.NoteForward(p.EntryId, null);   // H-HANDOFF-1 till ledger (rig oracle)
+                    return;
+                }
+                bool claimed = false, known = false;
                 CustomerEntry? claimedEntry = null;
                 var table = Table();
                 List<CustomerEntry>? entries = null;
@@ -482,13 +435,8 @@ namespace BigAmbitionsMP
                     {
                         if (e == null || !_ownerIds.TryGetValue(e, out var id) || id != p.EntryId) continue;
                         known = true;
-                        if (e.completed)
-                        {
-                            HandedOffPrune();
-                            if (_handedOff.Remove(p.EntryId)) { claimed = true; claimedEntry = e; handedOff = true; }
-                            else _processedForwards.Add(p.EntryId);
-                        }
-                        else { e.completed = true; claimed = true; claimedEntry = e; }
+                        if (registered || !e.completed) { e.completed = true; claimed = true; claimedEntry = e; }
+                        else _processedForwards.Add(p.EntryId);
                         break;
                     }
                 if (known && !claimed)
@@ -497,15 +445,17 @@ namespace BigAmbitionsMP
                     CustomerHandoff.NoteForward(p.EntryId, null);   // H-HANDOFF-1 till ledger (rig oracle)
                     return;
                 }
-                if (handedOff)
-                    Plugin.Logger.LogInfo($"[Business] forwarded order {p.EntryId} accepted (handed off) — this machine gave that customer to '{p.PlayerId}' at a hand-off without completing it.");
+                if (registered)
+                    Plugin.Logger.LogInfo($"[Business] forwarded order {p.EntryId} accepted (book once) — the first booking of a visit that crossed a hand-off, from '{p.PlayerId}'.");
                 // Recheck B2 (double-book): the owner's hourly abstract simulator processes every entry
                 // of the hour with NO completed filter (RetailBusinessSimulator.ProcessAllCustomersFromThisHour
                 // :171-186, ProcessCustomer :207+), so a claimed-but-listed entry was booked AGAIN at the
                 // hour-end tick whenever the owner stood outside. Retire the claimed entry from the live
                 // list: the adopted Order below (timestamp now) still feeds the daily quota subtraction.
+                // BOOK ONCE: a REGISTERED entry stays in the table - the registry sets it aside from every hourly pass,
+                // and a body this machine adopts (or takes back) for that visit still finds its entry (seat, clock).
                 int leftThisHour = -1;
-                if (claimedEntry != null && entries != null)
+                if (claimedEntry != null && entries != null && !registered)
                 {
                     try
                     {
@@ -618,8 +568,10 @@ namespace BigAmbitionsMP
                 }
                 catch { }
 
+                if (registered) BookOnce.TryBook(p.EntryId, "forwarded sale", o);   // first booking: marks the visit booked
                 reg.unprocessedCompletedOrders.Add(o);
                 _processedForwards.Add(p.EntryId);
+                if (_bookedForwards.Count < 4000) _bookedForwards.Add(p.EntryId);
                 CustomerHandoff.NoteForward(p.EntryId, o);   // H-HANDOFF-1 till ledger (rig oracle)
                 float orderRevenue = 0f;
                 foreach (var oe in o.entries) if (oe != null && oe.paid) orderRevenue += oe.price;
@@ -630,7 +582,7 @@ namespace BigAmbitionsMP
                 BuildingStorageSync.OwnerBusinessTail(reg);
                 InteriorSync.PushOwnedBuildingNow(p.AddressKey);
                 Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s) ${repricedTotal:F2} (forwarded at ${forwardedTotal:F2}){(bagged ? " +bag" : "")}{(feeLines > 0 ? $" (incl. {feeLines} entrance-fee line(s), no stock)" : "")}{(refused > 0 ? $" ({refused} refused on price)" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}."
-                    + (claimedEntry != null ? $" [PROBE:P-HELPER-DOUBLEBOOK] entry retired from the live table; {leftThisHour} unserved left this hour." : (known ? "" : " [PROBE:P-HELPER-DOUBLEBOOK] entry unknown — nothing to retire; quota relies on the adopted order's timestamp.")));
+                    + (claimedEntry != null ? (registered ? " [PROBE:P-HELPER-DOUBLEBOOK] entry kept (book-once registry sets it aside from hourly passes)." : $" [PROBE:P-HELPER-DOUBLEBOOK] entry retired from the live table; {leftThisHour} unserved left this hour.") : (known ? "" : " [PROBE:P-HELPER-DOUBLEBOOK] entry unknown — nothing to retire; quota relies on the adopted order's timestamp.")));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] adopt forwarded order: {ex.Message}"); }
         }

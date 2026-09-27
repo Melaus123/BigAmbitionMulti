@@ -679,6 +679,11 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception exS) { Plugin.Logger.LogWarning($"[Rest] occupied-shop set-aside: {exS.Message}"); }
 
+                    // H-HANDOFF-1 BOOK ONCE (2026-09-27, replaces fold F1's marks): a registered visit that is already
+                    // booked is set aside from this pass too (suppressed: no till add, no stock, no fee); an unbooked one
+                    // the pass puts in the till is booked by it. Taken AFTER the set-aside above and put back BEFORE it.
+                    var boPass = BookOnce.HourlyBegin(current, hour, "skip");
+
                     // B5 INSTRUMENT: how many body-less entries of this hour the sim was handed
                     // (candidates) and how many orders it actually put on the till. The difference is
                     // the native hourly CAPACITY drop - entries the simulator marks completed without
@@ -692,8 +697,6 @@ namespace BigAmbitionsMP
                         sdBefore = current.unprocessedCompletedOrders?.Count ?? 0;
                     }
                     catch { }
-                    // H-HANDOFF-1 fold F1: a handed-off entry this pass books loses its hand-off mark (first booking wins).
-                    var hoPass = CustomerHandoff.HourlyPassBegin(current, hour);
                     try
                     {
                         data.simulator.SetUp(current, hour);
@@ -701,6 +704,7 @@ namespace BigAmbitionsMP
                     }
                     finally
                     {
+                        BookOnce.HourlyEnd(boPass);   // book once: its set-aside goes back first (it was taken last)
                         // ALWAYS put them back, even if the native sim threw - a shopper table missing this
                         // hour's live entries would leave the spawner and every later sim out of step with the save.
                         try
@@ -716,7 +720,6 @@ namespace BigAmbitionsMP
                         catch (Exception exR) { Plugin.Logger.LogWarning($"[Rest] occupied-shop set-aside restore: {exR.Message}"); }
                     }
 
-                    CustomerHandoff.HourlyPassEnd(current, hoPass, hour, "skip");
                     try
                     {
                         sdAfter = current.unprocessedCompletedOrders?.Count ?? 0;

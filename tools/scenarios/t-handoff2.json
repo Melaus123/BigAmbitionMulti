@@ -11,6 +11,7 @@
     "gym": "60 ba:street_fifthavenue"
   },
   "oracles_absent": [
+    "\\[BookOnce\\] (register|book|till watch|hourly begin|hourly restore|hourly end)\\b[^:]*: ",
     "\\[SeatPins\\] [a-z -]+ error: ",
     "\\[TickIso\\]",
     "\\[Guard\\]",
@@ -19,6 +20,7 @@
     "\\[Customers\\] (puppet tick|adopt puppet):"
   ],
   "oracles_report": [
+    "\\[BookOnce\\] ",
     "\\[SeatPins\\] ",
     "\\[Handoff\\] body-only .*booked order before .* -> after ",
     "\\[Handoff\\] final rows accounted ",
@@ -100,7 +102,7 @@
     { "seq": 37, "role": "c", "cmd": "tilldupes ${gym}", "abort_on_fail": false, "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): LEG 1 TILL ORACLE: no order reached the owner's till twice" },
     {
       "seq": 38, "role": "c", "cmd": "handoffbook ${gym}", "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ", "abort_on_fail": false,
-      "capture": { "l1Ledger": "ledger=(\\d+)", "l1Booked": "booked=(\\d+)", "l1Paid": "paid=(\\d+)", "l1Fwd": "forwardsIn=(\\d+)", "l1Marks": "marks=(\\d+)" },
+      "capture": { "l1Ledger": "ledger=(\\d+)", "l1Booked": "booked=(\\d+)", "l1Paid": "paid=(\\d+)", "l1Fwd": "forwardsIn=(\\d+)", "l1BoReg": "boRegistered=(\\d+)", "l1BoSup": "boSuppressed=(\\d+)", "l1BoBy": "boBookedBy=(\\S+)", "l1BoSupBy": "boSuppressedBy=(\\S+)" },
       "note": "LEG 1 ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },
     { "seq": 39, "role": "both", "cmd": "mark TEST T-HANDOFF2 LEG2 OWNER-WALKS-IN", "expect_result": "OK MARK" },
@@ -127,7 +129,7 @@
     { "seq": 46, "role": "c", "cmd": "tilldupes ${gym}", "abort_on_fail": false, "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): LEG 2 TILL ORACLE: no order reached the owner's till twice" },
     {
       "seq": 47, "role": "c", "cmd": "handoffbook ${gym}", "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ", "abort_on_fail": false,
-      "capture": { "l2Ledger": "ledger=(\\d+)", "l2Booked": "booked=(\\d+)", "l2Paid": "paid=(\\d+)", "l2Fwd": "forwardsIn=(\\d+)", "l2Marks": "marks=(\\d+)" },
+      "capture": { "l2Ledger": "ledger=(\\d+)", "l2Booked": "booked=(\\d+)", "l2Paid": "paid=(\\d+)", "l2Fwd": "forwardsIn=(\\d+)", "l2BoReg": "boRegistered=(\\d+)", "l2BoSup": "boSuppressed=(\\d+)", "l2BoBy": "boBookedBy=(\\S+)", "l2BoSupBy": "boSuppressedBy=(\\S+)" },
       "note": "LEG 2 ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },
     { "seq": 48, "role": "c", "sleep_s": 12, "note": "the owner simulates with the host inside: the on-change stream runs" },

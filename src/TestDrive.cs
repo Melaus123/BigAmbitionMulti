@@ -902,7 +902,7 @@ namespace BigAmbitionsMP
                     return $"OK custstate bldg='{csAddr}' sim='{CustomerPuppets.SimulatorFor(csAddr)}' mode={csMode} "
                          + $"natives={csNat} done={csDone} leaving={csLeaving} feeMax={csFeeMax} feeMin={csFeeMin} copies={CustomerPuppets.PuppetCount} copyRows={csCopyRows} "
                          + $"visitRows={CustomerHandoff.KnownRows} finalsRx={CustomerHandoff.FinalsReceived} finalsTx={CustomerHandoff.FinalsSent} "
-                         + $"streamRx={CustomerHandoff.StreamRowsReceived} streamTx={CustomerHandoff.StreamSends} handedOff={CustomerEntrySync.HandedOffCount} "
+                         + $"streamRx={CustomerHandoff.StreamRowsReceived} streamTx={CustomerHandoff.StreamSends} bookOnce={BookOnce.Count} "
                          + $"lastAdopt={CustomerPuppets.LastAdopted}/{CustomerPuppets.LastWithState}/{CustomerPuppets.LastLeaving}/{CustomerPuppets.LastWalked} "
                          + $"lastMatched={CustomerPuppets.LastMatched} lastFrom='{CustomerPuppets.LastAdoptFrom}' lastVia={CustomerPuppets.LastAdoptVia} "
                          + $"feeSup={CustomerHandoff.FeeSuppressed} compSup={CustomerHandoff.ComplaintSuppressed} "

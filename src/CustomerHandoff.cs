@@ -30,7 +30,10 @@ namespace BigAmbitionsMP
     ///
     /// Part B (2026-09-27, CustomerSeatPins): the row also carries the HELD SPOT (SeatKind / SeatItem / SeatIndex /
     /// SeatSub, the queue line QueueItem) and the activity's absolute end time EndMin; the taker pins the same seat,
-    /// machine, slot chair, casino table spot, cinema seat or queue line and resumes the remaining time.</summary>
+    /// machine, slot chair, casino table spot, cinema seat or queue line and resumes the remaining time.
+    ///
+    /// Money (2026-09-27): BookOnce - every visit that crosses a hand-off is booked exactly once on the machine that
+    /// keeps the books, by whichever booking reaches it first.</summary>
     internal static class CustomerHandoff
     {
         // ── Receiver: the newest visit row per customer id ──────────────────────────────────────────
@@ -84,6 +87,7 @@ namespace BigAmbitionsMP
                 _adoptScope = false; _suppressFeeCheck = false; _suppressFeePay = false; _feeCounted = false;
                 StoppedStreamingFor = "";
                 _ledger.Clear(); _fwdBooked.Clear(); _fwdSeen.Clear();
+                BookOnce.Reset();
                 CustomerSeatPins.Reset();
 #if BAMP_DEV
                 _armN = 0; _armSeatN = 0;
@@ -229,11 +233,10 @@ namespace BigAmbitionsMP
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.CustomerVisitState, MPConfig.PlayerId, p));
         }
 
-        /// <summary>Steps 1-2: the FINAL snapshot of a simulator letting go. When this machine books the shop,
-        /// every handed-off customer whose order is not complete has its entry id put in
-        /// CustomerEntrySync's hand-off set: the spawner marked that entry consumed here, and without the mark
-        /// the partner's sale for it would be rejected as "already consumed on the owner's machine" while no
-        /// body here will ever complete it (step 8).</summary>
+        /// <summary>Steps 1-2: the FINAL snapshot of a simulator letting go. When this machine books the shop, every
+        /// handed-off customer is registered in BookOnce (book-once restructure 2026-09-27, replacing the hand-off
+        /// marks of step 8): the first booking of that visit that reaches this machine - the partner's forwarded
+        /// sale, a checkout here, an hourly pass - books it, every later one is suppressed.</summary>
         internal static void SendFinal(string addr, BuildingRegistration? reg, List<CustomerVisitRow> rows, string reason)
         {
             try
@@ -247,7 +250,7 @@ namespace BigAmbitionsMP
                     {
                         if (r == null || string.IsNullOrEmpty(r.Id)) continue;
                         LedgerAdd(r.Id, reg);
-                        if (!r.Completed) { CustomerEntrySync.MarkHandedOff(r.Id); marked++; }
+                        if (BookOnce.Register(reg, r.Id, null, "final sent")) marked++;
                     }
                 var p = new CustomerVisitStatePayload
                 {
@@ -258,7 +261,7 @@ namespace BigAmbitionsMP
                 Send(p);
                 FinalsSent++;
                 _sentSig.Clear();
-                Plugin.Logger.LogInfo($"[Handoff] final snapshot sent: {rows.Count} @{addr} ({reason}){(books ? $" - books here, {marked} unfinished entr{(marked == 1 ? "y" : "ies")} marked handed off" : "")}.");
+                Plugin.Logger.LogInfo($"[Handoff] final snapshot sent: {rows.Count} @{addr} ({reason}){(books ? $" - books here, {marked} visit(s) newly registered to book once" : "")}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] send final: {ex.Message}"); }
         }
@@ -293,6 +296,7 @@ namespace BigAmbitionsMP
                 if (send.Count == 0) return;
                 bool books = false;
                 try { books = reg != null && MergerFlip.BooksHere(reg); } catch { }
+                if (books) foreach (var r in send) BookOnce.Register(reg, r.Id, null, "stream sent");
                 Send(new CustomerVisitStatePayload
                 {
                     AddressKey = addr, SimulatorPid = MPConfig.PlayerId, Final = false, Reason = "stream",
@@ -316,6 +320,14 @@ namespace BigAmbitionsMP
                 if (_visitBldg != my) { _visit.Clear(); _visitBldg = my; }
                 float now = Time.unscaledTime;
                 int n = 0;
+                // Book once: on the machine that keeps this shop's books, every visit a partner sends is registered.
+                BuildingRegistration? boReg = null;
+                try
+                {
+                    var bmR = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                    if (bmR != null && GameStateReader.AddressKey(bmR) == my && MergerFlip.BooksHere(bmR)) boReg = bmR;
+                }
+                catch { }
                 if (p.Rows != null)
                     foreach (var r in p.Rows)
                     {
@@ -327,6 +339,7 @@ namespace BigAmbitionsMP
                         if (!p.Final && _visit.TryGetValue(r.Id, out var k) && k.Final && k.From == p.SimulatorPid && now - k.At < 2f) continue;
                         _visit[r.Id] = new Known { Row = r, From = p.SimulatorPid ?? "", At = now, Final = p.Final, SourceBooks = p.SourceBooks };
                         n++;
+                        if (boReg != null) BookOnce.Register(boReg, r.Id, null, p.Final ? "final received" : "stream received");
                     }
                 if (_visit.Count > 400)
                     foreach (var key in new List<string>(_visit.Keys))
@@ -429,47 +442,6 @@ namespace BigAmbitionsMP
             try { if (_feeCounted) return; _feeCounted = true; FeeSuppressed++; } catch { }
         }
 
-        // ── Fold F1: the owner's hourly pass books a handed-off entry FIRST ─────────────────────────────
-        /// <summary>Before an hourly pass of <paramref name="reg"/> for <paramref name="hour"/> on the machine that
-        /// keeps its books: the handed-off entries it is about to take (null = nothing marked here).</summary>
-        internal static List<KeyValuePair<AI.Customers.CustomerEntries.CustomerEntry, string>>? HourlyPassBegin(BuildingRegistration? reg, int hour)
-        {
-            try
-            {
-                if (reg == null || CustomerEntrySync.HandedOffCount == 0) return null;
-                if (!MergerFlip.BooksHere(reg)) return null;
-                return CustomerEntrySync.HandedOffEntriesAt(reg, hour);
-            }
-            catch { return null; }
-        }
-
-        internal static int HourlyBookedHandedOff;
-
-        /// <summary>After that pass: every handed-off entry whose order the pass put in the till is BOOKED - its
-        /// mark is spent, so the partner's later forward for it is rejected as "already consumed" (first booking
-        /// wins). An entry the pass only capped (ProcessAllCustomersFromThisHour :183-191 marks it completed
-        /// without an order) keeps its mark: the partner's sale is still the only one.</summary>
-        internal static void HourlyPassEnd(BuildingRegistration? reg, List<KeyValuePair<AI.Customers.CustomerEntries.CustomerEntry, string>>? before, int hour, string pass)
-        {
-            try
-            {
-                if (reg == null || before == null) return;
-                int booked = 0;
-                var till = reg.unprocessedCompletedOrders;
-                foreach (var kv in before)
-                {
-                    var o = kv.Key?.order;
-                    bool inTill = false;
-                    if (o != null && till != null)
-                        foreach (var t in till) if (ReferenceEquals(t, o)) { inTill = true; break; }
-                    if (inTill && CustomerEntrySync.UnmarkHandedOff(kv.Value, $"booked by the {pass} hourly pass h{hour}")) booked++;
-                }
-                HourlyBookedHandedOff += booked;
-                Plugin.Logger.LogInfo($"[Handoff] hourly pass ({pass}) @{GameStateReader.AddressKey(reg)} h{hour}: {before.Count} handed-off entr{(before.Count == 1 ? "y" : "ies")} of this hour, {booked} booked here - first booking wins ({CustomerEntrySync.HandedOffCount} mark(s) left).");
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] hourly pass: {ex.Message}"); }
-        }
-
         // ── Till ledger: the rig's order-count identity (read by the DEV lever `handoffbook`) ─────────
         // Every customer that crossed a hand-off on the machine that keeps the books, with the Order its
         // schedule entry held; plus every forward the partner sent for one (booked Order, or rejected).
@@ -522,6 +494,7 @@ namespace BigAmbitionsMP
                     try { eo = CustomerEntrySync.TryFindEntry(reg, id)?.order; } catch { }
                     Order? lo = kv.Value.EntryOrder;
                     _fwdBooked.TryGetValue(id, out var fo);
+                    var bo = BookOnce.BookedOrderOf(id);   // book once: the Order that booked the visit (a stand-alone entry's)
                     // b counts DISTINCT Orders booked for this customer: a second reference to the SAME Order is a
                     // till duplicate (the `tilldupes` lever and the ProcessDailyOrders tripwire own that one); two
                     // different Orders for one visit - the hourly pass's entry Order and a forward's new Order - is
@@ -529,15 +502,16 @@ namespace BigAmbitionsMP
                     int b = 0;
                     if (till != null)
                     {
-                        bool hitE = false, hitL = false, hitF = false;
+                        bool hitE = false, hitL = false, hitF = false, hitB = false;
                         foreach (var o in till)
                         {
                             if (o == null) continue;
                             if (eo != null && ReferenceEquals(o, eo)) hitE = true;
                             else if (lo != null && ReferenceEquals(o, lo)) hitL = true;
                             else if (fo != null && ReferenceEquals(o, fo)) hitF = true;
+                            else if (bo != null && ReferenceEquals(o, bo)) hitB = true;
                         }
-                        b = (hitE ? 1 : 0) + (hitL ? 1 : 0) + (hitF ? 1 : 0);
+                        b = (hitE ? 1 : 0) + (hitL ? 1 : 0) + (hitF ? 1 : 0) + (hitB ? 1 : 0);
                     }
                     bool f = _fwdSeen.Contains(id);
                     if (f) fwdIn++;
@@ -548,7 +522,7 @@ namespace BigAmbitionsMP
                 }
                 bool ok = booked == paid && dup == 0 && lost == 0;
                 return $"ledger={ids} booked={booked} paid={paid} dupIds={dup} lostIds={lost} identity={(ok ? "ok" : "BAD")} forwardsIn={fwdIn} "
-                     + $"marks={CustomerEntrySync.HandedOffCount} hourlyBooked={HourlyBookedHandedOff} feeRecharged={FeeRecharged} bad={string.Join(";", bad)}";
+                     + $"feeRecharged={FeeRecharged} bad={string.Join(";", bad)} " + BookOnce.Readout(key);
             }
             catch (Exception ex) { return "ERR ledger " + ex.Message; }
         }
@@ -605,27 +579,28 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>Fold F1 (2026-09-26): every native hourly pass of a business - direct or through the DistributedWork
-    /// queue (BusinessSimulatorHelper.RunHourly :36-39) - runs this one method (:58-67). On the machine that keeps
-    /// the books, a handed-off entry it books first loses its hand-off mark, so the partner's later forward for
-    /// that customer is rejected and the visit is booked exactly once.</summary>
+    /// <summary>Book once (2026-09-27, replaces fold F1): every native hourly pass of a business - direct or through the
+    /// DistributedWork queue (BusinessSimulatorHelper.RunHourly :36-39) - runs this one method (:58-67). On the machine
+    /// that keeps the books, a registered visit that is already booked is set aside from the schedule list for the
+    /// pass (suppressed: no till add, no stock, no fee), and an unbooked one the pass puts in the till is booked by it.
+    /// The Finalizer always puts the set-aside entries back, even if the native pass threw.</summary>
     [HarmonyPatch(typeof(BusinessSimulatorHelper), "SimulateBusiness")]
     public static class Patch_SimulateBusiness_HandoffFirstBooking
     {
-        static void Prefix(ValueTuple<BuildingRegistration, int> tuple, out List<KeyValuePair<AI.Customers.CustomerEntries.CustomerEntry, string>>? __state)
+        static void Prefix(ValueTuple<BuildingRegistration, int> tuple, out BookOnce.Pass? __state)
         {
             __state = null;
             try
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                __state = CustomerHandoff.HourlyPassBegin(tuple.Item1, tuple.Item2);
+                __state = BookOnce.HourlyBegin(tuple.Item1, tuple.Item2, "native");
             }
             catch { __state = null; }
         }
 
-        static void Postfix(ValueTuple<BuildingRegistration, int> tuple, List<KeyValuePair<AI.Customers.CustomerEntries.CustomerEntry, string>>? __state)
+        static void Finalizer(BookOnce.Pass? __state)
         {
-            try { if (__state != null) CustomerHandoff.HourlyPassEnd(tuple.Item1, __state, tuple.Item2, "native"); } catch { }
+            try { if (__state != null) BookOnce.HourlyEnd(__state); } catch { }
         }
     }
 

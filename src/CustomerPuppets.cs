@@ -155,8 +155,7 @@ namespace BigAmbitionsMP
                 _looksSent.Clear();
                 _myBldg = "";
                 _prevSim = ""; _lastReactSim = ""; _awaitFinalFrom = ""; _heldForGone = ""; _staleHoldLoggedFor = ""; _readyPendingVia = "";   // H-HANDOFF-1 step 11
-                try { CustomerHandoff.Reset(); } catch { }
-                try { CustomerEntrySync.ClearHandedOff(); } catch { }
+                try { CustomerHandoff.Reset(); } catch { }   // also clears the BookOnce registry
                 try { SkipPaceBodies.RestoreAll(); } catch { }   // D-SKIPPACE-1: leaving the building / session end - no body keeps a scaled speed
                 if (_followerHere) { try { IndoorCustomerSpawner.EnableCustomersSpawn(); } catch { } }
                 _followerHere = false;
@@ -179,6 +178,7 @@ namespace BigAmbitionsMP
                 HandoffWaitTick();       // H-HANDOFF-1 step 5: a take-over waiting for the old simulator's Final
                 SimulatorStreamTick();
                 HandoffStreamTick();     // H-HANDOFF-1 (ruling a): visit rows on change, <= 1/s
+                BookOnce.Tick();         // book once: the till watcher (inline till adds of the employee checkout / kiosk)
 #if BAMP_DEV
                 try { if (_myBldg.Length > 0) CustomerHandoff.ArmTick(_followerHere ? 0 : LiveCustomerCount, _puppets.Count); } catch { }
 #endif
@@ -598,7 +598,7 @@ namespace BigAmbitionsMP
             // H-HANDOFF-1: each copy with a visit row from the old simulator resumes that visit (step 6), and
             // the copies are adopted in the source's QUEUE ORDER (spot 0 first, not queued last) so re-queueing
             // bodies take their places in the same order.
-            int adopted = 0, walked = 0, withState = 0, leaving = 0, matched = 0, bodyOnly = 0, noCopy = 0, unmarked = 0, reopened = 0;
+            int adopted = 0, walked = 0, withState = 0, leaving = 0, matched = 0, bodyOnly = 0, noCopy = 0, reopened = 0;
             int fee0 = CustomerHandoff.FeeSuppressed, comp0 = CustomerHandoff.ComplaintSuppressed;
             // Fold K6 (2026-09-26): what became of every id this take-over looked at - adopted / bodyOnly / spawned /
             // leaving / refused:<reason> - for the accounting line below (every Final row must be accounted for).
@@ -606,9 +606,8 @@ namespace BigAmbitionsMP
             try
             {
                 var regNow = FindReg(_myBldg);
-                // Fold K4: a hand-off mark is spent only for a customer this machine really has back (adopted) or whose
-                // order is already booked here; a refused customer that is NOT booked goes back to the native spawner.
-                var spent = new HashSet<string>();
+                // Fold K4 (book once): a refused customer whose visit is registered and NOT booked goes back to the
+                // native spawner.
                 var refusedOpen = new List<string>();
                 var todo = new List<(string key, CustomerVisitRow? v)>();
                 foreach (var k in _puppets.Keys) todo.Add((k, CustomerHandoff.RowFrom(k, from)));
@@ -626,13 +625,12 @@ namespace BigAmbitionsMP
                         if (st) withState++;
                         if (lv) leaving++;
                         if (st && mt) matched++;
-                        spent.Add(key);
                         outcome[key] = bo ? "bodyOnly" : (lv ? "leaving" : "adopted");
                     }
                     else
                     {
                         StartLeaving(pup); walked++;
-                        if (_adoptBooked) spent.Add(key); else refusedOpen.Add(key);
+                        if (!_adoptBooked) refusedOpen.Add(key);
                         outcome[key] = "refused:" + _adoptWhy;
                     }
                 }
@@ -640,8 +638,8 @@ namespace BigAmbitionsMP
                 foreach (var t in todo) handled.Add(t.key);
                 // Fold F5: a Final row with NO copy here (its copy timed out, or never streamed to this machine) used
                 // to be dropped - the visit lost, the entry later respawned fresh. It is spawned at the entrance
-                // WITH its state, when the entry is still this machine's to spawn (not consumed here, or one this
-                // machine handed off itself).
+                // WITH its state, when the entry is still this machine's to spawn (not consumed here, or a visit the
+                // book-once registry holds - booked ones body-only, on a detached copy).
                 // Fold K6 (rig run T-HANDOFF2-20260926-213941 leg 2: 12 rows, 8 vanished): a visit is over when the
                 // customer is LEAVING, not when the order is completed - a gym order is completed at the door
                 // (GymCustomer.Init -> PayEntranceFee -> CompleteOrder) while the workout goes on. Only leaving rows
@@ -659,34 +657,28 @@ namespace BigAmbitionsMP
                             if (st2) withState++;
                             if (lv2) leaving++;
                             if (st2 && mt2) matched++;
-                            spent.Add(r.Id);
                             outcome[r.Id] = bo2 ? "bodyOnly" : (lv2 ? "leaving" : "spawned");
                         }
                         else
                         {
-                            if (_adoptBooked) spent.Add(r.Id); else refusedOpen.Add(r.Id);
+                            if (!_adoptBooked) refusedOpen.Add(r.Id);
                             outcome[r.Id] = "refused:" + _adoptWhy;
                         }
                     }
-                // Fold F4: the booking machine has these customers back - a hand-off mark it set for one of them is
-                // spent (a partner forward for it would now be a second booking). Every one goes into the till ledger.
-                // Fold K4: ONLY the ones adopted or already booked; before, a refused customer's mark was cleared too
-                // and that visit was lost.
+                // Every customer this take-over looked at goes into the till ledger (the rig oracle) on the machine that
+                // keeps the books. (Fold F4's mark clearing is gone: the book-once registry keeps a visit's booking state
+                // across any number of hand-offs, so a partner forward after a take-back is booked or suppressed there.)
                 bool booksNow = false;
                 try { booksNow = regNow != null && MergerFlip.BooksHere(regNow); } catch { }
                 if (booksNow)
-                {
                     foreach (var id in handled) CustomerHandoff.LedgerAdd(id, regNow);
-                    foreach (var id in spent)
-                        if (CustomerEntrySync.UnmarkHandedOff(id, "adopted back by the machine that keeps the books")) unmarked++;
-                }
-                // Fold K4: a refused, NOT booked customer this machine handed off: its entry was consumed here when it
-                // was first spawned and no body carries it now - opened again, so the native spawner brings it back.
+                // Fold K4 (book once): a refused visit that is registered and NOT booked: its entry was consumed here and
+                // no body carries it now - opened again, so the native spawner brings it back (it books once, like any).
                 foreach (var id in refusedOpen)
                 {
                     try
                     {
-                        if (!CustomerEntrySync.IsHandedOff(id)) continue;
+                        if (!BookOnce.IsRegistered(id) || BookOnce.IsBooked(id)) continue;
                         var e = CustomerEntrySync.TryFindEntry(regNow, id);
                         if (e == null || !e.completed) continue;
                         e.completed = false;
@@ -737,7 +729,7 @@ namespace BigAmbitionsMP
             CustomerHandoff.ConsumeFinal(from);
             LastAdopted = adopted; LastWithState = withState; LastLeaving = leaving; LastWalked = walked; LastMatched = matched;
             LastAdoptFrom = from; LastAdoptVia = via;
-            Plugin.Logger.LogInfo($"[Customers] native mode in '{_myBldg}' — spawner restored; {adopted} puppet(s) adopted in place ({withState} with state, {leaving} leaving, {walked} walking out) from '{from}' via {via}; {bodyOnly} body-only (order already booked), {noCopy} spawned without a copy, {unmarked} hand-off mark(s) cleared, {reopened} refused entr(ies) reopened.");
+            Plugin.Logger.LogInfo($"[Customers] native mode in '{_myBldg}' — spawner restored; {adopted} puppet(s) adopted in place ({withState} with state, {leaving} leaving, {walked} walking out) from '{from}' via {via}; {bodyOnly} body-only (order already booked), {noCopy} spawned without a copy, {BookOnce.Count} visit(s) in the book-once registry, {reopened} refused entr(ies) reopened.");
             if (withState > 0 || via != "no-final")
                 Plugin.Logger.LogInfo($"[Handoff] adopt: fee suppressed={CustomerHandoff.FeeSuppressed - fee0} complaint suppressed={CustomerHandoff.ComplaintSuppressed - comp0} progress matched={matched}/{withState}.");
         }
@@ -799,7 +791,7 @@ namespace BigAmbitionsMP
         private static readonly HashSet<string> _outOnce = new();   // pids whose building read "" on the last election pass (HIGH-1)
 
         /// <summary>Folds K4/K6: why the last AdoptPuppetAsNative refused, and whether that customer's order is
-        /// already booked on this machine (then its hand-off mark is spent even though no body was adopted).</summary>
+        /// already booked on this machine (the book-once registry; a refused unbooked visit is reopened).</summary>
         private static string _adoptWhy = "";
         private static bool _adoptBooked;
 
@@ -836,6 +828,28 @@ namespace BigAmbitionsMP
             return c;
         }
 
+        /// <summary>Book once: a detached Order built from a visit row (items with their done/paid flags, completed), the
+        /// rest (timestamp, scores, demand types) from <paramref name="basis"/> when there is one.</summary>
+        private static Order OrderFromRow(CustomerVisitRow v, Order? basis)
+        {
+            var c = new Order
+            {
+                timestamp = basis?.timestamp, completed = v.Completed, customerServiceSkill = basis?.customerServiceSkill ?? 0f,
+                cleanliness = basis?.cleanliness ?? 0f, customerDemandScore = basis?.customerDemandScore ?? 0f,
+            };
+            c.entries = new List<Entities.OrderEntry>();
+            if (v.Entries != null)
+                foreach (var ve in v.Entries)
+                    if (ve != null)
+                        c.entries.Add(new Entities.OrderEntry
+                        {
+                            itemName = ve.ItemName ?? "", price = ve.Price, wholesalePrice = ve.WholesalePrice,
+                            available = ve.Available, priceAccceptable = ve.Acceptable, paid = ve.Paid, processed = ve.Processed,
+                        });
+            c.customerDemandTypes = basis?.customerDemandTypes != null ? new List<string>(basis.customerDemandTypes) : new List<string>();
+            return c;
+        }
+
         private static string OrderSig(Order? o)
         {
             if (o == null) return "none";
@@ -853,38 +867,54 @@ namespace BigAmbitionsMP
             {
                 if (pup != null && pup.go == null) { _adoptWhy = "copy has no body"; return false; }
                 if (entryId.StartsWith("i", StringComparison.Ordinal)) { _adoptWhy = "local-only id"; return false; }
+                bool books = false;
+                try { books = reg != null && MergerFlip.BooksHere(reg); } catch { }
                 var entry = CustomerEntrySync.TryFindEntry(reg, entryId);
+                // Book once: on the machine that keeps the books, every adopted visit is registered (initial state: booked
+                // when its Order already sits in the till, or a forward for it was already adopted).
+                if (books) BookOnce.Register(reg, entryId, entry, "adopted");
+                bool synthetic = false;
+                if (entry == null && books && v != null && BookOnce.IsRegistered(entryId))
+                {
+                    // A registered visit whose entry left this machine's table (an older forward claimed and retired it, or
+                    // the schedule rotated): the visit goes on from a stand-alone entry built from the row (never put in the
+                    // table). Its Order is known to the registry: a booked visit is body-only (any later payment for it is
+                    // suppressed), an unbooked one books once like any other.
+                    try
+                    {
+                        var se = new AI.Customers.CustomerEntries.CustomerEntry
+                        {
+                            spawnTime = v.SpawnMin >= 0f ? new BigAmbitions.DayNightCycle.Timestamp(v.SpawnMin) : TimeHelper.Now(),
+                            completed = true,
+                        };
+                        se.order = OrderFromRow(v, null);
+                        se.order.timestamp = se.spawnTime;
+                        BookOnce.MapOrder(se.order, entryId);
+                        entry = se; synthetic = true;
+                    }
+                    catch (Exception sx) { Plugin.Logger.LogWarning($"[Handoff] stand-alone entry {entryId}: {sx.Message}"); entry = null; }
+                }
                 if (entry == null) { _adoptWhy = "entry not in this machine's table (claimed by a forward, or rotated)"; return false; }
                 if (entry.order == null) { _adoptWhy = "entry has no order"; return false; }
                 // Fold F5: no copy (pup == null) - spawned only from a row, and only when the entry is still this
-                // machine's to spawn: not consumed here, or consumed by a body this machine handed off itself.
+                // machine's to spawn: not consumed here, or a visit the book-once registry holds (booked or not).
                 if (pup == null && v == null) { _adoptWhy = "no visit row"; return false; }
-                if (pup == null && entry.completed && !CustomerEntrySync.IsHandedOff(entryId)) { _adoptWhy = "entry consumed on this machine"; return false; }
+                if (pup == null && entry.completed && !synthetic && !BookOnce.IsRegistered(entryId)) { _adoptWhy = "entry consumed on this machine"; return false; }
+                if (pup == null)
+                {
+                    bool live = false;
+                    try { foreach (var lc in IndoorCustomerSpawner.Customers) if (lc != null && !lc.isPlayer && ReferenceEquals(lc.customerEntry, entry)) { live = true; break; } } catch { }
+                    if (live) { _adoptWhy = "already live on this machine"; return false; }
+                }
                 string fee = "";
                 try { fee = BusinessTypeHelper.GetEntranceFeeNameForBusinessType(InstanceBehavior<BuildingManager>.Instance.businessType) ?? ""; } catch { }
-                // Fold F2 (2026-09-26): on the machine that keeps the books, an order that is already DONE here or
-                // already IN THE TILL (the owner's hourly pass booked it while he was outside - RetailBusinessSimulator
-                // .ProcessCustomer :229-273 - or his own body finished it) is never overwritten: the row's items and
-                // completed flag are not applied, no fee line is added or charged (a gym's PayEntranceFee would
-                // CompleteOrder it into the till again, Customer.cs:224-238/:385-397). The body alone is adopted.
-                bool books = false;
-                try { books = reg != null && MergerFlip.BooksHere(reg); } catch { }
-                bool booked = false;
-                if (books)
-                {
-                    if (entry.order.completed) booked = true;
-                    else
-                    {
-                        var till = reg!.unprocessedCompletedOrders;
-                        if (till != null) foreach (var t in till) if (ReferenceEquals(t, entry.order)) { booked = true; break; }
-                    }
-                }
+                // Book once (replaces fold F2's 'done or in the till'): on the machine that keeps the books, a visit the
+                // registry holds as BOOKED is never overwritten: the row's items and completed flag are not applied and no
+                // fee line is added. The body alone is adopted, on a detached copy (fold K1), and it is NOT walked out -
+                // it keeps its visit (eats, works out, sits); any later payment for it is suppressed by the registry.
+                bool booked = books && BookOnce.IsBooked(entryId);
                 _adoptBooked = booked;
-                // Fold K6: a booked FEE-ONLY order (a gym visit paid at the door) is a visit that goes on - the body is
-                // adopted and stays. A booked retail order walks out (fold F2 below); with no copy there is no body to
-                // walk, so it is not spawned at all.
                 bool feeOnlyBooked = booked && FeeOnly(entry.order.entries, fee);
-                if (booked && pup == null && !feeOnlyBooked) { _adoptWhy = "order already booked here (retail visit, would only walk out)"; return false; }
                 bodyOnly = booked;
                 // NOT guarded on entry.completed, deliberately: that flag means 'consumed by the spawner on this
                 // machine' (native sets it at spawn, paid or not), so it is true for every live shopper this machine
@@ -947,11 +977,12 @@ namespace BigAmbitionsMP
                 if (_spawnCustomerM == null) { CustomerSeatPins.DropEntry(entry, "no spawner"); withState = false; bodyOnly = false; _adoptWhy = "SpawnCustomer not found"; return false; }
                 // H-HANDOFF-1 step 7: Init runs synchronously inside SpawnCustomer (IndoorCustomerSpawner.cs:272), so
                 // this scope covers the entrance fee, PayEntranceFee and the arrival complaint (CustomerHandoff).
-                // F2: never add or charge a fee on an order that is already booked. F3/K5: the fee CHECK is suppressed
-                // whenever the snapshot holds the fee line; the gym's fee PAYMENT only when the source charged it or
-                // no money is kept here.
+                // Book once: the fee CHECK (K5 - it appends a fee line and a new random citizen may refuse the spawn) is
+                // suppressed for a booked visit and whenever the snapshot holds the fee line; the gym's fee PAYMENT only
+                // when the source charged it or no money is kept here (F3). A booked visit's PayEntranceFee is no longer
+                // skipped here: it completes the detached copy and the registry suppresses that till add.
                 bool suppressCheck = booked || (withState && feeInSnapshot);
-                bool suppressPay = booked || (withState && feeInSnapshot && !recharge);
+                bool suppressPay = withState && feeInSnapshot && !recharge;
                 // Fold K1 (2026-09-26): a body-only adoption hands the body a DETACHED COPY of the booked order, so the
                 // native Init cannot re-value the Order object that sits in the till; the entry keeps its own Order.
                 Order? tillOrder = null;
@@ -960,7 +991,12 @@ namespace BigAmbitionsMP
                 {
                     tillOrder = entry.order;
                     tillBefore = OrderSig(tillOrder);
-                    entry.order = CloneOrder(tillOrder);
+                    // Book once: the copy carries the ROW's progress when there is a row (the partner's live order - a diner
+                    // keeps the food it is eating); this machine's own Order can be stale (the native exit clean-up
+                    // ForceFinishOrder strips its unprocessed items, rig run T-HANDOFFSEAT-20260927-011851: items=0 and the
+                    // body left at once).
+                    entry.order = v?.Entries != null && v.Entries.Count > 0 ? OrderFromRow(v, tillOrder) : CloneOrder(tillOrder);
+                    BookOnce.MapOrder(entry.order, entryId);   // the copy's payments are this visit's: suppressed
                 }
                 CustomerHandoff.BeginAdopt(withState || booked, suppressCheck, suppressPay);
                 try { _spawnCustomerM.Invoke(null, new object[] { entry }); }
@@ -972,20 +1008,20 @@ namespace BigAmbitionsMP
                 if (tillOrder != null)
                 {
                     string tillAfter = OrderSig(tillOrder);
-                    Plugin.Logger.LogInfo($"[Handoff] body-only {entryId}: booked order before {tillBefore} -> after {tillAfter} ({(tillAfter == tillBefore ? "untouched" : "CHANGED")}); the body carries a detached copy{(feeOnlyBooked ? " - fee-only visit, it stays" : "")}.");
+                    Plugin.Logger.LogInfo($"[Handoff] body-only {entryId}: booked order before {tillBefore} -> after {tillAfter} ({(tillAfter == tillBefore ? "untouched" : "CHANGED")}); the body carries a detached copy{(feeOnlyBooked ? " - fee-only visit" : "")}{(synthetic ? " - stand-alone entry" : "")}, it keeps its visit.");
                 }
                 var list = IndoorCustomerSpawner.Customers;
                 if (list.Count <= before) { CustomerSeatPins.DropEntry(entry, "spawn refused"); withState = false; bodyOnly = false; _adoptWhy = "spawn refused (capacity or fee)"; return false; }   // the entry stays unconsumed
                 // Consumed — the regular spawner must not spawn it again. H-HANDOFF-1 (C3): set only AFTER the
                 // success check; before, a refused spawn still consumed the entry and that shopper never came.
                 entry.completed = true;
+                if (!booked && books) BookOnce.MapOrder(entry.order, entryId);
                 var c = list[list.Count - 1];
                 if (c == null) { CustomerSeatPins.DropEntry(entry, "no body"); return true; }
-                // Fold F2, rig run T-HANDOFF1-20260926-212003: a body whose order is already BOOKED walks out even
-                // when its row was not leaving - adopted in place it went back to the till and Customer.CompleteOrder
-                // (:385-397, no completed check) put the SAME order in the till a second time (tilldupes +2).
-                // Fold K6: except a fee-only (gym) visit - its order was completed at the door and the visit goes on.
-                bool leave = (booked && !feeOnlyBooked) || (v != null && v.Leaving && (withState || booked));
+                // Book once (replaces fold F2's walk-out, rig run T-HANDOFF1-20260926-212003): a booked body stays; the
+                // second till add its checkout would make (Customer.CompleteOrder :385-397 has no completed check) is
+                // suppressed by the registry. Only a body that was already leaving on the source walks out.
+                bool leave = v != null && v.Leaving && (withState || booked);
                 // Part B step B2: reserve the wanted seat / machine right after the spawn, before another adopted body's
                 // random pick can take it; a body that walks straight out wants nothing.
                 if (leave) CustomerSeatPins.DropEntry(entry, "walks out"); else CustomerSeatPins.ReserveAfter(entry, c);
