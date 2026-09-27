@@ -4795,6 +4795,15 @@ namespace BigAmbitionsMP
             {
                 if (reg == null)
                 { Plugin.Logger.LogWarning($"[Merger] terminate-rental REFUSED for '{p.AddressKey}': no registration here."); return; }
+                // H-STANDINLEASE-1 (user-approved 2026-09-26, option A): a routed terminate reaching the machine that
+                // stands in for an OFFLINE owner is refused exactly like a local one (the sender refuses first when its
+                // own absence table already says so) - nothing is sold, refunded or cleared.
+                string rkey = p.AddressKey;   // OwnerAbsent treats null/empty as 'not absent'; no '??' here - it would mark AddressKey maybe-null for the rest of the method
+                if (LeaseEndWatch.OwnerAbsent(rkey, out var rAbsent))
+                {
+                    Plugin.Logger.LogWarning(LeaseEndWatch.OfflineRefusal(rkey, rAbsent) + $" (routed from '{p.PlayerId}')");
+                    return;
+                }
                 if (!reg.RentedByPlayer)
                 { Plugin.Logger.LogWarning($"[Merger] terminate-rental REFUSED for '{p.AddressKey}': the building is not rented here."); return; }
 

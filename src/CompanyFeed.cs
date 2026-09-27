@@ -619,21 +619,144 @@ namespace BigAmbitionsMP
         private static readonly Dictionary<string, float> _sent    = new();   // address key -> unscaledTime a vacate went out
 
         /// <summary>Fold B-M1 (manager ruling 2026-09-26): the ONE ledger rule both lease-end triggers (this watch and
-        /// MPPatches.Patch_TerminateContract) apply. Mine = the ledger names this player. StandIn = the ledger names
-        /// another player AND this machine stands in for that absent owner's addresses (MergerAbsence.SimulatesHere) -
-        /// a sanctioned terminate (D27, MPPatches Patch_BizMan_TerminateContract_MergerDeedGuard) and a real lease end,
-        /// so it reaches the ledger exactly like the owner's own. Partner = the ledger gives it to a PRESENT partner:
-        /// log, never release. NoEntry = no ledger answer here.</summary>
-        internal enum Verdict { Mine, StandIn, Partner, NoEntry }
+        /// MPPatches.Patch_TerminateContract) apply. Mine = the ledger names this player. Partner = the ledger names ANY
+        /// other player, present or absent: log, never release. NoEntry = no ledger answer here.
+        /// H-STANDINLEASE-1 (user-approved 2026-09-26, option A): the stand-in rule is gone - nobody ends an OFFLINE
+        /// member's lease (the terminate is refused before any refund, see OwnerAbsent), so a building this machine
+        /// stands in for is a partner's here like any other. The StandIn member is gone (fold S4, 2026-09-26).</summary>
+        internal enum Verdict { Mine, Partner, NoEntry }
 
         internal static Verdict Classify(string key, out string owner)
         {
             owner = "";
             if (!MergerFlip.TryLedgerOwner(key, out owner)) return Verdict.NoEntry;
             if (!string.IsNullOrEmpty(owner) && owner == MPConfig.PlayerId) return Verdict.Mine;
-            bool standIn = false; try { standIn = MergerAbsence.SimulatesHere(key); } catch { }
-            return standIn ? Verdict.StandIn : Verdict.Partner;
+            return Verdict.Partner;
         }
+
+        /// <summary>H-STANDINLEASE-1 (user-approved 2026-09-26, option A): is the lease at this address held by a member
+        /// who is OFFLINE right now? Never true for a lease the ledger gives to ME. Fold S1/S2 (2026-09-26): an absence
+        /// mark counts only when (a) it is for this address, (b) its owner is the tenant the ledger names (when the
+        /// ledger is known here; a reserved stable id counts as that owner) and (c) that owner is NOT connected now
+        /// (host: MPServer.IsOnlinePid, through the owner's stable id too; client: MPClient.LobbyPlayers, the host's
+        /// connected-player list). A host mark flagged OwnerBack never counts - the owner is back and the mark only
+        /// waits for the return ack. Marks: this machine's own stand-in (MergerAbsence.SimulatesHere), then the
+        /// absence table (host: its own marks; client: the MergerState copy). No mark: the rental ledger names a
+        /// tenant who is not connected (host: MemberOnline; client: the company's host-pushed owner list shows an
+        /// offline owner as ""). The one read the terminate guard (MPPatches), the routed terminate
+        /// (SharedShopWorkTabs) and the BizMan terminate button (SharedShopVisibility) share. MAIN THREAD.</summary>
+        internal static bool OwnerAbsent(string key, out string owner)
+        {
+            owner = "";
+            try
+            {
+                if (string.IsNullOrEmpty(key)) return false;
+                bool known = MergerFlip.TryLedgerOwner(key, out var lo);
+                lo ??= "";
+                if (known && lo.Length > 0 && lo == MPConfig.PlayerId) return false;   // my own lease: I am present
+
+                // (1) this machine stands in for the address
+                bool sim = false; try { sim = MergerAbsence.SimulatesHere(key); } catch { }
+                if (sim)
+                {
+                    string sp = ""; try { sp = MergerAbsence.OwnerSimulatedFor(key) ?? ""; } catch { }
+                    if (TenantMatches(known, lo, sp, "") && !MemberOnline(sp, ""))
+                    { owner = lo.Length > 0 ? lo : sp; return true; }
+                }
+
+                // (2) the absence table
+                if (MPServer.IsRunning)
+                {
+                    foreach (var m in MergerAbsence.Marks.Values)
+                    {
+                        if (m == null || m.OwnerBack || m.Addresses == null) continue;   // OwnerBack: the owner is back
+                        if (!HasAddress(m.Addresses, key)) continue;
+                        if (!TenantMatches(known, lo, m.OwnerPid ?? "", m.OwnerStable ?? "")) continue;
+                        if (MemberOnline(m.OwnerPid ?? "", m.OwnerStable ?? "")) continue;
+                        owner = lo.Length > 0 ? lo : (m.OwnerPid ?? ""); return true;
+                    }
+                }
+                else
+                {
+                    foreach (var a in MergerAbsence.Known)
+                    {
+                        if (a?.Addresses == null || !HasAddress(a.Addresses, key)) continue;
+                        if (!TenantMatches(known, lo, a.OwnerPid ?? "", a.OwnerStable ?? "")) continue;
+                        if (MemberOnline(a.OwnerPid ?? "", a.OwnerStable ?? "")) continue;
+                        owner = lo.Length > 0 ? lo : (a.OwnerPid ?? ""); return true;
+                    }
+                }
+
+                // (3) no counting mark: the ledger alone
+                if (!known) return false;
+                if (MPServer.IsRunning) { if (lo.Length > 0 && !MemberOnline(lo, "")) { owner = lo; return true; } return false; }
+                return lo.Length == 0;   // client: the company's owner list names an offline owner as ""
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Lease] owner-absent check '{key}': {ex.Message}"); return false; }
+        }
+
+        private static bool HasAddress(List<string> addrs, string key)
+        {
+            foreach (var ad in addrs) if (string.Equals(ad, key, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>HOST: a PlayerId's stable id ("" when unknown). MPServer.StableIdByPlayer keeps a departed member's handle.</summary>
+        private static string HostStableOf(string pid)
+        {
+            if (string.IsNullOrEmpty(pid)) return "";
+            if (pid == MPConfig.PlayerId) return MPConfig.StableId ?? "";
+            return MPServer.StableIdByPlayer.TryGetValue(pid, out var s) ? (s ?? "") : "";
+        }
+
+        /// <summary>Fold S2: is a mark's owner (pid / stable id) the ledger tenant `lo`? An unknown ledger, or a client's
+        /// "" (the offline-owner sentinel), cannot contradict the mark. Host: a reserved stable id counts as its owner.</summary>
+        private static bool TenantMatches(bool known, string lo, string mPid, string mStable)
+        {
+            try
+            {
+                if (!known || lo.Length == 0) return true;
+                if (mPid.Length > 0 && lo == mPid) return true;
+                if (!MPServer.IsRunning) return false;
+                string ms = mStable.Length > 0 ? mStable : HostStableOf(mPid);
+                if (ms.Length == 0) return false;
+                if (lo == ms) return true;                    // the ledger holds the owner's reserved stable id
+                string ls = HostStableOf(lo);
+                return ls.Length > 0 && ls == ms;
+            }
+            catch { return true; }
+        }
+
+        /// <summary>Fold S1: is that member connected right now? Host: IsOnlinePid, also through the stable id (a pid or a
+        /// reserved stable id). Client: the host's connected-player list (MPClient.LobbyPlayers, refreshed on every
+        /// join/leave). Unknown = not connected.</summary>
+        private static bool MemberOnline(string pidOrStable, string stable)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(pidOrStable) && string.IsNullOrEmpty(stable)) return false;
+                if (!string.IsNullOrEmpty(pidOrStable) && pidOrStable == MPConfig.PlayerId) return true;
+                if (MPServer.IsRunning)
+                {
+                    if (MPServer.IsOnlinePid(pidOrStable)) return true;
+                    string st = !string.IsNullOrEmpty(stable) ? stable : HostStableOf(pidOrStable);
+                    foreach (var kv in MPServer.StableIdByPlayer)
+                    {
+                        if (string.IsNullOrEmpty(kv.Value)) continue;
+                        if ((kv.Value == st || kv.Value == pidOrStable) && MPServer.IsOnlinePid(kv.Key)) return true;
+                    }
+                    return false;
+                }
+                var lobby = MPClient.LobbyPlayers;
+                return lobby != null && !string.IsNullOrEmpty(pidOrStable) && lobby.Contains(pidOrStable);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>H-STANDINLEASE-1: the one refusal line (log only - nothing on screen), shared by the local guard and
+        /// the routed terminate so both ends log the same words.</summary>
+        internal static string OfflineRefusal(string key, string owner)
+            => $"[Merger] terminate-rental refused for '{key}': owner '{(string.IsNullOrEmpty(owner) ? "?" : owner)}' is offline - a lease is only ended by a present owner or routed to them";
 
         /// <summary>Fold B-L4: world change (MergerFlip.Reset, scene load) and session end (Tick below) drop both
         /// tables - a queued refund or a 'sent' stamp never outlives the world it was seen in.</summary>
@@ -728,41 +851,47 @@ namespace BigAmbitionsMP
             if (rented) { Skip(key, "still rented - a refund without a lease end"); return; }
             if (WasSent(key)) { Skip(key, "already sent"); return; }
 
-            // Fold B-M1/B-M2: the one rule (Classify) - mine or stand-in for an absent owner is reported/released,
-            // a present partner's is logged and left.
+            // H-STANDINLEASE-1 (user-approved 2026-09-26, option A; replaces the stand-in rule of fold B-M1/B-M2): a
+            // building this machine stands in for is an ABSENT owner's lease - never reported from here. The terminate
+            // is refused before any refund, so a refund that still lands (e.g. another mod's copy of the terminate) is
+            // logged loudly and left for the owner's own save.
+            bool simulated = false; try { simulated = MergerAbsence.SimulatesHere(key); } catch { }
+            if (simulated)
+            {
+                string ab = ""; try { ab = MergerAbsence.OwnerSimulatedFor(key); } catch { }
+                Plugin.Logger.LogWarning($"[Merger] deposit-return on '{key}', a building this machine stands in for (owner '{ab}' is offline) - not vacated; a lease is only ended by a present owner.");
+                Skip(key, $"stand-in for absent '{ab}'", loud: true);
+                return;
+            }
+            // Fold B-M1: the one rule (Classify) - mine is reported/released, another player's is logged and left.
             var verdict = Classify(key, out var owner);
             bool known = verdict != Verdict.NoEntry;
-            bool standIn = verdict == Verdict.StandIn;
-            if (!standIn) { try { standIn = MergerAbsence.SimulatesHere(key); } catch { } }
             if (verdict == Verdict.Partner)
             {
                 Plugin.Logger.LogWarning($"[Merger] deposit-return on a partner's building {key} - not vacated (ledger names '{owner}').");
                 Skip(key, $"partner '{owner}'", loud: true);
                 return;
             }
-            string standInNote = standIn ? $" (stand-in for absent '{(owner.Length > 0 ? owner : MergerAbsence.OwnerSimulatedFor(key))}')" : "";
-
             if (MPClient.IsConnected)
             {
                 // No company answer here: the host-pushed 'another player's' set is this client's only ledger.
-                // A stand-in's report goes out regardless - the host checks it against its own absence record.
-                bool other = false; if (!standIn) { try { other = GrantSync.IsOtherOwned(key); } catch { } }
+                bool other = false; try { other = GrantSync.IsOtherOwned(key); } catch { }
                 if (!known && other) { Skip(key, "the host attributes it to another player", loud: true); return; }
                 try { HamptonsAccess.InvalidateIconVerdicts(); } catch { }   // as the terminate postfix: our access answer changed
                 bool sent = false; string err = "";
                 try { sent = MPClient.RequestVacateBuilding(key); } catch (Exception sx) { err = sx.Message; }
                 if (sent) MarkSent(key);   // fold B-L2: only a send that went out suppresses the other trigger
-                Plugin.Logger.LogInfo($"[Lease] lease end seen via deposit-return {key} -> {(sent ? "vacate sent" : err.Length > 0 ? $"skipped(send failed: {err})" : "skipped(not connected)")}{standInNote}{(known ? "" : " (no company ledger here - the host arbitrates)")}");
+                Plugin.Logger.LogInfo($"[Lease] lease end seen via deposit-return {key} -> {(sent ? "vacate sent" : err.Length > 0 ? $"skipped(send failed: {err})" : "skipped(not connected)")}{(known ? "" : " (no company ledger here - the host arbitrates)")}");
                 return;
             }
 
-            // HOST: mine, stand-in, or no ledger entry (the terminate postfix's behaviour: release + broadcast).
+            // HOST: mine or no ledger entry (the terminate postfix's behaviour: release + broadcast).
             try { HamptonsAccess.InvalidateIconVerdicts(); } catch { }
             MPServer.BuildingOwners.TryRemove(key, out _);
             MPServer.BroadcastVacate(key);
             MarkSent(key);   // fold B-L2: after the broadcast went out
             MPServer.RefreshBuildingAccess();   // housing: drop guests' access to this now-vacated building
-            Plugin.Logger.LogInfo($"[Lease] lease end seen via deposit-return {key} -> released ({(known ? "ledger entry removed" : "no ledger entry")}, vacate broadcast){standInNote}");
+            Plugin.Logger.LogInfo($"[Lease] lease end seen via deposit-return {key} -> released ({(known ? "ledger entry removed" : "no ledger entry")}, vacate broadcast)");
         }
     }
 

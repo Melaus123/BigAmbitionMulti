@@ -771,8 +771,10 @@ namespace BigAmbitionsMP
                         string fkey = AddrOf(reg);
                         if (MergerFlip.IsFlipped(fkey))
                         {
-                            bool standIn = false; try { standIn = MergerAbsence.SimulatesHere(fkey); } catch { }
-                            termOk = standIn || (MergerSync.IAmMember && SharedShopWorkTabs.RunnerReachable(fkey));
+                            // H-STANDINLEASE-1: an OFFLINE owner's lease is ended by nobody - greyed for the stand-in
+                            // and for a routing member alike (the confirm behind it is refused and logged).
+                            bool absent = false; try { absent = LeaseEndWatch.OwnerAbsent(fkey, out _); } catch { }
+                            termOk = !absent && MergerSync.IAmMember && SharedShopWorkTabs.RunnerReachable(fkey);
                         }
                     }
                     SetButtonsCalling(__instance.transform, "TerminateContract", interactable: termOk);

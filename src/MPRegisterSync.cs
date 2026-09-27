@@ -2610,8 +2610,8 @@ namespace BigAmbitionsMP
 
         /// <summary>H-ROSTERTOOLTIP-1, PARTNER side: put the owner's demands and weekly hours on a DISPLAY copy, as the
         /// transfer apply does (MergerEmployeeSync :1092 demands clear+add when sent, :1140 assignedWeeklyHours). Not sent
-        /// (null / -1, an older sender) = the copy is left as it was. Only the display-copy sites call this; the sale
-        /// path's real records (EnsureRealStaff) keep their own behaviour.</summary>
+        /// (null / -1, an older sender) = the copy is left as it was. The display-copy sites call this, and since H-SALESTAFF-1 (2026-09-26)
+        /// the sale path's fresh real records (EnsureRealStaff) do too, so bought staff keep the owner's demands/hours/days.</summary>
         private static void ApplyTooltipFields(EmployeeInstance inst, StaffInfo s)
         {
             try { if (s.Demands != null) { inst.demands.Clear(); inst.demands.AddRange(s.Demands); } } catch { }
@@ -2825,6 +2825,21 @@ namespace BigAmbitionsMP
                     try { if (s.Gender >= 0) inst.characterData.gender = (BigAmbitions.Characters.Gender)s.Gender; } catch { }
                     inst.isAbsent = !s.Available; inst.isReplaced = false;
                     ApplyStaffFidelity(inst, s);
+                    // H-SALESTAFF-1 (user-approved 2026-09-26): the OWNER's demands from the sale's staff list, through the
+                    // display-copy helper - the same clear+add the transfer apply makes (MergerEmployeeSync :1092). A fresh
+                    // record otherwise starts with an EMPTY demand list, and the game's daily EmployeeHelper.RunDaily ->
+                    // EmployeeInstance.UpdateDemands tops it up with random demands, each with a 'new demand' message. The
+                    // same helper also sets the owner's weekly hours/days: the sale's schedule restore (MPOffers) writes
+                    // workShifts directly and the game never recounts them for this record (UpdateWeeklyHoursAndDays runs
+                    // only on schedule edits / auto-fill / old-save fixes), so without them the owner's hours-per-week
+                    // demand would be judged against 0 hours. Not sent (older sender) = left as the factory made it.
+                    ApplyTooltipFields(inst, s);
+                    try
+                    {
+                        Plugin.Logger.LogInfo($"[StaffRoster] sale staff '{s.Id}' at '{addr}': owner demands=[{string.Join(",", inst.demands ?? new List<string>())}] "
+                                            + $"(wire {(s.Demands == null ? "none" : s.Demands.Count.ToString())}), weekly hours={inst.assignedWeeklyHours} days={inst.assignedWeeklyDays?.Count ?? 0}.");
+                    }
+                    catch { }
                     try { inst.dayHired = SaveGameManager.Current.Day; inst.nextSickDay = Helpers.EmployeeHelper.GetNextSickDay(inst); inst.complaintData?.ResetHoursUntilNextComplaint(); }   // H-EMP-2: the game's hire-time stamp (after fidelity — the roll reads satisfaction) + the complaint grace (review r8 #1)
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] H-EMP-2 stamp failed for '{s.Id}' — record kept with an unrolled sick day (absent once at the next daily pass, then re-rolled by the game): {ex.Message}"); }   // review r9 #4: a throw here must not lose this record or the rest of the wire staff
                     gi.EmployeeInstances.Add(inst);

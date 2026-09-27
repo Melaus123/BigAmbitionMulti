@@ -2203,6 +2203,16 @@ namespace BigAmbitionsMP
                          + $"truly={MergerFlip.TrulyMine(ofreg)} ledger='{(ofKnown ? ofOwner : "?")}' mine={MergerFlip.LedgerSaysMine(ofkey)} name='{ofname}' type={oftype}";
                 }
 
+                case "ownerabsent":
+                {
+                    // H-STANDINLEASE-1 fold S1 (read-only): LeaseEndWatch.OwnerAbsent for one address, as the terminate guard reads it.
+                    if (arg.Length == 0) return "ERR address key required";
+                    string oakey = arg;
+                    try { var oareg = GameStatePatcher.FindRegistration(arg); if (oareg != null) oakey = GameStateReader.AddressKey(oareg); } catch { }
+                    bool oa = LeaseEndWatch.OwnerAbsent(oakey, out var oaOwner);
+                    return $"OK ownerabsent key='{oakey}' absent={oa} owner='{oaOwner}'";
+                }
+
                 case "bizrent":
                 case "bizterminate":
                 {

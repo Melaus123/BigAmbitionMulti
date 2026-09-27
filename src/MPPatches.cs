@@ -243,6 +243,11 @@ namespace BigAmbitionsMP
                     // access answer, on either role, before any ledger event reaches us.
                     try { HamptonsAccess.InvalidateIconVerdicts(); } catch { }
 
+                    // H-STANDINLEASE-1 fold (2026-09-26): Harmony runs this postfix even when a prefix skipped the native
+                    // terminate (an offline owner's lease refused, a partner's terminate routed to its runner). A lease that
+                    // did not end is still rented here - nothing to report.
+                    if (reg.RentedByPlayer) { Plugin.Logger.LogInfo($"[Patch] Unrent {key}: the lease did not end on this machine (refused or routed) - nothing reported."); return; }
+
                     // H-MERGEROWNFLIP-1 part B: the deposit-return trigger (LeaseEndWatch) reports the same lease end;
                     // whichever fires first sends, the other logs and stands down.
                     if (LeaseEndWatch.WasSent(key))
@@ -251,33 +256,31 @@ namespace BigAmbitionsMP
                         return;
                     }
                     // Fold B-L2: the 'sent' mark is set only AFTER the send / release actually went out.
-                    bool standIn = false; try { standIn = MergerAbsence.SimulatesHere(key); } catch { }
 
                     if (MPClient.IsConnected)
                     {
-                        // Owner or stand-in (fold B-M2): the host arbitrates (HandleVacateRequest).
+                        // The tenant (fold B-M2): the host arbitrates (HandleVacateRequest). It no longer accepts a
+                        // stand-in's vacate (H-STANDINLEASE-1) - an offline member's terminate is refused before this.
                         bool sent = false; string err = "";
                         try { sent = MPClient.RequestVacateBuilding(key); } catch (Exception sx) { err = sx.Message; }
                         if (sent) LeaseEndWatch.MarkSent(key);
-                        string who = standIn ? $" (as the stand-in for absent '{MergerAbsence.OwnerSimulatedFor(key)}')" : "";
-                        if (sent) Plugin.Logger.LogInfo($"[Patch] Client unrented {key} locally + notifying host{who}.");
-                        else Plugin.Logger.LogWarning($"[Patch] Client unrented {key} locally - vacate NOT sent ({(err.Length > 0 ? err : "not connected")}){who}; the deposit-return path may still report it.");
+                        if (sent) Plugin.Logger.LogInfo($"[Patch] Client unrented {key} locally + notifying host.");
+                        else Plugin.Logger.LogWarning($"[Patch] Client unrented {key} locally - vacate NOT sent ({(err.Length > 0 ? err : "not connected")}); the deposit-return path may still report it.");
                         return;
                     }
-                    // Host — fold B-M1: the same rule as LeaseEndWatch. Mine, stand-in for an absent owner, or no ledger
-                    // entry: clear ownership + tell clients. A PRESENT partner's building: log, do not release.
+                    // Host — fold B-M1: the same rule as LeaseEndWatch. Mine or no ledger entry: clear ownership + tell
+                    // clients. ANY partner's building, online or offline (H-STANDINLEASE-1: no stand-in release): log only.
                     var verdict = LeaseEndWatch.Classify(key, out var lOwner);
                     if (verdict == LeaseEndWatch.Verdict.Partner)
                     {
-                        Plugin.Logger.LogWarning($"[Merger] host terminate on a present partner's building {key} - not released (ledger names '{lOwner}').");
+                        Plugin.Logger.LogWarning($"[Merger] host terminate on a partner's building {key} - not released (ledger names '{lOwner}').");
                         return;
                     }
                     MPServer.BuildingOwners.TryRemove(key, out _);
                     MPServer.BroadcastVacate(key);
                     LeaseEndWatch.MarkSent(key);
                     MPServer.RefreshBuildingAccess();   // housing: drop guests' access to this now-vacated building
-                    string why = verdict == LeaseEndWatch.Verdict.StandIn ? $" (stand-in for absent '{lOwner}')"
-                               : verdict == LeaseEndWatch.Verdict.NoEntry ? " (no ledger entry)" : "";
+                    string why = verdict == LeaseEndWatch.Verdict.NoEntry ? " (no ledger entry)" : "";
                     Plugin.Logger.LogInfo($"[Patch] Host unrented {key}, broadcasted vacate to clients{why}.");
                 }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Patch] Patch_TerminateContract: {ex.Message}"); }
@@ -4746,17 +4749,23 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (MergerFlip.FlippedCount == 0) return true;
+                    if (MergerFlip.FlippedCount == 0 && MergerAbsence.SimulatedCount == 0) return true;
                     var bm  = AccessTools.Field(typeof(BizManPresentation), "bizManBusiness")?.GetValue(__instance) as BizManBusiness;
                     var reg = bm?.buildingRegistration;
                     if (reg == null) return true;
                     string key = GameStateReader.AddressKey(reg);
-                    if (!MergerFlip.IsFlipped(key)) return true;   // genuinely mine — native flow
-                    // D27: a STAND-IN MAY run it. On the machine simulating an absent owner's businesses the
-                    // address is still flipped, but the lifted copy IS the live state and this machine is the
-                    // route target — the native path here is the owner's own path, so it runs unchanged.
                     bool standIn = false; try { standIn = MergerAbsence.SimulatesHere(key); } catch { }
-                    if (standIn) return true;
+                    if (!standIn && !MergerFlip.IsFlipped(key)) return true;   // genuinely mine — native flow
+                    // H-STANDINLEASE-1 (user-approved 2026-09-26, option A; replaces D27's stand-in pass): while the owner
+                    // is OFFLINE nobody ends their lease - not the stand-in simulating the building, not a member routing
+                    // to it. The absent owner's own save still holds the lease and their rejoin re-adopts it
+                    // (ContestedTenancy orphan claim) after the deposit was already refunded. Refused HERE, before the
+                    // native body refunds anything. Log only - nothing on screen.
+                    if (LeaseEndWatch.OwnerAbsent(key, out var absentOwner))
+                    {
+                        Plugin.Logger.LogWarning(LeaseEndWatch.OfflineRefusal(key, absentOwner));
+                        return false;
+                    }
                     if (!MergerSync.IAmMember)
                     {
                         Plugin.Logger.LogInfo($"[Merger] terminate-rental refused for '{key}': this machine is not a company member.");
