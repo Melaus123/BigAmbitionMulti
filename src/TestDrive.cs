@@ -1473,6 +1473,13 @@ namespace BigAmbitionsMP
                 case "schedrows": return SchedRows(arg);
                 case "schedtab":  return SchedTab(arg);
                 case "shiftat":   return ShiftAt(arg);
+                // H-SCHEDSTATION-1 fold levers (DEV). `shiftdrag <addressKey> <day 1-7> <employeeId>`: the page's bar for that
+                // employee's shift is dragged and dropped on its own row the way the pointer does (WorkShiftDrag.OnBeginDrag +
+                // OnEndDrag onto a ScheduleCellHour of the same station), after a direct ScheduleHelper.HasSkillForWorkstation
+                // call; reports the answer, any throw and whether the bar went back into its row. `daytoggle <addressKey>
+                // <day 1-7>`: that day's open toggle flipped and flipped back (Toggle.isOn -> ScheduleDayButton.OnOpenToggleChange).
+                case "shiftdrag": return ShiftDrag(arg);
+                case "daytoggle": return DayToggle(arg);
 
                 // ── round-238 zombie-ledger synthesis ─────────────────────────
                 case "ledgerdrop":
@@ -4399,6 +4406,70 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { return $"ERR cartstrand: {ex.Message}"; }
                 }
 
+                case "cartgrab":
+                {
+                    // H-CARTICON-1 fold rig lever (DEV, WRITES the local player's position). `cartgrab <vid>`: take a PARTNER's
+                    // hand vehicle the way a click does - its drivable proxy (BAMP_<vid>) here, teleported beside it (as 'drive'),
+                    // then its own DriveVehicle() (walk to the handle, EnterVehicle). Works inside a building. The drive stream
+                    // then carries it (VehicleManager.TickDriveSync, pushed-cart branch).
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    string gv = arg.Trim();
+                    if (gv.Length == 0 || gv.Contains(" ")) return "ERR usage: cartgrab <vehicleId>";
+                    try { if (Helpers.VehicleHelper.IsInsideVehicle()) return "ERR in a vehicle"; } catch { }
+                    try
+                    {
+                        VehicleController? gvc = null;
+                        var gl = Helpers.VehicleHelper.AllPlayerVehicles;
+                        if (gl != null)
+                            for (int i = 0; i < gl.Count; i++)
+                            {
+                                var v = gl[i];
+                                if (v != null && v.vehicleInstance != null && v.vehicleInstance.id == "BAMP_" + gv && v.gameObject.activeInHierarchy) { gvc = v; break; }
+                            }
+                        if (gvc == null) return $"ERR no active drivable proxy of '{gv}' here";
+                        if (!gvc.vehicleType.HasTag(BigAmbitions.Tags.TagRef.Vehicletag.ishandvehicle)) return "ERR not a hand vehicle";
+                        string gterr = TeleportBeside(gvc.transform);
+                        if (gterr.Length > 0) return "ERR cartgrab: " + gterr;
+                        gvc.DriveVehicle();
+                        Plugin.Logger.LogInfo($"[TestDrive] cartgrab: DriveVehicle on proxy of '{gv}' (owner '{VehicleManager.OwnerIdFor(gv)}').");
+                        return $"OK cartgrab vid={gv} owner={VehicleManager.OwnerIdFor(gv)} queued";
+                    }
+                    catch (Exception ex) { return $"ERR cartgrab: {ex.Message}"; }
+                }
+
+                case "carthand":
+                {
+                    // H-CARTICON-1 fold rig lever (DEV). `carthand`: the hand vehicle in the LOCAL player's hands (held=<vid>|none,
+                    // with the building here). `carthand release`: let it go where it stands with the game's own HandTruck.Release()
+                    // (ExitVehicle) - the drive stream then sends the release to its owner.
+                    string hmode = arg.Trim();
+                    if (hmode.Length > 0 && hmode != "release") return "ERR usage: carthand [release]";
+                    try
+                    {
+                        // A PARTNER's cart (its BAMP_ proxy) first - the fx-hq1 host also carries its own 'in use'
+                        // flatbed under the player (run T-CARTICON-20260927-135706), which is not the one borrowed.
+                        VehicleController? hvc = null;
+                        var hall = new System.Collections.Generic.List<string>();
+                        var hpc = Helpers.PlayerHelper.PlayerController;
+                        if (hpc != null)
+                            foreach (var v in hpc.GetComponentsInChildren<VehicleController>(true))
+                            {
+                                if (v == null || v.vehicleInstance == null || string.IsNullOrEmpty(v.vehicleInstance.id)) continue;
+                                hall.Add(v.vehicleInstance.id);
+                                if (hvc == null || (!hvc.vehicleInstance.id.StartsWith("BAMP_", StringComparison.Ordinal)
+                                                    && v.vehicleInstance.id.StartsWith("BAMP_", StringComparison.Ordinal))) hvc = v;
+                            }
+                        string hbldg = MPRegisterSync.CurrentShopAddress ?? "";
+                        if (hvc == null) return $"OK carthand held=none bldg='{hbldg}' all=[]";
+                        string hid = hvc.vehicleInstance.id;
+                        if (hmode != "release") return $"OK carthand held={hid} bldg='{hbldg}' all=[{string.Join(",", hall)}]";
+                        if (hvc is HandTruck ht) ht.Release(); else hvc.ExitVehicle();
+                        Plugin.Logger.LogInfo($"[TestDrive] carthand release '{hid}' at '{hbldg}' {hvc.transform.position}.");
+                        return $"OK carthand released={hid} bldg='{hbldg}'";
+                    }
+                    catch (Exception ex) { return $"ERR carthand: {ex.Message}"; }
+                }
+
                 case "pinstate":
                 {
                     // H-GHOSTPIN-1 rig readout (read-only). Per KEPT partner pin: is its ghost active, is the pin drawn.
@@ -4828,6 +4899,163 @@ namespace BigAmbitionsMP
                        $"shift={(made == null ? "none" : made.startingHour + "-" + made.endingHour)} dayShifts={before}->{after} addErr={addErr} editErr={editErr} reloadErr={reloadErr} rows=[{rowsNow}]";
             }
             catch (Exception ex) { return $"ERR shiftat: {SsErr(ex)}: {ex.Message}"; }
+        }
+
+        private static readonly System.Reflection.FieldInfo? _ssDragWs =
+            HarmonyLib.AccessTools.Field(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftDrag), "_workShift");
+        private static readonly System.Reflection.FieldInfo? _ssDragRt =
+            HarmonyLib.AccessTools.Field(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftDrag), "workShiftRectTransform");
+        private static readonly System.Reflection.FieldInfo? _ssDayToggle =
+            HarmonyLib.AccessTools.Field(typeof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleDayButton), "openToggle");
+
+        /// <summary>SsOpenTab only when the page is not already on this shop and day - re-selecting the day
+        /// rebuilds every row (the fold levers must act on the rows as drawn).</summary>
+        private static string SsOpenIfNeeded(global::BuildingRegistration reg, int day)
+        {
+            try
+            {
+                var cur = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.CurrentScheduleDay;
+                if (SharedShopSchedule.IsScheduleTabOpenFor(reg) && cur != null && (int)cur.day == day) return "";
+            }
+            catch { }
+            return SsOpenTab(reg, day);
+        }
+
+        /// <summary>Fold levers: with "add=<stationId>@<fromHour>", make sure the page's current day holds a shift for
+        /// <paramref name="emp"/> - added through ScheduleHelper.AddWorkShift + the page's own row reload (as 'shiftat')
+        /// when absent - so the lever acts in the same frame, before the shared-shop owner's answer can replace the day.
+        /// Returns "present", "added", "-" (no add asked) or "ERR ...".</summary>
+        private static string SsEnsureShift(string emp, string addSpec)
+        {
+            try
+            {
+                var cur = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.CurrentScheduleDay;
+                bool has = cur?.workShifts?.Any(x => x != null && x.employeeId == emp) == true;
+                if (has) return "present";
+                if (addSpec.Length == 0) return "-";
+                int at = addSpec.LastIndexOf('@');
+                if (at <= 0 || !int.TryParse(addSpec.Substring(at + 1), out int from)) return "ERR add= must be <stationId>@<fromHour>";
+                string st = addSpec.Substring(0, at);
+                try { UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.AddWorkShift(from, st, emp); }
+                catch (Exception ex) { return "ERR add: " + SsErr(ex); }
+                UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.RequestScheduleScrollerReload.Invoke(false);
+                has = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.CurrentScheduleDay?.workShifts?.Any(x => x != null && x.employeeId == emp) == true;
+                return has ? "added" : "ERR add: no shift after AddWorkShift";
+            }
+            catch (Exception ex) { return "ERR ensure: " + SsErr(ex); }
+        }
+
+        /// <summary>'shiftdrag' (H-SCHEDSTATION-1 fold F1): see the verb comment.</summary>
+        private static string ShiftDrag(string arg)
+        {
+            try
+            {
+                var tk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                int n = tk.Length;
+                string addSpec = "";
+                if (n > 0 && tk[n - 1].StartsWith("add=", StringComparison.Ordinal)) { addSpec = tk[n - 1].Substring(4); n--; }
+                if (n < 4) return "ERR usage: shiftdrag <addressKey> <day 1-7> <employeeId> [add=<stationId>@<fromHour>]";
+                string emp = tk[n - 1];
+                if (!int.TryParse(tk[n - 2], out int day) || day < 1 || day > 7) return $"ERR day '{tk[n - 2]}' is not 1-7";
+                string addr = string.Join(" ", tk, 0, n - 2);
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (reg == null) return $"ERR no registration for '{addr}'";
+                string openErr = SsOpenIfNeeded(reg, day);
+                if (openErr.Length > 0) return "ERR shiftdrag: " + openErr;
+                string ensured = SsEnsureShift(emp, addSpec);
+                if (ensured.StartsWith("ERR")) return "ERR shiftdrag: " + ensured;
+                bool inPage = false;
+                try { inPage = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.EmployeesById?.ContainsKey(emp) == true; } catch { }
+                UI.Smartphone.Apps.BizMan.Schedule.WorkShiftDrag? bar = null; WorkShift? ws = null;
+                int nBars = 0, nActive = 0, nNoWs = 0;
+                foreach (var d in UnityEngine.Resources.FindObjectsOfTypeAll<UI.Smartphone.Apps.BizMan.Schedule.WorkShiftDrag>())
+                {
+                    if (d == null || d.gameObject.scene.name == null) continue;   // prefabs / assets
+                    nBars++;
+                    if (!d.gameObject.activeInHierarchy) continue;
+                    nActive++;
+                    var w = _ssDragWs?.GetValue(d) as WorkShift;
+                    if (w == null) { nNoWs++; continue; }
+                    if (w.employeeId == emp) { bar = d; ws = w; break; }
+                }
+                if (bar == null || ws == null)
+                {
+                    string dayHas = "?";
+                    try { dayHas = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.CurrentScheduleDay?.workShifts?.Any(x => x != null && x.employeeId == emp) == true ? "Y" : "N"; } catch { }
+                    return $"ERR shiftdrag: no bar for employee {emp} on the page (inPageDict={inPage} bars={nBars} active={nActive} noShift={nNoWs} dayHasShift={dayHas})";
+                }
+                string st = ws.itemInstanceId ?? "";
+                string hasSkill;
+                try { hasSkill = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.HasSkillForWorkstation(st, emp).ToString(); }
+                catch (Exception ex) { hasSkill = "ERR:" + SsErr(ex); }
+                UI.Smartphone.Apps.BizMan.Schedule.ScheduleCellHour? cell = null;
+                foreach (var c in UnityEngine.Object.FindObjectsOfType<UI.Smartphone.Apps.BizMan.Schedule.ScheduleCellHour>())
+                    if (c != null && c.gameObject.activeInHierarchy && c.WorkstationId == st) { cell = c; break; }
+                if (cell == null) return $"ERR shiftdrag: no hour cell of station {st} on the page";
+                var rt = (_ssDragRt?.GetValue(bar) as UnityEngine.RectTransform) ?? (bar.transform as UnityEngine.RectTransform);
+                var parentBefore = rt != null ? rt.parent : null;
+                string dragErr = "none";
+                try
+                {
+                    var ev = new UnityEngine.EventSystems.PointerEventData(UnityEngine.EventSystems.EventSystem.current);
+                    if (rt != null) ev.position = UnityEngine.RectTransformUtility.WorldToScreenPoint(null, rt.position);
+                    bar.OnBeginDrag(ev);
+                    ev.pointerCurrentRaycast = new UnityEngine.EventSystems.RaycastResult { gameObject = cell.gameObject };
+                    bar.OnEndDrag(ev);
+                }
+                catch (Exception ex)
+                {
+                    dragErr = SsErr(ex);
+                    try { Plugin.Logger.LogWarning($"[TestDrive] shiftdrag threw {ex.GetType().Name} (swallowed by the lever): {ex.Message}"); } catch { }
+                }
+                bool reset = false, cached = false;
+                try { reset = bar != null && rt != null && rt.parent == parentBefore; } catch { }
+                try { cached = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.GetWorkShiftsByWorkstationId(st).Contains(ws); } catch { }
+                bool dragging = UI.Smartphone.Apps.BizMan.Schedule.WorkShiftDrag.CurrentDraggedWorkShift != null;
+                string regKey = addr; try { regKey = GameStateReader.AddressKey(reg); } catch { }
+                Plugin.Logger.LogInfo($"[TestDrive] shiftdrag {regKey} day={day} emp={emp} st={st} hasSkill={hasSkill} dragErr={dragErr} reset={reset} cached={cached}.");
+                return $"OK shiftdrag {regKey} day={day} emp={emp} st={st} shift={ensured} inPageDict={inPage} hasSkill={hasSkill} dragErr={dragErr} reset={reset} dragging={dragging} cached={cached} ";
+            }
+            catch (Exception ex) { return $"ERR shiftdrag: {SsErr(ex)}: {ex.Message}"; }
+        }
+
+        /// <summary>'daytoggle' (H-SCHEDSTATION-1 fold F2): see the verb comment.</summary>
+        private static string DayToggle(string arg)
+        {
+            try
+            {
+                var tk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                int n = tk.Length;
+                string addSpec = "", addEmp = "";
+                if (n > 0 && tk[n - 1].StartsWith("add=", StringComparison.Ordinal)) { addSpec = tk[n - 1].Substring(4); n--; }
+                if (addSpec.Length > 0 && n > 0) { addEmp = tk[n - 1]; n--; }
+                if (n < 3 || !int.TryParse(tk[n - 1], out int day) || day < 1 || day > 7) return "ERR usage: daytoggle <addressKey> <day 1-7> [<employeeId> add=<stationId>@<fromHour>]";
+                string addr = string.Join(" ", tk, 0, n - 1);
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (reg == null) return $"ERR no registration for '{addr}'";
+                string openErr = SsOpenIfNeeded(reg, day);
+                if (openErr.Length > 0) return "ERR daytoggle: " + openErr;
+                string ensured = addSpec.Length > 0 ? SsEnsureShift(addEmp, addSpec) : "-";
+                if (ensured.StartsWith("ERR")) return "ERR daytoggle: " + ensured;
+                UI.Smartphone.Apps.BizMan.Schedule.ScheduleDayButton? btn = null;
+                foreach (var b in UnityEngine.Object.FindObjectsOfType<UI.Smartphone.Apps.BizMan.Schedule.ScheduleDayButton>())
+                    if (b != null && b.gameObject.activeInHierarchy && b.dayIndex == day) { btn = b; break; }
+                if (btn == null) return $"ERR daytoggle: no day button {day} on the page";
+                var tg = _ssDayToggle?.GetValue(btn) as UnityEngine.UI.Toggle;
+                if (tg == null) return "ERR daytoggle: open toggle not found";
+                var sd = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.GetScheduleDay(day);
+                bool before = sd.isOpen;
+                tg.SetIsOnWithoutNotify(before);   // the toggle mirrors the day (UpdateDayButton) - make sure the flip is a real change
+                string e1 = "none", e2 = "none";
+                try { tg.isOn = !before; } catch (Exception ex) { e1 = SsErr(ex); }
+                bool mid = sd.isOpen;
+                try { tg.isOn = before; } catch (Exception ex) { e2 = SsErr(ex); }
+                bool after = sd.isOpen;
+                string regKey = addr; try { regKey = GameStateReader.AddressKey(reg); } catch { }
+                Plugin.Logger.LogInfo($"[TestDrive] daytoggle {regKey} day={day} open={before}->{mid}->{after} err1={e1} err2={e2}.");
+                return $"OK daytoggle {regKey} day={day} shift={ensured} open={before}->{mid}->{after} err1={e1} err2={e2} ";
+            }
+            catch (Exception ex) { return $"ERR daytoggle: {SsErr(ex)}: {ex.Message}"; }
         }
 
         private static Entities.EmployeeInstance? FindEmployee(string id)

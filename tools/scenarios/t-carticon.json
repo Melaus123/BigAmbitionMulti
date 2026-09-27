@@ -1,7 +1,7 @@
 {
   "id": "T-CARTICON",
-  "title": "H-CARTICON-1 (verbal 0.3.1: a cart left inside a store keeps its icon forever). The OWNER (host melaus) leaves his EMPTY flatbed inside a shop and walks out: the game clears it natively (street data wiped, object destroyed, lastSeen set). ASSERT the owner stops broadcasting it (CARTICON line) and the partner outdoors holds NO copy and NO kept pin for it, while the host's car parked outside is still shown. The client's flatbed WITH cargo, left inside 3 Fifth Avenue in the fixture, keeps its tag natively and is still held by the host (hidden outdoors, shown inside - GHOSTPIN behaviour). The host re-enters the shop: report what the game reloads and what the partner then holds. NO save.",
-  "preconditions": "Fixture fx-hq1 (merged pair melaus + Client1, keepMerger). Host-owned, live outdoors at load (census, run T-STANDINTILL-BLIP-20260927-111317): flatbed vars.emptyCart (empty), car vars.car; flatbed m9z3 (cargo) reads 'in use' by the host in this fixture (run T-CARTICON-20260927-123759) so it is not touched. Client-owned, dormant: flatbed vars.cargoCart with cargo, tagged vars.cargoBldg. Dev build with 'cartstrand <vid> [sideMeters]' (moves MY live hand vehicle next to me inside the current building + native release-indoors street data) and 'cartstate <vid>' (OK cartstate vid= own= live= tag='' lastSeen= cargo= cleared= omitted= ghost=on|off|null|none pin=on|off|none).",
+  "title": "H-CARTICON-1 (verbal 0.3.1: a cart left inside a store keeps its icon forever). The OWNER (host melaus) leaves his EMPTY flatbed inside a shop and walks out: the game clears it natively (street data wiped, object destroyed, lastSeen set). ASSERT the owner stops broadcasting it (CARTICON line) and the partner outdoors holds NO copy and NO kept pin for it, while the host's car parked outside is still shown. The client's flatbed WITH cargo, left inside 3 Fifth Avenue in the fixture, keeps its tag natively and is still held by the host (hidden outdoors, shown inside - GHOSTPIN behaviour). The host re-enters the shop: report what the game reloads and what the partner then holds. NO save. FOLD LEG (review MED-HIGH): the host borrows the client's cargo flatbed inside 3 Fifth Avenue (not loaded by the client), pushes it outside, parks and releases it: ASSERT the owner still broadcasts it (cleared=N omitted=N) and the host still shows it.",
+  "preconditions": "Fixture fx-hq1 (merged pair melaus + Client1, keepMerger). Host-owned, live outdoors at load (census, run T-STANDINTILL-BLIP-20260927-111317): flatbed vars.emptyCart (empty), car vars.car; flatbed m9z3 (cargo) reads 'in use' by the host in this fixture (run T-CARTICON-20260927-123759) so it is not touched. Client-owned, dormant: flatbed vars.cargoCart with cargo, tagged vars.cargoBldg. Dev build with 'cartstrand <vid> [sideMeters]' (moves MY live hand vehicle next to me inside the current building + native release-indoors street data) and 'cartstate <vid>' (OK cartstate vid= own= live= tag='' lastSeen= cargo= cleared= omitted= ghost=on|off|null|none pin=on|off|none). Fold leg levers: 'cartgrab <vid>' (take a partner's hand vehicle via its drivable proxy, DriveVehicle) and 'carthand [release]' (what is in my hands / HandTruck.Release).",
   "instances": 2,
   "vars": {
     "clientPid": "Client1",
@@ -26,7 +26,10 @@
     "\\[Vehicle\\] Despawned ghost",
     "\\[Pins\\] kept pin (7LWp|m9z3)",
     "\\[InteriorMask\\] ghost 'ba:vehicletype_flatbed'",
-    "\\[Vehicle\\] CARTICON '7LWp"
+    "\\[Vehicle\\] CARTICON '7LWp",
+    "\\[TestDrive\\] (cartgrab|carthand)",
+    "\\[Drive\\] (my dormant car|dormant-borrowed) 'VZQs",
+    "\\[Vehicle\\] CARTICON 'VZQs"
   ],
   "steps": [
     {
@@ -379,15 +382,131 @@
       "note": "GHOSTPIN: inside its building the cargo cart copy is shown"
     },
     {
-      "seq": 49,
-      "role": "h",
-      "cmd": "exitbuilding",
-      "expect_result": "^OK exitbuilding"
+      "role": "both",
+      "cmd": "mark TEST CARTICON PARTNER BORROW",
+      "expect_result": "OK MARK",
+      "seq": 49
     },
     {
-      "seq": 50,
+      "role": "c",
+      "cmd": "cartstate ${cargoCart}",
+      "expect_result": "^OK cartstate .* own=Y live=N tag='${cargoBldg}' .*cleared=N omitted=N ",
+      "note": "PREMISE (fold leg): the OWNER (client, outdoors) has NOT loaded the building its cargo flatbed stands in",
+      "seq": 50
+    },
+    {
       "role": "h",
-      "sleep_s": 10
+      "cmd": "cartgrab ${cargoCart}",
+      "expect_result": "^OK cartgrab ",
+      "note": "the PARTNER (host, inside that building) takes the owner's cart the way a click does (DriveVehicle on its drivable proxy)",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Drive\\] my dormant car '${cargoCart}' is being driven remotely",
+          "within_s": 30
+        }
+      ],
+      "seq": 51
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 52
+    },
+    {
+      "role": "h",
+      "cmd": "carthand",
+      "expect_result": "^OK carthand held=BAMP_${cargoCart} bldg='${cargoBldg}'",
+      "note": "the partner holds it inside",
+      "seq": 53
+    },
+    {
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK exitbuilding",
+      "note": "pushes it outside (native exit with a hand vehicle in hand)",
+      "seq": 54
+    },
+    {
+      "role": "h",
+      "sleep_s": 12,
+      "seq": 55
+    },
+    {
+      "role": "h",
+      "cmd": "carthand",
+      "expect_result": "^OK carthand held=BAMP_${cargoCart} bldg=''",
+      "note": "still in hand, now outdoors",
+      "seq": 56
+    },
+    {
+      "role": "h",
+      "sleep_s": 4,
+      "seq": 57
+    },
+    {
+      "role": "h",
+      "cmd": "carthand release",
+      "expect_result": "^OK carthand released=BAMP_${cargoCart} bldg=''",
+      "note": "parks and releases it outdoors (HandTruck.Release)",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Drive\\] dormant-borrowed '${cargoCart}' released at 'outdoors'",
+          "within_s": 30
+        }
+      ],
+      "seq": 58
+    },
+    {
+      "role": "h",
+      "sleep_s": 15,
+      "note": "several fleet ticks on the owner (the omission test runs every dormant pass)",
+      "seq": 59
+    },
+    {
+      "role": "c",
+      "cmd": "cartstate ${cargoCart}",
+      "expect_result": "^OK cartstate .* own=Y live=\\w tag='' .*cleared=N omitted=N ",
+      "note": "THE FOLD: parked outdoors by a partner (empty tag, lastSeen as it was) - NOT treated as cleared, still broadcast",
+      "seq": 60
+    },
+    {
+      "role": "h",
+      "cmd": "cartstate ${cargoCart}",
+      "expect_result": "^OK cartstate .* ghost=on ",
+      "note": "THE FOLD: the partner outdoors still sees it",
+      "seq": 61
+    },
+    {
+      "role": "h",
+      "sleep_s": 20,
+      "seq": 62
+    },
+    {
+      "role": "c",
+      "cmd": "cartstate ${cargoCart}",
+      "expect_result": "^OK cartstate .* cleared=N omitted=N ",
+      "note": "still broadcast later",
+      "seq": 63
+    },
+    {
+      "role": "h",
+      "cmd": "cartstate ${cargoCart}",
+      "expect_result": "^OK cartstate .* ghost=on ",
+      "note": "still shown later",
+      "seq": 64
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST CARTICON BORROW END",
+      "expect_result": "OK MARK",
+      "seq": 65
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 66
     }
   ]
 }

@@ -1,7 +1,7 @@
 {
   "id": "T-SCHEDSTATION",
-  "title": "H-SCHEDSTATION-1: on a MERGED pair the member edits the PARTNER's shop schedule; a shift naming an employee who exists on the member but is not assigned to that shop there must not kill the station row when the owner's echo redraws the tab. The host (member) opens Client1's gym '60 ba:street_fifthavenue' Schedule tab, adds a shift through the game's own add-shift call (ScheduleHelper.AddWorkShift) for such an employee, runs the page's own row reload, waits for the owner's answer and reads the rows. Before the fix the row-killing error appears in the log (oracles_absent fails); after it the row stays with its sliders. Ends dissolved; NO save.",
-  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger true). Dev build with the levers schedrows / schedtab / shiftat (BAMP_DEV). Client1 owns the gym '60 ba:street_fifthavenue' with at least one scheduled shift. NOTHING is saved; the run ends dissolved and the fixture reset restores the pair.",
+  "title": "H-SCHEDSTATION-1: on a MERGED pair the member edits the PARTNER's shop schedule; a shift naming an employee who exists on the member but is not assigned to that shop there must not kill the station row when the owner's echo redraws the tab. The host (member) opens Client1's gym '60 ba:street_fifthavenue' Schedule tab, adds a shift through the game's own add-shift call (ScheduleHelper.AddWorkShift) for such an employee, runs the page's own row reload, waits for the owner's answer and reads the rows. Before the fix the row-killing error appears in the log (oracles_absent fails); after it the row stays with its sliders. Ends dissolved; NO save. FOLD (review F1/F2): with the out-of-list shift present, its bar is dragged (no exception, bar reset) and the day is toggled closed/open (no exception).",
+  "preconditions": "Reporter fixture fx-hq1 (MERGED pair melaus + Client1; vars.keepMerger true). Dev build with the levers schedrows / schedtab / shiftat (BAMP_DEV). Client1 owns the gym '60 ba:street_fifthavenue' with at least one scheduled shift. NOTHING is saved; the run ends dissolved and the fixture reset restores the pair. Fold levers: shiftdrag / daytoggle.",
   "instances": 2,
   "vars": {
     "clientPid": "Client1",
@@ -21,7 +21,8 @@
     "\\[SharedShop\\]",
     "GetEmployeeColor|WorkShiftSlider|ScheduleCellView|BaTable",
     "\\[TestDrive\\] .* '(schedrows|schedtab|shiftat) ",
-    "\\[Merger\\] "
+    "\\[Merger\\] ",
+    "\\[TestDrive\\] (shiftdrag|daytoggle) "
   ],
   "steps": [
     {
@@ -146,76 +147,104 @@
       ]
     },
     {
-      "seq": 17,
+      "role": "h",
+      "cmd": "shiftdrag ${gym} ${day} ${cand} add=${candSt}@${slot}",
+      "expect_result": "^OK shiftdrag .* hasSkill=False dragErr=none reset=True dragging=False ",
+      "note": "FOLD F1: the out-of-list shift's bar is dragged and dropped on its row (WorkShiftDrag.OnBeginDrag/OnEndDrag -> SetPosition -> HasSkillForWorkstation): 'no skill', no throw, the bar goes back into its row",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[ScheduleDiag\\] HasSkillForWorkstation: employee ${cand} is not on this page's list",
+          "within_s": 5
+        }
+      ],
+      "seq": 17
+    },
+    {
+      "role": "h",
+      "cmd": "daytoggle ${gym} ${day} ${cand} add=${candSt}@${slot}",
+      "expect_result": "^OK daytoggle .* shift=(present|added) open=(True|False)->(True|False)->\\2 err1=none err2=none",
+      "note": "FOLD F2: the day's open toggle flipped and back (OnOpenToggleChange -> GetEmployeesForDay) with the out-of-list shift present: no throw",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[ScheduleDiag\\] GetEmployeesForDay\\(\\d+\\): shift employee ${cand} is not on this page's list",
+          "within_s": 5
+        }
+      ],
+      "seq": 18
+    },
+    {
+      "seq": 19,
       "role": "h",
       "cmd": "schedrows ${gym} ${day}",
       "expect_result": "^OK schedrows ",
       "note": "REPORT: the rows right after the reload (slider counts include sliders the reload queued for destruction; the owner's answer may already have replaced the day)"
     },
     {
-      "seq": 18,
+      "seq": 20,
       "role": "h",
       "sleep_s": 12,
       "note": "2 s scan -> owner validates -> owner truth / echo -> RedrawScheduleTab"
     },
     {
-      "seq": 19,
+      "seq": 21,
       "role": "both",
       "cmd": "mark TEST SCHEDSTATION ECHO",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 20,
+      "seq": 22,
       "role": "h",
       "cmd": "schedrows ${gym} ${day}",
       "expect_result": "^OK schedrows .* cells=3 ",
       "note": "after the owner's answer: every station row still drawn, its sliders = its cached shifts"
     },
     {
-      "seq": 21,
+      "seq": 23,
       "role": "c",
       "cmd": "schedrows ${gym} ${day}",
       "expect_result": "^OK schedrows ",
       "note": "did the owner take the shift"
     },
     {
-      "seq": 22,
+      "seq": 24,
       "role": "h",
       "cmd": "schedtab close",
       "expect_result": "^OK schedtab close",
       "note": "the phone closed as the player would (a BizMan left open at quit NREs in CityMapFilters)"
     },
     {
-      "seq": 23,
+      "seq": 25,
       "role": "h",
       "sleep_s": 3
     },
     {
-      "seq": 24,
+      "seq": 26,
       "role": "both",
       "cmd": "mark TEST SCHEDSTATION DISSOLVE",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 25,
+      "seq": 27,
       "role": "c",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
       "note": "FIXTURE HYGIENE: end dissolved; NO save"
     },
     {
-      "seq": 26,
+      "seq": 28,
       "role": "h",
       "sleep_s": 8
     },
     {
-      "seq": 27,
+      "seq": 29,
       "role": "c",
       "cmd": "mergestatus",
       "expect_result": "member=False"
     },
     {
-      "seq": 28,
+      "seq": 30,
       "role": "both",
       "cmd": "mark TEST SCHEDSTATION END",
       "expect_result": "OK MARK"

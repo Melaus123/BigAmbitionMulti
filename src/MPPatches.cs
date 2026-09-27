@@ -4320,6 +4320,65 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── H-SCHEDSTATION-1 fold (review F1 MEDIUM / F3 LOW, 2026-09-27) ──
+        // The same unlisted-employee shift (an employee who is not on this page's EmployeesById - a partner's staff
+        // copy assigned elsewhere here) reaches two more lookups that trust the page's list:
+        //   F1  dragging its bar: WorkShiftDrag.OnEndDrag -> SetPosition -> ScheduleHelper.HasSkillForWorkstation
+        //       (ScheduleHelper.cs:534) reads GetScheduleEmployeeById(id).characterData -> NRE, and the bar stays loose.
+        //       Answer 'no skill' instead: SetPosition then shows the game's own 'required skill' notice and OnEndDrag
+        //       resets the bar (WorkShiftDrag.cs:138-141, ResetPosition).
+        //   F3  its 'manage employee' click: WorkShiftSlider.OnManageEmployeeClick opens MyEmployees on
+        //       GetScheduleEmployeeById(id) = null. Skipped (nothing to show on this page's list).
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper),
+                      nameof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.HasSkillForWorkstation))]
+        public static class Patch_ScheduleHasSkill_UnlistedEmployeeGuard
+        {
+            private static readonly System.Collections.Generic.HashSet<string> _logged = new();
+            static bool Prefix(string employeeId, ref bool __result)
+            {
+                try
+                {
+                    Entities.EmployeeInstance? emp = null;
+                    if (!string.IsNullOrEmpty(employeeId)) emp = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.GetScheduleEmployeeById(employeeId);
+                    if (emp?.characterData?.skills != null) return true;   // listed employee - native answer
+                    try
+                    {
+                        if (_logged.Add(employeeId ?? "<null>"))
+                            Plugin.Logger.LogWarning($"[ScheduleDiag] HasSkillForWorkstation: employee {employeeId ?? "<null>"} is not on this page's list - answered 'no skill', the bar resets (H-SCHEDSTATION-1 F1).");
+                    }
+                    catch { }
+                    __result = false;
+                    return false;
+                }
+                catch { return true; }
+            }
+        }
+
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider), "OnManageEmployeeClick")]
+        public static class Patch_WorkShiftSlider_ManageEmployee_UnlistedGuard
+        {
+            private static readonly System.Reflection.FieldInfo? _ws =
+                HarmonyLib.AccessTools.Field(typeof(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider), "_workShift");
+            private static readonly System.Collections.Generic.HashSet<string> _logged = new();
+            static bool Prefix(UI.Smartphone.Apps.BizMan.Schedule.WorkShiftSlider __instance)
+            {
+                try
+                {
+                    if (_ws == null) return true;
+                    string? id = (_ws.GetValue(__instance) as WorkShift)?.employeeId;
+                    if (!string.IsNullOrEmpty(id) && UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.GetScheduleEmployeeById(id) != null) return true;
+                    try
+                    {
+                        if (_logged.Add(id ?? "<null>"))
+                            Plugin.Logger.LogWarning($"[ScheduleDiag] OnManageEmployeeClick: employee {id ?? "<null>"} is not on this page's list - click skipped (H-SCHEDSTATION-1 F3).");
+                    }
+                    catch { }
+                    return false;
+                }
+                catch { return true; }
+            }
+        }
+
         // ── Patch: WorkShiftSlider.UpdateState — orphan-shift render guard ───
         // A WorkShift whose employeeId resolves to no record makes UpdateState
         // NRE at employeeById.characterData.name BEFORE the name label is set —
@@ -7381,6 +7440,40 @@ namespace BigAmbitionsMP
                       nameof(UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.GetEmployeesForDay))]
         public static class Patch_ScheduleEmployeesForDay_HideDutySynthetics
         {
+            // H-SCHEDSTATION-1 fold (review F2, 2026-09-27): native GetEmployeesForDay is
+            // workShifts.Select(w => EmployeesById[w.employeeId]).Distinct() (ScheduleHelper.cs:206) - the day
+            // open/close toggle (ScheduleDayButton.OnOpenToggleChange :257) threw KeyNotFound on a shift whose
+            // employee is not on this page's list. Only when such a shift exists, build the same list skipping it.
+            private static readonly System.Collections.Generic.HashSet<string> _logged = new();
+            static bool Prefix(int dayIndex, ref System.Collections.Generic.List<Entities.EmployeeInstance> __result)
+            {
+                try
+                {
+                    var byId = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.EmployeesById;
+                    var shifts = UI.Smartphone.Apps.BizMan.Schedule.ScheduleHelper.GetScheduleDay(dayIndex)?.workShifts;
+                    if (byId == null || shifts == null) return true;
+                    string? skipped = null;
+                    foreach (var w in shifts)
+                        if (w == null || w.employeeId == null || !byId.ContainsKey(w.employeeId)) { skipped = w?.employeeId ?? "<null>"; break; }
+                    if (skipped == null) return true;   // every id resolves - the native path, unchanged
+                    var list = new System.Collections.Generic.List<Entities.EmployeeInstance>();
+                    foreach (var w in shifts)
+                    {
+                        if (w == null || w.employeeId == null || !byId.TryGetValue(w.employeeId, out var emp)) continue;
+                        if (!list.Contains(emp)) list.Add(emp);   // Distinct() semantics
+                    }
+                    try
+                    {
+                        if (_logged.Add($"{dayIndex}|{skipped}"))
+                            Plugin.Logger.LogWarning($"[ScheduleDiag] GetEmployeesForDay({dayIndex}): shift employee {skipped} is not on this page's list - skipped (H-SCHEDSTATION-1 F2).");
+                    }
+                    catch { }
+                    __result = list;
+                    return false;
+                }
+                catch { return true; }
+            }
+
             static void Postfix(System.Collections.Generic.List<Entities.EmployeeInstance> __result)
             {
                 try

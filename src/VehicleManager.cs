@@ -2437,6 +2437,7 @@ namespace BigAmbitionsMP
                 if (!_ownedFollowing.TryGetValue(p.VehicleId, out var f))
                 {
                     f = new DrivenFollow(); _ownedFollowing[p.VehicleId] = f; BeginOwnedFollow(ownedGo, p.VehicleId);
+                    DropExitCleared(p.VehicleId, "a partner grabbed it");   // H-CARTICON-1 fold
                     // Round-74: SEED the follow target from the cart's CURRENT pose. f.Pos was born
                     // Vector3.zero, and a borrow that STARTED indoors (every packet Bldg-tagged under
                     // the old door-hold) never overwrote it — TickOwnedFollow lerped the real cart
@@ -2572,6 +2573,7 @@ namespace BigAmbitionsMP
                 VehicleInstance inst = null;
                 foreach (var vi in insts) if (vi != null && vi.id == p.VehicleId) { inst = vi; break; }
                 if (inst == null) { _dataFollow.Remove(p.VehicleId); return; }   // not my vehicle
+                DropExitCleared(inst.id, "a partner is moving it (data-follow)");   // H-CARTICON-1 fold
                 if (p.Released)
                 {
                     if (p.ParkState >= 0) try { inst.parkingState = (Helpers.ParkingState)p.ParkState; } catch { }   // round-232: borrower's exit verdict
@@ -2728,6 +2730,56 @@ namespace BigAmbitionsMP
         private static readonly HashSet<string> _clearedOmitted = new();
         private static int _clearedLogged;
 
+        // H-CARTICON-1 fold (review MED-HIGH, 2026-09-27): the cleared test used to key on the record's STATE alone
+        // (hand vehicle, empty tag, lastSeen stamped, no paid cargo). A cart a PARTNER borrowed from an interior this
+        // machine never loaded and parked outdoors reaches exactly that state (DataFollow -> ApplyStreetData('') leaves
+        // lastSeen as it was), so it vanished for everyone on release - with any unpaid cargo on it. Now ONLY ids this
+        // machine SAW the game clear on building exit count (VehicleController.OnExitBuilding's clearing branch, :197-201,
+        // watched by Patch_VehicleController_OnExitBuilding_CartClearWatch), with no cargo at all and not followed by a
+        // partner at that moment; ANY later write to the record (data-follow, street data, a load, a partner grab) drops
+        // the mark. In memory only: after a reload such a cart is broadcast again (the safe direction).
+        private static readonly HashSet<string> _exitCleared = new();
+
+        /// <summary>H-CARTICON-1 fold: OnExitBuilding postfix. <paramref name="id"/> had street data before the call;
+        /// empty street data after it means the game's own clearing branch ran (the only write in that method).</summary>
+        internal static void NoteExitCleared(VehicleController vc, string id)
+        {
+            try
+            {
+                var inst = vc != null ? vc.vehicleInstance : null;
+                if (inst == null || inst.id != id || !string.IsNullOrEmpty(inst.streetName)) return;
+                var vt = inst.VehicleType;
+                if (vt == null || !vt.HasTag(BigAmbitions.Tags.TagRef.Vehicletag.ishandvehicle)) return;
+                int cis = 0, cids = 0;
+                try { cis = inst.cargoInstances?.Count ?? 0; } catch { cis = 1; }
+#pragma warning disable CS0618   // cargoIds: obsolete since EA 0.8, still the carts' carried-item list (see the live pass)
+                try { cids = inst.cargoIds?.Count ?? 0; } catch { cids = 1; }
+#pragma warning restore CS0618
+                bool df = _dataFollow.ContainsKey(id), of = _ownedFollowing.ContainsKey(id);
+                if (cis > 0 || cids > 0 || df || of)
+                {
+                    if (_clearedLogged++ < 200)
+                        Plugin.Logger.LogInfo($"[Vehicle] CARTICON '{id}': cleared on building exit but NOT marked (cargo={cis} cargoIds={cids} dataFollow={df} following={of}) (H-CARTICON-1).");
+                    return;
+                }
+                if (_exitCleared.Add(id) && _clearedLogged++ < 200)
+                    Plugin.Logger.LogInfo($"[Vehicle] CARTICON '{id}': the game cleared this empty hand vehicle on building exit here - marked (H-CARTICON-1).");
+            }
+            catch { }
+        }
+
+        /// <summary>H-CARTICON-1 fold: any later write to a marked record ends the mark (never set again by it).</summary>
+        internal static void DropExitCleared(string? id, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(id) || !_exitCleared.Remove(id!)) return;
+                if (_clearedLogged++ < 200)
+                    Plugin.Logger.LogInfo($"[Vehicle] CARTICON '{id}': cleared mark dropped - {why} (H-CARTICON-1).");
+            }
+            catch { }
+        }
+
         /// <summary>H-CARTICON-1: is this saved (not loaded) vehicle one the game has cleared as an abandoned
         /// hand vehicle? Keys only on the game's own 'cleared on exit' state: the ishandvehicle type tag (the test
         /// OnExitBuilding :197 uses), empty street data (:200), lastSeen stamped (:203; non-zero, the gate
@@ -2742,6 +2794,8 @@ namespace BigAmbitionsMP
             try
             {
                 if (inst == null || string.IsNullOrEmpty(inst.id)) return false;
+                if (!_exitCleared.Contains(inst.id)) return false;   // fold: only a clear this machine SAW the game make
+                if (_dataFollow.ContainsKey(inst.id)) return false;  // fold: a partner is moving it right now
                 if (!string.IsNullOrEmpty(inst.streetName)) return false;
                 var vt = inst.VehicleType;
                 if (vt == null || !vt.HasTag(BigAmbitions.Tags.TagRef.Vehicletag.ishandvehicle)) return false;
@@ -2749,10 +2803,11 @@ namespace BigAmbitionsMP
                 if (ls == null || ls.GetTotalMinutes() == 0f) return false;
                 if (_ownedFollowing.ContainsKey(inst.id)) return false;
                 if (SaveGameManager.Current?.ActiveVehicleId == inst.id) return false;
-                var cis = inst.cargoInstances;
-                if (cis != null)
-                    foreach (var c in cis)
-                        if (c != null && c.paid) return false;
+                // fold: NO cargo at all (native clears only cargo-EMPTY carts, :197), paid or not, loose or carried
+                if ((inst.cargoInstances?.Count ?? 0) > 0) return false;
+#pragma warning disable CS0618   // cargoIds: see NoteExitCleared
+                if ((inst.cargoIds?.Count ?? 0) > 0) return false;
+#pragma warning restore CS0618
                 return true;
             }
             catch { return false; }
@@ -2765,7 +2820,7 @@ namespace BigAmbitionsMP
                 foreach (var id in now)
                     if (_clearedOmitted.Add(id) && _clearedLogged++ < 200)
                         Plugin.Logger.LogInfo($"[Vehicle] CARTICON '{id}': an empty hand vehicle the game cleared on building exit "
-                            + "(street data wiped, lastSeen set, not loaded, no paid cargo) - no longer broadcast; partners drop its copy and pin (H-CARTICON-1).");
+                            + "(seen cleared on exit here, street data wiped, lastSeen set, not loaded, no cargo) - no longer broadcast; partners drop its copy and pin (H-CARTICON-1).");
                 if (_clearedOmitted.Count == 0) return;
                 foreach (var id in _clearedOmitted.Where(x => !now.Contains(x)).ToList())
                 {
@@ -2837,6 +2892,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                DropExitCleared(inst.id, $"street data written ('{bldg}')");   // H-CARTICON-1 fold (null inst: caught below)
                 if (string.IsNullOrEmpty(bldg)) { inst.SetStreetData(string.Empty, 0); return; }
                 int sp = bldg.IndexOf(' ');
                 if (sp > 0 && int.TryParse(bldg.Substring(0, sp), out int num)) inst.SetStreetData(bldg.Substring(sp + 1), num);
@@ -3006,6 +3062,49 @@ namespace BigAmbitionsMP
                 }
             }
             Plugin.Logger.LogInfo($"[Traffic] === {found} traffic-named type(s) ===");
+        }
+    }
+
+    /// <summary>H-CARTICON-1 fold: watches the game's own clear of an abandoned hand vehicle on building exit
+    /// (VehicleController.OnExitBuilding :188-204). The prefix notes a record that still has street data; the postfix
+    /// marks it only when that street data is now empty - the clearing branch ran (a prefix that skipped the method,
+    /// e.g. the remote-drive guard, leaves it untouched). Record-only: the game's behaviour is not changed.</summary>
+    [HarmonyLib.HarmonyPatch(typeof(VehicleController), "OnExitBuilding")]
+    internal static class Patch_VehicleController_OnExitBuilding_CartClearWatch
+    {
+        static void Prefix(VehicleController __instance, out string? __state)
+        {
+            __state = null;
+            try
+            {
+                var inst = __instance != null ? __instance.vehicleInstance : null;
+                if (inst == null || string.IsNullOrEmpty(inst.id) || string.IsNullOrEmpty(inst.streetName)) return;
+                if (inst.id.StartsWith("BAMP_") && !inst.id.StartsWith("BAMP_TESTRIG")) return;   // ghosts / proxies are not mine
+                __state = inst.id;
+            }
+            catch { __state = null; }
+        }
+
+        static void Postfix(VehicleController __instance, string? __state)
+        {
+            if (__state == null) return;
+            try { VehicleManager.NoteExitCleared(__instance, __state); } catch { }
+        }
+    }
+
+    /// <summary>H-CARTICON-1 fold: a vehicle object loading again (VehicleController.Start) is a later write to its
+    /// record - any observed-clear mark on that id ends.</summary>
+    [HarmonyLib.HarmonyPatch(typeof(VehicleController), "Start")]
+    internal static class Patch_VehicleController_Start_CartClearDrop
+    {
+        static void Postfix(VehicleController __instance)
+        {
+            try
+            {
+                var id = __instance != null ? __instance.vehicleInstance?.id : null;
+                if (!string.IsNullOrEmpty(id)) VehicleManager.DropExitCleared(id, "the game loaded it again");
+            }
+            catch { }
         }
     }
 }
