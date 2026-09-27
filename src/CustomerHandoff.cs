@@ -87,6 +87,7 @@ namespace BigAmbitionsMP
                 _adoptScope = false; _suppressFeeCheck = false; _suppressFeePay = false; _feeCounted = false;
                 StoppedStreamingFor = "";
                 _ledger.Clear(); _fwdBooked.Clear(); _fwdSeen.Clear();
+                ClearStock();   // H-HANDOFF-1 stock once: per session, like the book-once registry
                 BookOnce.Reset();
                 CustomerSeatPins.Reset();
 #if BAMP_DEV
@@ -197,6 +198,7 @@ namespace BigAmbitionsMP
                             {
                                 ItemName = e.itemName ?? "", Price = e.price, WholesalePrice = e.wholesalePrice,
                                 Available = e.available, Acceptable = e.priceAccceptable, Paid = e.paid, Processed = e.processed,
+                                Picked = IsPicked(e) || IsMarkedTaken(e),   // stock once: a unit already grabbed for this line
                             });
                 return r;
             }
@@ -252,6 +254,7 @@ namespace BigAmbitionsMP
                         LedgerAdd(r.Id, reg);
                         if (BookOnce.Register(reg, r.Id, null, "final sent")) marked++;
                     }
+                if (books) NoteFinalStock(reg, addr, rows);   // H-HANDOFF-1 stock once: the units that leave with the crowd
                 var p = new CustomerVisitStatePayload
                 {
                     AddressKey = addr, SimulatorPid = MPConfig.PlayerId, Final = true, Reason = reason ?? "",
@@ -527,28 +530,395 @@ namespace BigAmbitionsMP
             catch (Exception ex) { return "ERR ledger " + ex.Message; }
         }
 
+        // ── H-HANDOFF-1 STOCK ONCE (user-approved 2026-09-26, batch 27) ────────────────────────────────────
+        // RULE: across a hand-off every unit a customer takes comes off a shelf EXACTLY ONCE. Only the machine that keeps
+        // the books has real stock: a replica's picks, serves and in-action catch-ups take none (ProcessSelfServiceOrder
+        // :21-28, Customer.GrabItem :511, FullServiceEmployee :95/:243, FullServiceOnEnterBuildingInAction :15-18,
+        // OrderHelper.Validate :26), and a replica's forwarded sale is deducted on the owner (CustomerEntrySync).
+        //  - OUT: when this booking machine lets its crowd go (SendFinal), the units its shelves already gave each open
+        //    visit leave with the body. They are remembered per visit here and never deducted again.
+        //  - FORWARD: a forwarded sale of that visit books those units without a deduction (credits: this list first,
+        //    then the units a live body of the same visit holds here); only the rest comes off a shelf. Credits the sale
+        //    does not use go back on a shelf, as the native Leave / ReturnUnacceptablePriceItems would put them.
+        //  - ADOPT: a body this machine takes back gets its credits; every other unit its row shows taken (on the
+        //    partner's machine, where no real shelf moved) comes off a shelf here now, or the line becomes unavailable
+        //    when there is none. Those lines are MARKED so no native re-take (a re-serve's GrabOrderEntryItems, the
+        //    in-action catch-up, a basket-less shop's ProcessSelfServiceOrder, a walking pick) takes them a second time.
+        private sealed class OutVisit { public string Addr = ""; public readonly List<KeyValuePair<string, float>> Units = new(); }
+        private static readonly Dictionary<string, OutVisit> _out = new();
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<OrderEntry, object> _takenMark = new();
+        private static readonly object _markObj = new object();
+        internal static int StockOutUnits, StockFwdCredited, StockFwdLiveCredited, StockAdoptCredited, StockAdoptDeducted, StockAdoptFailed, StockReturned, StockMarkSkips;
+
+        private static void ClearStock() { try { _out.Clear(); } catch { } }
+
+        internal static bool IsPaperBag(string? n)
+            => !string.IsNullOrEmpty(n) && n!.IndexOf("bag", StringComparison.OrdinalIgnoreCase) >= 0 && n.IndexOf("paper", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        /// <summary>A line whose unit came off a shelf on a machine with real stock: paid, or judged available and acceptable
+        /// (a walking pick validates then grabs; an employee grabs the available lines) - the rig's held test too.</summary>
+        internal static bool TakenLine(bool paid, bool available, bool acceptable) => paid || (available && acceptable);
+
+        internal static void MarkTaken(OrderEntry? e) { try { if (e != null && !_takenMark.TryGetValue(e, out _)) _takenMark.Add(e, _markObj); } catch { } }
+        internal static bool IsMarkedTaken(OrderEntry? e) { try { return e != null && _takenMark.TryGetValue(e, out _); } catch { return false; } }
+        internal static bool AnyMarked(Order? o)
+        {
+            try { if (o?.entries != null) foreach (var e in o.entries) if (IsMarkedTaken(e)) return true; } catch { }
+            return false;
+        }
+
+        // Picked (fold of rig run T-HANDOFFSEAT-20260927-033547): 'paid, or available and acceptable' also counted a
+        // full-service line the employee had judged (CheckConditions :164-186) but not grabbed yet. A unit is TAKEN when
+        // its line was grabbed: a walking pick returned (Customer.GrabItem - marked Picked, on any machine, and carried in
+        // the row), or the line is processed, available and acceptable (GrabOrderEntryItems :242-245, ProcessSelfServiceOrder
+        // :40-51, the in-action catch-up), or this visit's unit was settled at an adoption (MarkTaken).
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<OrderEntry, object> _picked = new();
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Order, object> _outOrders = new();
+        internal static void MarkPicked(OrderEntry? e) { try { if (e != null && !_picked.TryGetValue(e, out _)) _picked.Add(e, _markObj); } catch { } }
+        internal static bool IsPicked(OrderEntry? e) { try { return e != null && _picked.TryGetValue(e, out _); } catch { return false; } }
+        internal static bool TakenOe(OrderEntry? e)
+            => e != null && (IsPicked(e) || IsMarkedTaken(e) || (e.processed && e.available && e.priceAccceptable));
+        internal static bool TakenRow(CustomerVisitEntryInfo? e)
+            => e != null && (e.Picked || (e.Processed && e.Available && e.Acceptable));
+        /// <summary>The adopted order's lines were built one per non-null row line, in order (CustomerPuppets).</summary>
+        internal static void MarkPickedFromRow(List<OrderEntry>? l, List<CustomerVisitEntryInfo>? rows)
+        {
+            try
+            {
+                if (l == null || rows == null) return;
+                int i = 0;
+                foreach (var r in rows)
+                {
+                    if (r == null) continue;
+                    if (i >= l.Count) return;
+                    if (r.Picked && l[i] != null && l[i].itemName == (r.ItemName ?? "")) MarkPicked(l[i]);
+                    i++;
+                }
+            }
+            catch { }
+        }
+        /// <summary>The booking machine's own Order of a visit whose units are OUT (a native hourly pass may complete it into
+        /// the till as an unpaid snapshot, BookOnce.HourlyEnd - its taken lines are the out units, not lost ones).</summary>
+        internal static bool IsOutOrder(Order? o) { try { return o != null && _outOrders.TryGetValue(o, out _); } catch { return false; } }
+
+        /// <summary>SendFinal on the booking machine: per open visit, the units this machine's shelves gave it.</summary>
+        private static void NoteFinalStock(BuildingRegistration? reg, string addr, List<CustomerVisitRow> rows)
+        {
+            try
+            {
+                if (reg == null || rows == null) return;
+                int visits = 0, units = 0;
+                foreach (var r in rows)
+                {
+                    if (r == null || string.IsNullOrEmpty(r.Id)) continue;
+                    _out.Remove(r.Id);
+                    if (r.Completed || BookOnce.IsBooked(r.Id) || r.Entries == null) continue;   // sold already: its Order is in the till
+                    var ov = new OutVisit { Addr = addr };
+                    foreach (var e in r.Entries)
+                    {
+                        if (e == null || string.IsNullOrEmpty(e.ItemName)) continue;
+                        bool bag = IsPaperBag(e.ItemName);
+                        if (bag ? !e.Available : !TakenRow(e)) continue;
+                        if (!bag && !CustomerEntrySync.IsShelfItem(reg, e.ItemName)) continue;   // a fee or a service: no stock
+                        ov.Units.Add(new KeyValuePair<string, float>(e.ItemName, e.WholesalePrice));
+                    }
+                    if (ov.Units.Count == 0) continue;
+                    _out[r.Id] = ov; visits++; units += ov.Units.Count;
+                    try { var eo = CustomerEntrySync.TryFindEntry(reg, r.Id)?.order; if (eo != null && !_outOrders.TryGetValue(eo, out _)) _outOrders.Add(eo, _markObj); } catch { }
+                }
+                StockOutUnits += units;
+                if (visits > 0) Plugin.Logger.LogInfo($"[Stock] {units} unit(s) of {visits} open visit(s) leave @{addr} with the hand-off (taken off this machine's shelves; never deducted again).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] note final: {ex.Message}"); }
+        }
+
+        /// <summary>The units this machine gave a visit whose body is elsewhere - removed: the caller uses them up.</summary>
+        internal static List<KeyValuePair<string, float>> TakeOut(string id)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(id) && _out.TryGetValue(id, out var ov)) { _out.Remove(id); return ov.Units; }
+            }
+            catch { }
+            return new List<KeyValuePair<string, float>>();
+        }
+
+        internal static bool UseCredit(List<KeyValuePair<string, float>>? l, string item, out float ws)
+        {
+            ws = 0f;
+            if (l == null) return false;
+            for (int i = 0; i < l.Count; i++)
+                if (l[i].Key == item) { ws = l[i].Value; l.RemoveAt(i); return true; }
+            return false;
+        }
+
+        /// <summary>Units taken here for a visit that nothing sold: back on a shelf (the native Leave -> ReturnItemsToShelf,
+        /// Customer.cs:316-328). A bag handed out is gone, as natively.</summary>
+        internal static int ReturnLeftovers(BuildingRegistration? reg, List<KeyValuePair<string, float>>? l, string id, string why)
+        {
+            int n = 0;
+            try
+            {
+                if (reg == null || l == null || l.Count == 0) return 0;
+                foreach (var kv in l)
+                {
+                    try
+                    {
+                        if (IsPaperBag(kv.Key)) continue;
+                        if (ItemHelper.ReturnToAShelf(new BigAmbitions.Items.CargoInstance(kv.Key, 1, kv.Value), reg.Address)) n++;
+                    }
+                    catch { }
+                }
+                StockReturned += n;
+                Plugin.Logger.LogInfo($"[Stock] {id}: {l.Count} unit(s) taken here for this visit were not sold ({why}) - {n} back on a shelf.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] return {id}: {ex.Message}"); }
+            return n;
+        }
+
+        /// <summary>What an adoption's stock settlement did, so a refused spawn can undo it.</summary>
+        internal sealed class StockUndo
+        {
+            public string Addr = "";
+            public readonly List<KeyValuePair<string, float>> Credits = new(), Deducted = new();
+        }
+
+        /// <summary>ADOPT on the booking machine, BEFORE the spawn (rig run T-HANDOFFSEAT-20260927-034255: the in-action
+        /// catch-up ran inside the spawn, before a settlement made after it, and took 14 units a second time).
+        /// <paramref name="o"/> is the Order the body is handed (the entry's own, or a booked visit's detached copy).
+        /// A booked visit, a finished order or a body that walks straight out takes nothing here: its sale is (or will be)
+        /// booked by the source's checkout or forward, which settles its units; its lines are only marked.</summary>
+        internal static StockUndo? StockOnAdopt(BuildingRegistration? reg, string id, Order? o, bool booked, bool leaving)
+        {
+            try
+            {
+                if (reg == null || o?.entries == null) return null;
+                if (!booked && (leaving || o.completed))
+                {
+                    foreach (var e in o.entries) MarkTaken(e);   // the coming forward uses this visit's credits (left in place)
+                    return null;
+                }
+                var credits = TakeOut(id);
+                var u = new StockUndo { Addr = GameStateReader.AddressKey(reg) };
+                int fail = 0;
+                if (booked)
+                    foreach (var e in o.entries) MarkTaken(e);   // the booking (a forward, a checkout) took them
+                else
+                    foreach (var e in o.entries)
+                    {
+                        if (e == null || string.IsNullOrEmpty(e.itemName)) continue;
+                        float ws;
+                        if (IsPaperBag(e.itemName))
+                        {
+                            if (e.available && UseCredit(credits, e.itemName, out ws)) { MarkTaken(e); u.Credits.Add(new KeyValuePair<string, float>(e.itemName, ws)); }
+                            continue;
+                        }
+                        if (!TakenOe(e) || !CustomerEntrySync.IsShelfItem(reg, e.itemName)) continue;
+                        if (UseCredit(credits, e.itemName, out ws)) { MarkTaken(e); u.Credits.Add(new KeyValuePair<string, float>(e.itemName, ws)); continue; }
+                        if (CustomerEntrySync.DeductDisplayStock(reg, e.itemName, out ws))
+                        {
+                            MarkTaken(e);
+                            if (e.wholesalePrice <= 0f && ws > 0f) e.wholesalePrice = ws;
+                            u.Deducted.Add(new KeyValuePair<string, float>(e.itemName, ws > 0f ? ws : e.wholesalePrice));
+                        }
+                        else { e.available = false; e.paid = false; fail++; }   // the shop cannot give what it does not have
+                    }
+                int cred = u.Credits.Count, ded = u.Deducted.Count, left = credits.Count;
+                StockAdoptCredited += cred; StockAdoptDeducted += ded; StockAdoptFailed += fail;
+                if (left > 0) ReturnLeftovers(reg, credits, id, "adopted back without them");
+                if (cred + ded + fail + left > 0)
+                    Plugin.Logger.LogInfo($"[Stock] adopt {id}{(booked ? " (booked)" : "")}: {cred} unit(s) it carried from here, {ded} taken off a shelf now (picked on the partner's machine), {fail} unavailable, {left} returned.");
+                return u;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] adopt {id}: {ex.Message}"); return null; }
+        }
+
+        /// <summary>The spawn was refused after the settlement: the units taken now go back on a shelf and the carried
+        /// units are out again.</summary>
+        internal static void StockAdoptUndo(BuildingRegistration? reg, string id, StockUndo? u)
+        {
+            try
+            {
+                if (u == null || reg == null) return;
+                StockAdoptDeducted -= u.Deducted.Count; StockAdoptCredited -= u.Credits.Count;
+                if (u.Deducted.Count > 0) ReturnLeftovers(reg, u.Deducted, id, "spawn refused");
+                if (u.Credits.Count > 0)
+                {
+                    var ov = new OutVisit { Addr = u.Addr };
+                    ov.Units.AddRange(u.Credits);
+                    _out[id] = ov;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] adopt undo {id}: {ex.Message}"); }
+        }
+
+        /// <summary>A live body of a visit just booked by another Order is finished (CustomerPuppets.FinishLiveBodiesOf): the
+        /// units it holds that the booking does not sell go back on a shelf; the booking sold the rest.</summary>
+        internal static int ReturnUnbooked(Order? body, Order? booking)
+        {
+            try
+            {
+                var reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                if (reg == null || body?.entries == null || !MergerFlip.BooksHere(reg) || BookOnce.IsBookedCopy(body)) return 0;
+                var sold = new List<KeyValuePair<string, float>>();
+                if (booking?.entries != null)
+                    foreach (var e in booking.entries)
+                        if (e != null && e.paid && !string.IsNullOrEmpty(e.itemName)) sold.Add(new KeyValuePair<string, float>(e.itemName, 0f));
+                var back = new List<KeyValuePair<string, float>>();
+                foreach (var e in body.entries)
+                {
+                    if (e == null || string.IsNullOrEmpty(e.itemName) || IsPaperBag(e.itemName)) continue;
+                    if (!TakenOe(e) || !CustomerEntrySync.IsShelfItem(reg, e.itemName)) continue;
+                    if (UseCredit(sold, e.itemName, out _)) continue;
+                    back.Add(new KeyValuePair<string, float>(e.itemName, e.wholesalePrice));
+                }
+                return back.Count > 0 ? ReturnLeftovers(reg, back, BookOnce.IdOf(body) ?? "?", "its body was finished; the booking does not sell them") : 0;
+            }
+            catch { return 0; }
+        }
+
+        // Units of a visit that sit in the till as a SNAPSHOT: a native exit clean-up (Customer.ForceFinishOrder :363-371 ->
+        // CompleteOrder) keeps the processed lines of an adopted body's order and BookOnce keeps that Order in the till
+        // ("kept in the till as a snapshot"); a later forward of the visit carries the whole visit and BookOnce unpays the
+        // snapshot. Those units came off a shelf here once (rig run T-HANDOFFSEAT-20260927-032513: Client1-177, 8 units
+        // taken at the adoption, then 8 more by its forward).
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<OrderEntry, object> _creditedLines = new();
+        internal static int StockFwdTillCredited;
+        internal static bool IsCreditedLine(OrderEntry? e) { try { return e != null && _creditedLines.TryGetValue(e, out _); } catch { return false; } }
+
+        internal static List<OrderEntry> TillTakenOf(BuildingRegistration? reg, string id)
+        {
+            var l = new List<OrderEntry>();
+            try
+            {
+                var till = reg?.unprocessedCompletedOrders;
+                if (till == null || string.IsNullOrEmpty(id)) return l;
+                foreach (var o in till)
+                {
+                    if (o?.entries == null || BookOnce.IdOf(o) != id) continue;
+                    foreach (var e in o.entries)
+                        if (e != null && !string.IsNullOrEmpty(e.itemName) && !IsPaperBag(e.itemName) && TakenOe(e) && !IsCreditedLine(e))
+                            l.Add(e);
+                }
+            }
+            catch { }
+            return l;
+        }
+
+        internal static bool UseLine(List<OrderEntry>? l, string item, out float ws)
+        {
+            ws = 0f;
+            if (l == null) return false;
+            for (int i = 0; i < l.Count; i++)
+                if (l[i].itemName == item)
+                {
+                    ws = l[i].wholesalePrice;
+                    try { _creditedLines.Add(l[i], _markObj); } catch { }
+                    l.RemoveAt(i);
+                    return true;
+                }
+            return false;
+        }
+
+        internal static string StockReadout()
+            => $"once=out{StockOutUnits}/fwdCred{StockFwdCredited}/fwdLive{StockFwdLiveCredited}/fwdTill{StockFwdTillCredited}/adoptCred{StockAdoptCredited}/adoptDed{StockAdoptDeducted}/adoptFail{StockAdoptFailed}/ret{StockReturned}/skip{StockMarkSkips}";
+
 #if BAMP_DEV
         // ── DEV: `custstate arm <n>` - one log line the moment this interior holds n customers ────────
         private static int _armN, _armSeatN;
         internal static void Arm(int n) { _armN = n; }
         /// <summary>Part B: `custstate arm seated <n>` - one line the moment n live natives sit on a table seat.</summary>
         internal static void ArmSeated(int n) { _armSeatN = n; }
-        // ── DEV: `stockdelta <shop> [mark]` - the rig's STOCK oracle (fold H2) on the machine that keeps the books ──
-        // Building stock per item (every cargo slot of the shop's item instances: shelves, storage, the register) against
-        // the till, between two readouts (each readout re-marks). Per item: drop = stock then - stock now; sold = PAID
-        // lines of the till Orders appended since; held = basket lines in the open orders of live bodies here now minus
-        // then: paid (ProcessSelfServiceOrder :38-50 pays as it takes the unit) or validated available + acceptable (the
-        // walking pick, SelfServiceCustomerTryGrabItem -> OrderHelper.Validate then Customer.GrabItem :504-530
-        // SubtractFromStock, paid only at the checkout). A replica's pick touches no stock (ProcessSelfServiceOrder :21-28,
-        // GrabItem's owner gate), so an adopted body carrying one shows as held without a drop. stockOk <=> every stocked item has drop == sold + held (taken exactly once
-        // per sale, none from nothing). lost = done-but-unpaid lines of the new Orders (report-only). Items never
-        // stocked here (made by a producer, a fee) are listed as made; paper bags (a random bag name) are report-only.
+        // ── DEV: `stockdelta <shop> [mark]` - the rig's STOCK oracle (fold H2; an identity since the stock-once effort) ──
+        // On the machine that keeps the books, per stocked item between two readouts (each readout re-marks), every unit
+        // that left the building's stock (every cargo slot: shelves, storage, the register) is accounted for:
+        //   drop == live + fwd + hour + other + lost + heldDelta + outDelta
+        //   live   paid lines of new till Orders paid by a live checkout HERE (Order.Pay on this machine)
+        //   fwd    paid lines of new till Orders booked from a partner's forwarded sale
+        //   hour   paid lines of new till Orders the native hourly pass added (BusinessSimulatorHelper.SimulateBusiness)
+        //   other  paid lines of any other new till Order (an exit clean-up, a gym's fee completion)
+        //   lost   taken-but-unpaid lines of the new Orders (processed, available, acceptable, not paid)
+        //   heldDelta  change in units held by live bodies here (open orders; a booked visit's copy is sold, not held)
+        //   outDelta   change in units this machine's shelves gave visits whose bodies now live on the partner's machine
+        // stockOk <=> the identity holds for every stocked item (no unit taken twice, none from nothing). Items never
+        // stocked here (a fee) are listed as made; paper bags (a random bag name) are report-only.
         private static string _sdKey = "", _sdAt = "";
-        private static Dictionary<string, int>? _sdStock, _sdHeld;
+        private static Dictionary<string, int>? _sdStock, _sdHeld, _sdOut;
         private static List<Order>? _sdTill;
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Order, object> _sdLive = new(), _sdHour = new();
+
+        internal static void SdNotePaid(Order? o) { try { if (o != null && !_sdLive.TryGetValue(o, out _)) _sdLive.Add(o, _markObj); } catch { } }
+        internal static void SdNoteHourly(BuildingRegistration? reg, int from)
+        {
+            try
+            {
+                var t = reg?.unprocessedCompletedOrders;
+                if (t == null) return;
+                for (int i = Math.Max(0, from); i < t.Count; i++) { var o = t[i]; if (o != null && !_sdHour.TryGetValue(o, out _)) _sdHour.Add(o, _markObj); }
+            }
+            catch { }
+        }
+
+        // DEV trace behind the identity: between a mark and the next readout every native SubtractFromStock on this shop's
+        // item instances (and the mod's own DeductDisplayStock) is counted per item and caller - `takes=` in the readout.
+        private static HashSet<BigAmbitions.Items.ItemInstance>? _sdTraceSet;
+        private static readonly Dictionary<string, int> _sdTakes = new();
+        internal static bool SdTracing => _sdTraceSet != null;
+
+        private static void SdTraceArm(BuildingRegistration reg)
+        {
+            try
+            {
+                var s = new HashSet<BigAmbitions.Items.ItemInstance>(new TillDupes.RefEq<BigAmbitions.Items.ItemInstance>());
+                if (reg.itemInstances != null) foreach (var kv in reg.itemInstances) if (kv.Value != null) s.Add(kv.Value);
+                _sdTraceSet = s;
+                _sdTakes.Clear();
+            }
+            catch { _sdTraceSet = null; }
+        }
+
+        internal static void SdTrace(BigAmbitions.Items.ItemInstance ii, string item, int n)
+        {
+            try
+            {
+                if (_sdTraceSet == null || ii == null || n <= 0 || !_sdTraceSet.Contains(ii)) return;
+                string who = "?";
+                var st = new System.Diagnostics.StackTrace(1, false);
+                for (int i = 0; i < st.FrameCount && i < 10; i++)
+                {
+                    var m = st.GetFrame(i)?.GetMethod();
+                    if (m == null) continue;
+                    string dn = m.DeclaringType?.Name ?? "";
+                    if (dn.IndexOf("Patch", StringComparison.Ordinal) >= 0 || dn == "ItemHelper" || m.Name.IndexOf("SubtractFromStock", StringComparison.Ordinal) >= 0 || m.Name.StartsWith("DMD", StringComparison.Ordinal)) continue;
+                    who = dn + "." + m.Name;
+                    break;
+                }
+                SdTraceNote(item, who, n);
+            }
+            catch { }
+        }
+
+        internal static void SdTraceNote(string item, string who, int n)
+        {
+            try
+            {
+                if (_sdTraceSet == null || _sdTakes.Count > 60) return;
+                string k = CustomerEntrySync.ShortItem(item) + "@" + (who ?? "?").Replace(' ', '_');
+                _sdTakes.TryGetValue(k, out var v); _sdTakes[k] = v + n;
+            }
+            catch { }
+        }
+
+        private static string SdTakesReadout()
+        {
+            if (_sdTakes.Count == 0) return "takes=-";
+            var l = new List<string>();
+            foreach (var kv in _sdTakes) l.Add(kv.Key + "x" + kv.Value);
+            return "takes=" + string.Join(";", l);
+        }
 
         private static void SdAdd(Dictionary<string, int> d, string k, int n) { d.TryGetValue(k, out var v); d[k] = v + n; }
-        private static bool SdBag(string n) => n.IndexOf("bag", StringComparison.OrdinalIgnoreCase) >= 0 && n.IndexOf("paper", StringComparison.OrdinalIgnoreCase) >= 0;
+        private static int SdGet(Dictionary<string, int>? d, string k) => d != null && d.TryGetValue(k, out var v) ? v : 0;
 
         private static Dictionary<string, int> SdStock(BuildingRegistration reg)
         {
@@ -578,11 +948,19 @@ namespace BigAmbitionsMP
                 foreach (var c in IndoorCustomerSpawner.Customers)
                 {
                     if (c == null || c.isPlayer || c.order == null || c.order.completed || c.order.entries == null) continue;
+                    if (BookOnce.IsBookedCopy(c.order)) continue;   // a booked visit's units are sold: its Order sits in the till
                     foreach (var e in c.order.entries)
-                        if (e != null && !string.IsNullOrEmpty(e.itemName) && (e.paid || (e.available && e.priceAccceptable))) SdAdd(d, e.itemName, 1);
+                        if (e != null && !string.IsNullOrEmpty(e.itemName) && TakenOe(e)) SdAdd(d, e.itemName, 1);
                 }
             }
             catch { }
+            return d;
+        }
+
+        private static Dictionary<string, int> SdOut(string key)
+        {
+            var d = new Dictionary<string, int>();
+            try { foreach (var ov in _out.Values) if (ov.Addr == key) foreach (var u in ov.Units) SdAdd(d, u.Key, 1); } catch { }
             return d;
         }
 
@@ -593,62 +971,69 @@ namespace BigAmbitionsMP
                 string key = GameStateReader.AddressKey(reg);
                 var stock = SdStock(reg);
                 var held = SdHeld(reg);
+                var outNow = SdOut(key);
                 var till = reg.unprocessedCompletedOrders;
                 var tillNow = till != null ? new List<Order>(till) : new List<Order>();
                 string now = "";
                 try { var tm = TimeHelper.Now(); now = $"d{tm.Day}-{tm.Hour:00}:{(int)tm.Minute:00}"; } catch { }
                 int heldSum = 0; foreach (var v in held.Values) heldSum += v;
+                int outSum = 0; foreach (var v in outNow.Values) outSum += v;
                 string res;
-                if (markOnly || _sdStock == null || _sdHeld == null || _sdTill == null || _sdKey != key)
-                    res = $"{key} marked at={now} items={stock.Count} held={heldSum} till={tillNow.Count}{(markOnly ? "" : " (no earlier mark - marked now)")}";
+                if (markOnly || _sdStock == null || _sdHeld == null || _sdTill == null || _sdOut == null || _sdKey != key)
+                    res = $"{key} marked at={now} items={stock.Count} held={heldSum} out={outSum} till={tillNow.Count}{(markOnly ? "" : " (no earlier mark - marked now)")}";
                 else
                 {
-                    var sold = new Dictionary<string, int>();
+                    var fwdSet = new HashSet<Order>(new TillDupes.RefEq<Order>());
+                    foreach (var fo in _fwdBooked.Values) if (fo != null) fwdSet.Add(fo);
+                    var oldSet = new HashSet<Order>(new TillDupes.RefEq<Order>());
+                    foreach (var q in _sdTill) if (q != null) oldSet.Add(q);
+                    var live = new Dictionary<string, int>(); var fwd = new Dictionary<string, int>();
+                    var hour = new Dictionary<string, int>(); var oth = new Dictionary<string, int>();
                     var lost = new Dictionary<string, int>();
-                    int newOrders = 0;
+                    int newOrders = 0, nLive = 0, nFwd = 0, nHour = 0, nOth = 0;
                     foreach (var o in tillNow)
                     {
-                        if (o == null || o.entries == null) continue;
-                        bool old = false;
-                        foreach (var q in _sdTill) if (ReferenceEquals(q, o)) { old = true; break; }
-                        if (old) continue;
+                        if (o == null || o.entries == null || oldSet.Contains(o)) continue;
                         newOrders++;
+                        Dictionary<string, int> cat;
+                        if (fwdSet.Contains(o)) { cat = fwd; nFwd++; }
+                        else if (_sdLive.TryGetValue(o, out _)) { cat = live; nLive++; }
+                        else if (_sdHour.TryGetValue(o, out _)) { cat = hour; nHour++; }
+                        else { cat = oth; nOth++; }
                         foreach (var e in o.entries)
                         {
                             if (e == null || string.IsNullOrEmpty(e.itemName)) continue;
-                            if (e.paid) SdAdd(sold, e.itemName, 1);
-                            else if (e.processed && e.priceAccceptable) SdAdd(lost, e.itemName, 1);
+                            if (e.paid) SdAdd(cat, e.itemName, 1);
+                            else if (TakenOe(e) && !IsCreditedLine(e) && !IsOutOrder(o)) SdAdd(lost, e.itemName, 1);   // a line a forward carried is sold there
                         }
                     }
                     var names = new SortedSet<string>(StringComparer.Ordinal);
-                    foreach (var k in stock.Keys) names.Add(k);
-                    foreach (var k in _sdStock.Keys) names.Add(k);
-                    foreach (var k in sold.Keys) names.Add(k);
-                    foreach (var k in lost.Keys) names.Add(k);
-                    foreach (var k in held.Keys) names.Add(k);
-                    foreach (var k in _sdHeld.Keys) names.Add(k);
+                    foreach (var dd in new[] { stock, _sdStock, live, fwd, hour, oth, lost, held, _sdHeld, outNow, _sdOut })
+                        foreach (var k in dd.Keys) names.Add(k);
                     var per = new List<string>();
                     var bad = new List<string>();
-                    int dropT = 0, soldT = 0, lostT = 0, heldT = 0, made = 0, bagDrop = 0, bagSold = 0;
+                    int dropT = 0, soldT = 0, lostT = 0, heldT = 0, outT = 0, liveT = 0, fwdT = 0, hourT = 0, othT = 0, made = 0, bagDrop = 0, bagSold = 0;
                     foreach (var nm in names)
                     {
-                        _sdStock.TryGetValue(nm, out var b0); stock.TryGetValue(nm, out var b1);
-                        sold.TryGetValue(nm, out var s); lost.TryGetValue(nm, out var l);
-                        held.TryGetValue(nm, out var h1); _sdHeld.TryGetValue(nm, out var h0);
-                        int drop = b0 - b1, hd = h1 - h0;
-                        if (drop == 0 && s == 0 && l == 0 && hd == 0) continue;
+                        int b0 = SdGet(_sdStock, nm), b1 = SdGet(stock, nm);
+                        int L = SdGet(live, nm), F = SdGet(fwd, nm), H = SdGet(hour, nm), O = SdGet(oth, nm), lo = SdGet(lost, nm);
+                        int hd = SdGet(held, nm) - SdGet(_sdHeld, nm), od = SdGet(outNow, nm) - SdGet(_sdOut, nm);
+                        int drop = b0 - b1, s = L + F + H + O;
+                        if (drop == 0 && s == 0 && lo == 0 && hd == 0 && od == 0) continue;
                         string sn = CustomerEntrySync.ShortItem(nm);
-                        if (SdBag(nm)) { bagDrop += drop; bagSold += s; continue; }
+                        if (IsPaperBag(nm)) { bagDrop += drop; bagSold += s; continue; }
                         if (!_sdStock.ContainsKey(nm) && !stock.ContainsKey(nm)) { made += s; per.Add($"{sn}:made{s}"); continue; }
-                        dropT += drop; soldT += s; lostT += l; heldT += hd;
-                        per.Add($"{sn}:{drop}/{s}/{hd}/{l}");
-                        if (drop != s + hd) bad.Add($"{sn}:{drop}!={s}+{hd}");
+                        dropT += drop; soldT += s; lostT += lo; heldT += hd; outT += od; liveT += L; fwdT += F; hourT += H; othT += O;
+                        per.Add($"{sn}:{drop}={L}+{F}+{H}+{O}+{lo}+{hd}+{od}");
+                        if (drop != s + lo + hd + od) bad.Add($"{sn}:{drop}!={s}+{lo}+{hd}+{od}");
                     }
-                    res = $"{key} since={_sdAt} at={now} newOrders={newOrders} dropTotal={dropT} soldTotal={soldT} lostTotal={lostT} heldDelta={heldT} "
-                        + $"madeSold={made} bags={bagDrop}/{bagSold} stockOk={(bad.Count == 0 ? "True" : "False")} bad={(bad.Count == 0 ? "-" : string.Join(";", bad))} "
-                        + $"per={(per.Count == 0 ? "-" : string.Join(";", per))}";
+                    res = $"{key} since={_sdAt} at={now} newOrders={newOrders} orders=live{nLive}/fwd{nFwd}/hour{nHour}/other{nOth} dropTotal={dropT} soldTotal={soldT} "
+                        + $"tillLive={liveT} fwdSold={fwdT} hourSold={hourT} otherSold={othT} lostTotal={lostT} heldDelta={heldT} outDelta={outT} outNow={outSum} "
+                        + $"madeSold={made} bags={bagDrop}/{bagSold} {StockReadout()} stockOk={(bad.Count == 0 ? "True" : "False")} bad={(bad.Count == 0 ? "-" : string.Join(";", bad))} "
+                        + $"per={(per.Count == 0 ? "-" : string.Join(";", per))} (per=item:drop=live+fwd+hour+other+lost+heldDelta+outDelta) {SdTakesReadout()}";
                 }
-                _sdKey = key; _sdStock = stock; _sdHeld = held; _sdTill = tillNow; _sdAt = now;
+                _sdKey = key; _sdStock = stock; _sdHeld = held; _sdOut = outNow; _sdTill = tillNow; _sdAt = now;
+                SdTraceArm(reg);
                 return res + " ";
             }
             catch (Exception ex) { return "ERR stockdelta " + ex.Message; }
@@ -786,4 +1171,212 @@ namespace BigAmbitionsMP
             catch { return true; }
         }
     }
+
+    /// <summary>H-HANDOFF-1 STOCK ONCE: a re-serve on the booking machine (FullServiceEmployee.ServeCustomer :61 hands EVERY
+    /// retail line of the order to GrabOrderEntryItems, which takes a unit per line at :243-245 with no processed check)
+    /// skips the lines whose unit this visit already took (CustomerHandoff.MarkTaken at the adoption).</summary>
+    [HarmonyPatch(typeof(FullServiceEmployee), nameof(FullServiceEmployee.GrabOrderEntryItems))]
+    public static class Patch_FullServiceGrab_StockOnce
+    {
+        static void Prefix(ref IEnumerable<OrderEntry> orderEntries)
+        {
+            try
+            {
+                if (orderEntries == null) return;
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || !bm.IsPlayerOwnedBusiness) return;
+                var keep = new List<OrderEntry>();
+                int skip = 0;
+                foreach (var e in orderEntries) { if (CustomerHandoff.IsMarkedTaken(e)) skip++; else keep.Add(e); }
+                if (skip == 0) return;
+                orderEntries = keep;
+                CustomerHandoff.StockMarkSkips += skip;
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>H-HANDOFF-1 STOCK ONCE: the full-service in-action catch-up (FullServiceOnEnterBuildingInAction.OnStart
+    /// :13-37 - a body spawned with its visit already under way) validates, pays and takes a unit for EVERY line and a
+    /// paper bag. For an adopted body whose lines this visit already took, the taken lines are kept as they are (paid
+    /// when available and acceptable, as the catch-up would pay them) and only the other lines run the native steps.</summary>
+    [HarmonyPatch(typeof(FullServiceOnEnterBuildingInAction), nameof(FullServiceOnEnterBuildingInAction.OnStart))]
+    public static class Patch_FullServiceInAction_StockOnce
+    {
+        private static System.Reflection.MethodInfo? _regs;
+
+        static bool Prefix(FullServiceOnEnterBuildingInAction __instance)
+        {
+            try
+            {
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || !bm.IsPlayerOwnedBusiness) return true;
+                var cust = __instance?.sharedCustomer?.Value;
+                var o = cust?.order;
+                if (cust == null || o?.entries == null || !CustomerHandoff.AnyMarked(o)) return true;
+                _regs ??= AccessTools.Method(typeof(FullServiceOnEnterBuildingInAction), "AreThereCashRegisters");
+                bool registers = true;
+                try { if (_regs != null) registers = (bool)_regs.Invoke(null, null); } catch { }
+                int skipped = 0;
+                if (registers)
+                    foreach (var e in o.entries)
+                    {
+                        if (e == null) continue;
+                        if (CustomerHandoff.IsMarkedTaken(e))
+                        {
+                            e.processed = true;
+                            if (e.available && e.priceAccceptable) e.paid = true;
+                            skipped++;
+                            continue;
+                        }
+                        e.processed = true;
+                        var ic = bm.FindOptimalItemController(e.itemName);
+                        if (ic == null) continue;
+                        OrderHelper.Validate(cust.citizenData, e, ic, payIfAcceptable: true);
+                        if (e.paid) ic.ItemInstance.SubtractFromStock();
+                    }
+                bool anyPaid = false, bagDone = false;
+                foreach (var e in o.entries)
+                {
+                    if (e == null) continue;
+                    if (e.paid) anyPaid = true;
+                    if (CustomerHandoff.IsPaperBag(e.itemName) && e.available && CustomerHandoff.IsMarkedTaken(e)) bagDone = true;
+                }
+                if (anyPaid)
+                {
+                    if (!bagDone)
+                    {
+                        var bag = bm.FindOptimalItemController("ba:itemname_paperbag");
+                        if (bag == null || !bag.ItemInstance.SubtractFromStock())
+                        {
+                            foreach (var e in o.entries) if (e != null) e.paid = false;
+                            cust.Leave();
+                        }
+                    }
+                }
+                else
+                {
+                    foreach (var e in o.entries) if (e != null) e.processed = true;
+                    cust.Leave();
+                }
+                CustomerHandoff.StockMarkSkips += skipped;
+                return false;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] in-action: {ex.Message}"); return true; }
+        }
+    }
+
+    /// <summary>H-HANDOFF-1 STOCK ONCE: a basket-less self-service shop processes the whole order at once
+    /// (ProcessSelfServiceOrder.OnStart :38-55, a unit per acceptable line). An adopted body's already-taken lines are
+    /// held out of that pass and put back where they were afterwards (always - a finalizer).</summary>
+    [HarmonyPatch(typeof(ProcessSelfServiceOrder), nameof(ProcessSelfServiceOrder.OnStart))]
+    public static class Patch_ProcessSelfService_StockOnce
+    {
+        static void Prefix(ProcessSelfServiceOrder __instance, out List<KeyValuePair<int, OrderEntry>>? __state)
+        {
+            __state = null;
+            try
+            {
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || !bm.IsPlayerOwnedBusiness) return;
+                var l = __instance?.sharedCustomer?.Value?.order?.entries;
+                if (l == null) return;
+                List<KeyValuePair<int, OrderEntry>>? st = null;
+                for (int i = 0; i < l.Count; i++)
+                    if (CustomerHandoff.IsMarkedTaken(l[i])) (st ??= new List<KeyValuePair<int, OrderEntry>>()).Add(new KeyValuePair<int, OrderEntry>(i, l[i]));
+                if (st == null) return;
+                for (int i = st.Count - 1; i >= 0; i--) l.RemoveAt(st[i].Key);
+                __state = st;
+                CustomerHandoff.StockMarkSkips += st.Count;
+            }
+            catch { __state = null; }
+        }
+
+        static void Finalizer(ProcessSelfServiceOrder __instance, List<KeyValuePair<int, OrderEntry>>? __state)
+        {
+            try
+            {
+                if (__state == null) return;
+                var l = __instance?.sharedCustomer?.Value?.order?.entries;
+                if (l == null) return;
+                foreach (var kv in __state) l.Insert(Math.Min(kv.Key, l.Count), kv.Value);
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>H-HANDOFF-1 STOCK ONCE: a walking pick (Customer.GrabItem :504-530, SubtractFromStock at :513) of a line this
+    /// visit already took takes nothing again.</summary>
+    [HarmonyPatch(typeof(Customer), nameof(Customer.GrabItem), new Type[] { typeof(ItemController), typeof(Customer), typeof(OrderEntry) })]
+    public static class Patch_CustomerGrabItem_StockOnce
+    {
+        static bool Prefix(OrderEntry orderEntry, ref bool __result)
+        {
+            try
+            {
+                if (!CustomerHandoff.IsMarkedTaken(orderEntry)) return true;
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || !bm.IsPlayerOwnedBusiness) return true;
+                CustomerHandoff.StockMarkSkips++;
+                __result = orderEntry.available && orderEntry.priceAccceptable;
+                return false;
+            }
+            catch { return true; }
+        }
+
+        static void Postfix(OrderEntry orderEntry, bool __result)
+        {
+            try { if (__result && orderEntry != null) CustomerHandoff.MarkPicked(orderEntry); } catch { }
+        }
+    }
+
+#if BAMP_DEV
+    /// <summary>DEV stock oracle trace: who took each unit off this shop's stock between a mark and the readout.</summary>
+    [HarmonyPatch(typeof(ItemHelper), nameof(ItemHelper.SubtractFromStock))]
+    public static class Patch_SubtractFromStock_StockOracle
+    {
+        static void Prefix(BigAmbitions.Items.ItemInstance itemInstance, out KeyValuePair<string, float>? __state)
+        {
+            __state = null;
+            try
+            {
+                if (!CustomerHandoff.SdTracing || itemInstance == null) return;
+                var ci = itemInstance.GetStockInstance();
+                if (ci != null && !string.IsNullOrEmpty(ci.itemName)) __state = new KeyValuePair<string, float>(ci.itemName, (float)ci.amount);
+            }
+            catch { __state = null; }
+        }
+
+        static void Postfix(BigAmbitions.Items.ItemInstance itemInstance, KeyValuePair<string, float>? __state)
+        {
+            try
+            {
+                if (__state == null || itemInstance == null) return;
+                var ci = itemInstance.GetStockInstance();
+                float after = ci != null && ci.itemName == __state.Value.Key ? (float)ci.amount : 0f;
+                int n = (int)Math.Round(__state.Value.Value - after);
+                if (n > 0) CustomerHandoff.SdTrace(itemInstance, __state.Value.Key, n);
+            }
+            catch { }
+        }
+    }
+#endif
+
+#if BAMP_DEV
+    /// <summary>DEV stock oracle: the till Orders a native hourly pass appends are classed "hour" (CustomerHandoff.StockDelta).</summary>
+    [HarmonyPatch(typeof(BusinessSimulatorHelper), "SimulateBusiness")]
+    public static class Patch_SimulateBusiness_StockOracle
+    {
+        static void Prefix(ValueTuple<BuildingRegistration, int> tuple, out int __state)
+        {
+            __state = -1;
+            try { __state = tuple.Item1?.unprocessedCompletedOrders?.Count ?? -1; } catch { }
+        }
+
+        static void Finalizer(ValueTuple<BuildingRegistration, int> tuple, int __state)
+        {
+            try { if (__state >= 0) CustomerHandoff.SdNoteHourly(tuple.Item1, __state); } catch { }
+        }
+    }
+#endif
 }

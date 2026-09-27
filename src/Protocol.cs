@@ -1032,6 +1032,7 @@ namespace BigAmbitionsMP
         public bool   Acceptable     { get; set; } = true;
         public bool   Paid           { get; set; }
         public bool   Processed      { get; set; }
+        public bool   Picked         { get; set; }   // stock once (protocol 26, additive): the unit was already grabbed for this line
     }
 
     /// <summary>H-HANDOFF-1 (message 219): a simulator's visit rows for one building - a FINAL snapshot when

@@ -533,6 +533,13 @@ namespace BigAmbitionsMP
                 // without touching stock and without a paper bag.
                 string feeName = "";
                 try { feeName = BusinessTypeHelper.GetEntranceFeeNameForBusinessType(BusinessTypeHelper.GetData(reg)) ?? ""; } catch { }
+                // H-HANDOFF-1 STOCK ONCE: units this machine's shelves already gave this visit - the ones that left with a
+                // handed-off body (CustomerHandoff.TakeOut), then the ones a live body of the same visit holds here (its
+                // order is finished once this forward books) - are booked without a second deduction.
+                var credits = CustomerHandoff.TakeOut(p.EntryId);
+                var liveCredits = CustomerPuppets.LiveTakenOf(p.EntryId, reg);
+                var tillCredits = CustomerHandoff.TillTakenOf(reg, p.EntryId);   // then the visit's snapshot lines in the till
+                int credited = 0; bool bagCredited = false; float bagWs = 0f;
                 if (p.Items != null)
                     foreach (var it in p.Items)
                     {
@@ -555,11 +562,26 @@ namespace BigAmbitionsMP
                             catch (Exception fx) { Plugin.Logger.LogWarning($"[Business] forwarded fee line {p.EntryId}: {fx.Message}"); }
                             continue;
                         }
+                        // H-HANDOFF-1 STOCK ONCE: a paper-bag line is no shelf item. The bag an earlier serve of this visit
+                        // took here stands for the sale's bag below; otherwise the line is ignored (the bag below is the one).
+                        if (CustomerHandoff.IsPaperBag(it.ItemName))
+                        {
+                            if (!bagCredited && (CustomerHandoff.UseCredit(credits, it.ItemName, out bagWs) || CustomerHandoff.UseCredit(liveCredits, it.ItemName, out bagWs))) bagCredited = true;
+                            continue;
+                        }
                         // Recheck B1: the helper judged this item too expensive for that customer —
                         // native returns it to the shelf unsold (ReturnUnacceptablePriceItems), so it
                         // is neither deducted nor booked here.
                         if (!it.Acceptable) { refused++; continue; }
-                        if (DeductDisplayStock(reg, it.ItemName, out float slotWholesale))
+                        float slotWholesale = 0f;
+                        bool fromOut = CustomerHandoff.UseCredit(credits, it.ItemName, out slotWholesale);
+                        bool fromLive = !fromOut && CustomerHandoff.UseCredit(liveCredits, it.ItemName, out slotWholesale);
+                        bool fromTill = !fromOut && !fromLive && CustomerHandoff.UseLine(tillCredits, it.ItemName, out slotWholesale);
+                        if (fromOut) CustomerHandoff.StockFwdCredited++;
+                        if (fromTill) CustomerHandoff.StockFwdTillCredited++;
+                        if (fromLive) CustomerHandoff.StockFwdLiveCredited++;
+                        if (fromOut || fromLive || fromTill) credited++;
+                        if (fromOut || fromLive || fromTill || DeductDisplayStock(reg, it.ItemName, out slotWholesale))
                         {
                             float ownerPrice;
                             try { ownerPrice = ItemHelper.GetPrice(it.ItemName, reg); }   // owner's retailPrices, market default on a miss
@@ -578,6 +600,9 @@ namespace BigAmbitionsMP
                         }
                         else dropped++;
                     }
+                // H-HANDOFF-1 STOCK ONCE: units taken here for this visit that the sale does not carry (refused on price,
+                // dropped on the partner's machine) go back on a shelf, as the native serve / walk-out would put them.
+                if (credits.Count > 0) CustomerHandoff.ReturnLeftovers(reg, credits, p.EntryId, "not in the forwarded sale");
                 if (sold == 0)
                 {
                     _processedForwards.Add(p.EntryId);
@@ -595,6 +620,12 @@ namespace BigAmbitionsMP
                     bool needsBags = sold > feeLines;   // fold K3: a fee-only sale takes no bag
                     if (needsBags)
                         try { needsBags = BusinessTypeHelper.GetData(reg)?.HasTag(BigAmbitions.Tags.TagRef.Businesstag.customersneedpaperbags) ?? true; } catch { }
+                    if (needsBags && bagCredited)
+                    {
+                        o.AddPaperBagEntry(bagWs);   // H-HANDOFF-1 stock once: the bag this visit already took here
+                        bagged = true;
+                        needsBags = false;
+                    }
                     if (needsBags)
                         foreach (var kv in reg.itemInstances)
                         {
@@ -628,7 +659,7 @@ namespace BigAmbitionsMP
                 _adoptedSession[p.AddressKey] = adoptedSoFar + 1;
                 BuildingStorageSync.OwnerBusinessTail(reg);
                 InteriorSync.PushOwnedBuildingNow(p.AddressKey);
-                Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s) ${repricedTotal:F2} (forwarded at ${forwardedTotal:F2}){(bagged ? " +bag" : "")}{(feeLines > 0 ? $" (incl. {feeLines} entrance-fee line(s), no stock)" : "")}{(refused > 0 ? $" ({refused} refused on price)" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}."
+                Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s) ${repricedTotal:F2} (forwarded at ${forwardedTotal:F2}){(bagged ? " +bag" : "")}{(bagCredited ? " (its bag was already handed out here)" : "")}{(credited > 0 ? $" ({credited} unit(s) already taken off this machine's shelves for this visit - not deducted again)" : "")}{(feeLines > 0 ? $" (incl. {feeLines} entrance-fee line(s), no stock)" : "")}{(refused > 0 ? $" ({refused} refused on price)" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}."
                     + (claimedEntry != null ? $" [PROBE:P-HELPER-DOUBLEBOOK] entry retired from the live table{(registered ? " (book once)" : "")}; {leftThisHour} unserved left this hour."  : (known ? "" : " [PROBE:P-HELPER-DOUBLEBOOK] entry unknown — nothing to retire; quota relies on the adopted order's timestamp.")));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] adopt forwarded order: {ex.Message}"); }
@@ -637,10 +668,28 @@ namespace BigAmbitionsMP
         internal static string ShortItem(string n)
             => string.IsNullOrEmpty(n) ? "" : (n.StartsWith("ba:itemname_", StringComparison.Ordinal) ? n.Substring(12) : n);
 
+        /// <summary>H-HANDOFF-1 stock once: is <paramref name="itemName"/> a display-shelf item of this shop (any showcase slot
+        /// set to it, stocked or not)? A fee or a service line is not, and never moves stock.</summary>
+        internal static bool IsShelfItem(BuildingRegistration reg, string itemName)
+        {
+            try
+            {
+                if (reg?.itemInstances == null || string.IsNullOrEmpty(itemName)) return false;
+                foreach (var kv in reg.itemInstances)
+                {
+                    var ii = kv.Value;
+                    if (ii?.ItemCached == null || (ii.ItemCached.type & BigAmbitions.Items.ItemType.ShowcaseShelf) == 0 || ii.cargoInstances == null) continue;
+                    foreach (var s in ii.cargoInstances) if (s != null && s.itemName == itemName) return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         /// <summary>Reduce ONE unit of <paramref name="itemName"/> from a display (showcase-shelf) stock
         /// slot — what a live customer's grab does physically. Display-only on purpose: customers never
         /// shop from storage.</summary>
-        private static bool DeductDisplayStock(BuildingRegistration reg, string itemName, out float slotWholesale)
+        internal static bool DeductDisplayStock(BuildingRegistration reg, string itemName, out float slotWholesale)
         {
             slotWholesale = 0f;
             try
@@ -658,6 +707,9 @@ namespace BigAmbitionsMP
                         if (s == null || s.itemName != itemName || s.amount <= 0) continue;
                         s.amount--;
                         slotWholesale = (float)s.pricePerUnit;   // the owner's real cost basis for this unit
+#if BAMP_DEV
+                        CustomerHandoff.SdTraceNote(itemName, "DeductDisplayStock", 1);   // H-HANDOFF-1 stock oracle trace
+#endif
                         try { ii.OnItemsInCargoUpdated()?.Invoke(); } catch { }
                         return true;
                     }

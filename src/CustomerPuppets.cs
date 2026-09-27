@@ -846,6 +846,7 @@ namespace BigAmbitionsMP
                             itemName = ve.ItemName ?? "", price = ve.Price, wholesalePrice = ve.WholesalePrice,
                             available = ve.Available, priceAccceptable = ve.Acceptable, paid = ve.Paid, processed = ve.Processed,
                         });
+            CustomerHandoff.MarkPickedFromRow(c.entries, v.Entries);   // stock once: grabbed lines stay grabbed
             c.customerDemandTypes = basis?.customerDemandTypes != null ? new List<string>(basis.customerDemandTypes) : new List<string>();
             return c;
         }
@@ -883,6 +884,7 @@ namespace BigAmbitionsMP
                 {
                     try
                     {
+                        CustomerHandoff.ReturnUnbooked(lc.order, booking);   // H-HANDOFF-1 stock once: held units the booking does not sell go back on a shelf
                         var oes = lc.order.entries;
                         int before = oes != null ? oes.Count : 0;
                         if (oes != null) oes.RemoveAll(x => x == null || !x.processed);
@@ -897,6 +899,33 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] finish bodies {id}: {ex.Message}"); }
             return n;
+        }
+
+        /// <summary>H-HANDOFF-1 stock once: the units a live body of visit <paramref name="id"/> holds in this shop (open order,
+        /// not a booked copy) - a forward booking that visit credits them instead of deducting again.</summary>
+        internal static List<KeyValuePair<string, float>> LiveTakenOf(string id, BuildingRegistration? reg)
+        {
+            var l = new List<KeyValuePair<string, float>>();
+            try
+            {
+                if (string.IsNullOrEmpty(id) || reg == null) return l;
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || !ReferenceEquals(bm.buildingRegistration, reg)) return l;
+                foreach (var lc in IndoorCustomerSpawner.Customers)
+                {
+                    if (lc == null || lc.isPlayer || lc.order?.entries == null || lc.order.completed || BookOnce.IsBookedCopy(lc.order)) continue;
+                    if (LiveIdOf(lc) != id) continue;
+                    foreach (var e in lc.order.entries)
+                    {
+                        if (e == null || string.IsNullOrEmpty(e.itemName)) continue;
+                        bool bag = CustomerHandoff.IsPaperBag(e.itemName);
+                        if (bag ? e.available : CustomerHandoff.TakenOe(e))
+                            l.Add(new KeyValuePair<string, float>(e.itemName, e.wholesalePrice));
+                    }
+                }
+            }
+            catch { }
+            return l;
         }
 
         /// <summary>A live body's visit id: its Order in the book-once map, else this machine's own stream identity.</summary>
@@ -1004,6 +1033,7 @@ namespace BigAmbitionsMP
                                             available = ve.Available, priceAccceptable = ve.Acceptable, paid = ve.Paid, processed = ve.Processed,
                                         });
                             }
+                            if (v.Entries != null && v.Entries.Count > 0) CustomerHandoff.MarkPickedFromRow(ord.entries, v.Entries);   // stock once
                             ord.completed = v.Completed;
                             if (fee.Length > 0 && ord.entries != null)
                                 foreach (var oe in ord.entries) if (oe != null && oe.itemName == fee) { feeInSnapshot = true; break; }
@@ -1059,6 +1089,12 @@ namespace BigAmbitionsMP
                     BookOnce.MarkBookedCopy(entry.order);
                     BookOnce.MapOrder(entry.order, entryId);   // the copy's payments are this visit's: suppressed
                 }
+                // H-HANDOFF-1 STOCK ONCE: on the machine that keeps the books the body's taken lines are settled BEFORE the
+                // spawn (Init and the in-action catch-up run inside it): units it carried from here are credited, units
+                // picked on the partner's machine come off a shelf now, and all are marked so no native re-take takes them
+                // again (CustomerHandoff.StockOnAdopt). A refused spawn undoes it.
+                CustomerHandoff.StockUndo? stockUndo = null;
+                if (books) stockUndo = CustomerHandoff.StockOnAdopt(reg, entryId, entry.order, booked, v != null && v.Leaving);
                 CustomerHandoff.BeginAdopt(withState || booked, suppressCheck, suppressPay);
                 try { _spawnCustomerM.Invoke(null, new object[] { entry }); }
                 finally
@@ -1072,7 +1108,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Handoff] body-only {entryId}: booked order before {tillBefore} -> after {tillAfter} ({(tillAfter == tillBefore ? "untouched" : "CHANGED")}); the body carries a detached copy{(feeOnlyBooked ? " - fee-only visit" : "")}{(synthetic ? " - stand-alone entry" : "")}, it keeps its visit.");
                 }
                 var list = IndoorCustomerSpawner.Customers;
-                if (list.Count <= before) { CustomerSeatPins.DropEntry(entry, "spawn refused"); withState = false; bodyOnly = false; _adoptWhy = "spawn refused (capacity or fee)"; return false; }   // the entry stays unconsumed
+                if (list.Count <= before) { CustomerHandoff.StockAdoptUndo(reg, entryId, stockUndo); CustomerSeatPins.DropEntry(entry, "spawn refused"); withState = false; bodyOnly = false; _adoptWhy = "spawn refused (capacity or fee)"; return false; }   // the entry stays unconsumed
                 // Consumed — the regular spawner must not spawn it again. H-HANDOFF-1 (C3): set only AFTER the
                 // success check; before, a refused spawn still consumed the entry and that shopper never came.
                 entry.completed = true;

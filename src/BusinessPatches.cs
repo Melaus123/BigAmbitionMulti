@@ -251,6 +251,9 @@ namespace BigAmbitionsMP
             {
                 if (!__result || isPlayer || __instance == null) return;
                 NoteLivePay();   // H-SKIPDOUBLE-1 census - before the helper gate, so an OWNER counts too
+#if BAMP_DEV
+                CustomerHandoff.SdNotePaid(__instance);   // H-HANDOFF-1 stock oracle: an Order paid by a live checkout here
+#endif
                 if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
                 if (!BusinessHelperRoute.HelperHere(out var addr)) return;
                 string? entryId = CustomerEntrySync.EntryIdOf(__instance);
