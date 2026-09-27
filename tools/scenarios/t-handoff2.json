@@ -153,6 +153,10 @@
       "expect_result": "^OK custstate bldg='${gym}' sim='${hostPid}' mode=native natives=[1-9][0-9]* .*feeMax=1 ",
       "capture": { "hNat4": "natives=(\\d+)", "hAdopt4": "lastAdopt=(\\S+)", "hMatched4": "lastMatched=(\\d+)", "hVia4": "lastVia=(\\S+)" }
     },
-    { "seq": 54, "role": "h", "cmd": "mark TEST T-HANDOFF2 END", "expect_result": "OK MARK" }
+    {"seq": 54, "role": "h", "cmd": "exitbuilding", "expect_result": "^OK", "abort_on_fail": false, "note": "H1 LEG (fold H1, 2026-09-27): the booking player is gone (dropped) and the taker walks out too - the next native hourly pass runs the gym with nobody inside"},
+    {"seq": 55, "role": "h", "cmd": "mark TEST T-HANDOFF2 H1-HOUR", "expect_result": "OK MARK", "abort_on_fail": false, "expect_log": [{"role": "h", "regex": "\\[StaffRoster\\] [0-9]+ injected/synthetic record\\(s\\) sit out the hourly employee pass", "within_s": 150}], "note": "H1: wait for the next game-hour boundary on the host with the owner outside (an event, not a sleep)"},
+    {"seq": 56, "role": "h", "cmd": "tilldupes ${gym}", "abort_on_fail": false, "note": "REPORT-ONLY after the H1 hour"},
+    {"seq": 57, "role": "h", "cmd": "handoffbook ${gym}", "expect_result": "^OK handoffbook .*dupIds=0 lostIds=0 identity=ok .* fwdDouble=0 ", "abort_on_fail": false, "capture": {"h1Books": "books=(\\S+)", "h1Ledger": "ledger=(\\d+)", "h1FwdPairs": "fwdPairs=(\\d+)", "h1FwdInTill": "fwdInTill=(\\d+)", "h1FwdDouble": "fwdDouble=(\\d+)", "h1BoBy": "boBookedBy=(\\S+)"}, "note": "H1 ASSERTION: after the disconnect and an hour boundary with the owner outside, no visit is booked a second time (ledger identity; no forward-booked visit whose entry Order the pass also put in the till)"},
+    { "seq": 58, "role": "h", "cmd": "mark TEST T-HANDOFF2 END", "expect_result": "OK MARK" }
   ]
 }

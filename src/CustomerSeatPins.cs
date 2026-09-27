@@ -589,12 +589,28 @@ namespace BigAmbitionsMP
             table = FindItem(w.Item);
             if (table == null || table.SeatSpots == null || w.Index < 0 || w.Index >= table.SeatSpots.Length) { Unreserve(w); Fallback(w, "table missing at pick"); return false; }
             var s = table.SeatSpots[w.Index];
-            bool ok = s != null && ((w.Reserved && ReferenceEquals(s, w.Seat)) || s.IsAvailable);
+            bool mine = w.Reserved && ReferenceEquals(s, w.Seat);
+            bool ok = s != null && (mine || s.IsAvailable) && UsableTable(table, mine);
             if (!ok) { Unreserve(w); Fallback(w, "seat taken at pick"); return false; }
             seat = s;
             w.Reserved = true; w.Seat = s;
             MarkTaken(w);
             return true;
+        }
+
+        /// <summary>Fold L (2026-09-27): the game's own usability filter for a seat pick (BuildingManager
+        /// .GetAllTablesWithSeatsAvailable :1969-1987 - a Table-type item of this interior with a free seat). A seat this
+        /// body reserved counts as its free seat (ReserveAfter marked it occupied), so then only the Table type is checked.</summary>
+        private static bool UsableTable(ItemController table, bool reservedByMe)
+        {
+            try
+            {
+                if (table == null || table.Item == null || (table.Item.type & BigAmbitions.Items.ItemType.Table) == 0) return false;
+                if (reservedByMe) return true;
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                return bm != null && bm.GetAllTablesWithSeatsAvailable().Contains(table);
+            }
+            catch { return false; }
         }
 
         internal static WorkoutMachineController? TakeGym(Customer? c)
@@ -917,12 +933,14 @@ namespace BigAmbitionsMP
             {
                 var c = __instance.sharedCustomer != null ? __instance.sharedCustomer.Value : null;
                 if (c == null || !CustomerSeatPins.TryTakeSeat(c, out var seat, out var table) || seat == null) return true;
-                seat.occupied = true;
-                __instance._seatSpot = seat;
-                c.isSittingOn = seat;
+                // Fold L: everything that can throw first; the seat is marked taken last (a throw falls back to the
+                // native pick with nothing half-set).
                 var chair = seat.GetAttachedChair;
-                if (chair != null) { __instance._seatItemController = chair; chair.Occupied = true; }
-                else __instance._seatItemController = table;
+                __instance._seatItemController = chair != null ? chair : table;
+                __instance._seatSpot = seat;
+                if (chair != null) chair.Occupied = true;
+                seat.occupied = true;
+                c.isSittingOn = seat;
                 return false;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] seat pick error: {ex.Message}"); return true; }
@@ -938,12 +956,14 @@ namespace BigAmbitionsMP
             {
                 var c = __instance.sharedCustomer != null ? __instance.sharedCustomer.Value : null;
                 if (c == null || !CustomerSeatPins.TryTakeSeat(c, out var seat, out var table) || seat == null) return true;
-                seat.occupied = true;
-                __instance._seatSpot = seat;
-                c.isSittingOn = seat;
+                // Fold L: everything that can throw first; the seat is marked taken last (a throw falls back to the
+                // native pick with nothing half-set).
                 var chair = seat.GetAttachedChair;
-                if (chair != null) { __instance._seatItemController = chair; chair.Occupied = true; }
-                else __instance._seatItemController = table;
+                __instance._seatItemController = chair != null ? chair : table;
+                __instance._seatSpot = seat;
+                if (chair != null) chair.Occupied = true;
+                seat.occupied = true;
+                c.isSittingOn = seat;
                 return false;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] seat pick error: {ex.Message}"); return true; }
@@ -959,12 +979,14 @@ namespace BigAmbitionsMP
             {
                 var c = __instance.sharedCustomer != null ? __instance.sharedCustomer.Value : null;
                 if (c == null || !CustomerSeatPins.TryTakeSeat(c, out var seat, out var table) || seat == null) return true;
-                seat.occupied = true;
-                __instance._seatSpot = seat;
-                c.isSittingOn = seat;
+                // Fold L: everything that can throw first; the seat is marked taken last (a throw falls back to the
+                // native pick with nothing half-set).
                 var chair = seat.GetAttachedChair;
-                if (chair != null) { __instance._seatItemController = chair; chair.Occupied = true; }
-                else __instance._seatItemController = table;
+                __instance._seatItemController = chair != null ? chair : table;
+                __instance._seatSpot = seat;
+                if (chair != null) chair.Occupied = true;
+                seat.occupied = true;
+                c.isSittingOn = seat;
                 return false;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] seat pick error: {ex.Message}"); return true; }

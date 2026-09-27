@@ -920,7 +920,22 @@ namespace BigAmbitionsMP
                     if (hbReg == null) return $"ERR no registration at '{arg}'";
                     string hbKey = arg; try { hbKey = GameStateReader.AddressKey(hbReg); } catch { }
                     bool hbBooks = false; try { hbBooks = MergerFlip.BooksHere(hbReg); } catch { }
-                    return $"OK handoffbook {hbKey} books={hbBooks} " + CustomerHandoff.LedgerReport(hbReg);
+                    return $"OK handoffbook {hbKey} books={hbBooks} " + CustomerHandoff.LedgerReport(hbReg)
+                         + " " + CustomerEntrySync.ForwardDoubleReport(hbReg) + " ";
+                }
+
+                case "stockdelta":
+                {
+                    // `stockdelta <num> <ba:street_x> [mark]` - H-HANDOFF-1 fold H2 STOCK oracle (CustomerHandoff.StockDelta):
+                    // 'mark' snapshots the shop's stock / till / live baskets; a bare readout reports the per-item deltas
+                    // since the last mark and marks again.
+                    string sdArg = arg.Trim();
+                    bool sdMark = false;
+                    if (sdArg.EndsWith(" mark", StringComparison.OrdinalIgnoreCase)) { sdMark = true; sdArg = sdArg.Substring(0, sdArg.Length - 5).Trim(); }
+                    if (sdArg.Length == 0) return "ERR usage: stockdelta <num> <ba:street_x> [mark]";
+                    var sdReg = GameStatePatcher.FindRegistration(sdArg);
+                    if (sdReg == null) return $"ERR no registration at '{sdArg}'";
+                    return "OK stockdelta " + CustomerHandoff.StockDelta(sdReg, sdMark);
                 }
 
                 case "skipvote":

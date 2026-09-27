@@ -348,6 +348,45 @@ namespace BigAmbitionsMP
         private static readonly HashSet<string> _bookedForwards = new();
         internal static bool ForwardBooked(string entryId)
             => !string.IsNullOrEmpty(entryId) && _bookedForwards.Contains(entryId);
+        /// <summary>Fold L (2026-09-27): per session, like the book-once registry (BookOnce.Reset).</summary>
+        internal static void ClearBookedForwards() { try { _bookedForwards.Clear(); } catch { } }
+
+        /// <summary>Fold M4: the schedule id this machine already gave an entry (never mints one).</summary>
+        internal static string? KnownIdOf(CustomerEntry? e)
+            => e != null && _ownerIds.TryGetValue(e, out var id) ? id : null;
+
+#if BAMP_DEV
+        // H1 rig oracle (t-handoff2): every forward booked here with the entry Order it claimed. Survives the
+        // session wipe on purpose - a second booking of the same visit after the wipe is what it must catch.
+        private static readonly List<(string id, string addr, Order? entryOrder, Order fwd)> _devFwdPairs = new();
+        internal static string ForwardDoubleReport(BuildingRegistration reg)
+        {
+            try
+            {
+                string key = GameStateReader.AddressKey(reg);
+                var till = reg.unprocessedCompletedOrders;
+                int n = 0, dbl = 0, fwdIn = 0;
+                var bad = new List<string>();
+                foreach (var pr in _devFwdPairs)
+                {
+                    if (pr.addr != key) continue;
+                    n++;
+                    bool fIn = false, eIn = false;
+                    if (till != null)
+                        foreach (var o in till)
+                        {
+                            if (o == null) continue;
+                            if (ReferenceEquals(o, pr.fwd)) fIn = true;
+                            else if (pr.entryOrder != null && ReferenceEquals(o, pr.entryOrder) && o.completed && o.entries != null && o.entries.Exists(x => x != null && x.paid)) eIn = true;
+                        }
+                    if (fIn) fwdIn++;
+                    if (fIn && eIn) { dbl++; bad.Add(pr.id); }
+                }
+                return $"fwdPairs={n} fwdInTill={fwdIn} fwdDouble={dbl} fwdDoubleIds={(bad.Count == 0 ? "-" : string.Join(";", bad))}";
+            }
+            catch (Exception ex) { return "fwdERR " + ex.Message; }
+        }
+#endif
 
         /// <summary>BookOnce's hourly set-aside: this machine's live schedule list for a shop (the list the native
         /// simulators read through CustomerEntriesHelper.GetEntriesByAddress). Null when it holds none.</summary>
@@ -452,10 +491,14 @@ namespace BigAmbitionsMP
                 // :171-186, ProcessCustomer :207+), so a claimed-but-listed entry was booked AGAIN at the
                 // hour-end tick whenever the owner stood outside. Retire the claimed entry from the live
                 // list: the adopted Order below (timestamp now) still feeds the daily quota subtraction.
-                // BOOK ONCE: a REGISTERED entry stays in the table - the registry sets it aside from every hourly pass,
-                // and a body this machine adopts (or takes back) for that visit still finds its entry (seat, clock).
+                // Fold H1 (2026-09-27): a REGISTERED entry is retired too. Kept in the table it relied on the registry's
+                // hourly set-aside, and the registry is wiped on MP stop / scene-ready (CustomerPuppets.Reset ->
+                // CustomerHandoff.Reset -> BookOnce.Reset): the next native pass then booked the entry's own Order a
+                // second time. A later take-back of the visit adopts from a stand-alone entry built from the row
+                // (CustomerPuppets.AdoptPuppetAsNative, 'registered visit whose entry left this machine's table').
+                if (claimedEntry?.order != null) BookOnce.MapOrder(claimedEntry.order, p.EntryId);   // fold M4 (and H2(a): its live body)
                 int leftThisHour = -1;
-                if (claimedEntry != null && entries != null && !registered)
+                if (claimedEntry != null && entries != null)
                 {
                     try
                     {
@@ -571,7 +614,11 @@ namespace BigAmbitionsMP
                 if (registered) BookOnce.TryBook(p.EntryId, "forwarded sale", o);   // first booking: marks the visit booked
                 reg.unprocessedCompletedOrders.Add(o);
                 _processedForwards.Add(p.EntryId);
-                if (_bookedForwards.Count < 4000) _bookedForwards.Add(p.EntryId);
+                if (_bookedForwards.Count >= 4000) _bookedForwards.Clear();   // fold L: never silently stop recording
+                _bookedForwards.Add(p.EntryId);
+#if BAMP_DEV
+                if (_devFwdPairs.Count < 3000) _devFwdPairs.Add((p.EntryId, p.AddressKey, claimedEntry?.order, o));
+#endif
                 CustomerHandoff.NoteForward(p.EntryId, o);   // H-HANDOFF-1 till ledger (rig oracle)
                 float orderRevenue = 0f;
                 foreach (var oe in o.entries) if (oe != null && oe.paid) orderRevenue += oe.price;
@@ -582,7 +629,7 @@ namespace BigAmbitionsMP
                 BuildingStorageSync.OwnerBusinessTail(reg);
                 InteriorSync.PushOwnedBuildingNow(p.AddressKey);
                 Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s) ${repricedTotal:F2} (forwarded at ${forwardedTotal:F2}){(bagged ? " +bag" : "")}{(feeLines > 0 ? $" (incl. {feeLines} entrance-fee line(s), no stock)" : "")}{(refused > 0 ? $" ({refused} refused on price)" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}."
-                    + (claimedEntry != null ? (registered ? " [PROBE:P-HELPER-DOUBLEBOOK] entry kept (book-once registry sets it aside from hourly passes)." : $" [PROBE:P-HELPER-DOUBLEBOOK] entry retired from the live table; {leftThisHour} unserved left this hour.") : (known ? "" : " [PROBE:P-HELPER-DOUBLEBOOK] entry unknown — nothing to retire; quota relies on the adopted order's timestamp.")));
+                    + (claimedEntry != null ? $" [PROBE:P-HELPER-DOUBLEBOOK] entry retired from the live table{(registered ? " (book once)" : "")}; {leftThisHour} unserved left this hour."  : (known ? "" : " [PROBE:P-HELPER-DOUBLEBOOK] entry unknown — nothing to retire; quota relies on the adopted order's timestamp.")));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] adopt forwarded order: {ex.Message}"); }
         }

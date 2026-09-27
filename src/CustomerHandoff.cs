@@ -533,6 +533,127 @@ namespace BigAmbitionsMP
         internal static void Arm(int n) { _armN = n; }
         /// <summary>Part B: `custstate arm seated <n>` - one line the moment n live natives sit on a table seat.</summary>
         internal static void ArmSeated(int n) { _armSeatN = n; }
+        // ── DEV: `stockdelta <shop> [mark]` - the rig's STOCK oracle (fold H2) on the machine that keeps the books ──
+        // Building stock per item (every cargo slot of the shop's item instances: shelves, storage, the register) against
+        // the till, between two readouts (each readout re-marks). Per item: drop = stock then - stock now; sold = PAID
+        // lines of the till Orders appended since; held = basket lines in the open orders of live bodies here now minus
+        // then: paid (ProcessSelfServiceOrder :38-50 pays as it takes the unit) or validated available + acceptable (the
+        // walking pick, SelfServiceCustomerTryGrabItem -> OrderHelper.Validate then Customer.GrabItem :504-530
+        // SubtractFromStock, paid only at the checkout). A replica's pick touches no stock (ProcessSelfServiceOrder :21-28,
+        // GrabItem's owner gate), so an adopted body carrying one shows as held without a drop. stockOk <=> every stocked item has drop == sold + held (taken exactly once
+        // per sale, none from nothing). lost = done-but-unpaid lines of the new Orders (report-only). Items never
+        // stocked here (made by a producer, a fee) are listed as made; paper bags (a random bag name) are report-only.
+        private static string _sdKey = "", _sdAt = "";
+        private static Dictionary<string, int>? _sdStock, _sdHeld;
+        private static List<Order>? _sdTill;
+
+        private static void SdAdd(Dictionary<string, int> d, string k, int n) { d.TryGetValue(k, out var v); d[k] = v + n; }
+        private static bool SdBag(string n) => n.IndexOf("bag", StringComparison.OrdinalIgnoreCase) >= 0 && n.IndexOf("paper", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        private static Dictionary<string, int> SdStock(BuildingRegistration reg)
+        {
+            var d = new Dictionary<string, int>();
+            try
+            {
+                if (reg.itemInstances != null)
+                    foreach (var kv in reg.itemInstances)
+                    {
+                        var ii = kv.Value;
+                        if (ii?.cargoInstances == null) continue;
+                        foreach (var ci in ii.cargoInstances)
+                            if (ci != null && !string.IsNullOrEmpty(ci.itemName)) SdAdd(d, ci.itemName, (int)ci.amount);
+                    }
+            }
+            catch { }
+            return d;
+        }
+
+        private static Dictionary<string, int> SdHeld(BuildingRegistration reg)
+        {
+            var d = new Dictionary<string, int>();
+            try
+            {
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || !ReferenceEquals(bm.buildingRegistration, reg)) return d;
+                foreach (var c in IndoorCustomerSpawner.Customers)
+                {
+                    if (c == null || c.isPlayer || c.order == null || c.order.completed || c.order.entries == null) continue;
+                    foreach (var e in c.order.entries)
+                        if (e != null && !string.IsNullOrEmpty(e.itemName) && (e.paid || (e.available && e.priceAccceptable))) SdAdd(d, e.itemName, 1);
+                }
+            }
+            catch { }
+            return d;
+        }
+
+        internal static string StockDelta(BuildingRegistration reg, bool markOnly)
+        {
+            try
+            {
+                string key = GameStateReader.AddressKey(reg);
+                var stock = SdStock(reg);
+                var held = SdHeld(reg);
+                var till = reg.unprocessedCompletedOrders;
+                var tillNow = till != null ? new List<Order>(till) : new List<Order>();
+                string now = "";
+                try { var tm = TimeHelper.Now(); now = $"d{tm.Day}-{tm.Hour:00}:{(int)tm.Minute:00}"; } catch { }
+                int heldSum = 0; foreach (var v in held.Values) heldSum += v;
+                string res;
+                if (markOnly || _sdStock == null || _sdHeld == null || _sdTill == null || _sdKey != key)
+                    res = $"{key} marked at={now} items={stock.Count} held={heldSum} till={tillNow.Count}{(markOnly ? "" : " (no earlier mark - marked now)")}";
+                else
+                {
+                    var sold = new Dictionary<string, int>();
+                    var lost = new Dictionary<string, int>();
+                    int newOrders = 0;
+                    foreach (var o in tillNow)
+                    {
+                        if (o == null || o.entries == null) continue;
+                        bool old = false;
+                        foreach (var q in _sdTill) if (ReferenceEquals(q, o)) { old = true; break; }
+                        if (old) continue;
+                        newOrders++;
+                        foreach (var e in o.entries)
+                        {
+                            if (e == null || string.IsNullOrEmpty(e.itemName)) continue;
+                            if (e.paid) SdAdd(sold, e.itemName, 1);
+                            else if (e.processed && e.priceAccceptable) SdAdd(lost, e.itemName, 1);
+                        }
+                    }
+                    var names = new SortedSet<string>(StringComparer.Ordinal);
+                    foreach (var k in stock.Keys) names.Add(k);
+                    foreach (var k in _sdStock.Keys) names.Add(k);
+                    foreach (var k in sold.Keys) names.Add(k);
+                    foreach (var k in lost.Keys) names.Add(k);
+                    foreach (var k in held.Keys) names.Add(k);
+                    foreach (var k in _sdHeld.Keys) names.Add(k);
+                    var per = new List<string>();
+                    var bad = new List<string>();
+                    int dropT = 0, soldT = 0, lostT = 0, heldT = 0, made = 0, bagDrop = 0, bagSold = 0;
+                    foreach (var nm in names)
+                    {
+                        _sdStock.TryGetValue(nm, out var b0); stock.TryGetValue(nm, out var b1);
+                        sold.TryGetValue(nm, out var s); lost.TryGetValue(nm, out var l);
+                        held.TryGetValue(nm, out var h1); _sdHeld.TryGetValue(nm, out var h0);
+                        int drop = b0 - b1, hd = h1 - h0;
+                        if (drop == 0 && s == 0 && l == 0 && hd == 0) continue;
+                        string sn = CustomerEntrySync.ShortItem(nm);
+                        if (SdBag(nm)) { bagDrop += drop; bagSold += s; continue; }
+                        if (!_sdStock.ContainsKey(nm) && !stock.ContainsKey(nm)) { made += s; per.Add($"{sn}:made{s}"); continue; }
+                        dropT += drop; soldT += s; lostT += l; heldT += hd;
+                        per.Add($"{sn}:{drop}/{s}/{hd}/{l}");
+                        if (drop != s + hd) bad.Add($"{sn}:{drop}!={s}+{hd}");
+                    }
+                    res = $"{key} since={_sdAt} at={now} newOrders={newOrders} dropTotal={dropT} soldTotal={soldT} lostTotal={lostT} heldDelta={heldT} "
+                        + $"madeSold={made} bags={bagDrop}/{bagSold} stockOk={(bad.Count == 0 ? "True" : "False")} bad={(bad.Count == 0 ? "-" : string.Join(";", bad))} "
+                        + $"per={(per.Count == 0 ? "-" : string.Join(";", per))}";
+                }
+                _sdKey = key; _sdStock = stock; _sdHeld = held; _sdTill = tillNow; _sdAt = now;
+                return res + " ";
+            }
+            catch (Exception ex) { return "ERR stockdelta " + ex.Message; }
+        }
+
         internal static void ArmTick(int natives, int copies)
         {
             if (_armSeatN > 0)

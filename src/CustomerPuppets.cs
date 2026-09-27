@@ -858,6 +858,61 @@ namespace BigAmbitionsMP
             return $"items={n} paid={paid} total=${total:F2} completed={o.completed} score={o.customerDemandScore:F2}";
         }
 
+        /// <summary>Fold H2(a) (2026-09-27): the visit <paramref name="id"/> was just booked on this machine by another Order
+        /// (a forward, or any other funnel) while this machine's own body of that visit is alive with an open order: it
+        /// would queue again and the employee would serve it a second time (the paper bag FullServiceEmployee.cs:95, the
+        /// retail lines :59/:166-196) - stock taken twice. Its order is finished the way the native exit clean-up does it
+        /// (Customer.ForceFinishOrder :363-371 drops the unprocessed lines) but WITHOUT a till add, completed first so
+        /// Customer.Leave (:309-313) puts nothing back on a shelf, and the body leaves.</summary>
+        internal static int FinishLiveBodiesOf(string id, Order? booking)
+        {
+            int n = 0;
+            try
+            {
+                if (string.IsNullOrEmpty(id)) return 0;
+                List<Customer>? hit = null;
+                foreach (var lc in IndoorCustomerSpawner.Customers)
+                {
+                    if (lc == null || lc.isPlayer || lc.order == null || lc.order.completed) continue;
+                    if (booking != null && ReferenceEquals(lc.order, booking)) continue;
+                    if (LiveIdOf(lc) != id) continue;
+                    (hit ??= new List<Customer>()).Add(lc);
+                }
+                if (hit == null) return 0;
+                foreach (var lc in hit)
+                {
+                    try
+                    {
+                        var oes = lc.order.entries;
+                        int before = oes != null ? oes.Count : 0;
+                        if (oes != null) oes.RemoveAll(x => x == null || !x.processed);
+                        int after = oes != null ? oes.Count : 0;
+                        lc.order.completed = true;
+                        lc.Leave();
+                        n++;
+                        Plugin.Logger.LogInfo($"[BookOnce] {id} booked while its body lived here - its order finished ({before - after} open line(s) dropped, {after} kept, no till add); it leaves without being served again.");
+                    }
+                    catch (Exception lx) { Plugin.Logger.LogWarning($"[BookOnce] finish body {id}: {lx.Message}"); }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] finish bodies {id}: {ex.Message}"); }
+            return n;
+        }
+
+        /// <summary>A live body's visit id: its Order in the book-once map, else this machine's own stream identity.</summary>
+        private static string? LiveIdOf(Customer? lc)
+        {
+            try
+            {
+                if (lc == null) return null;
+                var id = BookOnce.IdOf(lc.order);
+                if (id != null) return id;
+                if (_custEntryIds.TryGetValue(lc.GetInstanceID(), out var t) && ReferenceEquals(t.order, lc.order)) return t.id;
+            }
+            catch { }
+            return null;
+        }
+
         private static bool AdoptPuppetAsNative(BuildingRegistration? reg, string entryId, Puppet? pup, CustomerVisitRow? v,
                                                 out bool withState, out bool leftNow, out bool matched, out bool bodyOnly)
         {
@@ -903,7 +958,8 @@ namespace BigAmbitionsMP
                 if (pup == null)
                 {
                     bool live = false;
-                    try { foreach (var lc in IndoorCustomerSpawner.Customers) if (lc != null && !lc.isPlayer && ReferenceEquals(lc.customerEntry, entry)) { live = true; break; } } catch { }
+                    // Fold L: a row-built stand-in entry is a NEW object - a live body of the same visit is found by its id.
+                    try { foreach (var lc in IndoorCustomerSpawner.Customers) if (lc != null && !lc.isPlayer && (ReferenceEquals(lc.customerEntry, entry) || LiveIdOf(lc) == entryId)) { live = true; break; } } catch { }
                     if (live) { _adoptWhy = "already live on this machine"; return false; }
                 }
                 string fee = "";
@@ -918,8 +974,8 @@ namespace BigAmbitionsMP
                 bodyOnly = booked;
                 // NOT guarded on entry.completed, deliberately: that flag means 'consumed by the spawner on this
                 // machine' (native sets it at spawn, paid or not), so it is true for every live shopper this machine
-                // ever spawned. A sale this machine already BOOKED through a forward cannot reach here: the owner's
-                // forward-adopt removes the claimed entry from the table, so TryFindEntry above returns null.
+                // ever spawned. A sale this machine already BOOKED through a forward reaches here only through the
+                // stand-alone entry: the owner's forward-adopt removes the claimed entry from the table (fold H1).
                 //
                 // H-HANDOFF-1 step 6: load the old simulator's visit row BEFORE the spawn, so the native Init reads
                 // it: the visit clock (Customer.SetCurrentTimeState :593-611 and the subclasses read
@@ -996,6 +1052,11 @@ namespace BigAmbitionsMP
                     // ForceFinishOrder strips its unprocessed items, rig run T-HANDOFFSEAT-20260927-011851: items=0 and the
                     // body left at once).
                     entry.order = v?.Entries != null && v.Entries.Count > 0 ? OrderFromRow(v, tillOrder) : CloneOrder(tillOrder);
+                    // Fold H2(b): no new shopping on a booked visit - the copy keeps only its DONE lines (the food a diner
+                    // eats, a paid fee), and it is marked so Customer.Leave -> ReturnItemsToShelf (Customer.cs:307-313)
+                    // never puts the row's items (picked on the partner's machine) onto this machine's shelves.
+                    try { entry.order.entries?.RemoveAll(x => x == null || !x.processed); } catch { }
+                    BookOnce.MarkBookedCopy(entry.order);
                     BookOnce.MapOrder(entry.order, entryId);   // the copy's payments are this visit's: suppressed
                 }
                 CustomerHandoff.BeginAdopt(withState || booked, suppressCheck, suppressPay);

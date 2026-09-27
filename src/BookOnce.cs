@@ -37,13 +37,22 @@ namespace BigAmbitionsMP
     ///     entry of that hour ASIDE from the schedule list for the length of the pass (no till add, no stock, no fee);
     ///     HourlyEnd puts it back and books every Unbooked entry whose Order the pass put in the till.
     ///   - The forwarded sale (CustomerEntrySync.OwnerAdoptForwardedOrder): TryBook before any stock is touched.
-    /// An UNPAID till add (nothing the day roll would pay - the native exit clean-up ForceFinishOrder, a refused fee) never
-    /// books a registered visit: it is taken out of the till again and the visit stays unbooked (DropUnpaid).
-    /// The till watcher: every Order appended to the till of the building this machine stands in is looked up
-    /// (registered entry Order, or a detached body copy); an Unbooked visit is booked by it, a Booked one is removed
-    /// again at once with one '[BookOnce] &lt;id&gt; already booked by &lt;source&gt; - &lt;funnel&gt; suppressed' line.
-    /// NOT GATED (physical stock a live body moves BEFORE its till add): the full-service paper bag
-    /// (FullServiceEmployee :95 SubtractFromStock) and the items the employee / the customer takes off the shelves.</summary>
+    /// An UNPAID till add (nothing the day roll would pay - a refused fee, the exit clean-up of an unpaid order) never
+    /// books a registered visit (fold M2, 2026-09-27): it STAYS in the till - it feeds the pricing satisfaction
+    /// (BusinessHelper.cs:830-842), the hourly quota (CustomerEntriesCalculator :100) and the security count
+    /// (BusinessSecurityHelper :188) - as a frozen SNAPSHOT (a copy), so the visit's own Order is free to go on and
+    /// book once later without a second reference in the till. A till add made inside the native exit clean-up
+    /// (Customer.ForceFinishOrder :363-371, fold M1) is never a booking either, paid lines or not: its paid lines
+    /// (a gym fee, a coat-check fee, a bar round) are counted exactly once - by the snapshot while the visit stays
+    /// unbooked, and the snapshot is UNPAID the moment a later booking of the visit (which carries those lines: the
+    /// row / forward holds them paid) books it (UnpaySnap).
+    /// The till watcher (fold M3: by reference, not by list length): every Order occurrence appended to the till of
+    /// the building this machine stands in is looked up (registered entry Order, or a detached body copy); an Unbooked
+    /// visit is booked by a paid one, a Booked one is removed again at once with one
+    /// '[BookOnce] &lt;id&gt; already booked by &lt;source&gt; - &lt;funnel&gt; suppressed' line.
+    /// Fold H2 (stock): a visit booked while this machine's own body of it is alive with an open order - that body's
+    /// order is finished (CustomerPuppets.FinishLiveBodiesOf) so it is never served a second time; a booked adopted
+    /// body's detached copy keeps only its done lines and never returns items to this machine's shelves.</summary>
     internal static class BookOnce
     {
         private sealed class Rec
@@ -53,6 +62,16 @@ namespace BigAmbitionsMP
             public bool Booked;
             public string Source = "";
             public Order? BookedOrder;
+            public Order? ExitSnap;                  // fold M1: a partly paid exit clean-up kept in the till (unbooked visit)
+            public BuildingRegistration? Reg;
+        }
+
+        /// <summary>Fold M3: Orders compared by reference (the till watcher's occurrence counts).</summary>
+        private sealed class RefEq : IEqualityComparer<Order>
+        {
+            internal static readonly RefEq I = new RefEq();
+            public bool Equals(Order x, Order y) => ReferenceEquals(x, y);
+            public int GetHashCode(Order o) => RuntimeHelpers.GetHashCode(o);
         }
 
         private static readonly Dictionary<string, Rec> _recs = new();
@@ -66,7 +85,18 @@ namespace BigAmbitionsMP
         private static int _watchCount = -1;
         private static int _nextPruneMin = -1;
         private static bool _inFee;
+        private static bool _inExit;                 // fold M1: inside Customer.ForceFinishOrder
         internal static int Suppressed;
+        // Fold M3: the till watcher's occurrence counts per Order reference (two maps swapped per look).
+        private static readonly Dictionary<Order, int> _seenA = new(RefEq.I), _seenB = new(RefEq.I);
+        private static Dictionary<Order, int> _seen = _seenA;
+        private static Order? _watchLast;
+        // Fold H2(b): detached copies of booked visits (a booked adopted body's order).
+        private static ConditionalWeakTable<Order, object> _bookedCopies = new();
+        // Fold H2(a): visits booked this frame whose live body here must be finished (processed in Tick).
+        private static readonly List<KeyValuePair<string, Order?>> _finish = new();
+        internal static int UnpaidKept, ExitKept, ExitUnpaid, Finished, CopyReturnsBlocked;
+        private static readonly Dictionary<string, int> _keptBy = new();
 
         internal static void Reset()
         {
@@ -75,8 +105,15 @@ namespace BigAmbitionsMP
                 _recs.Clear();
                 _orderIds = new ConditionalWeakTable<Order, string>();
                 _paidHere = new ConditionalWeakTable<Order, object>();
-                _registeredBy.Clear(); _bookedBy.Clear(); _suppressedBy.Clear(); _unpaidBy.Clear(); UnpaidDropped = 0;
-                _watchReg = null; _watchCount = -1; _nextPruneMin = -1; _inFee = false; Suppressed = 0;
+                _registeredBy.Clear(); _bookedBy.Clear(); _suppressedBy.Clear(); _keptBy.Clear();
+                UnpaidKept = 0; ExitKept = 0; ExitUnpaid = 0; Finished = 0; CopyReturnsBlocked = 0;
+                _watchReg = null; _watchCount = -1; _watchLast = null; _seenA.Clear(); _seenB.Clear(); _seen = _seenA;
+                _nextPruneMin = -1; _inFee = false; _inExit = false; Suppressed = 0;
+                _bookedCopies = new ConditionalWeakTable<Order, object>();
+                _finish.Clear();
+                // Fold L: the forward ledger is per session like the registry (H1: a forward-booked entry left the
+                // schedule at forward time, so nothing it booked can be re-booked by a pass after this wipe).
+                CustomerEntrySync.ClearBookedForwards();
             }
             catch { }
         }
@@ -130,6 +167,17 @@ namespace BigAmbitionsMP
         private static string? IdOfOrder(Order? o)
             => o != null && _orderIds.TryGetValue(o, out var id) ? id : null;
 
+        /// <summary>The visit id a body's Order is mapped to (null: none).</summary>
+        internal static string? IdOf(Order? o) => IdOfOrder(o);
+
+        /// <summary>Fold H2(b): the detached copy a booked adopted body carries.</summary>
+        internal static void MarkBookedCopy(Order? o)
+        {
+            try { if (o != null) { _bookedCopies.Remove(o); _bookedCopies.Add(o, _mark); } } catch { }
+        }
+        internal static bool IsBookedCopy(Order? o) => o != null && _bookedCopies.TryGetValue(o, out _);
+        internal static void NoteCopyReturnBlocked() { CopyReturnsBlocked++; }
+
         private static bool InTill(BuildingRegistration reg, Order o)
         {
             try
@@ -158,12 +206,12 @@ namespace BigAmbitionsMP
                 if (_recs.Count >= MaxRecs) return false;
                 entry ??= CustomerEntrySync.TryFindEntry(reg, id);
                 if (entry?.order != null) MapOrder(entry.order, id);
-                var r = new Rec { Addr = GameStateReader.AddressKey(reg), RegisteredMin = NowMin() };
+                var r = new Rec { Addr = GameStateReader.AddressKey(reg), RegisteredMin = NowMin(), Reg = reg };
                 if (CustomerEntrySync.ForwardBooked(id)) { r.Booked = true; r.Source = "forwarded sale (before registration)"; }
                 else if (entry?.order != null && InTill(reg, entry.order))
                 {
                     if (HasPaid(entry.order)) { r.Booked = true; r.Source = "till (before registration)"; r.BookedOrder = entry.order; }
-                    else DropUnpaid(reg, entry.order, id, "till (before registration)");
+                    else KeepInTill(reg, entry.order, id, r, "till (before registration)", false);
                 }
                 _recs[id] = r;
                 Bump(_registeredBy, how);
@@ -179,6 +227,10 @@ namespace BigAmbitionsMP
             r.Booked = true; r.Source = source; r.BookedOrder = o;
             Bump(_bookedBy, source);
             Plugin.Logger.LogInfo($"[BookOnce] {id} booked by {source}{(o != null ? $" (${PaidTotal(o):F2} paid)" : "")}.");
+            // Fold M1: an exit snapshot kept paid for this visit - the booking carries those lines now.
+            if (r.ExitSnap != null && !ReferenceEquals(r.ExitSnap, o)) UnpaySnap(id, r, source);
+            // Fold H2(a): a live body of this visit on this machine with another open Order is finished (next Tick).
+            if (_finish.Count < 200) _finish.Add(new KeyValuePair<string, Order?>(id, o));
         }
 
         /// <summary>What the day roll pays for: BusinessHelper.CreateDailyOrderHistory (:234-261) takes an Order only when
@@ -201,27 +253,85 @@ namespace BigAmbitionsMP
             return s;
         }
 
-        /// <summary>An UNPAID till add of a registered, unbooked visit is no booking: the native exit clean-up
-        /// (Customer.OnExitBuilding -> ForceFinishOrder :366-373 -> CompleteOrder) completes every live customer's order
-        /// with nothing paid while that visit goes on on the partner's machine (rig run T-HANDOFFSEAT-20260927-011125:
-        /// it 'booked' Client1-170 at $0 and the partner's real sale was suppressed). The day roll pays nothing for it,
-        /// so it is taken out of the till again (money-neutral) and the visit stays unbooked.</summary>
-        internal static int UnpaidDropped;
-        private static readonly Dictionary<string, int> _unpaidBy = new();
-        private static void DropUnpaid(BuildingRegistration reg, Order o, string id, string funnel, int index = -1)
+        /// <summary>Folds M1/M2 (2026-09-27): a till add of a registered, UNBOOKED visit that is no booking - an unpaid one
+        /// (the day roll pays nothing for it) or any add made inside the native exit clean-up (Customer.ForceFinishOrder
+        /// :363-371 completes the live order with whatever it holds; rig run T-HANDOFFSEAT-20260927-011125 'booked'
+        /// Client1-170 at $0 and suppressed the partner's real sale). It STAYS in the till (M2: pricing satisfaction,
+        /// the hourly quota and the security count read it) as a frozen snapshot, so the visit's own Order - which the
+        /// visit goes on with (an adoption writes the partner's row into it in place) - never sits in the till twice.
+        /// A paid exit snapshot is remembered: its paid lines count through it until a later booking of the visit
+        /// carries them (MarkBooked -> UnpaySnap).</summary>
+        private static void KeepInTill(BuildingRegistration reg, Order o, string id, Rec r, string funnel, bool paidExit, int index = -1)
         {
             try
             {
                 var till = reg.unprocessedCompletedOrders;
-                int n = 0;
-                if (till != null && index >= 0 && index < till.Count && ReferenceEquals(till[index], o)) { till.RemoveAt(index); n++; }
-                else if (till != null && index < 0) for (int i = till.Count - 1; i >= 0; i--) if (ReferenceEquals(till[i], o)) { till.RemoveAt(i); n++; }
-                if (n == 0) return;
-                UnpaidDropped++;
-                Bump(_unpaidBy, funnel);
-                Plugin.Logger.LogInfo($"[BookOnce] {id} unpaid till add ({funnel}) is no booking - removed, the visit stays unbooked.");
+                if (till == null) return;
+                if (index < 0 || index >= till.Count || !ReferenceEquals(till[index], o))
+                {
+                    index = -1;
+                    for (int i = till.Count - 1; i >= 0; i--) if (ReferenceEquals(till[i], o)) { index = i; break; }
+                }
+                if (index < 0) return;
+                var snap = Snapshot(o);
+                till[index] = snap;
+                Bump(_keptBy, funnel);
+                if (paidExit)
+                {
+                    if (r.ExitSnap != null) UnpaySnap(id, r, "a newer exit snapshot of the same visit");
+                    r.ExitSnap = snap;
+                    ExitKept++;
+                    Plugin.Logger.LogInfo($"[BookOnce] {id} exit clean-up ({funnel}) completed a partly paid order - no booking: kept in the till as a snapshot (${PaidTotal(snap):F2} paid on it counts there until a later booking of this visit carries it).");
+                }
+                else
+                {
+                    UnpaidKept++;
+                    Plugin.Logger.LogInfo($"[BookOnce] {id} unpaid till add ({funnel}) is no booking - kept in the till as a snapshot, the visit stays unbooked.");
+                }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] drop unpaid {id}: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] keep {id}: {ex.Message}"); }
+        }
+
+        private static readonly System.Reflection.MethodInfo? _clone =
+            typeof(object).GetMethod("MemberwiseClone", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+
+        /// <summary>A frozen copy of an Order (every field; its own copies of the entries).</summary>
+        private static Order Snapshot(Order o)
+        {
+            Order? c = null;
+            try { c = _clone?.Invoke(o, null) as Order; } catch { }
+            c ??= new Order { completed = o.completed, timestamp = o.timestamp, cleanliness = o.cleanliness };
+            var l = new List<OrderEntry>();
+            if (o.entries != null)
+                foreach (var e in o.entries)
+                {
+                    if (e == null) continue;
+                    OrderEntry? ec = null;
+                    try { ec = _clone?.Invoke(e, null) as OrderEntry; } catch { }
+                    l.Add(ec ?? e);
+                }
+            c.entries = l;
+            return c;
+        }
+
+        /// <summary>Fold M1: the visit's kept exit snapshot stops counting its paid lines - the booking that just
+        /// happened carries them (a forward holds every paid line of the partner's order, the row the lines paid).</summary>
+        private static void UnpaySnap(string id, Rec r, string why)
+        {
+            try
+            {
+                var s = r.ExitSnap;
+                r.ExitSnap = null;
+                if (s == null) return;
+                float amt = PaidTotal(s);
+                bool inTill = r.Reg != null && InTill(r.Reg, s);
+                if (s.entries != null) foreach (var e in s.entries) if (e != null) e.paid = false;
+                ExitUnpaid++;
+                Plugin.Logger.LogInfo(inTill
+                    ? $"[BookOnce] {id} exit snapshot unpaid (${amt:F2}) - {why} carries the whole visit; the snapshot stays in the till unpaid."
+                    : $"[BookOnce] {id} exit snapshot (${amt:F2}) had already left the till (a day roll paid it) - {why}: that amount may count twice.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] unpay {id}: {ex.Message}"); }
         }
 
         private static void NoteSuppressed(string id, Rec r, string funnel)
@@ -259,62 +369,107 @@ namespace BigAmbitionsMP
 
         internal static void FeeBegin() { _inFee = true; }
         internal static void FeeEnd() { _inFee = false; }
+        internal static void ExitBegin() { _inExit = true; }
+        internal static void ExitEnd() { _inExit = false; }
 
         /// <summary>Once per frame (CustomerPuppets.Tick) and right after the patched till-adding methods: every Order
-        /// appended to the till of the building this machine stands in since the last look.</summary>
+        /// occurrence appended to the till of the building this machine stands in since the last look. Fold M3: tracked
+        /// by reference (occurrence counts per Order), so an Order removed below the old end plus one appended in the
+        /// same frame is still examined.</summary>
         internal static void Scan(string? funnel)
         {
             try
             {
                 var bm = InstanceBehavior<BuildingManager>.Instance;
                 var reg = bm != null ? bm.buildingRegistration : null;
-                if (reg == null) { _watchReg = null; _watchCount = -1; return; }
+                if (reg == null) { _watchReg = null; _watchCount = -1; _watchLast = null; _seen.Clear(); return; }
                 var till = reg.unprocessedCompletedOrders;
                 if (till == null) return;
-                if (!ReferenceEquals(reg, _watchReg) || _watchCount < 0 || till.Count < _watchCount)
-                {
-                    _watchReg = reg; _watchCount = till.Count; return;
-                }
-                if (till.Count == _watchCount) return;
-                if (_recs.Count == 0 || !MergerFlip.BooksHere(reg)) { _watchCount = till.Count; return; }
-                for (int i = _watchCount; i < till.Count; i++)
+                if (!ReferenceEquals(reg, _watchReg) || _watchCount < 0) { _watchReg = reg; Recount(till); return; }
+                Order? last = till.Count > 0 ? till[till.Count - 1] : null;
+                if (till.Count == _watchCount && ReferenceEquals(last, _watchLast)) return;
+                if (_recs.Count == 0 || !MergerFlip.BooksHere(reg)) { Recount(till); return; }
+                var cur = ReferenceEquals(_seen, _seenA) ? _seenB : _seenA;
+                cur.Clear();
+                for (int i = 0; i < till.Count; i++)
                 {
                     var o = till[i];
-                    string? id = IdOfOrder(o);
-                    if (id == null || !_recs.TryGetValue(id, out var r)) continue;
-                    string fn = funnel ?? (_inFee ? "gym entrance fee (PayEntranceFee -> CompleteOrder)"
-                                        : (o != null && _paidHere.TryGetValue(o, out _)) ? "employee checkout (FullServiceEmployee after Order.Pay)"
-                                        : "till add (ticket kiosk / other)");
-                    if (funnel != null && _inFee) fn = "gym entrance fee (PayEntranceFee -> CompleteOrder)";
-                    if (!r.Booked)
+                    if (o == null) continue;
+                    cur.TryGetValue(o, out var k); k++;
+                    _seen.TryGetValue(o, out var had);
+                    if (k > had)
                     {
-                        if (o != null && !HasPaid(o))
+                        int act = Examine(reg, till, i, o, funnel);
+                        if (act == 1) { i--; continue; }            // removed (suppressed)
+                        if (act == 2)                               // replaced by a snapshot
                         {
-                            DropUnpaid(reg, o, id, fn, i);
-                            i--;
+                            var s = till[i];
+                            if (s != null) { cur.TryGetValue(s, out var ks); cur[s] = ks + 1; }
                             continue;
                         }
-                        MarkBooked(id, r, fn, o); continue;
                     }
-                    // The booking's own reference (an hourly pass or a first checkout seen here): it stays - unless
-                    // the same Order already sits in the till (a second reference is a second payment).
-                    if (o != null && ReferenceEquals(r.BookedOrder, o))
-                    {
-                        bool other = false;
-                        for (int j = 0; j < till.Count; j++) if (j != i && ReferenceEquals(till[j], o)) { other = true; break; }
-                        if (!other) continue;
-                    }
-                    NoteSuppressed(id, r, fn);
-                    till.RemoveAt(i); i--;
+                    cur[o] = k;
                 }
+                _seen = cur;
                 _watchCount = till.Count;
+                _watchLast = till.Count > 0 ? till[till.Count - 1] : null;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] till watch: {ex.Message}"); }
+        }
+
+        private static void Recount(List<Order> till)
+        {
+            _seen.Clear();
+            foreach (var o in till)
+            {
+                if (o == null) continue;
+                _seen.TryGetValue(o, out var n); _seen[o] = n + 1;
+            }
+            _watchCount = till.Count;
+            _watchLast = till.Count > 0 ? till[till.Count - 1] : null;
+        }
+
+        /// <summary>One new till occurrence. 0 = stays, 1 = removed, 2 = replaced by a snapshot (same index).</summary>
+        private static int Examine(BuildingRegistration reg, List<Order> till, int i, Order o, string? funnel)
+        {
+            string? id = IdOfOrder(o);
+            if (id == null || !_recs.TryGetValue(id, out var r)) return 0;
+            string fn = funnel ?? (_inFee ? "gym entrance fee (PayEntranceFee -> CompleteOrder)"
+                                : _paidHere.TryGetValue(o, out _) ? "employee checkout (FullServiceEmployee after Order.Pay)"
+                                : "till add (ticket kiosk / other)");
+            if (funnel != null && _inFee) fn = "gym entrance fee (PayEntranceFee -> CompleteOrder)";
+            if (_inExit) fn = "exit clean-up (ForceFinishOrder -> CompleteOrder)";
+            if (!r.Booked)
+            {
+                bool paid = HasPaid(o);
+                if (_inExit || !paid) { KeepInTill(reg, o, id, r, fn, _inExit && paid, i); return ReferenceEquals(till[i], o) ? 0 : 2; }
+                MarkBooked(id, r, fn, o);
+                return 0;
+            }
+            // The booking's own reference (an hourly pass or a first checkout seen here): it stays - unless the same
+            // Order already sits in the till (a second reference is a second payment).
+            if (ReferenceEquals(r.BookedOrder, o))
+            {
+                bool other = false;
+                for (int j = 0; j < till.Count; j++) if (j != i && ReferenceEquals(till[j], o)) { other = true; break; }
+                if (!other) return 0;
+            }
+            NoteSuppressed(id, r, fn);
+            till.RemoveAt(i);
+            return 1;
         }
 
         internal static void Tick()
         {
             try { Scan(null); } catch { }
+            if (_finish.Count == 0) return;
+            try
+            {
+                var l = _finish.ToArray();
+                _finish.Clear();
+                foreach (var kv in l) Finished += CustomerPuppets.FinishLiveBodiesOf(kv.Key, kv.Value);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] finish: {ex.Message}"); }
         }
 
         // ── Hourly passes (native SimulateBusiness and the MP skip pass) ───────────────────────────────────
@@ -344,6 +499,12 @@ namespace BigAmbitionsMP
                     var e = entries[i];
                     if (e?.spawnTime == null || e.spawnTime.Hour != hour) continue;
                     string? id = IdOfOrder(e.order);
+                    if (id == null)
+                    {
+                        // Fold M4: an entry whose Order was never mapped - its id from the schedule's own id map.
+                        id = CustomerEntrySync.KnownIdOf(e);
+                        if (id != null && e.order != null && _recs.ContainsKey(id)) MapOrder(e.order, id);
+                    }
                     if (id == null || !_recs.TryGetValue(id, out var r)) continue;
                     if (r.Booked)
                     {
@@ -384,7 +545,7 @@ namespace BigAmbitionsMP
                     if (o == null || !_recs.TryGetValue(kv.Value, out var r) || r.Booked) continue;
                     if (!InTill(p.Reg, o)) continue;
                     if (HasPaid(o)) { MarkBooked(kv.Value, r, $"{p.Name} hourly pass h{p.Hour}", o); booked++; }
-                    else DropUnpaid(p.Reg, o, kv.Value, $"{p.Name} hourly pass h{p.Hour}");
+                    else KeepInTill(p.Reg, o, kv.Value, r, $"{p.Name} hourly pass h{p.Hour}", false);
                 }
                 Plugin.Logger.LogInfo($"[BookOnce] hourly pass ({p.Name}) @{GameStateReader.AddressKey(p.Reg)} h{p.Hour}: {p.Open.Count + p.Aside.Count} registered entr{(p.Open.Count + p.Aside.Count == 1 ? "y" : "ies")} of this hour, {booked} booked here, {p.Aside.Count} already booked (set aside).");
             }
@@ -413,7 +574,8 @@ namespace BigAmbitionsMP
                 }
                 return $"boRegistered={reg} boBooked={booked} boUnbooked={reg - booked} boSuppressed={Suppressed} "
                      + $"boRegisteredBy={Tally(_registeredBy)} boBookedBy={Tally(_bookedBy)} boSuppressedBy={Tally(_suppressedBy)} "
-                     + $"boUnpaidDropped={UnpaidDropped} boUnpaidBy={Tally(_unpaidBy)}";
+                     + $"boUnpaidKept={UnpaidKept} boExitKept={ExitKept} boExitUnpaid={ExitUnpaid} boKeptBy={Tally(_keptBy)} "
+                     + $"boFinished={Finished} boCopyReturnsBlocked={CopyReturnsBlocked}";
             }
             catch (Exception ex) { return "boERR " + ex.Message; }
         }
@@ -457,5 +619,35 @@ namespace BigAmbitionsMP
         [HarmonyPriority(Priority.First)]
         static void Prefix() { BookOnce.FeeBegin(); }
         static void Finalizer() { BookOnce.FeeEnd(); }
+    }
+
+    /// <summary>Fold M1: flags every till add made inside the native exit clean-up (Customer.ForceFinishOrder :363-371 -
+    /// OnExitBuilding completes each live order with whatever it holds): never a booking for a registered visit.</summary>
+    [HarmonyPatch(typeof(Customer), "ForceFinishOrder")]
+    public static class Patch_Customer_ForceFinishOrder_BookOnce
+    {
+        [HarmonyPriority(Priority.First)]
+        static void Prefix() { BookOnce.ExitBegin(); }
+        static void Finalizer() { BookOnce.ExitEnd(); }
+    }
+
+    /// <summary>Fold H2(b): a booked adopted body's detached copy holds the partner's picked items - Customer.Leave ->
+    /// ReturnItemsToShelf (Customer.cs:307-313) must never put them onto this machine's shelves.</summary>
+    [HarmonyPatch(typeof(Customer), nameof(Customer.ReturnItemsToShelf))]
+    public static class Patch_Customer_ReturnItemsToShelf_BookOnce
+    {
+        static bool Prefix(Customer __instance)
+        {
+            try
+            {
+                if (__instance != null && BookOnce.IsBookedCopy(__instance.order))
+                {
+                    BookOnce.NoteCopyReturnBlocked();
+                    return false;
+                }
+            }
+            catch { }
+            return true;
+        }
     }
 }
