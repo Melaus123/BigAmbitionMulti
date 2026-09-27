@@ -1173,7 +1173,14 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                    if (__instance != RemotePlayerManager.GetLocalAnimator()) return;
+                    if (__instance != RemotePlayerManager.GetLocalAnimator())
+                    {
+                        // H-PUPPETANIM-1: a SIMULATED customer's one-shot (workout series moves, bites, every
+                        // RunAnimationLength - it ends in this same SetTrigger(int)) queues for the watchers' copies.
+                        // One Count compare when this machine simulates no customers.
+                        CustomerPuppets.NoteSimTrigger(__instance, __0);
+                        return;
+                    }
                     RemotePlayerManager.SendLocalTrigger(RemotePlayerManager.ResolveTriggerIndex(__0));
                 }
                 catch { /* never let an animator trigger break the game */ }

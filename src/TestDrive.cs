@@ -830,6 +830,26 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { return $"ERR puppetflips: {ex.GetType().Name}: {ex.Message}"; }
                 }
 
+                // ── H-PUPPETANIM-1 (batch 27): looping activities / one-shots on the watcher's copies ──
+                case "puppetacts":
+                {
+                    // `puppetacts`              per id the looping activity names ON right now (simulator: its natives'
+                    //                           animators; watcher: its copies' animators, read live), the missing-parameter
+                    //                           count, event counters; the machine-readable sig=<id>:<hexmask>,... last.
+                    // `puppetacts vs <sig>`     watcher: of the simulator's customers with a loop, how many copies show ALL of
+                    //                           those loops (within=True at >= 80%), and the seated eaters (Sitting + ConsumingFoodSitting).
+                    // `puppetacts arm <n>|eat`  simulator: log '[PuppetActs] armed ...' once >= n customers loop / a seated eater exists.
+                    try
+                    {
+                        string paa = arg.Trim();
+                        if (paa.StartsWith("arm", StringComparison.Ordinal)) return CustomerPuppets.ArmActs(paa.Substring(3).Trim());
+                        if (paa.StartsWith("vs", StringComparison.Ordinal)) return "OK puppetacts " + CustomerPuppets.ActsLine(paa.Substring(2).Trim());
+                        if (paa.Length > 0) return "ERR usage: puppetacts [vs <sig> | arm <n>|eat]";
+                        return "OK puppetacts " + CustomerPuppets.ActsLine(null);
+                    }
+                    catch (Exception ex) { return $"ERR puppetacts: {ex.GetType().Name}: {ex.Message}"; }
+                }
+
                 // ── H-HANDOFF-1 (batch 27): what each live customer's VISIT has reached, on THIS machine ──
                 case "custstate":
                 {

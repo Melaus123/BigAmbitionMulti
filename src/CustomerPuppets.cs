@@ -75,6 +75,11 @@ namespace BigAmbitionsMP
             public int bn;
             public string bsim = "";
             public bool snapNext;
+            // H-PUPPETANIM-1: what this copy SHOWS - looping activity bits (PuppetRowInfo.Loops), dance type, workout machine.
+            public long loops;
+            public float dance;
+            public string act = "";
+            public bool actsChecked;   // the K-of-N parameter line was evaluated for this copy's controller
         }
         private static readonly Dictionary<string, Puppet> _puppets = new();
 
@@ -156,6 +161,7 @@ namespace BigAmbitionsMP
                 _myBldg = "";
                 _prevSim = ""; _lastReactSim = ""; _awaitFinalFrom = ""; _heldForGone = ""; _staleHoldLoggedFor = ""; _readyPendingVia = "";   // H-HANDOFF-1 step 11
                 try { CustomerHandoff.Reset(); } catch { }   // also clears the BookOnce registry
+                try { ResetActs(); } catch { }               // H-PUPPETANIM-1
                 try { SkipPaceBodies.RestoreAll(); } catch { }   // D-SKIPPACE-1: leaving the building / session end - no body keeps a scaled speed
                 if (_followerHere) { try { IndoorCustomerSpawner.EnableCustomersSpawn(); } catch { } }
                 _followerHere = false;
@@ -618,6 +624,7 @@ namespace BigAmbitionsMP
                     if (AdoptPuppetAsNative(regNow, key, pup, v, out bool st, out bool lv, out bool mt, out bool bo))
                     {
                         if (bo) bodyOnly++;
+                        try { ApplyActivity(pup, 0L, 0f, ""); } catch { }   // H-PUPPETANIM-1: the copy's machine flag off (the native sets its own)
                         try { if (pup.heldGo != null) UnityEngine.Object.Destroy(pup.heldGo); } catch { }
                         try { if (pup.go != null) UnityEngine.Object.Destroy(pup.go); } catch { }
                         _puppets.Remove(key);
@@ -1310,19 +1317,22 @@ namespace BigAmbitionsMP
         // ── Simulator: stream my live customers ─────────────────────────────────────────────────────
         private static void SimulatorStreamTick()
         {
-            if (string.IsNullOrEmpty(_myBldg)) return;
-            if (!_authority.TryGetValue(_myBldg, out var sim) || sim != MPConfig.PlayerId) return;
+            // H-PUPPETANIM-1: every "not simulating" exit empties the animator->row map (NoteSimTrigger's one compare).
+            if (string.IsNullOrEmpty(_myBldg)) { ClearSimAnim(); return; }
+            if (!_authority.TryGetValue(_myBldg, out var sim) || sim != MPConfig.PlayerId) { ClearSimAnim(); return; }
             // H-HANDOFF-1 step 5: while waiting for the old simulator's Final this machine has no customers of its
             // own yet, and an EMPTY batch would walk every copy on the other machine out. Same after an EXIT Final
             // (CustomerHandoff.StoppedStreamingFor): the interior is being torn down but the election has not
             // moved yet.
-            if (_awaitFinalFrom.Length > 0) return;
-            if (_readyPendingVia.Length > 0) return;   // fold R0: same - a take-over is due once the interior is ready
-            if (_myBldg == CustomerHandoff.StoppedStreamingFor) return;
+            if (_awaitFinalFrom.Length > 0) { ClearSimAnim(); return; }
+            if (_readyPendingVia.Length > 0) { ClearSimAnim(); return; }   // fold R0: same - a take-over is due once the interior is ready
+            if (_myBldg == CustomerHandoff.StoppedStreamingFor) { ClearSimAnim(); return; }
             if (Time.unscaledTime < _nextStreamAt) return;
             _nextStreamAt = Time.unscaledTime + StreamInterval;
 
             var p = new CustomerPuppetStatePayload { AddressKey = _myBldg, SimulatorPid = MPConfig.PlayerId, T = Time.unscaledTime };
+            int tickLoopers = 0, tickSitEat = 0;   // H-PUPPETANIM-1: puppetacts arm
+            try { _simAnimRow.Clear(); } catch { }  // H-PUPPETANIM-1: rebuilt from this tick's natives
             try
             {
                 var reg = FindReg(_myBldg);
@@ -1345,6 +1355,24 @@ namespace BigAmbitionsMP
                         }
                     }
                     catch { }
+                    // H-PUPPETANIM-1: a live read of the looping activity states that are on, the dance type while
+                    // dancing, and the workout machine this body is on (only while a loop is on - pooled bodies).
+                    long rowLoops = 0L; float rowDance = 0f; string? rowAct = null;
+                    try
+                    {
+                        var an2 = c.tpc != null ? c.tpc.animator : null;
+                        if (an2 != null)
+                        {
+                            _simAnimRow[an2] = rid;
+                            rowLoops = LoopsOf(an2);
+                            if ((rowLoops & (1L << DanceBit)) != 0L && HasParam(an2, TypeOfDanceHash, AnimatorControllerParameterType.Float))
+                                rowDance = an2.GetFloat(TypeOfDanceHash);
+                            if (rowLoops != 0L && _bodyMachine.TryGetValue(an2.GetInstanceID(), out var mid) && !string.IsNullOrEmpty(mid)) rowAct = mid;
+                        }
+                        if (rowLoops != 0L) tickLoopers++;
+                        if (IsSitEat(rowLoops)) tickSitEat++;
+                    }
+                    catch { }
                     p.Rows.Add(new PuppetRowInfo
                     {
                         Id   = rid,
@@ -1353,6 +1381,9 @@ namespace BigAmbitionsMP
                         Held = heldName,
                         Fill = heldFill,
                         Fwd  = rowFwd,
+                        Loops = rowLoops,
+                        Dance = rowDance,
+                        ActItem = rowAct,
                     });
                     // Round-44: ship each customer's look ONCE so followers dress the same person.
                     if (!_looksSent.Contains(rid))
@@ -1368,6 +1399,13 @@ namespace BigAmbitionsMP
                         else Plugin.Logger.LogInfo($"[Customers] look capture EMPTY for {rid} (no appearance data).");
                     }
                 }
+            }
+            catch { }
+            try
+            {
+                // H-PUPPETANIM-1: the one-shots queued since the previous batch ride this one (a new list only when any).
+                if (_simEv.Count > 0) { p.Ev = _simEv; _simEv = new List<PuppetEventInfo>(); }
+                ActsArmCheck(tickLoopers, tickSitEat);
             }
             catch { }
             try { var sw = _simMoving; _simMoving = _simMovingNext; _simMovingNext = sw; _simMovingNext.Clear(); } catch { }   // H-PUPPETSTUTTER-1: only this tick's natives carry over
@@ -1808,7 +1846,8 @@ namespace BigAmbitionsMP
                         // The customer's own beat + the gendered interaction sound the simulator played.
                         if (!string.IsNullOrEmpty(p.CustomerId) && _puppets.TryGetValue(p.CustomerId, out var pup) && pup.tpc != null)
                         {
-                            try { pup.tpc.StartCoroutine(pup.tpc.animator.RunAnimation(AnimationType.UsingProducer, 2.5f)); } catch { }
+                            // H-PUPPETANIM-1: the customer's own UsingProducer beat is no longer started here - the simulator's
+                            // RunAnimationLength reaches the copy through the one-shot event funnel (one source); the sound stays.
                             try
                             {
                                 InstanceBehavior<SfxManager>.Instance.PlayAudio(
@@ -1970,10 +2009,13 @@ namespace BigAmbitionsMP
                     if (pup.leaving) pup.leaving = false;   // simulator says they're still here
                     if (pup.held != (r.Held ?? "")) UpdateHeld(pup, r.Held ?? "");
                     if (pup.fill != r.Fill) ApplyFill(pup, r.Fill);
+                    try { ApplyActivity(pup, r.Loops, r.Dance, r.ActItem ?? ""); } catch { }   // H-PUPPETANIM-1
                 }
                 // Rows that vanished = customers who left/were served away → walk out.
                 foreach (var kv in _puppets)
                     if (!seen.Contains(kv.Key) && !kv.Value.leaving) { _leaveMissing++; _leaveMissingTotal++; StartLeaving(kv.Value); }
+                // H-PUPPETANIM-1: the customers' one-shots since the previous batch, in send order.
+                if (p.Ev != null && p.Ev.Count > 0) PlayEvents(p.Ev);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] apply puppets: {ex.Message}"); }
         }
@@ -2049,6 +2091,7 @@ namespace BigAmbitionsMP
             _puppetLeaves++; _puppetLeavesTotal++;
             pup.leaving = true;
             pup.leaveAt = Time.unscaledTime + 6f;   // hard stop even if no exit is reachable
+            try { ApplyActivity(pup, 0L, 0f, ""); } catch { }   // H-PUPPETANIM-1: a copy walking out stands up and lets go of its machine
             try
             {
                 var zones = InstanceBehavior<BuildingManager>.Instance?.exitZones;
@@ -2130,6 +2173,7 @@ namespace BigAmbitionsMP
             {
                 if (_puppets.TryGetValue(k, out var pup))
                 {
+                    try { ApplyActivity(pup, 0L, 0f, ""); } catch { }   // H-PUPPETANIM-1
                     try { if (pup.heldGo != null) UnityEngine.Object.Destroy(pup.heldGo); } catch { }
                     try { if (pup.go != null) UnityEngine.Object.Destroy(pup.go); } catch { }
                     _puppets.Remove(k);
@@ -2302,7 +2346,8 @@ namespace BigAmbitionsMP
             if (speed <= 0.01f)
             {
                 anim.SetBool(BaseHuman.IsMoving, false);
-                if (bored != null && !bored.enabled) bored.enabled = true;
+                bool wantBored = pup.loops == 0L;   // H-PUPPETANIM-1: no idle fidgets while a looping activity shows
+                if (bored != null && bored.enabled != wantBored) bored.enabled = wantBored;
                 return;
             }
             if (bored != null && bored.enabled) bored.enabled = false;
@@ -2459,10 +2504,410 @@ namespace BigAmbitionsMP
             catch { }
         }
 
+        // ── H-PUPPETANIM-1 (batch 27): customers' activities on the watcher ───────────────────────────────
+        // A watcher's copy used to get IsMoving / Forward / MotionTime / HoldingBox only. Now:
+        //   * LOOPING states - every PermanentAnimationType SetBool (CharacterAnimations.cs:93-97: seats, eating, gym
+        //     machines ...) plus Dancing / TypeOfDance and isHoldingAJacket (BaseHuman.cs:52-56) - travel as a bit mask
+        //     per row (PuppetRowInfo.Loops/Dance), read LIVE off the real body's animator on the simulator;
+        //   * ONE-SHOTS - every Animator.SetTrigger(int) on a simulated customer (RunAnimationLength ends in it too,
+        //     :52-58) - travel as events (payload Ev) with the body's AnimationSpeed;
+        //   * the workout MACHINE's own animator flag (treadmill belt ...) follows PuppetRowInfo.ActItem on the watcher.
+        private const int DanceBit = 62, JacketBit = 61, MaxEnumBit = 60, MaxEvPerBatch = 32;
+        private static readonly int DancingHash     = Animator.StringToHash("Dancing");
+        private static readonly int TypeOfDanceHash = Animator.StringToHash("TypeOfDance");
+        private static readonly int JacketHash      = Animator.StringToHash("isHoldingAJacket");
+        private static readonly int AnimSpeedHash   = Animator.StringToHash("AnimationSpeed");
+        private static readonly int BoredHash       = Animator.StringToHash("Bored");   // BoredAnimations.cs:7 - copies fidget locally (DriveLocomotion), never twice
+        private static readonly int SittingBit = (int)PermanentAnimationType.Sitting;
+        private static readonly int EatSitBit  = (int)PermanentAnimationType.ConsumingFoodSitting;
+        private static (int bit, int hash, string name)[]? _loopDefs;
+        private static int _loopEnumCount, _loopUnmapped;
+        // per animator CONTROLLER: its parameters (hash -> type), and which loop bits it carries as bools
+        private static readonly Dictionary<RuntimeAnimatorController, Dictionary<int, AnimatorControllerParameterType>> _ctrlParams = new();
+        private static readonly Dictionary<RuntimeAnimatorController, (int bit, int hash)[]> _ctrlLoops = new();
+        // simulator: native customer animator -> row id, rebuilt every stream tick, EMPTY when this machine simulates nothing
+        private static readonly Dictionary<Animator, string> _simAnimRow = new();
+        private static List<PuppetEventInfo> _simEv = new();
+        // any machine: body animator instance id -> the workout machine's ItemInstance.id (Start/StopWorkoutAnimation postfixes)
+        private static readonly Dictionary<int, string> _bodyMachine = new();
+        private static HarmonyLib.AccessTools.FieldRef<global::PlayerActivity.WorkoutAnimatorController, BaseHuman>? _wacHuman;
+        private static HarmonyLib.AccessTools.FieldRef<global::PlayerActivity.WorkoutAnimatorController, global::Controllers.IWorkoutMachine>? _wacMachine;
+        private static bool _wacTried;
+        private static int _simEvQueued, _simEvDropped, _evPlayed, _evNoParam, _missingHits;
+        private static readonly HashSet<string> _missingNames = new();
+        private static string _actsLoggedKey = "", _actsCtrl = "";
+        private static int _actsK = -1;
+        private static int _actsArm = int.MinValue;   // puppetacts arm: n > 0 = loopers >= n; -1 = a seated eater; MinValue = off
+
+        private static void ResetActs()
+        {
+            _simAnimRow.Clear();
+            _simEv.Clear();
+            _bodyMachine.Clear();
+            _missingNames.Clear();
+            _simEvQueued = _simEvDropped = _evPlayed = _evNoParam = _missingHits = 0;
+            _actsLoggedKey = ""; _actsCtrl = ""; _actsK = -1;
+            _actsArm = int.MinValue;
+        }
+
+        private static void ClearSimAnim()
+        {
+            if (_simAnimRow.Count > 0) _simAnimRow.Clear();
+            if (_simEv.Count > 0) _simEv.Clear();
+        }
+
+        /// <summary>Every PermanentAnimationType (bit = its value; CharacterAnimations hashes value.ToString()), then Dancing
+        /// and isHoldingAJacket. Built once.</summary>
+        private static (int bit, int hash, string name)[] LoopDefs()
+        {
+            if (_loopDefs != null) return _loopDefs;
+            var l = new List<(int bit, int hash, string name)>();
+            int n = 0, un = 0;
+            try
+            {
+                foreach (PermanentAnimationType v in Enum.GetValues(typeof(PermanentAnimationType)))
+                {
+                    int bit = Convert.ToInt32(v);
+                    n++;
+                    if (bit < 0 || bit > MaxEnumBit) { un++; continue; }
+                    string nm = v.ToString();
+                    l.Add((bit, Animator.StringToHash(nm), nm));
+                }
+            }
+            catch { }
+            l.Add((DanceBit, DancingHash, "Dancing"));
+            l.Add((JacketBit, JacketHash, "HoldingJacket"));
+            _loopEnumCount = n; _loopUnmapped = un;
+            _loopDefs = l.ToArray();
+            return _loopDefs;
+        }
+
+        /// <summary>The controller's parameters, cached per controller (an animator that is not initialised yet reports
+        /// none - that answer is not cached).</summary>
+        private static Dictionary<int, AnimatorControllerParameterType>? ParamsOf(Animator an)
+        {
+            var ctl = an.runtimeAnimatorController;
+            if (ctl == null) return null;
+            if (_ctrlParams.TryGetValue(ctl, out var d)) return d;
+            d = new Dictionary<int, AnimatorControllerParameterType>();
+            try { foreach (var prm in an.parameters) d[prm.nameHash] = prm.type; } catch { }
+            if (d.Count > 0) _ctrlParams[ctl] = d;
+            return d;
+        }
+
+        private static bool HasParam(Animator an, int hash, AnimatorControllerParameterType type)
+        {
+            var d = ParamsOf(an);
+            return d != null && d.TryGetValue(hash, out var ty) && ty == type;
+        }
+
+        private static (int bit, int hash)[] LoopParamsOf(Animator an)
+        {
+            var ctl = an.runtimeAnimatorController;
+            if (ctl == null) return Array.Empty<(int, int)>();
+            if (_ctrlLoops.TryGetValue(ctl, out var arr)) return arr;
+            var d = ParamsOf(an);
+            if (d == null || d.Count == 0) return Array.Empty<(int, int)>();
+            var l = new List<(int bit, int hash)>();
+            foreach (var def in LoopDefs())
+                if (d.TryGetValue(def.hash, out var ty) && ty == AnimatorControllerParameterType.Bool) l.Add((def.bit, def.hash));
+            arr = l.ToArray();
+            _ctrlLoops[ctl] = arr;
+            return arr;
+        }
+
+        /// <summary>The looping activity bits that are ON on this animator right now (live read).</summary>
+        private static long LoopsOf(Animator an)
+        {
+            long m = 0L;
+            var arr = LoopParamsOf(an);
+            for (int i = 0; i < arr.Length; i++)
+                if (an.GetBool(arr[i].hash)) m |= 1L << arr[i].bit;
+            return m;
+        }
+
+        private static bool IsSitEat(long m)
+        {
+            if (SittingBit < 0 || SittingBit > MaxEnumBit || EatSitBit < 0 || EatSitBit > MaxEnumBit) return false;
+            long want = (1L << SittingBit) | (1L << EatSitBit);
+            return (m & want) == want;
+        }
+
+        private static string LoopNames(long m)
+        {
+            if (m == 0L) return "";
+            var sb = new System.Text.StringBuilder();
+            foreach (var def in LoopDefs())
+                if ((m & (1L << def.bit)) != 0L) { if (sb.Length > 0) sb.Append('+'); sb.Append(def.name); }
+            return sb.ToString();
+        }
+
+        /// <summary>Simulator (the SetTrigger(int) postfix): queue a simulated customer's one-shot for the next batch.
+        /// O(1); a single Count compare when this machine simulates no customers.</summary>
+        internal static void NoteSimTrigger(Animator anim, int hash)
+        {
+            try
+            {
+                if (_simAnimRow.Count == 0) return;
+                if (hash == BoredHash) return;   // idle fidgets: every copy runs its own (DriveLocomotion)
+                if (!_simAnimRow.TryGetValue(anim, out var rid)) return;
+                if (_simEv.Count >= MaxEvPerBatch) { _simEvDropped++; return; }
+                float s = 1f;
+                if (HasParam(anim, AnimSpeedHash, AnimatorControllerParameterType.Float)) s = anim.GetFloat(AnimSpeedHash);
+                _simEv.Add(new PuppetEventInfo { Id = rid, H = hash, S = s });
+                _simEvQueued++;
+            }
+            catch { }
+        }
+
+        /// <summary>Start/StopWorkoutAnimation postfixes: which workout machine (ItemInstance.id) a body is on.</summary>
+        internal static void NoteWorkout(global::PlayerActivity.WorkoutAnimatorController w, bool on)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (!_wacTried)
+                {
+                    _wacTried = true;
+                    try { _wacHuman = HarmonyLib.AccessTools.FieldRefAccess<global::PlayerActivity.WorkoutAnimatorController, BaseHuman>("_baseHuman"); } catch { }
+                    try { _wacMachine = HarmonyLib.AccessTools.FieldRefAccess<global::PlayerActivity.WorkoutAnimatorController, global::Controllers.IWorkoutMachine>("_workoutMachine"); } catch { }
+                }
+                if (_wacHuman == null || w == null) return;
+                var bh = _wacHuman(w);
+                if (bh == null || bh.animator == null) return;
+                int key = bh.animator.GetInstanceID();
+                if (!on) { _bodyMachine.Remove(key); return; }
+                var ic = _wacMachine != null ? _wacMachine(w) as ItemController : null;
+                string id = ic != null && ic.ItemInstance != null ? (ic.ItemInstance.id ?? "") : "";
+                if (id.Length > 0) _bodyMachine[key] = id; else _bodyMachine.Remove(key);
+            }
+            catch { }
+        }
+
+        /// <summary>Watcher: make a copy SHOW the given loops / dance / machine. Only changed bits are written; a loop
+        /// whose parameter the copy's controller lacks is counted (puppetacts missing=). Loops off = fidgets back
+        /// (DriveLocomotion) and the paced speed restored; ("", 0) is also the release on leave / removal.</summary>
+        private static void ApplyActivity(Puppet pup, long loops, float dance, string act)
+        {
+            var an = pup.anim;
+            if (an == null) return;
+            if (!pup.actsChecked) pup.actsChecked = LogActsParams(an);
+            if (loops != pup.loops)
+            {
+                long diff = loops ^ pup.loops;
+                var d = ParamsOf(an);
+                foreach (var def in LoopDefs())
+                {
+                    long bit = 1L << def.bit;
+                    if ((diff & bit) == 0L) continue;
+                    bool on = (loops & bit) != 0L;
+                    if (d == null || !d.TryGetValue(def.hash, out var ty) || ty != AnimatorControllerParameterType.Bool)
+                    {
+                        if (on) { _missingHits++; _missingNames.Add(def.name); }
+                        continue;
+                    }
+                    an.SetBool(def.hash, on);
+                }
+                pup.loops = loops;
+            }
+            if ((loops & (1L << DanceBit)) != 0L && Mathf.Abs(dance - pup.dance) > 0.0001f)
+            {
+                pup.dance = dance;
+                if (HasParam(an, TypeOfDanceHash, AnimatorControllerParameterType.Float)) an.SetFloat(TypeOfDanceHash, dance);
+            }
+            // User-approved 2026-09-22: looping activity animations follow the skip pace - the same Animator.speed knob
+            // SkipPaceBodies puts on the simulator's natives (idempotent; RestoreAll puts it back when the skip ends).
+            if (loops != 0L) { if (MPRestSync.SkipPace > 1.001f) SkipPaceBodies.ApplyAnimator(an); }
+            else if (SkipPaceBodies.IsAnimatorScaled(an)) SkipPaceBodies.RestoreAnimatorOne(an);
+            if (act != pup.act)
+            {
+                if (pup.act.Length > 0) SetMachineFlag(pup.act, false);
+                pup.act = act;
+                if (act.Length > 0) SetMachineFlag(act, true);
+            }
+        }
+
+        /// <summary>The workout machine's OWN animator flag (WorkoutAnimatorController.StartWorkoutAnimation sets it on the
+        /// simulator): found by ItemInstance.id among this interior's item controllers.</summary>
+        private static void SetMachineFlag(string itemId, bool on)
+        {
+            try
+            {
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm == null || bm.allItemControllers == null || string.IsNullOrEmpty(itemId)) return;
+                foreach (var ic in bm.allItemControllers)
+                {
+                    if (ic == null || ic.ItemInstance == null || ic.ItemInstance.id != itemId) continue;
+                    if (ic is global::Controllers.IWorkoutMachine wm)
+                    {
+                        var ma = wm.GetAnimator();
+                        var ex = wm.GetWorkoutExercise();
+                        if (ma != null && ex != null && !string.IsNullOrEmpty(ex.animationOnTheWorkoutMachineBoolName))
+                            ma.SetBool(ex.animationOnTheWorkoutMachineBoolName, on);
+                    }
+                    return;
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Watcher: replay the simulator's one-shots on the copies - AnimationSpeed first, then the trigger, only
+        /// when the copy's controller has that trigger.</summary>
+        private static void PlayEvents(List<PuppetEventInfo> evs)
+        {
+            for (int i = 0; i < evs.Count; i++)
+            {
+                try
+                {
+                    var e = evs[i];
+                    if (e == null || string.IsNullOrEmpty(e.Id)) continue;
+                    if (!_puppets.TryGetValue(e.Id, out var pup) || pup.leaving || pup.anim == null) continue;
+                    var an = pup.anim;
+                    if (!HasParam(an, e.H, AnimatorControllerParameterType.Trigger)) { _evNoParam++; continue; }
+                    if (HasParam(an, AnimSpeedHash, AnimatorControllerParameterType.Float)) an.SetFloat(AnimSpeedHash, e.S > 0f ? e.S : 1f);
+                    an.SetTrigger(e.H);
+                    _evPlayed++;
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>One line per follow session: how many looping activity parameters the copy's controller carries.
+        /// False = the animator reported no parameters yet (try again on the next row).</summary>
+        private static bool LogActsParams(Animator an)
+        {
+            try
+            {
+                var d = ParamsOf(an);
+                if (d == null || d.Count == 0) return false;
+                string cn = an.runtimeAnimatorController != null ? an.runtimeAnimatorController.name : "(none)";
+                string key = _myBldg + "|" + cn;
+                if (key == _actsLoggedKey) return true;
+                int k = 0;
+                var miss = new List<string>();
+                foreach (var def in LoopDefs())
+                {
+                    if (def.bit > MaxEnumBit) continue;
+                    if (d.TryGetValue(def.hash, out var ty) && ty == AnimatorControllerParameterType.Bool) k++;
+                    else miss.Add(def.name);
+                }
+                _actsLoggedKey = key; _actsCtrl = cn; _actsK = k;
+                Plugin.Logger.LogInfo($"[Customers] puppet activity params: {k} of {_loopEnumCount} present on '{cn}'"
+                    + $" (Dancing={HasParam(an, DancingHash, AnimatorControllerParameterType.Bool)}, isHoldingAJacket={HasParam(an, JacketHash, AnimatorControllerParameterType.Bool)},"
+                    + $" AnimationSpeed={HasParam(an, AnimSpeedHash, AnimatorControllerParameterType.Float)}, unmapped={_loopUnmapped}; missing: {(miss.Count == 0 ? "none" : string.Join(",", miss))}).");
+                return true;
+            }
+            catch { return true; }
+        }
+
+        private static void ActsArmCheck(int loopers, int sitEat)
+        {
+            if (_actsArm == int.MinValue) return;
+            if (_actsArm > 0 && loopers >= _actsArm)
+                Plugin.Logger.LogInfo($"[PuppetActs] armed count reached: {loopers} >= {_actsArm} customer(s) with a looping activity in '{_myBldg}'.");
+            else if (_actsArm == -1 && sitEat >= 1)
+                Plugin.Logger.LogInfo($"[PuppetActs] armed seated eater reached: {sitEat} in '{_myBldg}'.");
+            else return;
+            _actsArm = int.MinValue;
+        }
+
+        /// <summary>DEV lever `puppetacts arm n|eat`.</summary>
+        internal static string ArmActs(string a)
+        {
+            if (a == "eat") { _actsArm = -1; return $"OK puppetacts armed eat bldg='{_myBldg}'"; }
+            if (int.TryParse(a, out int n) && n > 0) { _actsArm = n; return $"OK puppetacts armed n={n} bldg='{_myBldg}'"; }
+            if (a == "off") { _actsArm = int.MinValue; return "OK puppetacts disarmed"; }
+            return "ERR usage: puppetacts arm <n>|eat|off";
+        }
+
+        /// <summary>DEV lever `puppetacts [vs sig]`: per id the loop names ON right now - the simulator reads its natives'
+        /// animators, the watcher its copies' animators (live, so it shows what is really displayed).</summary>
+        internal static string ActsLine(string? vs)
+        {
+            string mode = _followerHere ? "follower" : (IAmSimulatorFor(_myBldg) ? "native" : "none");
+            int rows = 0, loopers = 0, sitEat = 0, onMachine = 0, k = -1;
+            string ctrl = "";
+            var names = new System.Text.StringBuilder();
+            var sig = new System.Text.StringBuilder();
+            var shown = new Dictionary<string, long>();
+            void Add(string id, long m)
+            {
+                shown[id] = m;
+                if (m == 0L) return;
+                loopers++;
+                if (IsSitEat(m)) sitEat++;
+                if (names.Length > 0) names.Append(';');
+                names.Append(id).Append(':').Append(LoopNames(m));
+                if (sig.Length > 0) sig.Append(',');
+                sig.Append(id).Append(':').Append(m.ToString("x"));
+            }
+            int Kof(Animator an)
+            {
+                int kk = 0;
+                var arr = LoopParamsOf(an);
+                for (int i = 0; i < arr.Length; i++) if (arr[i].bit <= MaxEnumBit) kk++;
+                return kk;
+            }
+            if (mode == "native")
+            {
+                var reg = FindReg(_myBldg);
+                foreach (var c in IndoorCustomerSpawner.Customers)
+                {
+                    if (c == null || c.tpc == null || c.tpc.animator == null) continue;
+                    var an = c.tpc.animator;
+                    rows++;
+                    if (ctrl.Length == 0 && an.runtimeAnimatorController != null) { ctrl = an.runtimeAnimatorController.name; k = Kof(an); }
+                    long m = LoopsOf(an);
+                    if (m != 0L && _bodyMachine.ContainsKey(an.GetInstanceID())) onMachine++;
+                    Add(RowIdOf(c, reg), m);
+                }
+            }
+            else if (mode == "follower")
+            {
+                foreach (var kv in _puppets)
+                {
+                    var pup = kv.Value;
+                    if (pup == null || pup.leaving || pup.anim == null) continue;
+                    rows++;
+                    if (ctrl.Length == 0 && pup.anim.runtimeAnimatorController != null) { ctrl = pup.anim.runtimeAnimatorController.name; k = Kof(pup.anim); }
+                    if (pup.act.Length > 0) onMachine++;
+                    Add(kv.Key, LoopsOf(pup.anim));
+                }
+            }
+            LoopDefs();
+            string head = $"bldg='{_myBldg}' mode={mode} rows={rows} loopers={loopers} sitEat={sitEat} onMachine={onMachine} "
+                        + $"params={k}/{_loopEnumCount} ctrl='{ctrl}' loggedK={_actsK} missing={_missingNames.Count} missingHits={_missingHits} "
+                        + $"missingNames=[{string.Join(",", _missingNames)}] evQueued={_simEvQueued} evDropped={_simEvDropped} evPlayed={_evPlayed} evNoParam={_evNoParam}";
+            if (vs != null)
+            {
+                int total = 0, matched = 0, absent = 0, simSE = 0, seMatched = 0;
+                var mism = new System.Text.StringBuilder();
+                foreach (var part in vs.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    int colon = part.LastIndexOf(':');
+                    if (colon <= 0) continue;
+                    string id = part.Substring(0, colon);
+                    if (!long.TryParse(part.Substring(colon + 1), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out long sm) || sm == 0L) continue;
+                    total++;
+                    bool se = IsSitEat(sm);
+                    if (se) simSE++;
+                    if (!shown.TryGetValue(id, out long wm)) { absent++; mism.Append(id).Append(":absent;"); continue; }
+                    if ((wm & sm) == sm) { matched++; if (se) seMatched++; }
+                    else mism.Append(id).Append(":lacks=").Append(LoopNames(sm & ~wm)).Append(';');
+                }
+                float ratio = total > 0 ? (float)matched / total : 0f;
+                head += $" simLoopers={total} matched={matched} absent={absent} ratio={ratio.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} "
+                      + $"within={(total > 0 && ratio >= 0.8f)} simSitEat={simSE} sitEatMatched={seMatched} mismatch=[{mism}]";
+            }
+            return head + $" names=[{names}] sig={sig}";
+        }
+
+
         private static void DestroyAllPuppets()
         {
             foreach (var kv in _puppets)
             {
+                try { ApplyActivity(kv.Value, 0L, 0f, ""); } catch { }   // H-PUPPETANIM-1
                 try { if (kv.Value.heldGo != null) UnityEngine.Object.Destroy(kv.Value.heldGo); } catch { }
                 try { if (kv.Value.go != null) UnityEngine.Object.Destroy(kv.Value.go); } catch { }
             }
@@ -2471,6 +2916,7 @@ namespace BigAmbitionsMP
             _custEntryIds.Clear();
             _pendingEmotes.Clear();
             _warpHolds.Clear();
+            _actsLoggedKey = "";   // H-PUPPETANIM-1: the K-of-N parameter line is once per follow session
             // _looksById deliberately NOT cleared here — this runs on every building exit, and the whole
             // point of the cache is dressing REBUILT puppets on re-entry. Session Reset clears it.
         }
@@ -2495,6 +2941,26 @@ namespace BigAmbitionsMP
                 CustomerPuppets.OnLocalCustomerEmote(__instance, (int)characterEmojiName, secondsToShow);
             }
             catch { }
+        }
+    }
+
+    /// <summary>H-PUPPETANIM-1: which workout machine a body is on (PuppetRowInfo.ActItem) - the simulator reads it per
+    /// row; WorkoutAnimatorController.StartWorkoutAnimation / StopWorkoutAnimation are the two native edges.</summary>
+    [HarmonyLib.HarmonyPatch(typeof(global::PlayerActivity.WorkoutAnimatorController), nameof(global::PlayerActivity.WorkoutAnimatorController.StartWorkoutAnimation))]
+    public static class Patch_WorkoutStart_PuppetAct
+    {
+        static void Postfix(global::PlayerActivity.WorkoutAnimatorController __instance)
+        {
+            try { CustomerPuppets.NoteWorkout(__instance, true); } catch { }
+        }
+    }
+
+    [HarmonyLib.HarmonyPatch(typeof(global::PlayerActivity.WorkoutAnimatorController), nameof(global::PlayerActivity.WorkoutAnimatorController.StopWorkoutAnimation))]
+    public static class Patch_WorkoutStop_PuppetAct
+    {
+        static void Postfix(global::PlayerActivity.WorkoutAnimatorController __instance)
+        {
+            try { CustomerPuppets.NoteWorkout(__instance, false); } catch { }
         }
     }
 }

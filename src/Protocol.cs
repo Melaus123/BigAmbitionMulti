@@ -983,6 +983,25 @@ namespace BigAmbitionsMP
         public string Held { get; set; } = "";   // round-42: hand prop name (basket/box) — "" = empty hands
         public int Fill { get; set; }            // round-45: active direct children of the held prop (basket fill visuals)
         public float Fwd { get; set; }           // H-PUPPETSTUTTER-1: the real body's animator Forward while IsMoving, else 0 (0 = absent/old sender)
+        // H-PUPPETANIM-1 (protocol 26, additive): the real body's LOOPING activity states that are on - bit n = the
+        // PermanentAnimationType with value n (CharacterAnimations.SetBool), bit 62 = Dancing, bit 61 = isHoldingAJacket
+        // (BaseHuman.cs:52-56); the dance type (TypeOfDance) while dancing; the workout machine's ItemInstance.id while
+        // the body works out on one. Absent = 0 / 0 / null = nothing on (the copy stands idle, machine flag off).
+        [Newtonsoft.Json.JsonProperty(DefaultValueHandling = Newtonsoft.Json.DefaultValueHandling.Ignore)]
+        public long Loops { get; set; }
+        [Newtonsoft.Json.JsonProperty(DefaultValueHandling = Newtonsoft.Json.DefaultValueHandling.Ignore)]
+        public float Dance { get; set; }
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public string? ActItem { get; set; }
+    }
+
+    /// <summary>H-PUPPETANIM-1: one ONE-SHOT animator trigger a simulated customer fired (series moves, bites,
+    /// RunAnimationLength ...) since the previous batch - replayed on the watcher's copy in send order.</summary>
+    public class PuppetEventInfo
+    {
+        public string Id { get; set; } = "";   // the row id (PuppetRowInfo.Id)
+        public int H     { get; set; }         // the trigger's Animator parameter hash
+        public float S   { get; set; } = 1f;   // the body's AnimationSpeed float at that moment
     }
 
     /// <summary>Slice 3 (round-41): the simulating machine's live customer bodies for one building.
@@ -993,6 +1012,9 @@ namespace BigAmbitionsMP
         public string SimulatorPid { get; set; } = "";
         public List<PuppetRowInfo> Rows { get; set; } = new();
         public float T { get; set; }             // H-PUPPETSTUTTER-1: the sender's Time.unscaledTime at this sample (0 = absent/old sender)
+        // H-PUPPETANIM-1 (protocol 26, additive): one-shot triggers since the previous batch, at most 32 (null = none).
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public List<PuppetEventInfo>? Ev { get; set; }
     }
 
     /// <summary>H-HANDOFF-1 (message 219): one live customer's visit, enough for the machine taking the crowd

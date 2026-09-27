@@ -1,0 +1,418 @@
+{
+  "id": "T-PUPPETANIM",
+  "title": "H-PUPPETANIM-1, two players: the watcher's customer copies show the same LOOPING activities (gym machines, seats, eating) as the simulator's real customers. fx-hq1: the client's gym ('60 ba:street_fifthavenue') then the client's fast food ('11 ba:street_tenthavenue'), client simulating (owner, enters first), host watching; `puppetacts` on both machines at the same PAUSED minute. NO save.",
+  "preconditions": "Reporter fixture session fx-hq1 (day 44, MERGED - vars.keepMerger true). Dev build with H-PUPPETANIM-1 (puppetacts / custstate / enterbuilding / exitbuilding / skipvote / skipstate / pause, BAMP_DEV). Setup as T-PUPPETFLIPS: both step outside and take one consensus skip OUTDOORS to 10:45. ORACLES: (gym) of the simulator's customers with any loop on, >= 80% of the watcher's copies show ALL of those loops (live animator read, `puppetacts vs <sig>` within=True); (fast food) every simulator seated eater (Sitting + ConsumingFoodSitting) shows both on the watcher (sitEatMatched = simSitEat). REPORT: the '[Customers] puppet activity params: K of N present' line (once per follow session) and the missing-parameter names.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "gym": "60 ba:street_fifthavenue",
+    "shop": "11 ba:street_tenthavenue"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "(?<!swallowed )NullReferenceException",
+    "\\[Customers\\] (puppet tick|apply puppets|puppet spawn):",
+    "ERR puppetacts"
+  ],
+  "oracles_report": [
+    "\\[Customers\\] following ",
+    "\\[Customers\\] simulator for ",
+    "\\[Customers\\] puppet activity params",
+    "\\[PuppetActs\\]",
+    "\\[TestDrive\\] puppetacts"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST T-PUPPETANIM START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 32,
+      "note": "both worlds settle"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only): the HOST's own world can still be loading here (run T-HANDOFF2-20260926-213941 read settled=False at 39 s)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only)"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only)"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 18
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "note": "ASSERT the host settled, bounded at ~90 s after the load (rigrun has no retry-until primitive, so the ladder always runs its full length)"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "fx-hq1 loads Client1 inside a building; report-only"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "skipvote 10:45",
+      "expect_result": "^OK skipvote goal=",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "the setup skip to the next trading morning, taken OUTDOORS"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 40
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "enterbuilding ${gym}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the OWNER (client) enters first and simulates"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "enterbuilding ${gym}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the host watches: copies driven by the client's stream"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "sleep_s": 6
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "puppetacts arm 3",
+      "expect_result": "^OK puppetacts armed n=3 bldg='${gym}'",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[PuppetActs\\] armed count reached: ([3-9]|[1-9][0-9]+) >= 3",
+          "within_s": 240
+        }
+      ],
+      "note": "THE PREMISE WAIT (gym): an event on the simulator's stream tick, not a sleep"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${gym}' sim='${clientPid}' mode=follower natives=0 .*copies=[1-9]",
+      "note": "PREMISE: the host is a FOLLOWER holding copies"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "sleep_s": 4,
+      "note": "the watcher applies the latest rows"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK",
+      "note": "the world clock STOPS so both reads below are the SAME game minute"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "puppetacts",
+      "expect_result": "^OK puppetacts bldg='${gym}' mode=native rows=[1-9][0-9]* loopers=[1-9]",
+      "capture": {
+        "sigGym": " sig=(\\S+)",
+        "simLoopersGym": " loopers=(\\d+)",
+        "simOnMachine": "onMachine=(\\d+)",
+        "simParams": "params=(-?\\d+/\\d+)"
+      },
+      "note": "the SIMULATOR's gym customers: loops ON per id, read live off the natives' animators (sig = id:hexmask)"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "puppetacts vs ${sigGym}",
+      "expect_result": "^OK puppetacts bldg='${gym}' mode=follower .* within=True ",
+      "capture": {
+        "watchLoopersGym": " loopers=(\\d+)",
+        "matchedGym": " matched=(\\d+)",
+        "ratioGym": "ratio=([0-9.]+)",
+        "missingGym": " missing=(\\d+)",
+        "missingNamesGym": "missingNames=\\[([^\\]]*)\\]",
+        "watchOnMachine": "onMachine=(\\d+)",
+        "evPlayedGym": "evPlayed=(\\d+)",
+        "evNoParamGym": "evNoParam=(\\d+)",
+        "watchParams": "params=(-?\\d+/\\d+)"
+      },
+      "note": "THE ASSERTION: >= 80% of the simulator's customers with a loop show ALL of those loops on the watcher's copies (live animator read)"
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK",
+      "abort_on_fail": false,
+      "note": "leave the gym (the host takes the crowd over)"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "sleep_s": 4
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the OWNER (client) enters first and simulates"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the host watches: copies driven by the client's stream"
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "sleep_s": 6
+    },
+    {
+      "seq": 44,
+      "role": "c",
+      "cmd": "puppetacts arm eat",
+      "expect_result": "^OK puppetacts armed eat bldg='${shop}'",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[PuppetActs\\] armed seated eater reached: [1-9]",
+          "within_s": 300
+        }
+      ],
+      "note": "THE PREMISE WAIT (fast food): an event on the simulator's stream tick, not a sleep"
+    },
+    {
+      "seq": 45,
+      "role": "h",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${shop}' sim='${clientPid}' mode=follower natives=0 .*copies=[1-9]",
+      "note": "PREMISE: the host is a FOLLOWER holding copies"
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "sleep_s": 4,
+      "note": "the watcher applies the latest rows"
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK",
+      "note": "the world clock STOPS so both reads below are the SAME game minute"
+    },
+    {
+      "seq": 48,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 50,
+      "role": "c",
+      "cmd": "puppetacts",
+      "expect_result": "^OK puppetacts bldg='${shop}' mode=native rows=[1-9][0-9]* loopers=[1-9][0-9]* sitEat=[1-9]",
+      "capture": {
+        "sigFood": " sig=(\\S+)",
+        "simLoopersFood": " loopers=(\\d+)",
+        "simSitEat": "sitEat=(\\d+)"
+      },
+      "note": "the SIMULATOR's fast-food customers: seated eaters = Sitting + ConsumingFoodSitting both on"
+    },
+    {
+      "seq": 51,
+      "role": "h",
+      "cmd": "puppetacts vs ${sigFood}",
+      "expect_result": "^OK puppetacts bldg='${shop}' mode=follower .* simSitEat=([1-9][0-9]*) sitEatMatched=\\1 ",
+      "capture": {
+        "watchSitEat": " sitEat=(\\d+)",
+        "matchedFood": " matched=(\\d+)",
+        "ratioFood": "ratio=([0-9.]+)",
+        "withinFood": "within=(\\w+)",
+        "missingFood": " missing=(\\d+)"
+      },
+      "note": "THE ASSERTION: every seated eater on the simulator shows Sitting + ConsumingFoodSitting on the watcher's copy"
+    },
+    {
+      "seq": 52,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 54,
+      "role": "both",
+      "cmd": "mark TEST T-PUPPETANIM END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
