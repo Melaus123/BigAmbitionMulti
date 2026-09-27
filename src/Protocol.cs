@@ -102,7 +102,7 @@ namespace BigAmbitionsMP
         RadioState           = 175, // Any → Host → All (round-227): a building's speaker radio state (station + signed volume; sign = on/off) — light and precise so a radio click can never clobber concurrent interior edits
         ModMismatch          = 176, // Host → joiner (round-253, user-directed 2026-08-13): your installed-mod list differs from the host's. INFORMATIONAL ONLY — never a gate; the joiner shows a lobby notice + logs the diff so players stop being blind to install deltas (divergent prices/content read as mod bugs otherwise).
         PeerLogRequest       = 177, // Reporter → connected peers (bug-report v2, user-directed 2026-08-15): a bug bundle is being filed on my machine — contribute your logs. Third-party reports ("my friend crashed") used to carry only the reporter's half of the evidence.
-        PeerLogReply         = 178, // Peer → reporter: ONE log file, redacted (IPs + Windows usernames) ON THE OWNER'S MACHINE before it crosses the wire, then gzipped. TotalFiles replies per peer; TotalFiles=0 = nothing readable. The reporter's upload waits ≤12s then ships with whatever arrived.
+        PeerLogReply         = 178, // Peer → reporter: ONE log file, redacted (IP addresses, v4 + v6; Steam ids and user folder names are kept since batch 28 C) ON THE OWNER'S MACHINE before it crosses the wire, then gzipped. TotalFiles replies per peer; TotalFiles=0 = nothing readable. The reporter's upload waits ≤12s then ships with whatever arrived.
         GuestCargoGrab       = 179, // Taker → Host → Owner (round-269, field 20260816-101747 sell-loop exploit): a Business-granted guest grabbed an item (or drained shelf stock) in another player's business — convey it so the owner's copy loses it too. Ungranted grabs are BLOCKED by the pickup gate; this closes the dup for the granted flow. Routed to the online owner (their apply + next owner-push propagates), applied host-side when the owner is offline or is the host.
         JoinProgress         = 180, // Client → Host → All (round-270, field 20260816-112127 "cannot join" = silent relay downloads cancelled): the joiner's world-download percent, throttled. Display-only. The overlay derives "loading world…" from report STALENESS (fresh percent = downloading; gone quiet but not world-ready = native load running) — no phase field to desync.
         RegisterServe        = 156, // Simulator → Host → All: a customer's serve STARTED / FINISHED at a till.  Lets the player working that till on a FOLLOWER machine perform the job — they are assigned to the station locally and see the queue, but with no real customers there the native serve loop never runs, so without this they stand motionless behind a busy counter.
@@ -1834,7 +1834,7 @@ namespace BigAmbitionsMP
         public string TakerPid       { get; set; } = "";
     }
 
-    /// <summary>One log file for a bug bundle. Redacted (IPs + Windows usernames) on the
+    /// <summary>One log file for a bug bundle. Redacted (IP addresses, v4 + v6 - Steam ids and user folder names are kept) on the
     /// OWNER'S machine before sending, then gzipped — raw log text never crosses the wire.</summary>
     public class PeerLogReplyPayload
     {

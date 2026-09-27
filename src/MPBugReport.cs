@@ -1875,7 +1875,7 @@ namespace BigAmbitionsMP
         // the Player-prev logs. The reporter's Player.log is never dropped.
         private sealed class BundleItem
         {
-            public string Rel = "";        // zip entry name (steam ids already aliased)
+            public string Rel = "";        // zip entry name (Steam ids kept since batch 28 C; RedactEntryName is the seam)
             public int Priority;
             public int Order;
             public string? File;           // source on disk (raw; text is redacted when written)
@@ -2160,9 +2160,10 @@ namespace BigAmbitionsMP
             // .md and .json added 2026-08-26: this loose-file path is the FALLBACK used when the zip
             // build fails, and it was redacting only .log/.txt — so report.md, config-redacted.json and
             // every saves/**/*.json went up raw. The zip path already covers all four extensions, and
-            // IPs, account names and Steam IDs must be stripped on BOTH upload paths, not just the zip
-            // one — a fallback that quietly publishes more than the normal path is the worst shape.
-            // (Redact IPv4 addresses from TEXT uploads so the host's public IP is never published to
+            // IP addresses (IPv4 and IPv6) must be stripped on BOTH upload paths, not just the zip one —
+            // a fallback that quietly publishes more than the normal path is the worst shape.  Steam ids
+            // and user folder names are KEPT on both paths (batch 28 C, user ruling 2026-09-21).
+            // (Redact IP addresses from TEXT uploads so the host's public IP is never published to
             // Discord; the local report folder keeps the un-redacted originals. Maintainer decision 2026-06-16.)
             if (IsTextFile(path)) parts.Add(RedactedBytes(path));
             else parts.Add(path);   // binary (.zip / .hsg / images) streams as-is
@@ -2175,12 +2176,26 @@ namespace BigAmbitionsMP
         // reversed - they carry diagnostic value, e.g. Proton / Steam Deck paths). A mod token
         // `mod:<name>@a.b.c.d` (MPContentFingerprint) is an assembly VERSION, not an address: the
         // lookbehind skips a dotted quad that directly follows `mod:<name>@`.
+        // EFFORT BATCH 29 (R5): the exception is tightened to a real ASSEMBLY-NAME shape at a TOKEN START:
+        // `mod:` at the start of the text or after whitespace / , ; | ( [ { " ' =, then a name that starts
+        // with a letter or '_' and holds only letters, digits, '.', '_' or '-'.  `mod:10.0.0.1@<ip>` or
+        // `xmod:a@<ip>` no longer shield an address.
         private static readonly System.Text.RegularExpressions.Regex _ipv4 =
-            new System.Text.RegularExpressions.Regex(@"(?<!\bmod:[^\s@]+@)\b(?:\d{1,3}\.){3}\d{1,3}\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+            new System.Text.RegularExpressions.Regex(@"(?<!(?<![^\s,;|(\[{""'=])mod:[A-Za-z_][A-Za-z0-9_.\-]*@)\b(?:\d{1,3}\.){3}\d{1,3}\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        // EFFORT BATCH 29 (R5): IPv6 addresses are blanked too (MPTransport logs full remote endpoints,
+        // e.g. "[2001:db8::1]:7777").  Shapes: the full 8-group form, any '::'-compressed form, an
+        // IPv4-mapped tail (::ffff:a.b.c.d, blanked whole) and a %zone suffix.  Guards against false hits:
+        // not inside a word / after ':' '.' '%' (Steam "steam:<digits>", dotted names), at least one DIGIT
+        // in the run (so "Add::Bed"-style C++ scopes stay), and no 8-group or '::' requirement is met by a
+        // clock time ("12:34:56.789").  The port after "]:" is kept (only the address is sensitive).
+        private static readonly System.Text.RegularExpressions.Regex _ipv6 =
+            new System.Text.RegularExpressions.Regex(@"(?<![\w:.%])(?=[0-9A-Fa-f:]*\d)(?:(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){0,6}[0-9A-Fa-f]{0,4}::(?:[0-9A-Fa-f]{1,4}:){0,6}[0-9A-Fa-f]{0,4})(?:(?<=:)(?:\d{1,3}\.){3}\d{1,3})?(?:%[0-9A-Za-z]+)?(?![\w:]|\.\d)", System.Text.RegularExpressions.RegexOptions.Compiled);
 
         internal static string RedactSensitive(string s)
         {
             if (string.IsNullOrEmpty(s)) return s;
+            s = _ipv6.Replace(s, "[redacted-ip]");   // first: an IPv4-mapped IPv6 goes as ONE address
             return _ipv4.Replace(s, "[redacted-ip]");
         }
 

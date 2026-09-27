@@ -4405,16 +4405,21 @@ namespace BigAmbitionsMP
         // it with host's (id, name) pairs.
         // ── UUID-queue strategy (Phase 1d Wave 6) ─────────────────────────────
         // The cleanest way to make client's RivalDataCache match host's: don't
-        // suppress GenerateRivals — instead, INTERCEPT the random-ID generator
-        // it calls (UuidHelper.GenerateBase64Uuid) so the client's own
-        // GenerateRivals produces the SAME ids host produced.  The game's own
+        // suppress GenerateRivals — instead, REROUTE GenerateRivals' own two
+        // calls to the random-ID generator (UuidHelper.GenerateBase64Uuid; the
+        // Transpiler below - the generator itself is not patched) so the
+        // client's own GenerateRivals produces the SAME ids host produced.  The game's own
         // (private) code writes RivalDataCache normally — we never need
         // direct access to that private field.
         //
         // One Harmony patch class does it all (EFFORT BATCH 28, 2026-09-27):
         //   * Prefix flips a "we're inside" flag, Postfix flips it back AND on
         //     HOST broadcasts the rival ids to clients as soon as they're
-        //     generated (so client has them before its own GenerateRivals runs).
+        //     generated.  EFFORT BATCH 29: the host now runs New() BEFORE telling
+        //     the lobby to start, and re-sends the ids right after each peer's
+        //     StartGameNew (MPServer.TellLobbyPeersNewGame); the client resets its
+        //     feed when its start begins, so THAT copy is the one its
+        //     GenerateRivals runs from.
         //   * Transpiler rewrites GenerateRivals' OWN two id mints (the 7
         //     wholesale + 8 import draws, RivalsHelper.cs:476/:482) to call
         //     NextRivalId, which dequeues from GameStatePatcher.PendingRivalIdQueue

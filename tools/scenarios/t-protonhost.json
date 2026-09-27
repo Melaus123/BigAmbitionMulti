@@ -1,7 +1,7 @@
 {
   "id": "T-PROTONHOST",
-  "title": "EFFORT BATCH 28: (B) a forced failure of the host's new-game start continuation hands the lobby back and the SECOND Start press starts; (A) the client's GenerateRivals, fed through the new GenerateRivals transpiler (no HGExtensions detour), mints exactly the host's 15 rival ids. The rig cannot run Proton - the field fault itself is not reproducible here",
-  "preconditions": "Build with EFFORT BATCH 28 deployed (levers startfail + rivalids; charconfirm, hostnew existing). No fixture save is loaded - both machines generate a NEW world. The forced failure happens BEFORE the client joins, so the client only ever sees the second (real) start. NOTHING is saved.",
+  "title": "EFFORT BATCH 28/29: (B) a forced failure of the host's new-game start - with a client ALREADY in the lobby - hands the host's lobby back, the client never starts (the host now runs its own New before telling anyone), and the SECOND Start starts both machines exactly once; (A+R2) the client's GenerateRivals, fed through the GenerateRivals transpiler after a per-start reset of the rival feed, mints exactly the host's 15 rival ids. The rig cannot run Proton - the field fault itself is not reproducible here",
+  "preconditions": "Build with EFFORT BATCH 29 deployed (levers startfail [clientInLobby readout] + rivalids; charconfirm, hostnew existing). No fixture save is loaded - both machines generate a NEW world. The forced failure happens AFTER the client joined the lobby (batch 29 review R1). NOTHING is saved. The load-path failure is t-protonhost-load.",
   "instances": 2,
   "vars": {},
   "oracles_absent": [
@@ -11,44 +11,55 @@
     "LEFTOVER id",
     "called inside GenerateRivals but queue empty",
     "lobby latch untouched",
-    "lobby restore failed"
+    "lobby restore failed",
+    "a start is already in flight on this machine",
+    "telling the clients failed"
   ],
   "oracles_report": [
     "\\[Wave6\\] GenerateRivals transpiler",
     "\\[Server\\] StartNewGame error",
     "\\[Wave6\\] GenerateRivals starting on client",
+    "client rival feed reset",
+    "sent to \\d+ client\\(s\\) after the host's own start",
+    "Host started game",
     "Lobby Start ignored"
   ],
   "steps": [
     { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
     { "seq": 2, "role": "h", "cmd": "startfail", "expect_result": "^OK startfail armed=False running=True inLobby=True", "note": "baseline: lobby live" },
-    { "seq": 3, "role": "h", "cmd": "startfail arm", "expect_result": "^OK the next StartNewGame continuation throws once" },
+    { "seq": 3, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 4, "role": "h", "sleep_s": 15, "note": "the client reaches the lobby" },
+    { "seq": 5, "role": "c", "cmd": "startfail", "expect_result": "clientInLobby=True", "note": "baseline: the client sits in the lobby" },
+    { "seq": 6, "role": "both", "cmd": "charconfirm", "expect_result": "^OK armed" },
+    { "seq": 7, "role": "h", "cmd": "startfail arm", "expect_result": "^OK the next start continuation \\(new game or host load\\) throws once" },
     {
-      "seq": 4, "role": "h", "cmd": "hostnew", "expect_result": "^OK StartNewGame invoked",
+      "seq": 8, "role": "h", "cmd": "hostnew", "expect_result": "^OK StartNewGame invoked",
       "expect_log": [ { "role": "h", "regex": "\\[Server\\] StartNewGame error - lobby restored, Start can be pressed again: System.InvalidOperationException: DEV startfail lever", "within_s": 30 } ],
-      "note": "FIRST press: the continuation throws once - the failure is logged once and the latch is handed back"
+      "note": "FIRST press, client in the lobby: the host's continuation throws once BEFORE New - the failure is logged once and the latch is handed back"
     },
-    { "seq": 5, "role": "h", "cmd": "startfail", "expect_result": "^OK startfail armed=False running=True inLobby=True", "note": "the lever fired once and the lobby is live again (field bug: inLobby stayed False forever)" },
-    { "seq": 6, "role": "c", "cmd": "join", "expect_result": "^OK" },
-    { "seq": 7, "role": "h", "sleep_s": 15, "note": "the client reaches the lobby" },
-    { "seq": 8, "role": "both", "cmd": "charconfirm", "expect_result": "^OK armed" },
+    { "seq": 9, "role": "h", "sleep_s": 10, "note": "anything wrongly sent to the client would have landed by now" },
+    { "seq": 10, "role": "h", "cmd": "startfail", "expect_result": "^OK startfail armed=False running=True inLobby=True", "note": "the lever fired once and the host's lobby is live again" },
+    { "seq": 11, "role": "c", "cmd": "startfail", "expect_result": "clientInLobby=True", "note": "THE R1 CHECK: the client was never told to start by the failed press (it is still in the lobby)" },
     {
-      "seq": 9, "role": "h", "cmd": "hostnew", "expect_result": "^OK StartNewGame invoked",
+      "seq": 12, "role": "h", "cmd": "hostnew", "expect_result": "^OK StartNewGame invoked",
       "expect_log": [
         { "role": "h", "regex": "\\[Server\\] New game init \\+ intro scene loaded", "within_s": 180 },
+        { "role": "h", "regex": "\\[Server\\] StartNewGame \\(\\w+\\) sent to 1 client\\(s\\) after the host's own start; base cash \\$\\d+; rival ids \\d+ rival\\(s\\)", "within_s": 180 },
+        { "role": "c", "regex": "\\[Client\\] Host started game \\(new\\)", "within_s": 180 },
         { "role": "c", "regex": "\\[Wave6\\] GenerateRivals starting on client; UUID queue has 15 id\\(s\\)", "within_s": 300 }
       ],
-      "note": "SECOND press: a real start (not 'ignored - a start is already in flight'); the client's GenerateRivals runs from the host's 15-id feed"
+      "note": "SECOND press: a real start on BOTH machines (the client's first and only start); the client's GenerateRivals runs from the host's 15-id feed re-sent behind its StartGameNew"
     },
-    { "seq": 10, "role": "h", "sleep_s": 150, "note": "both machines create characters (charconfirm) and settle" },
+    { "seq": 13, "role": "h", "sleep_s": 150, "note": "both machines create characters (charconfirm) and settle" },
     {
-      "seq": 11, "role": "h", "cmd": "rivalids",
+      "seq": 14, "role": "h", "cmd": "rivalids",
       "expect_result": "^OK rivalids n=15 w=\\[[^\\],]+(,[^\\],]+){6}\\] i=\\[[^\\],]+(,[^\\],]+){7}\\]",
       "capture": { "hostIds": "^OK rivalids (n=15 w=\\[.*\\] i=\\[.*\\])$" },
       "note": "the host's own minted rival ids (7 wholesale + 8 import)"
     },
-    { "seq": 12, "role": "c", "cmd": "rivalids", "expect_result": "^OK rivalids ${hostIds}$", "note": "THE CHECK: the client's world holds the host's ids, in order" },
-    { "seq": 13, "role": "c", "cmd": "status", "expect_result": "settled=True", "note": "report: the client settled into the new world" },
-    { "seq": 14, "role": "both", "cmd": "mark TEST PROTONHOST END", "expect_result": "OK MARK" }
+    { "seq": 15, "role": "c", "cmd": "rivalids", "expect_result": "^OK rivalids ${hostIds}$", "note": "THE CHECK: the client's world holds the host's ids, in order (count 15)" },
+    { "seq": 16, "role": "c", "cmd": "status", "expect_result": "settled=True", "note": "report: the client settled into the new world" },
+    { "seq": 17, "role": "c", "cmd": "startfail", "expect_result": "clientInLobby=False", "note": "report: the client left the lobby once (the second start was acted on)" },
+    { "seq": 18, "role": "both", "cmd": "mark TEST PROTONHOST END", "expect_result": "OK MARK" }
   ]
 }

@@ -64,8 +64,10 @@ namespace BigAmbitionsMP
         internal static bool HoldRivalsSnapshot;
         internal static RivalsSnapshotPayload? HeldRivalsSnapshot;
 
-        /// <summary>EFFORT BATCH 28 "startfail" verb state — while true, the NEXT StartNewGame
-        /// main-thread continuation throws once (MPServer), exercising the lobby hand-back.</summary>
+        /// <summary>EFFORT BATCH 28 "startfail" verb state — while true, the NEXT host start
+        /// main-thread continuation throws once, exercising the lobby hand-back: a new game throws
+        /// where SaveGameManager.New ran (MPServer), a lobby save load throws where the host's own
+        /// load ran (MPSaveCoordinator.HostLoadSession, EFFORT BATCH 29) - both BEFORE any client is told.</summary>
         internal static bool ForceStartFailOnce;
 
         /// <summary>Round-260 "rentdeny" verb state — while true, the host denies every
@@ -237,9 +239,10 @@ namespace BigAmbitionsMP
                 case "startfail":
                     // EFFORT BATCH 28 (B) test lever, host-side: 'arm' -> the next StartNewGame
                     // continuation throws once; bare -> readout of the lever + the lobby latch.
-                    if (arg == "arm") { ForceStartFailOnce = true;  return "OK the next StartNewGame continuation throws once (host-side)"; }
+                    if (arg == "arm") { ForceStartFailOnce = true;  return "OK the next start continuation (new game or host load) throws once (host-side)"; }
                     if (arg == "off") { ForceStartFailOnce = false; return "OK startfail disarmed"; }
-                    return $"OK startfail armed={ForceStartFailOnce} running={MPServer.IsRunning} inLobby={MPServer.IsInLobby}";
+                    // EFFORT BATCH 29: clientInLobby = this machine's CLIENT lobby latch (true until a start is acted on).
+                    return $"OK startfail armed={ForceStartFailOnce} running={MPServer.IsRunning} inLobby={MPServer.IsInLobby} clientInLobby={MPClient.IsInLobby}";
 
                 case "rivalids":
                 {

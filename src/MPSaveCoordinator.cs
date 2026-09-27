@@ -1239,7 +1239,9 @@ namespace BigAmbitionsMP
             // REPLACED inside RestoreOwnershipFromManifest, beside the merger roster it belongs to —
             // always from THIS manifest, so an older slot can never keep newer paperwork.
             MPServer.RestoreOwnershipFromManifest(m);              // cross-machine ownership + cash seed + paperwork
-            MPServer.SendLoadDataToEachClient(session, m, lineage); // each client gets its own .hsg FROM the source, tagged with the lineage
+            // EFFORT BATCH 29 (R1): the member serve (SendLoadDataToEachClient) moved INTO the main-thread
+            // continuation below, AFTER the host's own load - a host load that failed used to leave every
+            // client already loading its save while the host went back to the lobby.
 
             float hostCash = BestCashFor(m, MPConfig.StableId);
             // Review-2 fix: only overlay cash we actually KNOW (a live figure or a
@@ -1250,10 +1252,34 @@ namespace BigAmbitionsMP
                               || (m.Slots != null && m.Slots.Exists(s => s.StableId == MPConfig.StableId));
             if (!hostCashKnown)
                 Plugin.Logger.LogInfo($"[MPSave] No recorded cash for this host in '{session}' — keeping the loaded save's own money.");
+            // EFFORT BATCH 29 (R1 + R3): the host's OWN load runs first; only when it did not fail are the
+            // members served their saves.  A failure (a throw, or LoadOwnHsg refusing) used to be logged
+            // as "Host load" and nothing else - the lobby latch stayed burnt forever and the clients were
+            // already loading.  It now reaches MPServer.StartFailed (lobby handed back, nobody served).
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
-                try { if (LoadOwnHsg(session, MPConfig.StableId) && hostCashKnown) QueueCashApply(hostCash); }
-                catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Host load: {ex}"); }
+                try
+                {
+#if BAMP_DEV
+                    // EFFORT BATCH 29 test lever ('startfail arm'): one forced failure of the host's own load.
+                    if (TestDrive.ForceStartFailOnce)
+                    {
+                        TestDrive.ForceStartFailOnce = false;
+                        throw new InvalidOperationException("DEV startfail lever: forced host-load failure (test)");
+                    }
+#endif
+                    if (!LoadOwnHsg(session, MPConfig.StableId))
+                        throw new InvalidOperationException($"the host's own save of '{session}' did not load (LoadOwnHsg returned false)");
+                }
+                catch (Exception ex)
+                {
+                    MPServer.StartFailed("HostLoadSession", ex);
+                    return;   // no member was served
+                }
+                try { if (hostCashKnown) QueueCashApply(hostCash); }
+                catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Host load cash overlay: {ex}"); }
+                try { MPServer.SendLoadDataToEachClient(session, m, lineage); }   // each client gets its own .hsg FROM the source, tagged with the lineage
+                catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostLoadSession '{session}': serving the members failed (the host's load stands): {ex}"); }
             });
             Plugin.Logger.LogInfo($"[MPSave] HostLoadSession '{session}' → continuing lineage '{lineage}' — {m.Slots.Count} slot(s).");
         }

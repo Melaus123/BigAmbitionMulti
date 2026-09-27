@@ -1,0 +1,50 @@
+{
+  "id": "T-PROTONHOST-LOAD",
+  "title": "EFFORT BATCH 29 (R1 load shape + R3): a forced failure of the host's OWN save load (main-thread continuation of HostLoadSession) reaches StartFailed - the lobby is handed back, the client in the lobby was never served its save - and the next Start loads both machines",
+  "preconditions": "Fixture save1 (host melaus, Client1). Build with EFFORT BATCH 29 deployed (startfail lever reaches the host load; clientInLobby readout). The client joins the lobby BEFORE the failed load. NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "lobby latch untouched",
+    "lobby restore failed",
+    "a start is already in flight on this machine",
+    "serving the members failed",
+    "Lobby Start ignored"
+  ],
+  "oracles_report": [
+    "\\[Server\\] HostLoadSession error",
+    "\\[MPSave\\] Loading \\.hsg",
+    "Host started game"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "sleep_s": 15, "note": "the client reaches the lobby" },
+    { "seq": 4, "role": "c", "cmd": "startfail", "expect_result": "clientInLobby=True", "note": "baseline" },
+    { "seq": 5, "role": "h", "cmd": "startfail arm", "expect_result": "^OK the next start continuation \\(new game or host load\\) throws once" },
+    {
+      "seq": 6, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK StartLoadGame",
+      "expect_log": [ { "role": "h", "regex": "\\[Server\\] HostLoadSession error - lobby restored, Start can be pressed again: System.InvalidOperationException: DEV startfail lever: forced host-load failure", "within_s": 60 } ],
+      "note": "FIRST press: the host's own load throws once on the main thread (R3: this used to be logged as 'Host load' only - lobby wedged)"
+    },
+    { "seq": 7, "role": "h", "sleep_s": 10, "note": "a wrongly served save would have landed by now" },
+    { "seq": 8, "role": "h", "cmd": "startfail", "expect_result": "^OK startfail armed=False running=True inLobby=True", "note": "THE R3 CHECK: the host's lobby is usable again" },
+    { "seq": 9, "role": "c", "cmd": "startfail", "expect_result": "clientInLobby=True", "note": "THE R1 CHECK (load shape): the client was not served before the host's own load" },
+    {
+      "seq": 10, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK StartLoadGame",
+      "expect_log": [ { "role": "h", "regex": "\\[MPSave\\] Loading \\.hsg: char=", "within_s": 60 } ],
+      "note": "SECOND press: a real load"
+    },
+    { "seq": 11, "role": "h", "sleep_s": 90, "note": "both worlds load and settle" },
+    { "seq": 12, "role": "h", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 13, "role": "c", "cmd": "status", "expect_result": "settled=True", "note": "the client was served after the host's load and settled" },
+    { "seq": 14, "role": "both", "cmd": "mark TEST PROTONHOST-LOAD END", "expect_result": "OK MARK" }
+  ]
+}

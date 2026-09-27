@@ -422,9 +422,11 @@ namespace BigAmbitionsMP
 
         /// <summary>
         /// Ordered FIFO of rival IDs to be consumed by client's GenerateRivals.
-        /// Populated when host's RivalsSnapshot arrives.  Drained by the
-        /// Harmony Prefix on UuidHelper.GenerateBase64Uuid (which only fires
-        /// while RivalsGenerateRunning is true).
+        /// Populated when host's RivalsSnapshot arrives.  Drained by
+        /// Patch_RivalsHelper_GenerateRivals.NextRivalId - the transpiled stand-in
+        /// for GenerateRivals' own two id mints (feeds only while
+        /// RivalsGenerateRunning is true; UuidHelper itself is not patched since
+        /// EFFORT BATCH 28).
         /// </summary>
         public static readonly System.Collections.Generic.Queue<string> PendingRivalIdQueue = new();
 
@@ -448,6 +450,24 @@ namespace BigAmbitionsMP
         /// injected cache.
         /// </summary>
         public static bool ClientRivalsInjected = false;
+
+        /// <summary>EFFORT BATCH 29 (R2): ClientRivalsReady / ClientRivalsInjected / the id queue belong to
+        /// ONE world start, not to the process.  They were set once and never cleared, so a retried start
+        /// (or any second new game in the same game session) found Injected already true, suppressed every
+        /// GenerateRivals and left the client with NO rivals.  Called on every new connection and at the
+        /// start of every client world start (MPClient).  MAIN THREAD ONLY (the queue is main-thread state).</summary>
+        internal static void ResetClientRivalFeed(string why)
+        {
+            try
+            {
+                bool had = ClientRivalsReady || ClientRivalsInjected || PendingRivalIdQueue.Count > 0;
+                ClientRivalsReady = false;
+                ClientRivalsInjected = false;
+                PendingRivalIdQueue.Clear();
+                if (had) Plugin.Logger.LogInfo($"[Patcher] client rival feed reset ({why}) - this world's GenerateRivals waits for this start's host ids.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] client rival feed reset ({why}): {ex.Message}"); }
+        }
 
         /// <summary>
         /// PlayerId → CharacterName for entries that are HUMAN PLAYERS (not AI

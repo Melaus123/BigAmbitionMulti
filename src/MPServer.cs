@@ -1628,28 +1628,19 @@ namespace BigAmbitionsMP
             lock (_joinBaselineDone) _joinBaselineDone.Clear();   // round-276: baseline latches die with the session
             _expectedLoadGen.Clear(); _parkedBaselineGen.Clear(); _firedLoadGen.Clear(); _markedInGame.Clear();   // round-284: load-ticket state too (the counter itself never resets — a reissued gen could match a stale echo)
 
-            // Per-player starting cash: each client gets the host-designated amount
-            // (their override, else the difficulty base).  The host now designates
-            // everyone's cash, so EnforceStartingCash is always true here — the
-            // client uses the StartingMoney we bake into its own Settings copy.
+            // EFFORT BATCH 29 (R1, review of b485e1a): the HOST's own risky start steps run FIRST.
+            // The lobby peers used to be sent StartGameNew HERE, before SaveGameManager.New ran in the
+            // continuation below - so a host-side failure (the Proton fault hit New -> GenerateRivals)
+            // handed the host's lobby back while every client was already in character creation, and
+            // the second Start sent them a SECOND start.  Now New (incl. rival generation) and the intro
+            // scene request run first; a throw there reaches StartFailed with NO client told (they never
+            // leave the lobby).  Only after the host's start succeeded are the peers that were in the
+            // lobby at the press told (TellLobbyPeersNewGame), each StartGameNew followed by the host's
+            // rival ids, so a client's GenerateRivals still runs from the host's ids.  Nothing after
+            // "told" hands the lobby back (a failure there is logged; the host's start stands).
             int baseCash = settings.StartingMoney;
             int baseAge  = settings.StartingAge;
-            foreach (var peer in _clients.Keys)
-            {
-                string pid  = _peerNames.TryGetValue(peer.Id, out var p) ? p : "";
-                int    cash = StartingCashFor(pid, baseCash);
-                int    age  = StartingAgeFor(pid, baseAge);
-                var perPayload = new StartGamePayload
-                {
-                    SaveName            = "",
-                    Settings            = CloneWithCash(settings, cash, age),
-                    EnforceStartingCash = true,
-                    LoadGen             = string.IsNullOrEmpty(pid) ? 0 : MintLoadGen(pid),   // round-284 load ticket
-                };
-                Send(peer, MessageEnvelope.Create(MessageType.StartGameNew, "host", perPayload));
-                Plugin.Logger.LogInfo($"[Server] StartNewGame → '{pid}' cash ${cash} age {age}.");
-            }
-            Plugin.Logger.LogInfo($"[Server] StartNewGame ({settings.Difficulty}) sent to {_clients.Count} client(s); base cash ${baseCash}.");
+            var lobbyPeers = new List<MPLink>(_clients.Keys);
 
             // Host's own starting cash + age (the host's overrides if set, else base).
             int hostCash = StartingCashFor(MPConfig.PlayerId, baseCash);
@@ -1662,10 +1653,12 @@ namespace BigAmbitionsMP
             // then naturally transitions to the game when the player clicks "Start Game".
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
+                RivalsSnapshotPayload? rivals = null;
                 try
                 {
 #if BAMP_DEV
-                    // EFFORT BATCH 28 test lever ('startfail arm'): one forced failure of this continuation.
+                    // EFFORT BATCH 28 test lever ('startfail arm'): one forced failure of this continuation,
+                    // at the point the Proton fault hit (before New) - EFFORT BATCH 29: no client told yet.
                     if (TestDrive.ForceStartFailOnce)
                     {
                         TestDrive.ForceStartFailOnce = false;
@@ -1679,14 +1672,55 @@ namespace BigAmbitionsMP
                     // Discovery probe — logs GameVariables structure so we can
                     // later force multiplayer new games into Custom (non-story) mode.
                     SaveGameManager.New(BuildGameVariables(hostSettings));
+                    // The host's ids for the clients, built at the SAME moment the GenerateRivals Postfix
+                    // builds its copy (inside New, before the intro scene) - never from the intro scene.
+                    try { rivals = BuildRivalsSnapshot(); }
+                    catch (Exception exR) { Plugin.Logger.LogWarning($"[Server] StartNewGame: rival ids for the clients: {exR.Message}"); }
                     LoadScene.LoadIntro(false);
                     Plugin.Logger.LogInfo("[Server] New game init + intro scene loaded.");
                 }
                 catch (Exception ex)
                 {
                     StartFailed("StartNewGame", ex);
+                    return;   // no client was told - they are still in the lobby
                 }
+                try { TellLobbyPeersNewGame(lobbyPeers, settings, baseCash, baseAge, rivals); }
+                catch (Exception ex) { Plugin.Logger.LogError($"[Server] StartNewGame: telling the clients failed (the host's start stands): {ex}"); }
             });
+        }
+
+        /// <summary>EFFORT BATCH 29 (R1): the client half of a new-game start, run only AFTER the host's own
+        /// New + intro request succeeded (main thread).  Each peer that was in the lobby at the press and is
+        /// still connected gets its StartGameNew (per-player cash/age + load ticket, unchanged) and then the
+        /// host's rival ids: the client resets its rival feed when it acts on the start (MPClient
+        /// HandleStartGame), so THIS copy - behind the start on the same link - is the one its
+        /// GenerateRivals runs from.  Per-peer failures are logged and never stop the others.</summary>
+        private static void TellLobbyPeersNewGame(List<MPLink> lobbyPeers, GameVariablesDto settings, int baseCash, int baseAge, RivalsSnapshotPayload? rivals)
+        {
+            int told = 0;
+            foreach (var peer in lobbyPeers)
+            {
+                if (!_clients.ContainsKey(peer)) continue;   // left between the press and the host's start
+                try
+                {
+                    string pid  = _peerNames.TryGetValue(peer.Id, out var p) ? p : "";
+                    int    cash = StartingCashFor(pid, baseCash);
+                    int    age  = StartingAgeFor(pid, baseAge);
+                    var perPayload = new StartGamePayload
+                    {
+                        SaveName            = "",
+                        Settings            = CloneWithCash(settings, cash, age),
+                        EnforceStartingCash = true,
+                        LoadGen             = string.IsNullOrEmpty(pid) ? 0 : MintLoadGen(pid),   // round-284 load ticket
+                    };
+                    Send(peer, MessageEnvelope.Create(MessageType.StartGameNew, "host", perPayload));
+                    if (rivals != null) Send(peer, MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", rivals));
+                    told++;
+                    Plugin.Logger.LogInfo($"[Server] StartNewGame → '{pid}' cash ${cash} age {age}.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] StartNewGame → peer {peer.Id}: {ex.Message}"); }
+            }
+            Plugin.Logger.LogInfo($"[Server] StartNewGame ({settings.Difficulty}) sent to {told} client(s) after the host's own start; base cash ${baseCash}; rival ids {(rivals != null ? rivals.Rivals.Count + " rival(s)" : "NOT sent")}.");
         }
 
         /// <summary>Round-285 backstop: a load that refuses AFTER StartLoadGame burned the
@@ -1723,7 +1757,10 @@ namespace BigAmbitionsMP
         /// start is already in flight" forever.  Logged ONCE per failure (this line replaces the
         /// old "StartNewGame error" line and keeps its prefix).  Same world-up guard as
         /// NotifyLoadRefused: a failure reached with a live world never flips back to "lobby".
-        /// No on-screen text (the lobby's existing Start button is the whole affordance).</summary>
+        /// No on-screen text (the lobby's existing Start button is the whole affordance).
+        /// EFFORT BATCH 29 (R1): every start path now runs the HOST's own risky steps (New / its own
+        /// load) BEFORE any client is told to start, so a failure landing here has told nobody - the
+        /// clients are still in the lobby and the next Start starts every machine exactly once.</summary>
         internal static void StartFailed(string where, Exception ex)
         {
             try
@@ -1738,6 +1775,19 @@ namespace BigAmbitionsMP
                 MPSaveCoordinator.ConsumeDevHostLoadAs(where + " failed");   // the override never outlives its start (NotifyLoadRefused rule)
                 IsInLobby = true;
                 Plugin.Logger.LogError($"[Server] {where} error - lobby restored, Start can be pressed again: {ex}");
+                // EFFORT BATCH 29 (R4): the all-players-loaded pause (TimeSync startup hold) must not
+                // outlive a failed start.  It is normally engaged only once the host's world is up, so
+                // this is a backstop; marshalled (EndStartupHold touches timeScale / the native pause).
+                try
+                {
+                    if (TimeSync.IsStartupHeld)
+                        GameStatePatcher.EnqueueOnMainThread(() =>
+                        {
+                            try { if (TimeSync.IsStartupHeld) { TimeSync.EndStartupHold(); Plugin.Logger.LogInfo($"[Server] {where} failed - the startup hold was switched off with the lobby hand-back."); } }
+                            catch (Exception e3) { Plugin.Logger.LogWarning($"[Server] startup hold switch-off after a failed start: {e3.Message}"); }
+                        });
+                }
+                catch { }
             }
             catch (Exception e2) { Plugin.Logger.LogError($"[Server] {where} error: {ex} (lobby restore failed: {e2.Message})"); }
         }
@@ -1836,13 +1886,8 @@ namespace BigAmbitionsMP
 
             // No MP session yet — fall back to the legacy "everyone loads their most
             // recent single-player save" behaviour.
-            // Round-284: one shared ticket for the broadcast serve — every named peer
-            // expects the same gen.
-            var payload = new StartGamePayload { SaveName = "", LoadGen = MintSharedLoadGen() };
-            Broadcast(MessageEnvelope.Create(MessageType.StartGameLoad, "host", payload));
-            Plugin.Logger.LogInfo("[Server] StartLoadGame (legacy SP path) sent to all clients.");
-
-            // Host loads its most recent save on the main thread
+            // EFFORT BATCH 29 (R1): the HOST loads first; the clients are told (StartGameLoad) only after
+            // the host's own load did not fail - a failure reaches StartFailed with nobody told.
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
                 try
@@ -1856,18 +1901,30 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning("[Server] No saves found — starting new game instead.");
                         SaveGameManager.New(MakeGameVariables());
                         LoadScene.LoadIntro(false);
-                        return;
                     }
-
-                    // Load the most recent save (list is sorted newest-first by the game)
-                    var save = saves[0];
-                    Plugin.Logger.LogInfo($"[Server] Loading save: {save.alias}");
-                    MPSaveCoordinator.GuardedNativeLoad(save, true, "host latest-save fallback", save.alias);   // round-251
+                    else
+                    {
+                        // Load the most recent save (list is sorted newest-first by the game)
+                        var save = saves[0];
+                        Plugin.Logger.LogInfo($"[Server] Loading save: {save.alias}");
+                        if (!MPSaveCoordinator.GuardedNativeLoad(save, true, "host latest-save fallback", save.alias))   // round-251
+                            throw new InvalidOperationException("the host's latest save did not load (GuardedNativeLoad returned false)");
+                    }
                 }
                 catch (Exception ex)
                 {
                     StartFailed("StartLoadGame", ex);
+                    return;   // no client was told
                 }
+                try
+                {
+                    // Round-284: one shared ticket for the broadcast serve — every named peer
+                    // expects the same gen.
+                    var payload = new StartGamePayload { SaveName = "", LoadGen = MintSharedLoadGen() };
+                    Broadcast(MessageEnvelope.Create(MessageType.StartGameLoad, "host", payload));
+                    Plugin.Logger.LogInfo("[Server] StartLoadGame (legacy SP path) sent to all clients.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogError($"[Server] StartLoadGame: telling the clients failed (the host's load stands): {ex}"); }
             });
         }
 

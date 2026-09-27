@@ -257,6 +257,9 @@ namespace BigAmbitionsMP
 
             IsInLobby = true;
             _lobbyPlayers = new List<string>();
+            // EFFORT BATCH 29 (R2): the rival id feed is PER SESSION - a new connection never inherits the
+            // previous session's "ready/injected" latches (marshalled: the queue is main-thread state).
+            try { GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.ResetClientRivalFeed("new connection")); } catch { }
 
             // Send Hello
             var hello = new HelloPayload
@@ -1385,6 +1388,7 @@ namespace BigAmbitionsMP
                         LoadScene.LoadMainMenu(BAModAPI.ModActivationScope.City);
                         return;
                     }
+                    GameStatePatcher.ResetClientRivalFeed("mid-join fresh start");   // EFFORT BATCH 29 (R2): same per-world reset
                     SaveGameManager.New(MPServer.BuildGameVariables(s));
                     LoadScene.LoadIntro(false);
                 }
@@ -1398,6 +1402,15 @@ namespace BigAmbitionsMP
 
         private static void HandleStartGame(MessageEnvelope env, bool isNew)
         {
+            // EFFORT BATCH 29 (R1): a start while one is already in flight (or a world is up) is IGNORED.
+            // IsInLobby is set true on every connect and false by the first start on that connection, so
+            // a second StartGameNew/StartGameLoad on the same connection can only be a duplicate - acting
+            // on it would restart character creation / the load under the first one.
+            if (!IsInLobby)
+            {
+                Plugin.Logger.LogWarning($"[Client] Host start ({(isNew ? "new" : "load")}) ignored - a start is already in flight on this machine.");
+                return;
+            }
             IsInLobby = false;
             SendPhaseReport("Loading", "intent: start-game (fence)");   // round-276b: intents name themselves
             var  sp              = env.GetPayload<StartGamePayload>();
@@ -1432,6 +1445,13 @@ namespace BigAmbitionsMP
                         try { Disconnect(); } catch { }
                         return;
                     }
+
+                    // EFFORT BATCH 29 (R2): every world start begins with a clean rival id feed. The host's
+                    // ids for THIS start arrive right after this message (MPServer.TellLobbyPeersNewGame), so
+                    // New() below suppresses GenerateRivals and the snapshot runs it from the host's ids -
+                    // the order the round-256 repair path already handles.  Without this, a second new game
+                    // in the same game session found ClientRivalsInjected still true and got NO rivals.
+                    GameStatePatcher.ResetClientRivalFeed(isNew ? "host started a new game" : "host started a load");
 
                     if (isNew)
                     {
