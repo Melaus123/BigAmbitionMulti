@@ -6750,6 +6750,8 @@ namespace BigAmbitionsMP
         {
             RunOnMainThread(() =>
             {
+                int mRows = -1;                                        // PROBE: P-MIDNIGHT
+                StallWatch.MarketBegin(marketJson);                   // PROBE: P-MIDNIGHT ('market parse')
                 try
                 {
                     var dtos = Newtonsoft.Json.JsonConvert.DeserializeObject<List<MarketEntryDto>>(marketJson);
@@ -6774,8 +6776,10 @@ namespace BigAmbitionsMP
                     int pEntryHit = 0, pEntryMissing = 0, pRowHit = 0, pRowMissing = 0, pNullRowList = 0;
                     int pEntryAdded = 0, pRowAdded = 0;   // round-102i: created from the host's payload
                     // PROBE-END: Demand
+                    StallWatch.Step("market apply items"); int mI = 0;   // PROBE: P-MIDNIGHT
                     foreach (var dto in dtos)
                     {
+                        StallWatch.Item(mI++, dto.ItemName);             // PROBE: P-MIDNIGHT (a reference, no allocation)
                         // Round-102i: ADD-IF-MISSING. This used to only UPDATE rows the client
                         // already had, so anything the client hadn't built yet (its world still
                         // loading at join) was silently dropped and the host's values landed
@@ -6800,6 +6804,7 @@ namespace BigAmbitionsMP
 
                         // Find matching entry; update import price + per-neighborhood demand (host-authoritative).
                         bool pFoundEntry = false;   // PROBE: Demand
+                        int mJ = 0;                 // PROBE: P-MIDNIGHT
                         foreach (var entry in gi.productMarketEntries)
                         {
                             if (entry.itemName == dto.ItemName)
@@ -6811,6 +6816,7 @@ namespace BigAmbitionsMP
                                 if (dto.DemandValues != null && entry.demandValues != null)
                                     foreach (var ndDto in dto.DemandValues)
                                     {
+                                        StallWatch.Row(mJ++, ndDto.Neighborhood);   // PROBE: P-MIDNIGHT
                                         bool pFoundRow = false;   // PROBE: Demand
                                         foreach (var nd in entry.demandValues)
                                             if (nd != null && nd.neighborhood == ndDto.Neighborhood)
@@ -6860,6 +6866,7 @@ namespace BigAmbitionsMP
                     // does not mention. Measured at 10 on two different saves; they are the rows
                     // stuck at ~100% (providers==0) because nothing authoritative ever writes them.
                     // Knowing WHICH they are decides whether dropping them is safe.
+                    StallWatch.Step("market orphan scan");   // PROBE: P-MIDNIGHT
                     int pOrphan = 0; var pOrphanNames = new System.Text.StringBuilder();
                     try
                     {
@@ -6886,6 +6893,7 @@ namespace BigAmbitionsMP
                     }
                     catch { }
                     // PERMANENT one-liner: proves the client's demand is host-derived and current.
+                    StallWatch.Step("market apply commit"); mRows = pRowHit + pRowAdded;   // PROBE: P-MIDNIGHT
                     _pendingMarketJson = null;
                     _lastMarketApplyAt = UnityEngine.Time.unscaledTime;
                     _haveAuthoritativeDemand = true;
@@ -6902,6 +6910,7 @@ namespace BigAmbitionsMP
                 {
                     Plugin.Logger.LogError($"[Patcher] ApplyMarketSnapshot error: {ex.Message}");
                 }
+                finally { StallWatch.MarketEnd(mRows); }   // PROBE: P-MIDNIGHT ('[Midnight] market apply end')
             });
         }
 

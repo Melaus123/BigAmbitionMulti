@@ -3380,6 +3380,14 @@ namespace BigAmbitionsMP
                     return $"OK rivalfire {rfKind} nb='{rfNb}' rival='{rfRival.rivalData?.id ?? ""}' result={rfResult}";
                 }
 
+                // C1 / C5 review folds (2026-09-27): synthetic rivalmono payloads on a client, the monologue cut, the kind spoof.
+                case "rivalmonodev":
+                    return CompanyMessages.DevMonoLever(arg);
+
+                // P-MIDNIGHT (2026-09-27): 'stalltest <s>' blocks the main thread; 'stalltest' alone reads the watchdog state.
+                case "stalltest":
+                    return StallWatch.DevLever(arg);
+
                 case "rivalnews":
                 {
                     if (!MPServer.IsRunning) return "ERR host only";

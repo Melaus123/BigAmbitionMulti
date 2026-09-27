@@ -44,6 +44,7 @@ namespace BigAmbitionsMP
         /// recycled; searches at most once per second until then.</summary>
         public static void TickRetry()
         {
+            StallWatch.Frame();   // P-MIDNIGHT: the per-frame main-thread stamp the stall watchdog reads (no allocation)
             try
             {
                 if (_recycled) return;
@@ -158,6 +159,7 @@ namespace BigAmbitionsMP
                 string root = SafeRoot();
                 Directory.CreateDirectory(root);
                 _markerPath = Path.Combine(root, "session-open.json");
+                StallWatch.RotatePrevious();   // P-MIDNIGHT: the previous session's live ring log becomes '-prev' before this session writes
 
                 if (File.Exists(_markerPath))
                 {
@@ -251,7 +253,8 @@ namespace BigAmbitionsMP
                 if (_sessionStartedAt < 0f) _sessionStartedAt = Time.unscaledTime;
                 var marker = BuildMarker("normal start", false);
                 marker["LastAlive"] = DateTime.Now.ToString("O");
-                marker["Phase"] = phase ?? "";
+                marker["Phase"] = StallWatch.PhaseText(phase ?? "");   // P-MIDNIGHT: names the running step, if any
+                _lastHeartbeatMarker = marker;   // read-only from here on (the stall watchdog copies it)
                 marker["UptimeSeconds"] = ((int)(Time.unscaledTime - _sessionStartedAt + 0.5f)).ToString(CultureInfo.InvariantCulture);
                 // Round-207g: serialize on the main thread (small object), WRITE on the
                 // pool — the synchronous 30s disk write was the occasional ~70ms Pre.A
@@ -263,6 +266,26 @@ namespace BigAmbitionsMP
                 {
                     try { File.WriteAllText(path, json); } catch { }
                 });
+            }
+            catch { }
+        }
+
+        // P-MIDNIGHT (2026-09-27): the stall watchdog's marker write (BACKGROUND THREAD) - the last heartbeat's fields with
+        // Phase naming the step the main thread is stuck in, so the next launch's crash hint names it.
+        private static volatile Dictionary<string, string>? _lastHeartbeatMarker;
+
+        internal static void WriteStallMarker(string stallText)
+        {
+            try
+            {
+                var m = _lastHeartbeatMarker;
+                string path = _markerPath;
+                if (m == null || string.IsNullOrWhiteSpace(path)) return;
+                var c = new Dictionary<string, string>(m);
+                c["LastAlive"] = DateTime.Now.ToString("O");
+                c.TryGetValue("Phase", out var ph);
+                c["Phase"] = (ph ?? "") + "; " + stallText;
+                File.WriteAllText(path, JsonConvert.SerializeObject(c, Formatting.Indented));
             }
             catch { }
         }
@@ -341,6 +364,8 @@ namespace BigAmbitionsMP
                 CopyPlayerLogs(dir);
                 WriteSaveStore(dir);   // bug-report v2 (task #40) + H-REPORTLOSS-1: newest save per connected player + full store listing
                 CopyIfExists(ring, Path.Combine(dir, "bamp-ring.log"), MaxCopiedLogBytes);
+                // P-MIDNIGHT: a crash report also carries the crashed session's own ring, kept on disk every ~10 s
+                if (includeCrashArtifacts) CopyIfExists(StallWatch.PrevPath(), Path.Combine(dir, "bamp-ring-prev.log"), MaxCopiedLogBytes);
                 // Task #5: the actual crash evidence lives OUTSIDE Player.log — but only CRASH reports
                 // carry it (a stale Crash_* folder on an unrelated manual report is misleading noise).
                 if (includeCrashArtifacts) CollectUnityCrashArtifacts(dir);
@@ -1830,7 +1855,7 @@ namespace BigAmbitionsMP
         /// list (it orders them by priority and applies the budget; H-REPORTLOSS-1).</summary>
         private static IEnumerable<string> UploadFiles(string dir)
         {
-            foreach (var name in new[] { "description.txt", "report.md", "save-store.md", "peer-logs.txt", "Player.log", "Player-prev.log", "bamp-ring.log", "config-redacted.json" })
+            foreach (var name in new[] { "description.txt", "report.md", "save-store.md", "peer-logs.txt", "Player.log", "Player-prev.log", "bamp-ring.log", "bamp-ring-prev.log", "config-redacted.json" })
             {
                 string path = Path.Combine(dir, name);
                 if (File.Exists(path)) yield return path;
@@ -1893,7 +1918,7 @@ namespace BigAmbitionsMP
             if (r.Equals("Player.log", StringComparison.OrdinalIgnoreCase)) return 1;
             if (r.StartsWith("saves/", StringComparison.OrdinalIgnoreCase)) return 7;
             if (r.StartsWith("attachments/", StringComparison.OrdinalIgnoreCase)) return 6;
-            if (IsPrevLog(r) || r.Equals("bamp-ring.log", StringComparison.OrdinalIgnoreCase)) return 5;
+            if (IsPrevLog(r) || r.Equals("bamp-ring.log", StringComparison.OrdinalIgnoreCase) || r.Equals("bamp-ring-prev.log", StringComparison.OrdinalIgnoreCase)) return 5;
             if (r.StartsWith("unity-crash/", StringComparison.OrdinalIgnoreCase)) return 4;
             if (r.StartsWith("peer/", StringComparison.OrdinalIgnoreCase)) return 3;
             return 2;

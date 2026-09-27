@@ -25,7 +25,8 @@
     "\\[TestDrive\\] .* 'rival(attn|force|mono|state)",
     "\\[RivalMono\\] ",
     "\\[RivalNews\\] '",
-    "\\[RivalAttn\\] (intro|activation|deactivation|surrender|FIRED|fire |ACTIVATED|deactivated|DEV|rival )"
+    "\\[RivalAttn\\] (intro|activation|deactivation|surrender|FIRED|fire |ACTIVATED|deactivated|DEV|rival )",
+    "\\[Messages\\] '[^']+' sent a "
   ],
   "steps": [
     { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
@@ -145,9 +146,17 @@
       "note": "TEST C2: a price war for Client1 through its own timeline entry #0: the attack monologue on Client1, then the entry's message and the attack's special message (read = the entry has a clip, RivalTimeline.cs:248)"
     },
     { "seq": 28, "role": "h", "cmd": "rivalattn mono", "expect_result": "^OK rivalattn mono enqueued=${hm2} ", "note": "TEST C2: no attack monologue on the host" },
-    { "seq": 29, "role": "both", "cmd": "mark TEST RIVALSC SURRENDER", "expect_result": "OK MARK" },
+    {"seq": 29, "role": "both", "cmd": "mark TEST RIVALSC CUT", "expect_result": "OK MARK"},
+    {"seq": 30, "role": "c", "cmd": "rivalmonodev enqueue ${rival} rivals_thierry_laurent_moreau_entrance 2", "expect_result": "^OK rivalmonodev enqueued=2 clip=entrance pending=2 parked=0", "expect_log": [{"role": "c", "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_entrance' from rival '${rival}': monologue enqueued \\(clip='[^']+', portrait='[^']+', 1 trailing\\)", "within_s": 10}], "note": "C1 review fold (DEV): two synthetic rivalmono payloads through Client1's receiver - the first monologue starts, the second waits in the game's queue; both pending"},
+    {"seq": 31, "role": "c", "sleep_s": 3},
+    {"seq": 32, "role": "c", "cmd": "rivalmonodev cut", "expect_result": "^OK rivalmonodev cut pending 2 -> 0", "expect_log": [{"role": "c", "regex": "\\[RivalMono\\] monologue for 'rivals_thierry_laurent_moreau_entrance' cut short \\(2 pending\\) - raised as plain text\\.", "within_s": 10}, {"role": "c", "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_entrance' raised: contact message read=0 special=0 \\+ 1 trailing \\[ba:messagetype_rivalry_activated read=1 special=1\\]", "within_s": 10}], "note": "TEST C1: MonologueUI.InstantClose (as LoadScene.cs:32 / FuneralHelper.cs:138 call it) stops the running monologue's callback - both pending payloads are raised as plain text right away"},
+    {"seq": 33, "role": "c", "cmd": "rivalmonodev copies", "expect_result": "^OK rivalmonodev raised=2 copies=\\d+ pending=0 parked=0", "note": "both payloads raised once each (contact + trailing message, the 'shown' lines); copies= is informational - a client in no company drops relayed copies on its next tick (CompanyMessages.Tick -> ClearAll, pre-existing)"},
+    {"seq": 34, "role": "c", "cmd": "rivalmonodev enqueue ${rival} rivals_thierry_laurent_moreau_entrance 1", "expect_result": "^OK rivalmonodev enqueued=1 clip=entrance pending=1 parked=0", "expect_log": [{"role": "c", "regex": "\\[RivalMono\\] monologue for 'rivals_thierry_laurent_moreau_entrance' finished after it was already raised - nothing raised again\\.", "within_s": 180}, {"role": "c", "regex": "\\[RivalMono\\] 'rivals_thierry_laurent_moreau_entrance' monologue finished: contact message read=1 special=0 \\+ 1 trailing", "within_s": 240}], "note": "InstantClose leaves the game's queue as it was (MonologueUI.cs:121-138): the next enqueue plays the cut-off second entry first - its late callback raises NOTHING (no duplicate) - then the new one raises as usual"},
+    {"seq": 35, "role": "c", "cmd": "rivalmonodev copies", "expect_result": "^OK rivalmonodev raised=3 copies=\\d+ pending=0 parked=0", "note": "TEST C1: no duplicate after the cut (the late callback of the cut-off entry raised nothing; only the new payload was raised)"},
+    {"seq": 36, "role": "c", "cmd": "rivalmonodev spoof", "expect_result": "^OK rivalmonodev spoof sent", "expect_log": [{"role": "h", "regex": "\\[Messages\\] '[^']+' sent a 'msg' with kind 'rivalmono' - only the host sets a kind; kind cleared\\.", "within_s": 15}], "note": "TEST C5: a client-originated message with Kind 'rivalmono' - the host blanks the kind before routing (logged once per sender)"},
+    { "seq": 37, "role": "both", "cmd": "mark TEST RIVALSC SURRENDER", "expect_result": "OK MARK" },
     {
-      "seq": 30,
+      "seq": 38,
       "role": "h",
       "cmd": "rivalattn surrender ${rival}",
       "expect_result": "^OK rivalattn surrender rival=${rival} scheduled",
@@ -180,10 +189,10 @@
       ],
       "note": "TEST C3: the per-player surrender step: the host runs DefeatRival directly (no monologue on the host), the surrender monologue on Client1 (the one key that had the rival active)"
     },
-    { "seq": 31, "role": "h", "cmd": "rivalattn mono", "expect_result": "^OK rivalattn mono enqueued=${hm2} last=\\S+ defeats=1$", "note": "TEST C3: DefeatRival defeated the rival exactly once; still no monologue on the host" },
-    { "seq": 32, "role": "h", "cmd": "rivalattn surrender ${rival}", "expect_result": "^ERR rival ${rival} already defeated", "note": "a second surrender is refused" },
-    { "seq": 33, "role": "h", "sleep_s": 6 },
-    { "seq": 34, "role": "c", "cmd": "rivalstate", "expect_result": "ju1yVbREcE2B5ymg6q5tyA==:-:D:", "note": "the defeat reached Client1 (per-peer R3)" },
-    { "seq": 35, "role": "both", "cmd": "mark TEST RIVALSC END", "expect_result": "OK MARK" }
+    { "seq": 39, "role": "h", "cmd": "rivalattn mono", "expect_result": "^OK rivalattn mono enqueued=${hm2} last=\\S+ defeats=1$", "note": "TEST C3: DefeatRival defeated the rival exactly once; still no monologue on the host" },
+    { "seq": 40, "role": "h", "cmd": "rivalattn surrender ${rival}", "expect_result": "^ERR rival ${rival} already defeated", "note": "a second surrender is refused" },
+    { "seq": 41, "role": "h", "sleep_s": 6 },
+    { "seq": 42, "role": "c", "cmd": "rivalstate", "expect_result": "ju1yVbREcE2B5ymg6q5tyA==:-:D:", "note": "the defeat reached Client1 (per-peer R3)" },
+    { "seq": 43, "role": "both", "cmd": "mark TEST RIVALSC END", "expect_result": "OK MARK" }
   ]
 }

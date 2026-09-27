@@ -1,0 +1,160 @@
+{
+  "id": "T-MIDNIGHTPROBE",
+  "title": "P-MIDNIGHT (log-only probe, user-preapproved class, 2026-09-27): host + client on save1 cross midnight - the host's day roll is marked ('[Midnight] day roll begin/end'), the client's market apply logs begin (bytes) / end (ms, rows, steps); a DEV main-thread block on the client ('stalltest 8') is named by the stall watchdog with its step, the live ring log is flushed to disk, and the resume is logged",
+  "preconditions": "Fixture save1 (host melaus, client Client1). Dev build with the P-MIDNIGHT probe (src/StallWatch.cs) and the 'stalltest' lever. No save is taken.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "Patch_StallWatch_DayRollSteps BOUND NOTHING",
+    "\\[Stall\\] (watchdog:|watchdog start:|ring flush:|rotate:|day-roll step target|ring log fields)",
+    "\\[Patcher\\] ApplyMarketSnapshot error"
+  ],
+  "oracles_report": [
+    "\\[Midnight\\] ",
+    "\\[Stall\\] ",
+    "\\[TestDrive\\] .* 'stalltest"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "the host's world loads"
+    },
+    {
+      "seq": 4,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "sleep_s": 60,
+      "note": "the client is served its save and settles"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 9,
+      "role": "both",
+      "cmd": "mark TEST MIDNIGHT START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "stalltest",
+      "expect_result": "^OK stallwatch thread=alive ",
+      "note": "the watchdog runs on the client"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "stalltest",
+      "expect_result": "^OK stallwatch thread=alive ",
+      "note": "and on the host"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "clock 23:57",
+      "expect_result": "^OK clock ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Midnight\\] day roll begin \\(day \\d+ -> \\d+\\)",
+          "within_s": 120
+        },
+        {
+          "role": "h",
+          "regex": "\\[Midnight\\] day roll end \\d+ ms",
+          "within_s": 150
+        },
+        {
+          "role": "c",
+          "regex": "\\[Midnight\\] market apply begin \\(\\d+ bytes\\)",
+          "within_s": 150
+        },
+        {
+          "role": "c",
+          "regex": "\\[Midnight\\] market apply end \\d+ ms \\(\\d+ rows, \\d+ steps\\)",
+          "within_s": 150
+        }
+      ],
+      "note": "TEST P-MIDNIGHT (b): the host's own clock path to 3 game-minutes before midnight; live time crosses it (NewDay marked step by step); the client's next market snapshot apply logs begin + end with rows and the step count"
+    },
+    {
+      "seq": 13,
+      "role": "both",
+      "cmd": "mark TEST MIDNIGHT STALL",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "stalltest 8",
+      "expect_result": "^OK stalltest blocked the main thread 8 s",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Stall\\] main thread stuck \\d+\\.\\d s at step 'dev stalltest' \\(#8 'stalltest'\\)",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[Stall\\] resumed after \\d+\\.\\d s",
+          "within_s": 30
+        }
+      ],
+      "note": "TEST P-MIDNIGHT (c): the main thread blocked 8 s (DEV) - the watchdog names the step once, flushes the ring log, then logs the resume"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "stalltest",
+      "expect_result": "^OK stallwatch thread=alive stalls=[1-9]\\d* resumed=[1-9]\\d* stallflush=[1-9]\\d* ringwrites=[1-9]\\d* ringbytes=[1-9]\\d* ringage=1?\\d\\.\\ds ",
+      "note": "TEST P-MIDNIGHT (a): the live ring file (bamp-ring-live-<install>.log) is on disk and was written in the last 20 s"
+    },
+    {
+      "seq": 16,
+      "role": "both",
+      "cmd": "mark TEST MIDNIGHT END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

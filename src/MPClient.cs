@@ -1778,7 +1778,10 @@ namespace BigAmbitionsMP
 
         private static void HandleMarketSnapshot(MessageEnvelope env)
         {
-            var payload = env.GetPayload<MarketSnapshotPayload>();
+            StallWatch.Step("market snapshot decode");   // PROBE: P-MIDNIGHT
+            MarketSnapshotPayload? payload = null;
+            try { payload = env.GetPayload<MarketSnapshotPayload>(); }
+            finally { StallWatch.Done(); }               // PROBE: P-MIDNIGHT
             if (payload == null) return;
 
             Plugin.Logger.LogInfo("[Client] Received market snapshot.");

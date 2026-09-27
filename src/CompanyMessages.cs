@@ -170,7 +170,7 @@ namespace BigAmbitionsMP
                 {
                     if (p.Trailing.Count > 4) why = $"{p.Trailing.Count} trailing messages";
                     else foreach (var tm in p.Trailing)
-                        if (tm == null || string.IsNullOrEmpty(tm.Key) || tm.Key.Length > 160 || (tm.Data?.Count ?? 0) > 24) { why = "trailing message"; break; }
+                        if (tm == null || string.IsNullOrEmpty(tm.Key) || tm.Key.Length > 160 || (tm.Data?.Count ?? 0) > 24 || !DataEntriesOk(tm.Data)) { why = "trailing message"; break; }
                 }
             }
             else if (p.Action == "refused")
@@ -183,12 +183,23 @@ namespace BigAmbitionsMP
             return false;
         }
 
+        /// <summary>C4 review fold (2026-09-27): a trailing message's data entries, bounded like the main message's (key 64 / value 512).</summary>
+        private static bool DataEntriesOk(Dictionary<string, string>? d)
+        {
+            if (d == null) return true;
+            foreach (var kv in d)
+                if ((kv.Key?.Length ?? 0) > 64 || (kv.Value?.Length ?? 0) > 512) return false;
+            return true;
+        }
+
         // -- tick --
 
         /// <summary>MAIN THREAD (SharedShopStaff.Tick). Nothing publishes on a timer here - a message is an
         /// event - so this only makes the "inert without a company" promise good.</summary>
         public static void Tick()
         {
+            try { TickParkedMono(); }   // C1 review fold: a rival monologue that arrived while the world loaded
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalMono] parked tick: {ex.GetType().Name}: {ex.Message}"); }
             try
             {
                 if (!MergerSync.IAmMember)
@@ -1361,6 +1372,16 @@ namespace BigAmbitionsMP
         /// <summary>HOST: set while the host key's own monologue callback runs with co-members online.</summary>
         private static MonoCollect? _monoCollect;
         private static readonly HashSet<string> _monoSeen = new HashSet<string>(StringComparer.Ordinal);
+        /// <summary>C1 review fold (2026-09-27): CLIENT - rivalmono payloads whose monologue is enqueued and whose callback has
+        /// not run yet. MonologueUI.InstantClose (LoadScene.cs:32, FuneralHelper.cs:138) stops the coroutines, so the running
+        /// entry's callback never comes (queued entries stay in the game's queue and play at its next enqueue) - the
+        /// InstantClose prefix raises every pending payload as plain text; a late callback then finds nothing and raises nothing.</summary>
+        private static readonly Dictionary<string, CompanyMessagePayload> _monoPending = new Dictionary<string, CompanyMessagePayload>(StringComparer.Ordinal);
+        private sealed class ParkedMono { public CompanyMessagePayload P = null!; public bool Plain; }
+        /// <summary>C1 review fold: CLIENT - rivalmono payloads that arrived while SaveGameManager.Current was null (still
+        /// loading). NOT marked seen; TickParkedMono raises them once the world is live. Bounded.</summary>
+        private static readonly Dictionary<string, ParkedMono> _monoParked = new Dictionary<string, ParkedMono>(StringComparer.Ordinal);
+        private const int MonoParkCap = 32;
 
         /// <summary>HOST, on EnqueueMonologue of the host key's own rival message: with at least one online co-member
         /// (a merged host company) the game's own finished-callback is wrapped, so everything the rival's contact raises
@@ -1497,7 +1518,17 @@ namespace BigAmbitionsMP
             {
                 if (MPServer.IsRunning) return;                                  // the host plays its own key natively
                 if (string.IsNullOrEmpty(p.OwnerPid) || p.OwnerPid == MPConfig.PlayerId) return;
-                if (!_monoSeen.Add(p.MessageId)) return;                         // a resend
+                if (_monoSeen.Contains(p.MessageId) || _monoParked.ContainsKey(p.MessageId)) return;   // a resend
+                if (SaveGameManager.Current == null)
+                {
+                    // C1 review fold: still loading - ApplyRelayed would return in silence. Park it, NOT marked seen.
+                    if (_monoParked.Count >= MonoParkCap)
+                    { Plugin.Logger.LogWarning($"[RivalMono] '{p.MessageKey}' from rival '{p.RivalId}' arrived before the world was live and {MonoParkCap} are already parked - dropped."); return; }
+                    _monoParked[p.MessageId] = new ParkedMono { P = p, Plain = false };
+                    Plugin.Logger.LogInfo($"[RivalMono] '{p.MessageKey}' from rival '{p.RivalId}' arrived before the world was live - parked ({_monoParked.Count} parked).");
+                    return;
+                }
+                _monoSeen.Add(p.MessageId);
                 var rival = BigAmbitions.Rivals.RivalsHelper.GetSpecialRival(p.RivalId ?? "");
                 AudioClip? clip = rival == null ? null : RivalClipFor(rival, p.MessageKey ?? "", out _);
                 UI.Monologues.MonologueUI? ui = null;
@@ -1505,11 +1536,29 @@ namespace BigAmbitionsMP
                 if (rival != null && clip != null && ui != null)
                 {
                     var sprite = rival.monologueSprite;
-                    ui.EnqueueMonologue(p.MessageKey, clip, sprite, k =>
+                    string mid = p.MessageId;
+                    _monoPending[mid] = p;
+                    try
                     {
-                        try { RaiseRivalMono(p, true); }
-                        catch (Exception cx) { Plugin.Logger.LogWarning($"[RivalMono] error raising '{p.MessageKey}': {cx.GetType().Name}: {cx.Message}"); }
-                    });
+                        ui.EnqueueMonologue(p.MessageKey, clip, sprite, k =>
+                        {
+                            try
+                            {
+                                if (!_monoPending.Remove(mid))
+                                {
+                                    Plugin.Logger.LogInfo($"[RivalMono] monologue for '{p.MessageKey}' finished after it was already raised - nothing raised again.");
+                                    return;
+                                }
+                                RaiseRivalMono(p, true);
+                            }
+                            catch (Exception cx) { Plugin.Logger.LogWarning($"[RivalMono] error raising '{p.MessageKey}': {cx.GetType().Name}: {cx.Message}"); }
+                        });
+                    }
+                    catch
+                    {
+                        if (_monoPending.Remove(mid)) RaiseRivalMono(p, false);
+                        throw;
+                    }
                     Plugin.Logger.LogInfo($"[RivalMono] '{p.MessageKey}' from rival '{p.RivalId}': monologue enqueued (clip='{clip.name}', portrait='{(sprite != null ? sprite.name : "-")}', {p.Trailing?.Count ?? 0} trailing).");
                     return;
                 }
@@ -1519,8 +1568,58 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalMono] error applying '{p?.MessageKey}': {ex.GetType().Name}: {ex.Message}"); }
         }
 
+        /// <summary>C1 review fold (2026-09-27): MonologueUI.InstantClose prefix (MAIN THREAD). Every rivalmono whose monologue
+        /// callback has not run is raised now as plain text (a world still loading parks it instead, raised plain later).</summary>
+        internal static void OnMonologueInstantClose()
+        {
+            if (_monoPending.Count == 0) return;
+            int n = _monoPending.Count;
+            var list = new List<CompanyMessagePayload>(_monoPending.Values);
+            _monoPending.Clear();
+            foreach (var p in list)
+            {
+                try
+                {
+                    if (SaveGameManager.Current == null)
+                    {
+                        if (_monoParked.Count < MonoParkCap && !_monoParked.ContainsKey(p.MessageId))
+                            _monoParked[p.MessageId] = new ParkedMono { P = p, Plain = true };
+                        Plugin.Logger.LogInfo($"[RivalMono] monologue for '{p.MessageKey}' cut short ({n} pending) while no world is live - parked ({_monoParked.Count} parked).");
+                        continue;
+                    }
+                    Plugin.Logger.LogInfo($"[RivalMono] monologue for '{p.MessageKey}' cut short ({n} pending) - raised as plain text.");
+                    RaiseRivalMono(p, false);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalMono] error raising cut-short '{p.MessageKey}': {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>C1 review fold: MAIN THREAD, per frame (Tick). Cheap when nothing is parked; raises the parked payloads
+        /// once SaveGameManager.Current is set (recurrence-covered: it runs every frame until the park is empty).</summary>
+        private static void TickParkedMono()
+        {
+            if (_monoParked.Count == 0) return;
+            if (SaveGameManager.Current == null) return;
+            if (MPServer.IsRunning) { _monoParked.Clear(); return; }
+            var list = new List<ParkedMono>(_monoParked.Values);
+            _monoParked.Clear();
+            foreach (var x in list)
+            {
+                try
+                {
+                    Plugin.Logger.LogInfo($"[RivalMono] '{x.P.MessageKey}' parked while the world loaded - raising now ({list.Count} parked, {(x.Plain ? "plain text" : "monologue")}).");
+                    if (x.Plain) RaiseRivalMono(x.P, false);
+                    else ApplyRivalMono(x.P);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalMono] error raising parked '{x.P.MessageKey}': {ex.GetType().Name}: {ex.Message}"); }
+            }
+        }
+
         private static void RaiseRivalMono(CompanyMessagePayload p, bool spoken)
         {
+#if BAMP_DEV
+            if (p.MessageId.StartsWith("bamp-rivalmono-dev-", StringComparison.Ordinal)) _devMonoRaised++;   // DEV lever count only
+#endif
             bool mainRead = spoken || p.Read;
             ApplyRelayed(RivalSub(p, p.MessageId, p.MessageKey, p.Data, p.IsSpecial), mainRead);
             int i = 0;
@@ -1558,53 +1657,6 @@ namespace BigAmbitionsMP
             Notify             = p.Notify,
             StampMinute        = 0,
         };
-
-        /// <summary>H-RIVALPARITY-1 A: TEXT routing for the per-player rival path (MPRivalAttention) - the rival's message,
-        /// by the game's own localization key, to exactly these players, through the same "rivalnews" relay the gateway
-        /// above sends (so the client's apply is the one already in use). The host's own contact list is never touched:
-        /// the rival contact is addressed by id (RivalsHelper.GetRivalContact = the rival's name, category Rivals,
-        /// description "rival"). Returns the number of players it was sent to.</summary>
-        internal static int SendRivalTextToPids(BigAmbitions.Rivals.SpecialRival? rival, string key, bool isSpecial, List<string>? pids)
-        {
-            int n = 0;
-            try
-            {
-                if (!MPServer.IsRunning || rival == null || string.IsNullOrEmpty(key) || pids == null) return 0;
-                string rivalId = rival.rivalData?.id ?? "";
-                string name = rival.rivalData?.rivalName ?? "";
-                if (name.Length == 0) return 0;
-                foreach (var pid in pids)
-                {
-                    if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId || !MPServer.IsOnlinePid(pid)) continue;
-                    var p = new CompanyMessagePayload
-                    {
-                        PlayerId           = MPConfig.PlayerId,
-                        Action             = "msg",
-                        Kind               = "rivalnews",
-                        RivalId            = rivalId,
-                        Neighborhood       = rival.primaryNeighborhood ?? "",
-                        MessageId          = "bamp-rivalnews-" + Fnv($"{rivalId}|{name}|{key}|{pid}|{++_seq}"),
-                        OwnerPid           = MPConfig.PlayerId,
-                        AddressKey         = "",
-                        ContactId          = name,
-                        ContactCategory    = (int)ContactCategoryName.Rivals,
-                        ContactDescription = "rival",
-                        StreetName         = "",
-                        StreetNumber       = 0,
-                        MessageKey         = key,
-                        Data               = new Dictionary<string, string>(),
-                        IsSpecial          = isSpecial,
-                        IsNewInteraction   = false,
-                        Notify             = true,
-                        StampMinute        = 0,
-                    };
-                    try { MPServer.SendToPid(pid, MessageEnvelope.Create(MessageType.CompanyMessages, "host", p)); n++; }
-                    catch (Exception sx) { Plugin.Logger.LogWarning($"[RivalAttn] text to '{pid}': {sx.Message}"); }
-                }
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] text '{key}': {ex.Message}"); }
-            return n;
-        }
 
         private static BigAmbitions.Rivals.SpecialRival? FindSpecialRivalByContactId(string contactId)
         {
@@ -1789,9 +1841,82 @@ namespace BigAmbitionsMP
             _mine.Clear(); _copies.Clear(); _handled.Clear(); _createdHere.Clear(); _relayOwner.Clear(); _pending.Clear();
             _order.Clear(); _logged.Clear(); _seq = 0; _applying = false;
             _insurance.Clear(); _insuranceByOffer.Clear(); _relayedOffers.Clear();   // r2 MINOR-9
+            // C6 review fold (2026-09-27): the rivalmono state dies with the session too
+            _monoSeen.Clear(); _monoPending.Clear(); _monoParked.Clear();
+            _monoCollect = null; _monoCtxRival = null; _monoCtxKey = null;
         }
 
         // -- TestDrive --
+
+#if BAMP_DEV
+        private static int _devMonoSeq, _devMonoRaised;
+        /// <summary>DEV lever 'rivalmonodev' (C1 / C5 review folds, CLIENT): enqueue &lt;rivalId&gt; &lt;key&gt; &lt;n&gt; = n rivalmono payloads
+        /// through Receive (1 trailing each); cut = MonologueUI.InstantClose; copies = relayed copies the lever made;
+        /// spoof = a client-originated msg with Kind 'rivalmono' to the host (which must blank the kind).</summary>
+        internal static string DevMonoLever(string arg)
+        {
+            var a = (arg ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            string sub = a.Length > 0 ? a[0] : "";
+            if (MPServer.IsRunning) return "ERR client only";
+            if (SaveGameManager.Current == null) return "ERR no world loaded";
+            const string prefix = "bamp-rivalmono-dev-";
+            switch (sub)
+            {
+                case "enqueue":
+                {
+                    if (a.Length < 4 || !int.TryParse(a[3], out var n) || n < 1 || n > 4) return "ERR usage: rivalmonodev enqueue <rivalId> <key> <1-4>";
+                    var rival = BigAmbitions.Rivals.RivalsHelper.GetSpecialRival(a[1]);
+                    if (rival == null) return "ERR rival not found";
+                    if (RivalClipFor(rival, a[2], out var where) == null) return $"ERR no clip for key '{a[2]}'";
+                    for (int i = 0; i < n; i++)
+                    {
+                        var p = new CompanyMessagePayload
+                        {
+                            PlayerId = "dev", Action = "msg", Kind = "rivalmono", RivalId = a[1], Neighborhood = rival.primaryNeighborhood ?? "",
+                            MessageId = prefix + Environment.TickCount.ToString("x") + "-" + (++_devMonoSeq),
+                            OwnerPid = "dev-host", AddressKey = "", ContactId = rival.rivalData?.rivalName ?? "rival",
+                            ContactCategory = (int)ContactCategoryName.Rivals, ContactDescription = "rival", StreetName = "", StreetNumber = 0,
+                            MessageKey = a[2], Data = new Dictionary<string, string>(), IsSpecial = false, IsNewInteraction = false, Notify = false,
+                            StampMinute = 0, Read = false,
+                            Trailing = new List<RivalMonoTrailing> { new RivalMonoTrailing { Key = "ba:messagetype_rivalry_activated", Read = true, Special = true } },
+                        };
+                        Receive(p);
+                    }
+                    return $"OK rivalmonodev enqueued={n} clip={where} pending={_monoPending.Count} parked={_monoParked.Count}";
+                }
+                case "cut":
+                {
+                    UI.Monologues.MonologueUI? ui = null;
+                    try { ui = UI.UIs.Instance != null ? UI.UIs.Instance.monologueUI : null; } catch { ui = null; }
+                    if (ui == null) return "ERR no monologue UI";
+                    int before = _monoPending.Count;
+                    ui.InstantClose();
+                    return $"OK rivalmonodev cut pending {before} -> {_monoPending.Count}";
+                }
+                case "copies":
+                {
+                    int c = 0;
+                    foreach (var id in _copies.Keys) if (id.StartsWith(prefix, StringComparison.Ordinal)) c++;
+                    return $"OK rivalmonodev raised={_devMonoRaised} copies={c} pending={_monoPending.Count} parked={_monoParked.Count}";
+                }
+                case "spoof":
+                {
+                    if (!MPClient.IsConnected) return "ERR not connected";
+                    var p = new CompanyMessagePayload
+                    {
+                        PlayerId = MPConfig.PlayerId, Action = "msg", Kind = "rivalmono", RivalId = "", Neighborhood = "",
+                        MessageId = prefix + "spoof-" + (++_devMonoSeq), OwnerPid = MPConfig.PlayerId, AddressKey = "",
+                        ContactId = "spoof", ContactCategory = (int)ContactCategoryName.Rivals, ContactDescription = "rival",
+                        StreetName = "", StreetNumber = 0, MessageKey = "ba:messagetype_rivalry_activated", Data = new Dictionary<string, string>(),
+                        IsSpecial = false, IsNewInteraction = false, Notify = false, StampMinute = 0,
+                    };
+                    Send(p);
+                    return "OK rivalmonodev spoof sent";
+                }
+                default: return "ERR usage: rivalmonodev enqueue|cut|copies|spoof";
+            }
+        }
+#endif
 
         /// <summary>One line per relayed message this machine holds, oldest first.</summary>
         public static List<string> Readout(int max)
@@ -2045,6 +2170,19 @@ namespace BigAmbitionsMP
 
     /// <summary>RIVAL-FAIR-2 M4: the swallow itself (see the pair above).  Off a session, and for every key this
     /// machine was not told to skip, the monologue plays exactly as the game enqueued it.</summary>
+    /// <summary>C1 review fold (2026-09-27): InstantClose (LoadScene.cs:32, FuneralHelper.cs:138, MonologueUI.Awake) stops the
+    /// monologue coroutines and with them the running entry's finished-callback - a rivalmono waiting on that callback
+    /// is raised as plain text here instead.</summary>
+    [HarmonyPatch(typeof(UI.Monologues.MonologueUI), nameof(UI.Monologues.MonologueUI.InstantClose))]
+    public static class Patch_MonologueUI_InstantClose_RaisePendingRivalMono
+    {
+        static void Prefix()
+        {
+            try { CompanyMessages.OnMonologueInstantClose(); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalMono] instant-close prefix: {ex.GetType().Name}: {ex.Message}"); }
+        }
+    }
+
     [HarmonyPatch(typeof(UI.Monologues.MonologueUI), nameof(UI.Monologues.MonologueUI.EnqueueMonologue), new[] { typeof(string), typeof(AudioClip), typeof(Sprite), typeof(Action<string>) })]
     public static class Patch_MonologueUI_EnqueueMonologue_SkipWhenNotRecipient
     {

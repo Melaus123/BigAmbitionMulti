@@ -8071,6 +8071,9 @@ namespace BigAmbitionsMP
         // group gate (a message never leaves the sender's company) and pointing a PRESS at the one machine
         // that still holds the button's live closure.
 
+        /// <summary>C5 review fold (2026-09-27): senders already logged for a client-set Kind (once per sender).</summary>
+        private static readonly HashSet<string> _loggedClientMessageKind = new();
+
         /// <summary>HOST (main thread): one leg of the phone relay.</summary>
         public static void HostRouteCompanyMessages(CompanyMessagePayload p, string senderPid)
         {
@@ -8078,6 +8081,14 @@ namespace BigAmbitionsMP
             {
                 if (p == null || string.IsNullOrEmpty(senderPid)) return;
                 if (!CompanyMessages.PayloadSane(p, "host relay")) return;
+                // C5 review fold (2026-09-27): only the host's own payloads may carry a Kind ('rivalmono' plays a rival's
+                // monologue on the receiver, 'rivalnews' bypasses the co-member gate) - a client's is blanked here.
+                if (senderPid != MPConfig.PlayerId && (!string.IsNullOrEmpty(p.Kind) || (p.Trailing?.Count ?? 0) > 0))
+                {
+                    if (_loggedClientMessageKind.Add(senderPid))
+                        Plugin.Logger.LogWarning($"[Messages] '{senderPid}' sent a '{p.Action}' with kind '{p.Kind}' - only the host sets a kind; kind cleared.");
+                    p.Kind = ""; p.Trailing = new List<RivalMonoTrailing>();
+                }
                 // r2 MAJOR-3: a PRESS the rate gate drops is ANSWERED, not silently swallowed. The presser's
                 // own click already wiped that copy's buttons, and nothing else would ever clear its pending
                 // entry - a silent drop meant that action could never be run again.
