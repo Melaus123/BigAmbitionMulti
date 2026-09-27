@@ -13,10 +13,10 @@ namespace BigAmbitionsMP
     /// data for client businesses bridged from their self-reported stats (the
     /// host's replicas have empty order history).
     ///
-    /// Threshold scaling (user: pooled presence trips caps instantly): the
-    /// pooled GetPlayerValues result is NORMALIZED by session player count —
-    /// income / N and business count ceil(/N) — which is mathematically the
-    /// same as multiplying every timeline threshold by N, with one patch.
+    /// Timeline activation is PER PLAYER since H-RIVALPARITY-1 part A
+    /// (2026-09-27): the pooled, divide-by-N GetPlayerValues postfix is gone -
+    /// see MPRivalAttention (per-key counts and checks; a merged host adds only
+    /// its co-members' qualifying shops).
     ///
     /// RIVAL-FAIR-2 (user ruling 2026-09-12) widens two more player-selectors,
     /// both by the H-SWAP-1 call-scoped tenancy raise (Patch_AiPass_TenancyRaise
@@ -42,12 +42,6 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class MPRivalFairness
     {
-        private static int SessionPlayerCount()
-        {
-            try { return System.Math.Max(1, MPRestSync.AllPlayers().Count); }
-            catch { return 1; }
-        }
-
         /// <summary>Session-player registrations in a neighborhood (the host's
         /// replicas — businessOwnerRivalId carries the player id).</summary>
         private static List<BuildingRegistration> SessionRegsIn(string neighborhood)
@@ -73,42 +67,13 @@ namespace BigAmbitionsMP
             return outList;
         }
 
-        // ── Timeline activation: pooled presence, per-player-scaled ─────────
-        [HarmonyPatch(typeof(RivalTimeline), "GetPlayerValues")]
-        public static class Patch_RivalSeesAllPlayers
-        {
-            static void Postfix(SpecialRival rival, ref (List<BuildingRegistration>, float) __result)
-            {
-                if (!MPServer.IsRunning) return;
-                try
-                {
-                    var list   = __result.Item1 ?? new List<BuildingRegistration>();
-                    float income = __result.Item2;
-                    foreach (var reg in SessionRegsIn(rival.primaryNeighborhood))
-                    {
-                        // "Succeeding" bridge: replicas have no order history —
-                        // the client's self-reported per-business weekly income
-                        // (rivals-leaderboard channel) stands in for it.
-                        float wk = MPServer.SessionBusinessWeeklyIncome(GameStateReader.AddressKey(reg));
-                        if (wk <= 0f) continue;
-                        list.Add(reg);
-                        income += wk;
-                    }
-
-                    // Normalize pooled values by player count == scale every
-                    // threshold by N (collective threat, SP-paced triggers).
-                    int n = SessionPlayerCount();
-                    if (n > 1)
-                    {
-                        income /= n;
-                        int keep = (int)System.Math.Ceiling(list.Count / (double)n);
-                        if (list.Count > keep) list.RemoveRange(keep, list.Count - keep);
-                    }
-                    __result = (list, income);
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalFair] GetPlayerValues: {ex.Message}"); }
-            }
-        }
+        // ── Timeline activation: per player (H-RIVALPARITY-1 A, 2026-09-27) ───
+        // The pooled Patch_RivalSeesAllPlayers (every session player's shops added
+        // to the host's count, then divided by N) was removed: the host's own
+        // GetPlayerValues is native again, a merged host adds only its co-members'
+        // qualifying shops (MPRivalAttention.Patch_MergedHostCoMembers), and every
+        // other player's rival attention is counted and checked per key in
+        // MPRivalAttention.
 
         // ── Price-war targeting: include what session players sell ───────────
         [HarmonyPatch(typeof(RivalDefenseHelper), "GetTopSellingProducts")]

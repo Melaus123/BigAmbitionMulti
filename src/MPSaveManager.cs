@@ -95,6 +95,10 @@ namespace BigAmbitionsMP
         /// company online would forget "simulated since day D", which the return leg needs.
         /// Empty/absent on manifests written before the field existed.</summary>
         public List<MpAbsenceMark> Absence { get; set; } = new();
+        /// <summary>H-RIVALPARITY-1 part A (2026-09-27): per-player rival ATTENTION as of this save moment - the host
+        /// key's native state plus every other key's own (MPRivalAttention). Written where Absence is written, restored
+        /// clear-then-apply. NULL (absent) = the manifest predates the feature = migration (clients start fresh).</summary>
+        public List<MpRivalAttnEntry>? RivalAttention { get; set; }
         /// <summary>Merger phase 4a (G1): each member's LATEST company-books bundle as of this save
         /// moment (the host store). Rides the model like Paperwork/Absence and follows exactly the same
         /// timeline - written with the slot, REPLACED from the loaded slot on every load, reset on a new

@@ -2949,7 +2949,23 @@ namespace BigAmbitionsMP
                 case "rivalsig":
                 {
                     if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    // H-RIVALPARITY-1 A: `rivalsig <pid>` on the host = the signature that player's machine should show.
+                    string rsPid = arg.Trim();
+                    if (rsPid.Length > 0 && MPServer.IsRunning) return $"OK rivalsig {MPServer.RivalStateSignatureFor(rsPid)}";
                     return $"OK rivalsig {MPServer.RivalStateSignature()}";
+                }
+
+                // H-RIVALPARITY-1 part A levers (2026-09-27): per-key rival attention and the rival's timeline data.
+                case "rivalattn":
+                {
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    return MPRivalAttention.Lever(arg);
+                }
+
+                case "rivaltimeline":
+                {
+                    if (SaveGameManager.Current == null) return "ERR no world loaded";
+                    return MPRivalAttention.TimelineLever(arg);
                 }
 
                 // -- H-RIVALPARITY-1 item C levers (user-approved 2026-09-27). ALL READ-ONLY. -----------

@@ -1239,6 +1239,7 @@ namespace BigAmbitionsMP
             // REPLACED inside RestoreOwnershipFromManifest, beside the merger roster it belongs to —
             // always from THIS manifest, so an older slot can never keep newer paperwork.
             MPServer.RestoreOwnershipFromManifest(m);              // cross-machine ownership + cash seed + paperwork
+            MPRivalAttention.RestoreFromManifest(m);               // H-RIVALPARITY-1 A: per-player rival attention, clear-then-apply from THIS manifest (null = migration)
             // EFFORT BATCH 29 (R1): the member serve (SendLoadDataToEachClient) moved INTO the main-thread
             // continuation below, AFTER the host's own load - a host load that failed used to leave every
             // client already loading its save while the host went back to the lobby.
@@ -3842,6 +3843,7 @@ namespace BigAmbitionsMP
                 try { PaperworkSync.FlushNow("pre-save"); } catch { }
                 m.Paperwork = MPServer.SnapshotPaperwork();
                 m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
+                m.RivalAttention = MPRivalAttention.Snapshot(true);   // H-RIVALPARITY-1 A: per-player rival attention rides the same save moment (main thread here: host rows read now)
                 m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books store rides the same save moment
                 m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: an in-transit employee is held by NOBODY's .hsg - the host's table is the only copy
                 m.CargoTransfers = MPServer.SnapshotCargoTransfers();   // phase 4c part 2: in-transit GOODS are held by nobody's .hsg either
@@ -3943,6 +3945,7 @@ namespace BigAmbitionsMP
                     }
                     m.Paperwork = MPServer.SnapshotPaperwork();   // phase 3-A: the store rides the model, so a grants-only write cannot drop it (no flush here — this path is not guaranteed main-thread)
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
+                    m.RivalAttention = MPRivalAttention.Snapshot(false);   // H-RIVALPARITY-1 A: per-player rival attention rides the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): same reason - a grants-only write must not drop the books store
                     m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: same reason - a grants-only write must not drop an in-transit employee
                     m.CargoTransfers = MPServer.SnapshotCargoTransfers();   // phase 4c part 2: same reason - nor in-transit goods
@@ -4033,6 +4036,7 @@ namespace BigAmbitionsMP
                 {   // P3-B review MAJOR-5: BOTH stamps sit under the lineage gate (a bare second statement escaped it)
                     m.Paperwork = MPServer.SnapshotPaperwork();
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
+                    m.RivalAttention = MPRivalAttention.Snapshot(false);   // H-RIVALPARITY-1 A: per-player rival attention rides the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books stamp sits under the SAME lineage gate
                     m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: the in-transit stamp sits under the SAME lineage gate
                     m.CargoTransfers = MPServer.SnapshotCargoTransfers();   // phase 4c part 2: the cargo stamp sits under the SAME lineage gate

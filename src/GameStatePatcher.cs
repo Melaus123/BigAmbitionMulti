@@ -740,8 +740,9 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>RIVAL-FAIR-2 R3 - CLIENT, MAIN THREAD.  Overwrite this machine's specialRivalStates
-        /// from the host's.  isActive / isDefeated / defenseStates only: completedTimelineEntryIds and
-        /// sentMessageKeys are the HOST's timeline bookkeeping and this machine runs no timeline
+        /// from the host's.  Since H-RIVALPARITY-1 A the host sends THIS player's own isActive plus its own
+        /// sent keys / completed ids (SentKeys / CompletedIds, applied in place when present); before that,
+        /// completedTimelineEntryIds and sentMessageKeys were the HOST's bookkeeping and this machine runs no timeline
         /// (Patch_RivalsHelper_CheckRivalTimelines_SkipOnClient), so overwriting them would destroy
         /// nothing useful and could resurrect messages.  ItemHelper.ClearPriceCaches (public,
         /// ItemHelper.cs:152) is called when something changed so the price consumers re-read.
@@ -781,6 +782,19 @@ namespace BigAmbitionsMP
                     }
                     if (st.isActive   != s.IsActive)   { st.isActive   = s.IsActive;   changed++; }
                     if (st.isDefeated != s.IsDefeated) { st.isDefeated = s.IsDefeated; changed++; }
+                    // H-RIVALPARITY-1 A (per-peer R3): THIS player's own sent keys / completed ids, applied IN PLACE
+                    // (clear + add, never a new list) - the game caches RivalsHelper.SentMessages pointing at the
+                    // existing list (decompile RivalsHelper.cs:172-175). NULL = an older host: the lists are left alone.
+                    if (s.SentKeys != null)
+                    {
+                        if (st.sentMessageKeys == null) st.sentMessageKeys = new List<string>();
+                        if (!st.sentMessageKeys.SequenceEqual(s.SentKeys)) { st.sentMessageKeys.Clear(); st.sentMessageKeys.AddRange(s.SentKeys); changed++; }
+                    }
+                    if (s.CompletedIds != null)
+                    {
+                        if (st.completedTimelineEntryIds == null) st.completedTimelineEntryIds = new List<string>();
+                        if (!st.completedTimelineEntryIds.SequenceEqual(s.CompletedIds)) { st.completedTimelineEntryIds.Clear(); st.completedTimelineEntryIds.AddRange(s.CompletedIds); changed++; }
+                    }
 
                     if (DefensesDiffer(st.defenseStates, s.Defenses))
                     {

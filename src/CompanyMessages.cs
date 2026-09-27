@@ -1219,17 +1219,11 @@ namespace BigAmbitionsMP
             if (key == "ba:messagetype_rivals_attempting_to_poach") return true;
             try { if (key == (rival.rentBuildingMessageKey ?? "") && key.Length > 0) return true; } catch { }
 
-            var recipients = PlayersWithBusinessIn(nb);
-            bool hostKeeps = !HostCopyWouldBeSuppressed(rival, key);   // ONE DECISION POINT (the predicate below); the gateway acts on its answer.
-            if (recipients.Count == 0)
-            {
-                // A message must never be destroyed on EVERY machine.  With no recipient the relay
-                // sends nothing AND would suppress the host's native copy, so the text would exist
-                // nowhere - and the caller marks sentMessageKeys regardless, so it never comes back.
-                // Keep the host's copy as the single surviving one.
-                hostKeeps = true;
-                try { if (_noNeighbourhoodLogged.Add(rivalId + "|" + nb)) Plugin.Logger.LogInfo($"[RivalNews] no player has a business in '{nb}' - host copy kept (rival '{rivalId}'; logged once)."); } catch { }   // fold d: once per rival+neighbourhood, not per send
-            }
+            // H-RIVALPARITY-1 A (2026-09-27): the game's own timeline on the host speaks for the HOST KEY only - every
+            // other player's rival attention runs per key in MPRivalAttention and routes its own text - so this message
+            // goes to the host key's members: the host keeps its copy, a merged company's online co-members get one.
+            var recipients = MPRivalAttention.HostKeyOnlineMembers();
+            bool hostKeeps = !HostCopyWouldBeSuppressed(rival, key);   // always true since part A (one decision point kept)
 
             var p = new CompanyMessagePayload
             {
@@ -1280,20 +1274,9 @@ namespace BigAmbitionsMP
         /// and the monologue skip below uses the SAME answer, so the two can never disagree.</summary>
         internal static bool HostCopyWouldBeSuppressed(BigAmbitions.Rivals.SpecialRival? rival, string key)
         {
-            try
-            {
-                if (!MPServer.IsRunning) return false;
-                if (rival == null || string.IsNullOrEmpty(key)) return false;
-                string nb = "";
-                try { nb = rival.primaryNeighborhood ?? ""; } catch { return false; }
-                if (nb.Length == 0) return false;
-                if (key == "ba:messagetype_rivals_attempting_to_poach") return false;
-                try { string rent = rival.rentBuildingMessageKey ?? ""; if (rent.Length > 0 && key == rent) return false; } catch { }
-                var recipients = PlayersWithBusinessIn(nb);
-                if (recipients.Count == 0) return false;   // nobody to relay to - the host keeps the only copy
-                return !recipients.Contains(MPConfig.PlayerId);
-            }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] suppression test: {ex.GetType().Name}: {ex.Message}"); return false; }
+            // H-RIVALPARITY-1 A (2026-09-27): the host's own rival messages are the HOST KEY's, so its copy is never
+            // suppressed any more and the monologue skip below never fires (the neighbourhood rule is retired).
+            return false;
         }
 
         /// <summary>The monologue key this machine must NOT play; set on the way INTO RivalsHelper.SendMessageToPlayer
@@ -1328,6 +1311,53 @@ namespace BigAmbitionsMP
             try { onMonologueFinished?.Invoke(messageLocalizeKey); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalNews] monologue '{messageLocalizeKey}' tail: {ex.GetType().Name}: {ex.Message}"); }
             return false;
+        }
+
+        /// <summary>H-RIVALPARITY-1 A: TEXT routing for the per-player rival path (MPRivalAttention) - the rival's message,
+        /// by the game's own localization key, to exactly these players, through the same "rivalnews" relay the gateway
+        /// above sends (so the client's apply is the one already in use). The host's own contact list is never touched:
+        /// the rival contact is addressed by id (RivalsHelper.GetRivalContact = the rival's name, category Rivals,
+        /// description "rival"). Returns the number of players it was sent to.</summary>
+        internal static int SendRivalTextToPids(BigAmbitions.Rivals.SpecialRival? rival, string key, bool isSpecial, List<string>? pids)
+        {
+            int n = 0;
+            try
+            {
+                if (!MPServer.IsRunning || rival == null || string.IsNullOrEmpty(key) || pids == null) return 0;
+                string rivalId = rival.rivalData?.id ?? "";
+                string name = rival.rivalData?.rivalName ?? "";
+                if (name.Length == 0) return 0;
+                foreach (var pid in pids)
+                {
+                    if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId || !MPServer.IsOnlinePid(pid)) continue;
+                    var p = new CompanyMessagePayload
+                    {
+                        PlayerId           = MPConfig.PlayerId,
+                        Action             = "msg",
+                        Kind               = "rivalnews",
+                        RivalId            = rivalId,
+                        Neighborhood       = rival.primaryNeighborhood ?? "",
+                        MessageId          = "bamp-rivalnews-" + Fnv($"{rivalId}|{name}|{key}|{pid}|{++_seq}"),
+                        OwnerPid           = MPConfig.PlayerId,
+                        AddressKey         = "",
+                        ContactId          = name,
+                        ContactCategory    = (int)ContactCategoryName.Rivals,
+                        ContactDescription = "rival",
+                        StreetName         = "",
+                        StreetNumber       = 0,
+                        MessageKey         = key,
+                        Data               = new Dictionary<string, string>(),
+                        IsSpecial          = isSpecial,
+                        IsNewInteraction   = false,
+                        Notify             = true,
+                        StampMinute        = 0,
+                    };
+                    try { MPServer.SendToPid(pid, MessageEnvelope.Create(MessageType.CompanyMessages, "host", p)); n++; }
+                    catch (Exception sx) { Plugin.Logger.LogWarning($"[RivalAttn] text to '{pid}': {sx.Message}"); }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] text '{key}': {ex.Message}"); }
+            return n;
         }
 
         private static BigAmbitions.Rivals.SpecialRival? FindSpecialRivalByContactId(string contactId)

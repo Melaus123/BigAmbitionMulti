@@ -1,0 +1,408 @@
+{
+  "id": "T-RIVALS-A",
+  "title": "H-RIVALPARITY-1 part A (user-approved 2026-09-27): per-player rival attention - solo host = native only; the host's per-key count for Client1 equals the client's own GetPlayerValues; Client1's intro + activation happen for Client1 only (text to Client1, host state unchanged); save/reload keeps the store; rivaltimeline report",
+  "preconditions": "Fixture save1 (host melaus, client Client1; 4 rivals, Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA==). Its manifest predates RivalAttention = the MIGRATION path (clients start fresh). Build H-RIVALPARITY-1 A deployed on both machines. Writes ONE scratch slot (the -auto rotation sibling); the fixture's own save1 is never overwritten.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "rival": "ju1yVbREcE2B5ymg6q5tyA=="
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[RivalAttn\\] (sweep|tick|step|check|count|snapshot|settle load|host rows|manifest restore|set active|sweep postfix|merged host count|text)[^\\]]*:"
+  ],
+  "oracles_report": [
+    "\\[TestDrive\\] .* 'rivaltimeline ",
+    "\\[TestDrive\\] .* 'rivalattn",
+    "\\[RivalAttn\\] ",
+    "\\[RivalSync\\] host rival state published"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "the host's world loads; NO client yet - the SOLO-HOST phase (test 4)"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "mark TEST RIVALSA SOLO",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "rivalattn",
+      "expect_result": "^OK rivalattn host hostKey=p:\\S+ keys=0 firings=0 sig=\\S+ rivals=\\[[^;]*\\]$",
+      "capture": {
+        "hostKey": "hostKey=(\\S+)"
+      },
+      "note": "TEST 4: only the host key (no ';' = no second key row on any rival), no mod-path firing"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "rivalattn sweep",
+      "expect_result": "^OK rivalattn sweep ran",
+      "note": "the game's own hourly sweep, run now: the native path, then the postfix (which must do nothing solo)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 35,
+      "note": "longer than the 10-30 s native delay: any mod-path step would have run"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "rivalattn",
+      "expect_result": "^OK rivalattn host hostKey=${hostKey} keys=0 firings=0 sig=\\S+ rivals=\\[[^;]*\\]$",
+      "note": "TEST 4 after a sweep: still the host key only, 0 firings"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "rivaltimeline ${rival}",
+      "expect_result": "^OK rivaltimeline rival=${rival} ",
+      "note": "REPORT: the Murray Hill rival's allEntries (copycat / overlapping price entries decide the manager's gate question)"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "rivalstate",
+      "expect_result": "^OK rivalstate rivals=[1-9]",
+      "capture": {
+        "hMH": "(ju1yVbREcE2B5ymg6q5tyA==:[A-]:[D-]):\\d+"
+      },
+      "note": "the host's own (native) Murray Hill state before any client"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "note": "a later joiner parks for the host's approval popup; the lever accepts it"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "sleep_s": 60,
+      "note": "the client is served its save and settles"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 16,
+      "role": "both",
+      "cmd": "mark TEST RIVALSA COUNT",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "rivalattn report",
+      "expect_result": "^OK rivalattn report sent",
+      "note": "the self-report now (else up to 120 s old)"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "^OK rivalattn local pid=${clientPid} rivals=\\[ju1yVbREcE2B5ymg6q5tyA==\\{[^}]*\\}: native count=(\\d+) income=-?\\d+ reported=\\1 active=0 ",
+      "capture": {
+        "cCount": "native count=(\\d+)"
+      },
+      "note": "TEST 1 (client side): the game's own GetPlayerValues ON the client; reported = the self-report's RivalQualifying rows (must agree); active=0 = CLIENTS START FRESH (per-peer R3)"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "\\{${clientPid}\\}\\|count=${cCount}\\|floor=0\\|",
+      "note": "TEST 1 (host side): the host's per-key count for Client1 equals the client's native count"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "rivaltimeline ${rival}",
+      "expect_result": "^OK rivaltimeline rival=${rival} ",
+      "note": "REPORT: the same timeline data on the client"
+    },
+    {
+      "seq": 22,
+      "role": "both",
+      "cmd": "mark TEST RIVALSA ACTIVATE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "rivalattn floor ${clientPid} ${rival} 3",
+      "expect_result": "^OK rivalattn floor key=p:\\S+ rival=${rival} n=3",
+      "note": "DEV floor: Client1's count reads at least 3 on this rival (the fixture's real Murray Hill count is reported in the COUNT block)"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "rivalattn sweep",
+      "expect_result": "^OK rivalattn sweep ran",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] intro '[^']+' for p:\\S+ on ju1yVbREcE2B5ymg6q5tyA==: text to 1 player\\(s\\) \\[${clientPid}\\]",
+          "within_s": 45
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalNews\\] '[^']+' from rival 'ju1yVbREcE2B5ymg6q5tyA==' delivered",
+          "within_s": 50
+        }
+      ],
+      "note": "TEST 2a: Client1's intro, 10-30 s after the check, as TEXT to Client1 only"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "rivalattn sweep",
+      "expect_result": "^OK rivalattn sweep ran",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] ACTIVATED rival ju1yVbREcE2B5ymg6q5tyA== for p:\\S+ \\(special text to 1 player",
+          "within_s": 45
+        },
+        {
+          "role": "c",
+          "regex": "\\[RivalNews\\] 'ba:messagetype_rivalry_activated' from rival 'ju1yVbREcE2B5ymg6q5tyA==' delivered",
+          "within_s": 50
+        }
+      ],
+      "note": "TEST 2b: the next check activates the rival for Client1 (intro already sent), after the native delay"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "sleep_s": 6,
+      "note": "the per-peer heartbeat publish (3 s)"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "rivalstate",
+      "expect_result": "ju1yVbREcE2B5ymg6q5tyA==:A:",
+      "note": "TEST 2: active on Client1's machine"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "rivalstate",
+      "expect_result": "${hMH}:",
+      "note": "TEST 2: the host's own Murray Hill state is unchanged"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "rivalsig ${clientPid}",
+      "expect_result": "^OK rivalsig ",
+      "capture": {
+        "sigC": "^OK rivalsig (.*)$"
+      },
+      "note": "the per-peer signature the host expects on Client1"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "rivalsig",
+      "expect_result": "^OK rivalsig ${sigC}$",
+      "note": "Client1 holds exactly its own key's state (sent keys + completed ids applied in place)"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "\\{${clientPid}\\}\\|count=\\d+\\|floor=3\\|income=[^|]*\\|pct=[^|]*\\|active=1\\|completed=0\\|sent=2\\|"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "active=1 sent=2 completed=0"
+    },
+    {
+      "seq": 33,
+      "role": "both",
+      "cmd": "mark TEST RIVALSA SAVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "rivalattn",
+      "expect_result": "^OK rivalattn host ",
+      "capture": {
+        "sig": "sig=(\\S+)"
+      },
+      "note": "TEST 3: the store signature before the save"
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "autosave",
+      "expect_result": "^OK HostSaveNow\\('autosave'\\) invoked slot=[^ ]+",
+      "capture": {
+        "slot": "slot=([^ ]+)"
+      }
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the client's upload reaches the host and the slot manifest is stamped"
+    },
+    {
+      "seq": 37,
+      "role": "both",
+      "cmd": "mark TEST RIVALSA RELOAD",
+      "expect_result": "OK MARK"
+    },
+    {
+      "role": "c",
+      "drop": true,
+      "note": "an in-game client served a reload exits to the menu (T-WALLETDUPE pattern): the member leaves, the host loads, the member comes back"
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "hostload ${slot}",
+      "expect_result": "^OK StartLoadGame\\('${slot}'\\) invoked",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[RivalAttn\\] restored [1-9]\\d* key-rival row\\(s\\) for 1 key\\(s\\)",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "the host's world loads"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "rivalattn",
+      "expect_result": "sig=${sig} ",
+      "note": "TEST 3: identical after the reload (taken BEFORE Client1 is back, so no check can move it)"
+    },
+    {
+      "role": "c",
+      "relaunch": true,
+      "note": "the member returns"
+    },
+    {
+      "seq": 44,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 45,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "cmd": "rivalattn floor ${clientPid} ${rival} 3",
+      "expect_result": "^OK rivalattn floor",
+      "note": "the DEV floor is memory-only; re-applied so the next natural check does not deactivate on the real count"
+    },
+    {
+      "seq": 48,
+      "role": "c",
+      "sleep_s": 50
+    },
+    {
+      "seq": 49,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 50,
+      "role": "c",
+      "cmd": "rivalstate",
+      "expect_result": "ju1yVbREcE2B5ymg6q5tyA==:A:",
+      "note": "the per-peer JOIN snapshot carries Client1's own restored state"
+    },
+    {
+      "seq": 51,
+      "role": "h",
+      "cmd": "rivalattn ${rival}",
+      "expect_result": "\\{${clientPid}\\}\\|count=\\d+\\|floor=3\\|income=[^|]*\\|pct=[^|]*\\|active=1\\|completed=0\\|sent=2\\|"
+    },
+    {
+      "seq": 52,
+      "role": "h",
+      "cmd": "rivalstate",
+      "expect_result": "${hMH}:",
+      "note": "the host's own Murray Hill state survived the reload unchanged"
+    },
+    {
+      "seq": 53,
+      "role": "both",
+      "cmd": "mark TEST RIVALSA END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

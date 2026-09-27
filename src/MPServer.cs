@@ -1334,6 +1334,15 @@ namespace BigAmbitionsMP
         // enumerated on the main thread (rival-fairness patches, snapshot build).
         private static readonly ConcurrentDictionary<string, RivalsStatsRequestPayload> _clientSelfStats = new();
 
+        /// <summary>H-RIVALPARITY-1 A (P3): a player's latest self-reported business rows (empty if none). The payload
+        /// object is replaced WHOLE on every report, never mutated, so reading its list on the main thread is safe.</summary>
+        internal static List<RivalBusinessInfo> SelfReportRows(string pid)
+        {
+            try { if (!string.IsNullOrEmpty(pid) && _clientSelfStats.TryGetValue(pid, out var r) && r?.Businesses != null) return r.Businesses; }
+            catch { }
+            return new List<RivalBusinessInfo>();
+        }
+
         /// <summary>Self-reported weekly income for a session player's business
         /// at this address (0 if unknown).  Bridges the rival-AI fairness
         /// patches: the host's replica registrations have empty order history,
@@ -10596,7 +10605,7 @@ namespace BigAmbitionsMP
         /// Receivers (clients) get matching name entries so building popups
         /// can resolve "owned by [player]" without an "undefined" fallback.
         /// </summary>
-        public static RivalsSnapshotPayload BuildRivalsSnapshot()
+        public static RivalsSnapshotPayload BuildRivalsSnapshot(string? forPid = null)
         {
             var snap = new RivalsSnapshotPayload();
             try
@@ -10617,7 +10626,11 @@ namespace BigAmbitionsMP
 
                 // RIVAL-FAIR-2 R3: the host's own rival STATE rides the identity snapshot, so a
                 // joiner is current the moment it lands.  Null-safe on the other side (older host = null).
-                snap.States = BuildRivalStates();
+                // H-RIVALPARITY-1 A (per-peer R3): the rival state is PER PLAYER now. A targeted snapshot (the join
+                // replay) carries that player's own key; an untargeted broadcast carries none (null = the receiver
+                // leaves its state) and the per-peer signatures reset, so the next 3 s heartbeat hands each peer its own.
+                if (forPid != null) snap.States = BuildRivalStatesFor(forPid);
+                else { snap.States = null; _lastRivalSigByPid.Clear(); }
 
                 // Inject every human player as a "rival" entry so receivers
                 // can resolve "owned by [player X]" lookups.  Includes the host
@@ -10684,7 +10697,10 @@ namespace BigAmbitionsMP
                 {
                     if (st == null || string.IsNullOrEmpty(st.rivalId)) continue;
                     if (!seenIds.Add(st.rivalId)) continue;   // fold e: first per id wins
-                    var row = new CbRivalState { RivalId = st.rivalId, IsActive = st.isActive, IsDefeated = st.isDefeated };
+                    var row = new CbRivalState { RivalId = st.rivalId, IsActive = st.isActive, IsDefeated = st.isDefeated,
+                                                 // H-RIVALPARITY-1 A: the native (host key's) bookkeeping; BuildRivalStatesFor overlays a player's own
+                                                 SentKeys = st.sentMessageKeys == null ? new List<string>() : new List<string>(st.sentMessageKeys),
+                                                 CompletedIds = st.completedTimelineEntryIds == null ? new List<string>() : new List<string>(st.completedTimelineEntryIds) };
                     if (st.defenseStates != null)
                         foreach (var d in st.defenseStates)
                         {
@@ -10706,6 +10722,26 @@ namespace BigAmbitionsMP
         /// machines that agree on this agree on the rival state that matters.</summary>
         public static string RivalStateSignature() => SignatureOf(BuildRivalStates());
 
+        /// <summary>H-RIVALPARITY-1 A: the signature ONE player's machine should show (the `rivalsig &lt;pid&gt;` lever).</summary>
+        public static string RivalStateSignatureFor(string pid) => SignatureOf(BuildRivalStatesFor(pid));
+
+        /// <summary>H-RIVALPARITY-1 A (per-peer R3, design (g)): the rival state ONE player should hold - the world's rows
+        /// (defeat, running attacks) with that player's OWN key's isActive / sent keys / completed ids (MPRivalAttention).
+        /// The host's key - and a player the host cannot key yet - gets the native state unchanged.</summary>
+        public static List<CbRivalState> BuildRivalStatesFor(string pid)
+        {
+            var list = BuildRivalStates();
+            try
+            {
+                if (!IsRunning || string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) return list;
+                string key = MPRivalAttention.KeyOfPid(pid);
+                if (key.Length == 0 || key == MPRivalAttention.HostKey) return list;
+                foreach (var r in list) MPRivalAttention.OverlayFor(key, r);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalSync] BuildRivalStatesFor '{pid}': {ex.Message}"); }
+            return list;
+        }
+
         /// <summary>The signature deliberately covers rivalId | active | defeated | defense COUNT plus
         /// each defense's timestamp + mechanic - NOT aggression and NOT affectedItems/EmployeeIds.
         /// Native AddDefenseState only ever APPENDS a defense, never mutates one in place, so count +
@@ -10725,32 +10761,41 @@ namespace BigAmbitionsMP
                   .Append('|').Append(r.Defenses.Count);
                 foreach (var d in r.Defenses)
                     sb.Append(':').Append(d.Day).Append('.').Append(d.Hour).Append('.').Append((int)d.Minute).Append('.').Append(d.Mechanic);
+                // H-RIVALPARITY-1 A: the player's own bookkeeping travels per peer, so a change to it must publish.
+                sb.Append("|s").Append(string.Join(",", r.SentKeys ?? new List<string>()))
+                  .Append("|c").Append(string.Join(",", r.CompletedIds ?? new List<string>()));
                 sb.Append(';');
             }
             return sb.ToString();
         }
 
-        private static string _lastRivalStateSig = "";
+        /// <summary>H-RIVALPARITY-1 A: the last signature sent to each player (per-peer R3).</summary>
+        private static readonly ConcurrentDictionary<string, string> _lastRivalSigByPid = new();
 
-        /// <summary>RIVAL-FAIR-2 R3: publish the host's rival state when it CHANGES.  The payload carries
-        /// States only - Rivals / WholesaleIds / ImportIds stay empty - because the identity half of the
-        /// snapshot reseeds the client's ClientRivalNames, ClientPlayerRoster and the slot-exact
-        /// PendingRivalIdQueue, and re-running that on every hourly sweep would churn caches that must be
-        /// written once at join.  The client's apply recognises the states-only shape and touches nothing
-        /// else.</summary>
+        /// <summary>RIVAL-FAIR-2 R3, PER PEER since H-RIVALPARITY-1 A (2026-09-27): publish to each connected player ITS
+        /// OWN rival state (BuildRivalStatesFor) when that player's signature changed.  The payload carries States only -
+        /// Rivals / WholesaleIds / ImportIds stay empty - because the identity half of the snapshot reseeds the client's
+        /// ClientRivalNames, ClientPlayerRoster and the slot-exact PendingRivalIdQueue, and re-running that on every
+        /// hourly sweep would churn caches that must be written once at join.  The client's apply recognises the
+        /// states-only shape and touches nothing else.</summary>
         public static void PublishRivalStateIfChanged(string why)
         {
             try
             {
                 if (!IsRunning) return;
-                var states = BuildRivalStates();
-                string sig = SignatureOf(states);
-                if (sig == _lastRivalStateSig) return;
-                _lastRivalStateSig = sig;
-                Broadcast(MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", new RivalsSnapshotPayload { States = states }));
-                int k = 0, m = 0;
-                foreach (var r in states) { if (r.IsActive) k++; m += r.Defenses.Count; }
-                Plugin.Logger.LogInfo($"[RivalSync] host rival state published: {states.Count} rival(s), {k} active, {m} defense(s) ({why}).");
+                foreach (var peer in _clients.Keys)
+                {
+                    string pid = _peerNames.TryGetValue(peer.Id, out var nm) ? (nm ?? "") : "";
+                    if (pid.Length == 0) continue;
+                    var states = BuildRivalStatesFor(pid);
+                    string sig = SignatureOf(states);
+                    if (_lastRivalSigByPid.TryGetValue(pid, out var last) && last == sig) continue;
+                    _lastRivalSigByPid[pid] = sig;
+                    Send(peer, MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", new RivalsSnapshotPayload { States = states }));
+                    int k = 0, m = 0;
+                    foreach (var r in states) { if (r.IsActive) k++; m += r.Defenses.Count; }
+                    Plugin.Logger.LogInfo($"[RivalSync] host rival state published: {states.Count} rival(s), {k} active, {m} defense(s) ({why}) -> '{pid}' key {MPRivalAttention.KeyOfPid(pid)}.");
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalSync] publish: {ex.Message}"); }
         }
@@ -10760,8 +10805,11 @@ namespace BigAmbitionsMP
             if (peer == null) return;
             try
             {
-                var snap = BuildRivalsSnapshot();
+                // H-RIVALPARITY-1 A: the join snapshot carries THIS player's own rival state (per-peer R3).
+                string pid = _peerNames.TryGetValue(peer.Id, out var nm) ? (nm ?? "") : "";
+                var snap = BuildRivalsSnapshot(pid);
                 Send(peer, MessageEnvelope.Create(MessageType.RivalsSnapshot, "host", snap));
+                if (pid.Length > 0 && snap.States != null) _lastRivalSigByPid[pid] = SignatureOf(snap.States);
                 Plugin.Logger.LogInfo($"[Server] Sent rivals snapshot to peer={peer.Id}: {snap.Rivals.Count} rival(s).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] SendRivalsSnapshotTo: {ex.Message}"); }
@@ -11192,6 +11240,7 @@ namespace BigAmbitionsMP
             // MONOLOGUE CALLBACK after the hooked timeline sweep returned (the client showed a rival active
             // that the host had already deactivated), so the change-gated publish also rides this 3 s
             // heartbeat - a poll of the authoritative state, sent only when the signature moved.
+            try { MPRivalAttention.Tick(); } catch (Exception tx) { Plugin.Logger.LogWarning($"[RivalAttn] heartbeat tick: {tx.Message}"); }   // H-RIVALPARITY-1 A: per-player delayed steps + planned entries
             try { PublishRivalStateIfChanged("heartbeat"); } catch (Exception rx) { Plugin.Logger.LogWarning($"[RivalSync] heartbeat publish: {rx.Message}"); }
             var (day, hour) = GameStateReader.GetGameTime();
             float speed = speedOverride ?? UnityEngine.Time.timeScale;

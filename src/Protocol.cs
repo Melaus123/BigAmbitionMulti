@@ -3520,6 +3520,10 @@ namespace BigAmbitionsMP
         public bool   IsActive { get; set; }
         public bool   IsDefeated { get; set; }
         public List<CbDefense> Defenses { get; set; } = new();
+        /// <summary>H-RIVALPARITY-1 A (per-peer R3, 2026-09-27): the RECEIVER's own sent message keys and completed
+        /// timeline entry ids (its own key's), applied IN PLACE. NULL = an older host - the receiver leaves its lists.</summary>
+        public List<string>? SentKeys     { get; set; }
+        public List<string>? CompletedIds { get; set; }
     }
 
     /// <summary>RIVAL-FAIR-2 R3: one BigAmbitions.Rivals.DefenseState.  Timestamp is
@@ -3817,6 +3821,14 @@ namespace BigAmbitionsMP
         public string BusinessName { get; set; } = "";
         public string BusinessType { get; set; } = "";    // business type id string (EA 0.11)
         public float  WeeklyIncome { get; set; }
+        /// <summary>H-RIVALPARITY-1 A (P3, 2026-09-27): the game's own rival-count test (RivalTimeline.GetPlayerValues)
+        /// run on the OWNER's machine; the registration's neighbourhood; GetAvgDailyIncome(7); the last 7 days' sold
+        /// amounts per item; the items on its price list. Defaults on rows from an older build / AI rows.</summary>
+        public bool   RivalQualifying { get; set; }
+        public string Neighborhood    { get; set; } = "";
+        public float  AvgDaily7       { get; set; }
+        public Dictionary<string, int>? Sold7d { get; set; }
+        public List<string>? Selling { get; set; }
     }
 
     /// <summary>Per-rival stats for the leaderboard display.</summary>
