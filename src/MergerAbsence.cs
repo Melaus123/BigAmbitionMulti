@@ -674,6 +674,11 @@ namespace BigAmbitionsMP
                 // installer has to know which of them are the owner's to install it exactly once.
                 var owned = new HashSet<string>(p.Addresses ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
                 string owner = p.OwnerPid ?? "";
+                // H-STANDINTILL-1: the addresses this machine ALREADY stood in for, for this owner, before this payload
+                // (a re-apply / re-send). Only a FRESH stand-in takes the till over below - on a re-apply this machine has
+                // been the single writer of that till all along, so its own till is newer than any bundle.
+                var tillAlreadyHere = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var kv in _simHere) if (kv.Value == owner) tillAlreadyHere.Add(kv.Key);
                 UndoLocal(owner, $"re-applying the hand-over for '{owner}'", restoreDisplay: false);   // MAJOR-2: undo THEN install
                 // WAVE 4 r2 (review MAJOR-2): this machine is about to hold that owner's REAL items. Its
                 // DISPLAY COPIES of the same agreements must go first, or both sets sit in the lists at once
@@ -686,6 +691,7 @@ namespace BigAmbitionsMP
                     if (string.IsNullOrEmpty(addr)) continue;
                     _simHere[addr] = owner;                  // (a)+(b)+(e): the veil exception, the interior
                                                               // publisher and the paperwork publish all read this
+                    if (!tillAlreadyHere.Contains(addr)) TakeOverTill(addr, bundle, owner);   // H-STANDINTILL-1
                     int staff = PromoteStaffFor(addr, bundle, owner);        // (c)
                     int items = InstallListsFor(addr, bundle, owned, owner);  // (d)
                     Plugin.Logger.LogInfo($"[Absence] simulating '{addr}' for '{p.OwnerPid}' "
@@ -707,6 +713,57 @@ namespace BigAmbitionsMP
                         }));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] apply: {ex.Message}"); }
+        }
+
+        /// <summary>H-STANDINTILL-1 (user-approved 2026-09-27): a FRESH stand-in's till of the absent owner's shop
+        /// (reg.unprocessedCompletedOrders) is REPLACED by the owner's till from the hand-over bundle - the same fill the
+        /// return leg uses (PaperworkSync.FillTill) - or EMPTIED when the bundle carries no record of that address. While
+        /// the shop was flipped here the till only gathered COPIES (the unchecked native adds, TicketKioskController.cs:144
+        /// and SelfServiceEmployee.cs:150, while this player stood inside), which the veil kept off the day roll. Kept, they
+        /// were paid AGAIN by this machine's next day roll once it books the shop (BusinessHelper.ProcessDailyOrders
+        /// :223-232 has no date check), shipped to the owner in this machine's paperwork, and they replaced the owner's own
+        /// unpaid orders in the host's stored record (PaperworkSync.MergeAddresses), which lost those. Taking the owner's
+        /// till over carries the owner's unpaid orders through the stint and back exactly once. ONLY the till is touched
+        /// (order history and campaigns stay as they were). Main thread.</summary>
+        private static void TakeOverTill(string addr, BusinessPaperworkPayload? bundle, string owner)
+        {
+            try
+            {
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (reg == null)
+                {
+                    Plugin.Logger.LogWarning($"[Absence] till of '{addr}' for '{owner}': no registration here - not taken over.");
+                    return;
+                }
+                BusinessPaperwork? biz = null;
+                if (bundle?.Businesses != null)
+                    foreach (var b in bundle.Businesses)
+                        if (b != null && string.Equals(b.AddressKey, addr, StringComparison.OrdinalIgnoreCase)) { biz = b; break; }
+                int before = 0; try { before = reg.unprocessedCompletedOrders?.Count ?? 0; } catch { }
+                double beforeVal = TillValue(reg);
+                int after = PaperworkSync.FillTill(reg, biz?.UnprocessedCompletedOrders);
+                double afterVal = TillValue(reg);
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                string src = biz != null
+                    ? $"the owner's till from the hand-over bundle ({biz.UnprocessedCompletedOrders?.Count ?? 0} order(s))"
+                    : "nothing - the bundle holds no record of this address, so it is emptied";
+                Plugin.Logger.LogInfo($"[Absence] till of '{addr}' for '{owner}' taken over: {before} local order(s) worth "
+                                    + $"{beforeVal.ToString("F2", inv)} replaced by {src} - now {after} order(s) worth {afterVal.ToString("F2", inv)}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] till take-over '{addr}': {ex.Message}"); }
+        }
+
+        /// <summary>What a till is worth at the day roll (TillDupes.ExtraReferenceValue per order - the one formula).</summary>
+        private static double TillValue(BuildingRegistration reg)
+        {
+            double v = 0;
+            try
+            {
+                var till = reg.unprocessedCompletedOrders;
+                if (till != null) foreach (var o in till) v += TillDupes.ExtraReferenceValue(o);
+            }
+            catch { }
+            return v;
         }
 
         /// <summary>B5 / re-apply / re-designation: stop simulating for ONE absent owner (r1 MAJOR-6 -

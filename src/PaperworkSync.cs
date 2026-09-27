@@ -722,24 +722,7 @@ namespace BigAmbitionsMP
                             PwSet(s, "customers", r2.Customers);
                         });
                     });
-                    int till = PwFill<PwOrder>(reg, "unprocessedCompletedOrders", b.UnprocessedCompletedOrders, (o, po) =>
-                    {
-                        PwSet(o, "completed", po.Completed);
-                        PwSet(o, "customerServiceSkill", po.CustomerServiceSkill);
-                        PwSet(o, "cleanliness", po.Cleanliness);
-                        PwSet(o, "customerDemandScore", po.CustomerDemandScore);
-                        PwFillStrings(o, "customerDemandTypes", po.CustomerDemandTypes);
-                        PwFill<PwOrderEntry>(o, "entries", po.Entries, (e, oe) =>
-                        {
-                            PwSet(e, "itemName", oe.ItemName);
-                            PwSet(e, "price", oe.Price);
-                            PwSet(e, "available", oe.Available);
-                            PwSet(e, "priceAccceptable", oe.PriceAcceptable);   // the game's own spelling
-                            PwSet(e, "paid", oe.Paid);
-                            PwSet(e, "processed", oe.Processed);
-                            PwSet(e, "wholesalePrice", oe.WholesalePrice);
-                        });
-                    });
+                    int till = FillTill(reg, b.UnprocessedCompletedOrders);   // H-STANDINTILL-1: shared with the stand-in's hand-over
                     int fx = PwFill<PwFactoryExport>(reg, "factoryExports", b.FactoryExports, (o, f) =>
                     {
                         PwSet(o, "itemName", f.ItemName);
@@ -761,6 +744,34 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] returned books: {ex.Message}"); }
             return n;
+        }
+
+        /// <summary>H-STANDINTILL-1 (2026-09-27): THE TILL FILL - reg.unprocessedCompletedOrders REPLACED wholesale by
+        /// the bundle's rows (null or empty = the till is emptied). One copy of the arithmetic for both writers of a
+        /// shop's till from a bundle: the returned owner (ApplyReturnedBusinesses, above) and a FRESH stand-in taking
+        /// the absent owner's till over (MergerAbsence.ApplyHandover). Main thread. Returns how many orders the till
+        /// holds afterwards.</summary>
+        internal static int FillTill(BuildingRegistration reg, List<PwOrder>? orders)
+        {
+            if (reg == null) return 0;
+            return PwFill<PwOrder>(reg, "unprocessedCompletedOrders", orders, (o, po) =>
+            {
+                PwSet(o, "completed", po.Completed);
+                PwSet(o, "customerServiceSkill", po.CustomerServiceSkill);
+                PwSet(o, "cleanliness", po.Cleanliness);
+                PwSet(o, "customerDemandScore", po.CustomerDemandScore);
+                PwFillStrings(o, "customerDemandTypes", po.CustomerDemandTypes);
+                PwFill<PwOrderEntry>(o, "entries", po.Entries, (e, oe) =>
+                {
+                    PwSet(e, "itemName", oe.ItemName);
+                    PwSet(e, "price", oe.Price);
+                    PwSet(e, "available", oe.Available);
+                    PwSet(e, "priceAccceptable", oe.PriceAcceptable);   // the game's own spelling
+                    PwSet(e, "paid", oe.Paid);
+                    PwSet(e, "processed", oe.Processed);
+                    PwSet(e, "wholesalePrice", oe.WholesalePrice);
+                });
+            });
         }
 
         private const System.Reflection.BindingFlags PwFlags = System.Reflection.BindingFlags.Public

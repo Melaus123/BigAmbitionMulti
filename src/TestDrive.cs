@@ -2318,6 +2318,132 @@ namespace BigAmbitionsMP
                          + $"truly={MergerFlip.TrulyMine(ofreg)} ledger='{(ofKnown ? ofOwner : "?")}' mine={MergerFlip.LedgerSaysMine(ofkey)} name='{ofname}' type={oftype}";
                 }
 
+                case "tillledger":
+                {
+                    // H-STANDINTILL-1 (DEV lever, test only): a PER-ORDER LEDGER of one shop's till
+                    // (reg.unprocessedCompletedOrders) on THIS machine.
+                    //   seed <tag 1-9> <n 1-20> <addr> - APPEND n SYNTHETIC, completed, PAID orders, one entry each priced
+                    //        tag*100 + k + 0.25 (k = 1..n), so the ledger names each one (T<tag>#<k>) on every machine it
+                    //        travels to (the paperwork carries the price, not an identity). Every seed is logged.
+                    //   show <addr> - the till: tagged orders by name, the rest counted, and the day-roll value.
+                    //   pay <addr>  - the game's OWN per-shop day roll (BusinessHelper.ProcessDailyOrders, private, by
+                    //        reflection - the tripwire prefix and every mod patch on it run as on a real roll), one
+                    //        '[TillLedger] <pid> PAID' line per order it bills, and the wallet delta.
+                    var tlSp = arg.Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                    if (tlSp.Length < 2) return "ERR usage: tillledger seed <tag> <n> <addr> | show <addr> | pay <addr>";
+                    string tlVerb = tlSp[0].ToLowerInvariant();
+                    string tlRest = tlSp[1];
+                    int tlTag = 0, tlN = 0;
+                    if (tlVerb == "seed")
+                    {
+                        var tlS2 = tlRest.Split(new[] { ' ' }, 3, StringSplitOptions.RemoveEmptyEntries);
+                        if (tlS2.Length < 3 || !int.TryParse(tlS2[0], out tlTag) || !int.TryParse(tlS2[1], out tlN)
+                            || tlTag < 1 || tlTag > 9 || tlN < 1 || tlN > 20)
+                            return "ERR usage: tillledger seed <tag 1-9> <n 1-20> <addr>";
+                        tlRest = tlS2[2];
+                    }
+                    else if (tlVerb != "show" && tlVerb != "pay") return "ERR usage: tillledger seed <tag> <n> <addr> | show <addr> | pay <addr>";
+                    var tlReg = GameStatePatcher.FindRegistration(tlRest);
+                    if (tlReg == null) return $"ERR no registration at '{tlRest}'";
+                    string tlKey = tlRest; try { tlKey = GameStateReader.AddressKey(tlReg); } catch { }
+                    var tlInv = System.Globalization.CultureInfo.InvariantCulture;
+                    string tlPid = MPConfig.PlayerId;
+                    bool tlBooks = false; try { tlBooks = MergerFlip.BooksHere(tlReg); } catch { }
+                    if (tlReg.unprocessedCompletedOrders == null) tlReg.unprocessedCompletedOrders = new System.Collections.Generic.List<Order>();
+                    var tlTill = tlReg.unprocessedCompletedOrders;
+                    System.Func<Order, string> tlSig = tlO =>
+                    {
+                        if (tlO?.entries == null || tlO.entries.Count == 0) return "N[empty]";
+                        if (tlO.entries.Count == 1 && tlO.entries[0] != null)
+                        {
+                            double tlP = tlO.entries[0].price;
+                            int tlW = (int)System.Math.Floor(tlP);
+                            int tlT = tlW / 100, tlK = tlW % 100;
+                            if (System.Math.Abs(tlP - tlW - 0.25) < 0.01 && tlT >= 1 && tlT <= 9 && tlK >= 1) return $"T{tlT}#{tlK}";
+                        }
+                        var tlSb = new StringBuilder("N[");
+                        foreach (var tlE in tlO.entries)
+                            if (tlE != null) tlSb.Append(tlE.itemName).Append('=').Append(tlE.price.ToString("F2", tlInv)).Append(tlE.paid ? "p" : "u").Append(';');
+                        return tlSb.Append(']').ToString();
+                    };
+                    if (tlVerb == "seed")
+                    {
+                        string tlItem = "";
+                        try
+                        {
+                            foreach (var tlO in tlTill)
+                            {
+                                if (tlO?.entries == null) continue;
+                                foreach (var tlE in tlO.entries) if (tlE != null && !string.IsNullOrEmpty(tlE.itemName)) { tlItem = tlE.itemName; break; }
+                                if (tlItem.Length > 0) break;
+                            }
+                            if (tlItem.Length == 0 && tlReg.orderHistory != null)
+                                foreach (var tlH in tlReg.orderHistory)
+                                {
+                                    if (tlH?.itemSales == null) continue;
+                                    foreach (var tlS in tlH.itemSales) if (tlS != null && !string.IsNullOrEmpty(tlS.itemName)) { tlItem = tlS.itemName; break; }
+                                    if (tlItem.Length > 0) break;
+                                }
+                        }
+                        catch { }
+                        if (tlItem.Length == 0) tlItem = "ba:tillledger_probe";
+                        for (int tlK2 = 1; tlK2 <= tlN; tlK2++)
+                        {
+                            float tlPrice = tlTag * 100 + tlK2 + 0.25f;
+                            var tlNew = new Order { completed = true };
+                            tlNew.entries.Add(new global::Entities.OrderEntry
+                            {
+                                itemName = tlItem, price = tlPrice, available = true, priceAccceptable = true,
+                                paid = true, processed = true, wholesalePrice = 0f,
+                            });
+                            tlTill.Add(tlNew);
+                            Plugin.Logger.LogInfo($"[TillLedger] {tlPid} SEEDED T{tlTag}#{tlK2} into '{tlKey}' item='{tlItem}' "
+                                                + $"price={tlPrice.ToString("F2", tlInv)} books={tlBooks} (DEV lever: a SYNTHETIC paid till entry, test only)");
+                        }
+                        try { PaperworkSync.MarkDirty(); } catch { }   // the till changed: the next paperwork publish carries it
+                    }
+                    var tlTags = new System.Collections.Generic.List<string>();
+                    int tlNatural = 0; double tlValue = 0;
+                    foreach (var tlO in tlTill)
+                    {
+                        if (tlO == null) continue;
+                        string tlS3 = tlSig(tlO);
+                        if (tlS3.StartsWith("T")) tlTags.Add(tlS3); else tlNatural++;
+                        tlValue += TillDupes.ExtraReferenceValue(tlO);
+                    }
+                    tlTags.Sort(StringComparer.Ordinal);
+                    string tlState = $"key='{tlKey}' books={tlBooks} orders={tlTill.Count} value={tlValue.ToString("F2", tlInv)} "
+                                   + $"tagged=[{string.Join(",", tlTags)}] natural={tlNatural}";
+                    if (tlVerb != "pay")
+                    {
+                        Plugin.Logger.LogInfo($"[TillLedger] {tlPid} {tlVerb.ToUpperInvariant()} {tlState}");
+                        return $"OK tillledger {tlVerb} {tlState}";
+                    }
+                    var tlMi = HarmonyLib.AccessTools.Method(typeof(global::Helpers.BusinessHelper), "ProcessDailyOrders");
+                    if (tlMi == null) return "ERR BusinessHelper.ProcessDailyOrders not found";
+                    var tlBilled = new System.Collections.Generic.List<string>();
+                    foreach (var tlO in tlTill)
+                    {
+                        if (tlO == null || !tlO.completed || tlO.entries == null || !tlO.entries.Exists(x => x != null && x.paid)) continue;
+                        string tlS4 = tlSig(tlO);
+                        tlBilled.Add(tlS4);
+                        Plugin.Logger.LogInfo($"[TillLedger] {tlPid} PAID {tlS4} at '{tlKey}' value={TillDupes.ExtraReferenceValue(tlO).ToString("F2", tlInv)} books={tlBooks}");
+                    }
+                    double tlM0 = 0, tlM1 = 0;
+                    try { tlM0 = SaveGameManager.Current.Money; } catch { }
+                    try { tlMi.Invoke(null, new object[] { tlReg }); }
+                    catch (Exception exTl) { return "ERR day roll threw: " + (exTl.InnerException?.Message ?? exTl.Message); }
+                    try { tlM1 = SaveGameManager.Current.Money; } catch { }
+                    int tlAfter = 0; try { tlAfter = tlReg.unprocessedCompletedOrders?.Count ?? 0; } catch { }
+                    try { PaperworkSync.MarkDirty(); } catch { }   // the till was emptied: the next paperwork publish carries it
+                    tlBilled.Sort(StringComparer.Ordinal);
+                    string tlLine = $"key='{tlKey}' books={tlBooks} billed={tlBilled.Count} value={tlValue.ToString("F2", tlInv)} "
+                                  + $"money={tlM0.ToString("F2", tlInv)}->{tlM1.ToString("F2", tlInv)} tillAfter={tlAfter} "
+                                  + $"paid=[{string.Join(",", tlBilled.FindAll(s => s.StartsWith("T")))}] naturalPaid={tlBilled.FindAll(s => !s.StartsWith("T")).Count}";
+                    Plugin.Logger.LogInfo($"[TillLedger] {tlPid} DAYROLL {tlLine}");
+                    return $"OK tillledger pay {tlLine}";
+                }
+
                 case "ownerabsent":
                 {
                     // H-STANDINLEASE-1 fold S1 (read-only): LeaseEndWatch.OwnerAbsent for one address, as the terminate guard reads it.
