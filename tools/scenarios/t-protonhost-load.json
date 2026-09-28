@@ -1,6 +1,6 @@
 {
   "id": "T-PROTONHOST-LOAD",
-  "title": "EFFORT BATCH 29 (R1 load shape + R3): a forced failure of the host's OWN save load (main-thread continuation of HostLoadSession) reaches StartFailed - the lobby is handed back, the client in the lobby was never served its save - and the next Start loads both machines",
+  "title": "EFFORT BATCH 29 (R1 load shape + R3): a forced failure of the host's OWN save load (main-thread continuation of HostLoadSession) reaches StartFailed - the lobby is handed back, the client in the lobby was never served its save. H-PROTONHOST-1 remnant (R3, 2026-09-28): the next Start is a NEW GAME in the same lobby, and nothing the failed load restored (owners, bought buildings, cash, colours, loans, rival attention) carries into the new world",
   "preconditions": "Fixture save1 (host melaus, Client1). Build with EFFORT BATCH 29 deployed (startfail lever reaches the host load; clientInLobby readout). The client joins the lobby BEFORE the failed load. NOTHING is saved.",
   "instances": 2,
   "vars": {
@@ -21,7 +21,8 @@
   "oracles_report": [
     "\\[Server\\] HostLoadSession error",
     "\\[MPSave\\] Loading \\.hsg",
-    "Host started game"
+    "Host started game",
+    "\\[Server\\] new world"
   ],
   "steps": [
     { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
@@ -37,14 +38,20 @@
     { "seq": 7, "role": "h", "sleep_s": 10, "note": "a wrongly served save would have landed by now" },
     { "seq": 8, "role": "h", "cmd": "startfail", "expect_result": "^OK startfail armed=False running=True inLobby=True", "note": "THE R3 CHECK: the host's lobby is usable again" },
     { "seq": 9, "role": "c", "cmd": "startfail", "expect_result": "clientInLobby=True", "note": "THE R1 CHECK (load shape): the client was not served before the host's own load" },
+    { "seq": 10, "role": "h", "cmd": "status", "expect_result": "ledger=[1-9]", "note": "R3 PREMISE: the failed load restored the save's owners into the host ledger (StartFailed undoes none of it)" },
+    { "seq": 11, "role": "both", "cmd": "charconfirm", "expect_result": "^OK armed" },
     {
-      "seq": 10, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK StartLoadGame",
-      "expect_log": [ { "role": "h", "regex": "\\[MPSave\\] Loading \\.hsg: char=", "within_s": 60 } ],
-      "note": "SECOND press: a real load"
+      "seq": 12, "role": "h", "cmd": "hostnew", "expect_result": "^OK StartNewGame invoked",
+      "expect_log": [
+        { "role": "h", "regex": "\\[Server\\] new world \\(new game\\): ownership ledger cleared \\([1-9]\\d* owned, \\d+ bought, \\d+ cash, -?\\d+ loan\\(s\\), -?\\d+ rival attention row\\(s\\)\\) - nothing from an earlier load carries in\\.", "within_s": 30 },
+        { "role": "h", "regex": "\\[Server\\] New game init \\+ intro scene loaded", "within_s": 180 },
+        { "role": "c", "regex": "\\[Client\\] Host started game \\(new\\)", "within_s": 180 }
+      ],
+      "note": "R3 SECOND press = New Game in the same lobby: the failed load's owners / bought buildings / cash / colours / loans / rival attention are cleared at the world boundary"
     },
-    { "seq": 11, "role": "h", "sleep_s": 90, "note": "both worlds load and settle" },
-    { "seq": 12, "role": "h", "cmd": "status", "expect_result": "settled=True" },
-    { "seq": 13, "role": "c", "cmd": "status", "expect_result": "settled=True", "note": "the client was served after the host's load and settled" },
-    { "seq": 14, "role": "both", "cmd": "mark TEST PROTONHOST-LOAD END", "expect_result": "OK MARK" }
+    { "seq": 13, "role": "h", "sleep_s": 150, "note": "both machines create characters (charconfirm) and settle" },
+    { "seq": 14, "role": "h", "cmd": "status", "expect_result": "settled=True .*ledger=0 bought=0 loans=0 rivalAttn=0 ", "note": "R3 THE CHECK: nothing from the failed load in the new world" },
+    { "seq": 15, "role": "c", "cmd": "status", "expect_result": "settled=True", "note": "the client was served the new world and settled" },
+    { "seq": 16, "role": "both", "cmd": "mark TEST PROTONHOST-LOAD END", "expect_result": "OK MARK" }
   ]
 }

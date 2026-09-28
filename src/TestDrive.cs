@@ -139,6 +139,21 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[TestDrive] tick: {ex.Message}"); }
         }
 
+        /// <summary>R3 readout: rival attention store rows of non-host keys (the store is private: DEV reflection).</summary>
+        private static int DevRivalAttnRows()
+        {
+            var ty = typeof(MPRivalAttention);
+            var bf = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+            var lk = ty.GetField("_lock", bf)?.GetValue(null);
+            if (!(ty.GetField("_store", bf)?.GetValue(null) is System.Collections.IDictionary st) || lk == null) return -1;
+            string hostPrefix = MPRivalAttention.HostKey + "|";
+            int n = 0;
+            lock (lk)
+                foreach (var k in st.Keys)
+                    if (k is string ks && !ks.StartsWith(hostPrefix, StringComparison.Ordinal)) n++;
+            return n;
+        }
+
         private static string Execute(string line)
         {
             if (string.IsNullOrEmpty(line)) return "ERR empty command";
@@ -161,6 +176,11 @@ namespace BigAmbitionsMP
                     try { sb.Append($"session='{MPSaveCoordinator.ActiveSessionName}' "); } catch { }
                     try { var t = GameStateReader.GetGameTime(); sb.Append($"day={t.day} hour={t.hourOfDay:0.0} "); } catch { }
                     try { sb.Append($"ledger={MPServer.BuildingOwners.Count} "); } catch { }
+                    // R3 (H-PROTONHOST-1 remnant): the rest of what a host load restores - bought buildings, the host
+                    // loan ledger, and rival attention rows of NON-host keys (the host key re-reads native state).
+                    try { sb.Append($"bought={MPServer.BuildingRealEstateOwners.Count} "); } catch { }
+                    try { sb.Append($"loans={MPServer.HostLoanLedgerCount()} "); } catch { }
+                    try { sb.Append($"rivalAttn={DevRivalAttnRows()} "); } catch { }
                     // Weather round (2026-08-18): local isRaining / last host verdict /
                     // drops visually falling — lets the rig verify the VISUAL layer,
                     // which log lines alone cannot see (-1 = unknown).
@@ -2382,6 +2402,47 @@ namespace BigAmbitionsMP
                         return "ERR usage: blip [seconds]";
                     MergerSync.ArmDropGrace("test lever", bsecs);
                     return $"OK blip armed: the link reads as down for {bsecs:0.#} s - watch [Merger] view dropped / view kept";
+                }
+
+                case "leavegame":
+                {
+                    // R2 (H-STANDINTILL-1 remnant, DEV lever): runs the REAL leave anchor. menu = LoadScene.LoadMainMenuFromCity
+                    // (the pause-menu Main Menu confirm / funeral path); quit = MiniMenu's private QuitToDesktopCoroutine (the
+                    // Quit button / MP Save and Exit path - the process exits); disc = the mod's Disconnect button path. The
+                    // rig then treats the instance as dropped (a 'drop' step).
+                    if (MPServer.IsRunning) return "ERR client only";
+                    if (!MPClient.IsConnected) return "ERR not connected";
+                    string lgArg = arg.Trim().ToLowerInvariant();
+                    try
+                    {
+                        if (lgArg == "disc")
+                        {
+                            MPClient.DisconnectAfterLeavePublish("disconnect");
+                            return "OK leavegame disc: the Disconnect-button path ran";
+                        }
+                        var lgHost = MPCanvasUI.Instance;
+                        if (lgHost == null || !lgHost.isActiveAndEnabled) return "ERR leavegame: no active MPCanvasUI to run the coroutine on";
+                        if (lgArg == "menu")
+                        {
+                            lgHost.StartCoroutine(global::UI.Load.LoadScene.LoadMainMenuFromCity());
+                            return "OK leavegame menu: LoadScene.LoadMainMenuFromCity started";
+                        }
+                        if (lgArg == "quit")
+                        {
+                            global::UI.MiniMenu.MiniMenu? lgMm = null;
+                            foreach (var mm in UnityEngine.Resources.FindObjectsOfTypeAll<global::UI.MiniMenu.MiniMenu>())
+                                if (mm != null && mm.gameObject.scene.IsValid()) { lgMm = mm; break; }
+                            if (lgMm == null) return "ERR leavegame quit: no MiniMenu in the scene";
+                            var lgM = HarmonyLib.AccessTools.Method(typeof(global::UI.MiniMenu.MiniMenu), "QuitToDesktopCoroutine");
+                            if (lgM == null) return "ERR leavegame quit: MiniMenu.QuitToDesktopCoroutine not found";
+                            var lgIt = lgM.Invoke(lgMm, null) as System.Collections.IEnumerator;
+                            if (lgIt == null) return "ERR leavegame quit: the coroutine was not created";
+                            lgHost.StartCoroutine(lgIt);
+                            return "OK leavegame quit: MiniMenu.QuitToDesktopCoroutine started (the process will exit)";
+                        }
+                    }
+                    catch (Exception exLg) { return "ERR leavegame: " + (exLg.InnerException?.Message ?? exLg.Message); }
+                    return "ERR usage: leavegame menu|quit|disc";
                 }
 
                 case "netdrop":

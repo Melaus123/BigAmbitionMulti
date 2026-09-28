@@ -315,6 +315,27 @@ namespace BigAmbitionsMP
             return true;
         }
 
+        /// <summary>R3 (H-PROTONHOST-1 remnant, 2026-09-28): MPServer.StartNewGameCore - a New Game is a world boundary.
+        /// A FAILED host load leaves the store ARMED with its manifest rows; in the new world EnsureBound then disarmed
+        /// it and KEPT those rows, skipping the new-world clear. Disarm, unbind and clear here, so the new world binds
+        /// through the fresh-world branch. Returns the store rows dropped (log), -1 on error.</summary>
+        internal static int ResetForNewWorld()
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    int n = _store.Count;
+                    _armed = false; _giAtRestore = null; _boundGi = null;
+                    _store.Clear(); _planned.Clear(); _pending.Clear(); _extra.Clear(); ClearWorldLocked();
+                    _manifestHostRows = null; _manifestHostKey = "";
+                    _hostRowsCache = new List<MpRivalAttnEntry>();
+                    return n;
+                }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[RivalAttn] new-world reset: {ex.Message}"); return -1; }
+        }
+
         /// <summary>MPSaveCoordinator load path, beside RestoreOwnershipFromManifest: clear-then-apply from THIS
         /// manifest (same timeline rule as the absence marks). NULL = a manifest older than this feature =
         /// migration: the host key IS the native state already; every other player starts fresh.</summary>

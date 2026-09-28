@@ -60,6 +60,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                EnsureQuitHook();   // R2: one bool read after the first frame
                 if (UnityEngine.Time.unscaledTime < _nextTick) return;
                 _nextTick = UnityEngine.Time.unscaledTime + 1f;
 
@@ -99,6 +100,59 @@ namespace BigAmbitionsMP
         /// <summary>Force one publish now (the coordinated-save hooks and the TestDrive verb).
         /// Returns the bundle that went out, or null when nothing was published.</summary>
         public static BusinessPaperworkPayload? FlushNow(string why) => Publish(why);
+
+        // -- H-STANDINTILL-1 remnant (R2, 2026-09-28): one final publish when the player DELIBERATELY leaves --
+        private static bool _leaveFlushed;   // one leave publishes once; cleared in Reset and on every connect
+        private static bool _quitHooked;
+
+        /// <summary>R2: publish this machine's books one last time at the moment the player commits to leaving
+        /// while the world is still live - the pause-menu Main Menu (and the funeral screen), Quit to Desktop (also
+        /// reached by the MP Save and Exit), a window close, the mod's Disconnect button. Before this, orders taken
+        /// since the last 30 s publish never reached the host store, so neither the owner's hand-over bundle nor a
+        /// stand-in who left on purpose (it publishes the stood-in shops too; this runs before MergerAbsence.Reset)
+        /// carried them. Client only: the host's own store is local and its leave ends the session. Main thread.
+        /// Returns true when a bundle went out (the Disconnect button then holds the socket close one frame).</summary>
+        public static bool LeaveFlush(string anchor)
+        {
+            try
+            {
+                if (MPServer.IsRunning || !MPClient.IsConnected) return false;
+                if (_leaveFlushed) return false;
+                _leaveFlushed = true;
+                var p = FlushNow("leave: " + anchor);
+                if (p != null)
+                {
+                    Plugin.Logger.LogInfo($"[Paperwork] leave publish ({anchor}): published day {p.Day} ({p.Businesses.Count} business(es)).");
+                    return true;
+                }
+                string why = !MPWorldReady.IsSettled ? "world not settled"
+                           : !MergerSync.IAmMember ? "not a merger member"
+                           : "nothing to publish, or the bundle was refused";
+                Plugin.Logger.LogInfo($"[Paperwork] leave publish ({anchor}): NOT published ({why}).");
+                return false;
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] leave publish ({anchor}): {ex.Message}"); return false; }
+        }
+
+        /// <summary>R2: a new connection may publish its own leave once (MPClient.OnConnected).</summary>
+        public static void ClearLeaveLatch() { _leaveFlushed = false; }
+
+        /// <summary>R2 anchor 3 (window close): Application.wantsToQuit fires on a raw window close and on
+        /// Application.Quit, before OnApplicationQuit - while the world may still be loaded. Registered once from
+        /// the main-thread Tick. Never blocks the quit.</summary>
+        private static void EnsureQuitHook()
+        {
+            if (_quitHooked) return;
+            _quitHooked = true;
+            try { UnityEngine.Application.wantsToQuit += OnWantsToQuit; }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] leave hook (window close): {ex.Message}"); }
+        }
+
+        private static bool OnWantsToQuit()
+        {
+            try { LeaveFlush("window close"); } catch { }
+            return true;
+        }
 
         private static BusinessPaperworkPayload? Publish(string why)
         {
@@ -887,6 +941,7 @@ namespace BigAmbitionsMP
         public static void Reset()
         {
             _dirty = false; _urgent = false; _wasMember = false; _lastPublishedDay = -1; _lastPublishAt = -999f;
+            _leaveFlushed = false;   // R2: a new world / session may publish its own leave once
         }
 
         // ── Mutation points (the game's OWN events; no timers, no one-shot delays) ──
@@ -894,6 +949,31 @@ namespace BigAmbitionsMP
         /// <summary>Order completion — the one choke point every business simulator funnels through
         /// (RetailBusinessSimulator :219, Gym :70, Office :64, CinemaTheater :54 all Add() the order
         /// that Pay() just settled).  Marks the till + orderHistory paperwork dirty.</summary>
+        /// <summary>R2 anchor 1: the pause-menu Main Menu after its confirm (MiniMenu.OpenMainMenu) and the funeral
+        /// screen both start LoadScene.LoadMainMenuFromCity (LoadScene.cs:27); the prefix runs when the coroutine is
+        /// created, before its first step - the world is still loaded and the socket open.</summary>
+        [HarmonyPatch(typeof(global::UI.Load.LoadScene), nameof(global::UI.Load.LoadScene.LoadMainMenuFromCity))]
+        internal static class Patch_LeaveToMainMenu
+        {
+            private static void Prefix()
+            {
+                try { LeaveFlush("menu"); }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] leave publish (menu) prefix: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>R2 anchor 2: Quit to Desktop after its confirm - the native Quit button and the MP Save and Exit
+        /// (MiniMenuUtil.QuitToDesktop) both start the private MiniMenu.QuitToDesktopCoroutine (MiniMenu.cs:166).</summary>
+        [HarmonyPatch(typeof(global::UI.MiniMenu.MiniMenu), "QuitToDesktopCoroutine")]
+        internal static class Patch_LeaveQuitToDesktop
+        {
+            private static void Prefix()
+            {
+                try { LeaveFlush("quit"); }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] leave publish (quit) prefix: {ex.Message}"); }
+            }
+        }
+
         [HarmonyPatch(typeof(Order), "Pay")]
         internal static class Patch_OrderPay
         {

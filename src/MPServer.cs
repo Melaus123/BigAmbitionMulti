@@ -349,6 +349,49 @@ namespace BigAmbitionsMP
         /// (X3) — the next world must re-earn it through a manifest restore or a fresh FORM.</summary>
         public static void ResetWallet() { _walletBalance.Clear(); _walletContributed.Clear(); MergerStateAuthoritative = false; }
 
+        /// <summary>R3 (H-PROTONHOST-1 remnant, 2026-09-28): the host pressing Start New Game is a world boundary for
+        /// the ownership ledger too. HostLoadSession restores owners, bought buildings, cash, colour slots, loans and
+        /// rival attention BEFORE the host's own load (MPSaveCoordinator.cs:1241); if that load fails, StartFailed hands
+        /// the lobby back and undoes none of it, so a New Game pressed next inherited it all (fresh-world buildings shown
+        /// as taken; the first save wrote them into the new world's manifest). Start() clears these only when hosting
+        /// begins. Main thread (StartNewGameCore).</summary>
+        private static void ResetOwnershipForNewWorld(string why)
+        {
+            try
+            {
+                int o = BuildingOwners.Count, r = BuildingRealEstateOwners.Count, c = CashByStableId.Count;
+                int l = HostLoanLedgerCount();
+                BuildingOwners.Clear();
+                BuildingRealEstateOwners.Clear();
+                CashByStableId.Clear();
+                _sharedPoolByOwner.Clear();
+                // Colours: the failed load seeded the slot table from its manifest - start empty, then re-assign the host
+                // and every known lobby player (the Start() / RestoreOwnershipFromManifest pattern).
+                PlayerColours.ResetHost();
+                PlayerColours.Learn(MPConfig.PlayerId, PlayerColours.HostAssign(MPConfig.StableId));
+                foreach (var kv in StableIdByPlayer.OrderBy(k => k.Value, StringComparer.Ordinal))
+                    if (!string.IsNullOrEmpty(kv.Key) && !string.IsNullOrEmpty(kv.Value))
+                        PlayerColours.Learn(kv.Key, PlayerColours.HostAssign(kv.Value));
+                // Loans: RestoreLoans filled the host ledger; MPHub.Reset is the same per-session reset the scene exit runs.
+                MPHub.Reset();
+                int ra = MPRivalAttention.ResetForNewWorld();
+                Plugin.Logger.LogInfo($"[Server] new world ({why}): ownership ledger cleared ({o} owned, {r} bought, {c} cash, {l} loan(s), {ra} rival attention row(s)) - nothing from an earlier load carries in.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] new world ({why}): ownership reset: {ex.Message}"); }
+        }
+
+        /// <summary>R3: the host loan ledger's size (MPHub._hostLoans is private; read for the log and the DEV status
+        /// readout). -1 when unreadable.</summary>
+        internal static int HostLoanLedgerCount()
+        {
+            try
+            {
+                var fi = typeof(MPHub).GetField("_hostLoans", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                return fi?.GetValue(null) is System.Collections.ICollection col ? col.Count : -1;
+            }
+            catch { return -1; }
+        }
+
         /// <summary>Host: rebuild the live ownership map from a session manifest
         /// (re-keying the stableId-keyed owners back to the live playerIds of
         /// connected players; absent owners stay reserved under their stableId
@@ -1661,6 +1704,7 @@ namespace BigAmbitionsMP
             MergerAbsence.HostReset(); MergerAbsence.Reset();   // phase 3-B: the absence marks die with the session too - a new world starts with nobody simulating for anybody
             _mergerPendingByTarget.Clear();   // and no proposals carried in from the previous world (audit 2026-08-26)
             ResetWallet();            // fresh world — no shared wallet (slice 4)
+            ResetOwnershipForNewWorld("new game");   // R3 (H-PROTONHOST-1 remnant): nothing a FAILED load restored carries into the new world
             // 4c part 2b r4c (re-check r4 MAJOR-1): the host-held in-transit tables die with the session too - a new world
             // must never resume the previous world's employee moves or cargo (they were cleared only by a manifest LOAD).
             // The previous world's transit tail stays on disk untouched: it continues THAT world's last save (its stamp).

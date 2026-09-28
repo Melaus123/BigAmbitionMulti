@@ -171,6 +171,7 @@ namespace BigAmbitionsMP
             SessionEnded = false;
             _voluntaryDisconnect = false;
             _connected = false;
+            _deferredDisconnectFrame = -1;   // R2: a new connection never inherits a held close
 
             var t = new LnlClientTransport();
             t.Connected    += OnConnected;
@@ -204,6 +205,7 @@ namespace BigAmbitionsMP
             SessionEnded = false;
             _voluntaryDisconnect = false;
             _connected = false;
+            _deferredDisconnectFrame = -1;   // R2: a new connection never inherits a held close
 
             var t = new SteamClientTransport();
             t.Connected    += OnConnected;
@@ -233,12 +235,55 @@ namespace BigAmbitionsMP
             _lobbyPlayers = new List<string>();
         }
 
+        // R2 (H-STANDINTILL-1 remnant, 2026-09-28): the mod's Disconnect button is a deliberate leave. The last
+        // paperwork publish is sent first; a bare socket close discards queued reliable data (SteamClientTransport
+        // .Disconnect -> ConnectionManager.Close without linger), so when a bundle went out the close waits one frame.
+        private static int _deferredDisconnectFrame = -1;
+
+        /// <summary>R2: a deliberate leave through the mod (the Disconnect button, the DEV leavegame lever): publish the
+        /// books once (PaperworkSync.LeaveFlush), then disconnect - one frame later when a bundle was just sent.
+        /// Main thread.</summary>
+        public static void DisconnectAfterLeavePublish(string anchor)
+        {
+            bool published = false;
+            try { published = PaperworkSync.LeaveFlush(anchor); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Client] leave publish ({anchor}): {ex.Message}"); }
+            if (!published) { Disconnect(); return; }
+            try
+            {
+                _deferredDisconnectFrame = UnityEngine.Time.frameCount;
+                Plugin.Logger.LogInfo($"[Client] disconnect ({anchor}) held one frame (frame {_deferredDisconnectFrame}) so the leave publish leaves before the socket closes.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Client] deferred disconnect ({anchor}): {ex.Message} - disconnecting now");
+                _deferredDisconnectFrame = -1;
+                Disconnect();
+            }
+        }
+
+        /// <summary>R2: the held close, run from the per-frame TickWorldReadyGate on the first later frame.</summary>
+        private static void TickDeferredDisconnect()
+        {
+            if (_deferredDisconnectFrame < 0) return;
+            try
+            {
+                int now = UnityEngine.Time.frameCount;
+                if (now <= _deferredDisconnectFrame) return;
+                _deferredDisconnectFrame = -1;
+                Plugin.Logger.LogInfo($"[Client] deferred disconnect: closing now (frame {now}, after the leave publish).");
+                Disconnect();
+            }
+            catch (Exception ex) { _deferredDisconnectFrame = -1; Plugin.Logger.LogWarning($"[Client] deferred disconnect: {ex.Message}"); }
+        }
+
         // ── Events ────────────────────────────────────────────────────────────
 
         private static void OnConnected()
         {
             Plugin.Logger.LogInfo("[Client] Connected to host.");
             _connected = true;
+            try { PaperworkSync.ClearLeaveLatch(); } catch { }   // R2: this connection may publish its own leave once
             // Round-283: freshness state is PER SESSION.  The host's Seq counter starts at 1 in a
             // fresh host process, so a last-seen carried over from a previous connection would drop
             // every heartbeat of this one.  Host capability is re-learned from the next LobbyUpdate;
@@ -2304,6 +2349,7 @@ namespace BigAmbitionsMP
             // and is one bool read for a non-member, and it must run BEFORE the world-ready early
             // return below, which is client-only state.
             PaperworkSync.Tick();
+            TickDeferredDisconnect();   // R2: a Disconnect-button close held one frame behind the leave publish
             try
             {
                 if (!IsConnected || _worldReadySent || !WorldSyncApplied) return;
