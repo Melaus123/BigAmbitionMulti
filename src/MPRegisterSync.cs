@@ -2238,6 +2238,7 @@ namespace BigAmbitionsMP
             {
                 EmployeeInstance? le = null;
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(s.Id, out le); } catch { }
+                if (le == null) try { if (gi.EmployeeInstances != null) foreach (var e0 in gi.EmployeeInstances) if (e0 != null && e0.id == s.Id) { le = e0; break; } } catch { }   // re-check F3: judge the listed record when the lookup entry is gone
                 bool tagged = CompanyCandidates.IsInjectedCandidate(s.Id);
                 bool isCand = false; try { isCand = le != null && le.IsCandidate; } catch { }
                 bool inCand = false, inEmp = false;

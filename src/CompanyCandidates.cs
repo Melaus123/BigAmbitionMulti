@@ -1110,8 +1110,9 @@ namespace BigAmbitionsMP
                         if (_logged.Add("restore-untagged|" + c.id))
                             Plugin.Logger.LogInfo($"{Tag} restore ({context}) put back '{c.id}' which is no longer a company copy (dropped during the strip window) - untagged leftover.");
                     }
+                    if (DictHoldsOtherHired(c.id, c)) continue;   // re-check F4: a hired listed employee holds this id - the copy does not come back at all
                     if (!there) list.Add(c);
-                    try { if (!DictHoldsOtherHired(c.id, c)) EmployeeHelper.EmployeeInstancesDictionary[c.id] = c; } catch { }   // S3: never overwrite a hired listed employee's entry
+                    try { EmployeeHelper.EmployeeInstancesDictionary[c.id] = c; } catch { }   // S3: never overwrite a hired listed employee's entry (checked above)
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} restore ({context}): {ex.GetType().Name}: {ex.Message}"); }

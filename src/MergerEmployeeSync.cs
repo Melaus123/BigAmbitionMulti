@@ -1024,7 +1024,7 @@ namespace BigAmbitionsMP
                     }
                     bool exists = false;
                     try { exists = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(p.EmployeeId ?? ""); } catch { }
-                    if (exists && MPRegisterSync.IsInjectedStaff(p.EmployeeId ?? ""))
+                    if (MPRegisterSync.IsInjectedStaff(p.EmployeeId ?? ""))   // re-check F2: a display copy whose lookup entry was removed by id is still a copy, never a completed adoption
                     {
                         // H-ADOPT-2 (harness run T-P0-5, 2026-09-10): the record already here is the member's INJECTED COPY from
                         // their roster publish (injected records keep the real id) - not a completed adoption. The old
@@ -1210,6 +1210,7 @@ namespace BigAmbitionsMP
             // H-XFERROSTER-1 invariant: the promotion only counts when it produced a REAL employee (not a candidate,
             // in the employee list) at the named workplace (or the bench). Anything else is refused, so the host
             // gives the record back instead of closing its holding entry on a record no save holds.
+            bool pKeepLive = false;
             try
             {
                 bool pBench = string.IsNullOrEmpty(rec.AddressKey);
@@ -1234,10 +1235,13 @@ namespace BigAmbitionsMP
                     return false;
                 }
                 if (!pBuilt && !pBench && pAt != rec.AddressKey)
+                {
+                    pKeepLive = true;   // re-check F1: the live record was moved/benched since - never stamp the host's older fields over it
                     Plugin.Logger.LogInfo($"[Transfer] repeat adopt of '{rec.EmployeeId}' - this save already holds that employee at '{(pAt.Length > 0 ? pAt : "the bench")}' (moved or benched since; asked for '{rec.AddressKey}', same record={ReferenceEquals(inst, before)}) - accepted, nothing rebuilt.");
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] promote of '{rec.EmployeeId}': invariant check threw {ex.GetType().Name}: {ex.Message} - refused."); return false; }
-            StampExtendedFields(inst, rec);
+            if (!pKeepLive) StampExtendedFields(inst, rec);
             return true;
         }
 
