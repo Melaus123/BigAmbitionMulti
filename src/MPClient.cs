@@ -239,12 +239,22 @@ namespace BigAmbitionsMP
         // paperwork publish is sent first; a bare socket close discards queued reliable data (SteamClientTransport
         // .Disconnect -> ConnectionManager.Close without linger), so when a bundle went out the close waits one frame.
         private static int _deferredDisconnectFrame = -1;
+        // D1 (review of 147e031, 2026-09-28): the held close waits for the event "the transport reports no pending reliable
+        // data" (IClientTransport.PendingReliable == 0), bounded by this ceiling in real seconds.
+        private static float _deferredDisconnectSince;
+        private const float DeferredCloseCeilingS = 2f;
 
         /// <summary>R2: a deliberate leave through the mod (the Disconnect button, the DEV leavegame lever): publish the
         /// books once (PaperworkSync.LeaveFlush), then disconnect - one frame later when a bundle was just sent.
         /// Main thread.</summary>
         public static void DisconnectAfterLeavePublish(string anchor)
         {
+            // D2: a second Disconnect click while the held close is pending changes nothing.
+            if (_deferredDisconnectFrame >= 0)
+            {
+                Plugin.Logger.LogInfo($"[Client] disconnect ({anchor}): a close is already pending - ignored.");
+                return;
+            }
             bool published = false;
             try { published = PaperworkSync.LeaveFlush(anchor); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Client] leave publish ({anchor}): {ex.Message}"); }
@@ -252,7 +262,8 @@ namespace BigAmbitionsMP
             try
             {
                 _deferredDisconnectFrame = UnityEngine.Time.frameCount;
-                Plugin.Logger.LogInfo($"[Client] disconnect ({anchor}) held one frame (frame {_deferredDisconnectFrame}) so the leave publish leaves before the socket closes.");
+                _deferredDisconnectSince = UnityEngine.Time.unscaledTime;
+                Plugin.Logger.LogInfo($"[Client] disconnect ({anchor}) held (frame {_deferredDisconnectFrame}) until the transport reports the leave publish delivered (at most {DeferredCloseCeilingS:0} s).");
             }
             catch (Exception ex)
             {
@@ -270,8 +281,14 @@ namespace BigAmbitionsMP
             {
                 int now = UnityEngine.Time.frameCount;
                 if (now <= _deferredDisconnectFrame) return;
+                int pend = -1;
+                try { pend = _transport?.PendingReliable ?? 0; } catch { pend = -1; }
+                float waited = UnityEngine.Time.unscaledTime - _deferredDisconnectSince;
+                if (pend > 0 && waited < DeferredCloseCeilingS) return;   // the event: nothing pending (or the ceiling)
                 _deferredDisconnectFrame = -1;
-                Plugin.Logger.LogInfo($"[Client] deferred disconnect: closing now (frame {now}, after the leave publish).");
+                Plugin.Logger.LogInfo(pend > 0
+                    ? $"[Client] deferred disconnect: closing now (frame {now}, {waited * 1000f:0} ms) at the {DeferredCloseCeilingS:0} s ceiling with {pend} reliable unit(s) still pending - the close lingers (ceiling)."
+                    : $"[Client] deferred disconnect: closing now (frame {now}, {waited * 1000f:0} ms) - {(pend == 0 ? "no reliable data pending, the leave publish is delivered (drained)" : "pending data unknown (unknown)")}.");
                 Disconnect();
             }
             catch (Exception ex) { _deferredDisconnectFrame = -1; Plugin.Logger.LogWarning($"[Client] deferred disconnect: {ex.Message}"); }

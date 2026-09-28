@@ -107,6 +107,35 @@ namespace BigAmbitionsMP
         internal static bool ConfirmCustomizerArmed;
         private static float _customizerFirstSeen = -1f;
 
+        // t-handoff3 LEG1D (2026-09-28): `custevict 1 empty await <tag> [s]` - a bounded premise wait for an empty-handed
+        // body. Each poll tries `custevict 1 empty`; the first eviction sets the premise met, the bound sets it unmet.
+        private static float _ceEmptyUntil = -1f;
+        private static string _ceEmptyTag = "", _ceEmptyLastId = "none";
+        private static void TickEvictEmpty()
+        {
+            try
+            {
+                string r = Execute("custevict 1 empty");
+                if (r.StartsWith("OK custevict asked=1 evicted=1 ", StringComparison.Ordinal))
+                {
+                    _ceEmptyUntil = -1f;
+                    var m = System.Text.RegularExpressions.Regex.Match(r, @"=([^:,\s=#]+):proc0/taken0/");
+                    _ceEmptyLastId = m.Success ? m.Groups[1].Value : "?";
+                    CustomerHandoff.PremiseSet(_ceEmptyTag, true);
+                    Plugin.Logger.LogInfo($"[TestDrive] custevict empty: evicted {_ceEmptyLastId} (premise {_ceEmptyTag} met) - {r}");
+                    return;
+                }
+                if (UnityEngine.Time.unscaledTime > _ceEmptyUntil)
+                {
+                    _ceEmptyUntil = -1f;
+                    _ceEmptyLastId = "none";
+                    CustomerHandoff.PremiseSet(_ceEmptyTag, false);
+                    Plugin.Logger.LogInfo($"[TestDrive] custevict empty: premise {_ceEmptyTag} not met - no empty-handed body on the floor in time ({r}).");
+                }
+            }
+            catch (Exception ex) { _ceEmptyUntil = -1f; Plugin.Logger.LogWarning($"[TestDrive] custevict empty wait: {ex.Message}"); }
+        }
+
         internal static void Tick()
         {
             if (UnityEngine.Time.unscaledTime < _nextPoll) return;
@@ -118,6 +147,7 @@ namespace BigAmbitionsMP
                 if (ConfirmCustomizerArmed) TickCustomizerConfirm();
                 if (RejectNextJoin) TickRejectJoin();   // H-REFUSALMUTE-1: re-checks the pending joins every poll until one is refused
                 if (_workArmed) TickWork();   // H-WORKFF-1 part 2: 'work on' follow-through (DEV lever)
+                if (_ceEmptyUntil > 0f) TickEvictEmpty();   // t-handoff3 LEG1D premise wait (DEV lever)
                 if (!_armedLogged)
                 {
                     _armedLogged = true;
@@ -564,10 +594,19 @@ namespace BigAmbitionsMP
                     // stops it advancing time itself, so a machine started here would move nothing.
                     // HOST ONLY: the host's clock is the world's; clients follow through the ordinary time sync.
                     if (!MPServer.IsRunning) return "ERR host only";
-                    int colon = arg.IndexOf(':');
-                    if (colon <= 0 || !int.TryParse(arg.Substring(0, colon).Trim(), out var wantH)
-                                   || !int.TryParse(arg.Substring(colon + 1).Trim(), out var wantM))
-                        return "ERR usage: clock HH:MM";
+                    // `clock next` (H-HOURROLL rig, 2026-09-28): one minute past the next full hour - crosses exactly one roll.
+                    string clkArg = arg.Trim();
+                    if (clkArg == "next")
+                    {
+                        var (_, clkH) = GameStateReader.GetGameTime();
+                        int clkNext = (int)clkH + 1;
+                        if (clkNext > 23) return "ERR clock next: the next hour is past midnight (clock only moves within today)";
+                        clkArg = $"{clkNext}:01";
+                    }
+                    int colon = clkArg.IndexOf(':');
+                    if (colon <= 0 || !int.TryParse(clkArg.Substring(0, colon).Trim(), out var wantH)
+                                   || !int.TryParse(clkArg.Substring(colon + 1).Trim(), out var wantM))
+                        return "ERR usage: clock HH:MM | clock next";
                     if (wantH < 0 || wantH > 23 || wantM < 0 || wantM > 59) return "ERR usage: clock HH:MM (00:00-23:59)";
                     var (curDay, curHour) = GameStateReader.GetGameTime();
                     double nowMin  = curHour * 60.0;
@@ -799,6 +838,18 @@ namespace BigAmbitionsMP
                     var ceArgs = arg.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                     bool ceTakenOnly = ceArgs.Length > 1 && ceArgs[1] == "taken";   // R1: only bodies holding a taken line
                     bool ceEmptyOnly = ceArgs.Length > 1 && ceArgs[1] == "empty";   // U1 (2026-09-28): only bodies holding NOTHING (no taken, no processed line)
+                    if (ceArgs.Length > 0 && ceArgs[0] == "last")
+                        return $"OK custevict last tag={(_ceEmptyTag.Length > 0 ? _ceEmptyTag : "-")} state={CustomerHandoff.PremiseState(_ceEmptyTag)} id={_ceEmptyLastId}";
+                    if (ceEmptyOnly && ceArgs.Length > 3 && ceArgs[2] == "await")
+                    {
+                        float ceWait = 90f;
+                        if (ceArgs.Length > 4) float.TryParse(ceArgs[4], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out ceWait);
+                        if (ceWait <= 0f) ceWait = 90f;
+                        _ceEmptyTag = ceArgs[3];
+                        _ceEmptyLastId = "pending";
+                        _ceEmptyUntil = UnityEngine.Time.unscaledTime + ceWait;
+                        return $"OK custevict armed empty tag={_ceEmptyTag} for={ceWait:0}s bldg='{CustomerPuppets.MyBuilding}'";
+                    }
                     if (ceArgs.Length == 0 || !int.TryParse(ceArgs[0], out ceWant) || ceWant <= 0)
                         return "ERR usage: custevict <n> [taken|empty|served [seconds]] (a positive count of live bodies to send home)";
                     if (ceArgs.Length > 1 && ceArgs[1] == "served")

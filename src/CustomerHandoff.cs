@@ -497,7 +497,9 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (string.IsNullOrEmpty(id) || _fwdSeen.Count > 4000) return;
+                if (string.IsNullOrEmpty(id)) return;
+                try { if (booked == null && !BookOnce.IsRegistered(id)) FwdConsumed++; } catch { }   // H-HOURROLL rig counter
+                if (_fwdSeen.Count > 4000) return;
                 _fwdSeen.Add(id);
                 BookOnce.ClearEnding(id, "its sale was forwarded");   // R2: a forward wins over 'ending'
                 if (booked != null) _fwdBooked[id] = booked;
@@ -554,7 +556,8 @@ namespace BigAmbitionsMP
                 }
                 bool ok = booked == paid && dup == 0 && lost == 0;
                 return $"ledger={ids} booked={booked} paid={paid} dupIds={dup} lostIds={lost} identity={(ok ? "ok" : "BAD")} forwardsIn={fwdIn} "
-                     + $"feeRecharged={FeeRecharged} bad={string.Join(";", bad)} " + BookOnce.Readout(key);
+                     + $"feeRecharged={FeeRecharged} bad={string.Join(";", bad)} passAfterLeave={PassAfterLeave} passPreempt={BookOnce.PassPreempt} "
+                     + $"soldSkipped={SoldSkipped} fwdConsumed={FwdConsumed} " + BookOnce.Readout(key);
             }
             catch (Exception ex) { return "ERR ledger " + ex.Message; }
         }
@@ -1000,6 +1003,13 @@ namespace BigAmbitionsMP
         // R1 sender/receiver (message 220). One send per visit id on the partner, cleared with the stock ledger.
         private static readonly HashSet<string> _unsoldSent = new();
         internal static int UnsoldLeavesSent, UnsoldLeavesIn;
+        // H-HOURROLL rig counters (handoffbook): a 220 (either kind) for a visit an hourly pass booked; a release 220 skipped
+        // as sold; a forward rejected as 'already consumed' on this machine (an unregistered visit).
+        internal static int PassAfterLeave, SoldSkipped, FwdConsumed;
+        private static void NotePassAfterLeave(string id)
+        {
+            try { if (BookOnce.IsPassSource(BookOnce.SourceOf(id))) PassAfterLeave++; } catch { }
+        }
 
         /// <summary>R1 receiver, OWNER machine, MAIN THREAD: a partner's unsold walk-out (message 220).</summary>
         internal static void OnUnsoldLeave(CustomerUnsoldLeavePayload p)
@@ -1027,13 +1037,18 @@ namespace BigAmbitionsMP
                     // its sale (a forward wins over 'ending'); cleared at the second hour boundary if neither comes.
                     LeavingNoticesIn++;
                     if (_fwdSeen.Contains(p.EntryId) || BookOnce.IsBooked(p.EntryId))
+                    {
+                        NotePassAfterLeave(p.EntryId);
                         Plugin.Logger.LogInfo($"[Stock] leaving notice {p.EntryId} from {p.PlayerId}: the visit was sold (forwarded or booked) - nothing to mark.");
+                    }
                     else BookOnce.MarkEnding(reg, p.EntryId, p.PlayerId);
                     return;
                 }
                 UnsoldLeavesIn++;
                 if (_fwdSeen.Contains(p.EntryId) || BookOnce.IsBooked(p.EntryId))
                 {
+                    NotePassAfterLeave(p.EntryId);
+                    SoldSkipped++;
                     Plugin.Logger.LogInfo($"[Stock] unsold walk-out {p.EntryId} from {p.PlayerId}: the visit was sold (forwarded or booked) - skipped.");
                     return;
                 }

@@ -169,6 +169,63 @@ namespace BigAmbitionsMP
         private sealed class Ending { public string Addr = "", From = ""; public int MarkAbs; }
         private static readonly Dictionary<string, Ending> _ending = new();
         internal static int EndingMarked, EndingCleared;
+
+        // H-HOURROLL (2026-09-28): the owner's hourly pass for a shop whose live customers a PARTNER runs right now.
+        // PartnerLiveAside = hour entries set aside for it; PassBooked = bookings made by an hourly pass; PassPreempt = a
+        // sale forward suppressed because an hourly pass booked the visit first (rig oracle: 0).
+        internal static int PartnerLiveAside, PassPreempt, PassBooked;
+
+        /// <summary>The funnel that booked this visit ("" = not registered here or not booked yet).</summary>
+        internal static string SourceOf(string id)
+        {
+            try { return !string.IsNullOrEmpty(id) && _recs.TryGetValue(id, out var r) && r.Booked ? (r.Source ?? "") : ""; }
+            catch { return ""; }
+        }
+
+        /// <summary>Is <paramref name="source"/> an hourly pass (native or skip)?</summary>
+        internal static bool IsPassSource(string? source) => !string.IsNullOrEmpty(source) && source!.Contains("hourly pass");
+
+        /// <summary>H-HOURROLL (user ruling 2026-09-27): only shop types whose live customers' sales are FORWARDED to the
+        /// owner may be set aside. Forwarding happens at Order.Pay with isPlayer false (BusinessPatches
+        /// Patch_Order_Pay_HelperForward), reached by SelfServiceEmployee :78 and FullServiceEmployee :136 in the plain
+        /// self-service / full-service shops. Gym (Customer.CompleteOrder, no Pay), nightclub (bar / coat check / door
+        /// fee), cinema (ticket booth), hairdresser (stylist pays with isPlayer: true) and every other simulator are
+        /// billed by the owner's paper pass - never set aside. A shop with an entrance fee is excluded too.</summary>
+        private static bool ForwardedSalesType(BuildingRegistration reg)
+        {
+            try
+            {
+                var data = BusinessTypeHelper.GetData(reg);
+                if (data == null || data.simulator == null || !data.spawnCustomers) return false;
+                var t = data.simulator.GetType();
+                if (t != typeof(global::Buildings.Retail.Simulation.SelfServiceBusinessSimulator)
+                    && t != typeof(global::Buildings.Retail.Simulation.FullServiceBusinessSimulator)) return false;
+                string fee = "";
+                try { fee = BusinessTypeHelper.GetEntranceFeeNameForBusinessType(data) ?? ""; } catch { }
+                return fee.Length == 0;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>H-HOURROLL: another machine runs this shop's live customers RIGHT NOW (the host's elected simulator is
+        /// a partner who stands inside), outside a skip and outside the hour a skip ended in, for a forwarded-sales shop
+        /// type. Single-player parity: BusinessSimulatorHelper.cs:32 skips the whole occupied shop.</summary>
+        private static bool PartnerSimulates(BuildingRegistration reg, int hour, out string pid)
+        {
+            pid = "";
+            string a = GameStateReader.AddressKey(reg);
+            if (string.IsNullOrEmpty(a)) return false;
+            pid = CustomerPuppets.SimulatorFor(a) ?? "";
+            if (pid.Length == 0 || pid == MPConfig.PlayerId || !CustomerHandoff.PlayerInside(pid, a)) return false;
+            if (!ForwardedSalesType(reg)) return false;
+            if (MPRestSync.SkipActive) return false;   // a skip: the partner's spawner denies bodies - the pass bills them
+            try { if (InstanceBehavior<global::UI.UIs>.Instance.timeMachine.isRunning) return false; } catch { }   // BSH:32 parity
+            var (gd, gh) = GameStateReader.GetGameTime();
+            double passStartMin = gd * 1440.0 + hour * 60.0;
+            if (hour > (int)gh) passStartMin -= 1440.0;   // the pass is for an hour of the previous day
+            if (MPRestSync.LastSkipEndMinutes >= passStartMin) return false;   // H-SKIPTAIL analogue: the hour a skip ended in
+            return true;
+        }
         private static int NowAbsHour()
         {
             try { var tm = TimeHelper.Now(); return (int)tm.Day * 24 + (int)tm.Hour; } catch { return -1; }
@@ -360,6 +417,7 @@ namespace BigAmbitionsMP
         {
             r.Booked = true; r.Source = source; r.BookedOrder = o;
             Bump(_bookedBy, source);
+            if (IsPassSource(source)) PassBooked++;   // H-HOURROLL rig counter
             Plugin.Logger.LogInfo($"[BookOnce] {id} booked by {source}{(o != null ? $" (${PaidTotal(o):F2} paid)" : "")}.");
             // Fold M1: an exit snapshot kept paid for this visit - the booking carries those lines now.
             if (r.ExitSnap != null && !ReferenceEquals(r.ExitSnap, o)) UnpaySnap(id, r, source, o);
@@ -520,6 +578,7 @@ namespace BigAmbitionsMP
             {
                 if (string.IsNullOrEmpty(id) || !_recs.TryGetValue(id, out var r)) return true;
                 if (!r.Booked) { MarkBooked(id, r, funnel, o); return true; }
+                if (funnel == "forwarded sale" && IsPassSource(r.Source)) PassPreempt++;   // H-HOURROLL rig counter (must stay 0)
                 NoteSuppressed(id, r, funnel);
                 return false;
             }
@@ -662,6 +721,7 @@ namespace BigAmbitionsMP
             public string Name = "";
             public readonly List<KeyValuePair<int, CustomerEntry>> Aside = new();
             public readonly List<KeyValuePair<CustomerEntry, string>> Open = new();
+            public int PartnerAside;   // H-HOURROLL: of Aside, the entries set aside for a partner's live customers
         }
 
         /// <summary>Before an hourly pass of <paramref name="reg"/> for <paramref name="hour"/>: a Booked registered entry
@@ -670,16 +730,30 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (reg == null || (_recs.Count == 0 && _ended.Count == 0 && _ending.Count == 0) || !MergerFlip.BooksHere(reg)) return null;
+                if (reg == null || !MergerFlip.BooksHere(reg)) return null;
+                // H-HOURROLL (2026-09-28): a partner runs this shop's live customers right now - the whole hour is theirs.
+                string simPid = "";
+                bool live = false;
+                try { live = PartnerSimulates(reg, hour, out simPid); } catch { live = false; }
+                if (!live && _recs.Count == 0 && _ended.Count == 0 && _ending.Count == 0) return null;
                 string fn = $"{pass} hourly pass h{hour}";
                 ExpireEnding(reg, hour, fn);   // R2: an 'ending' mark lives through one hour boundary after the one it was marked in
                 var entries = CustomerEntrySync.EntriesOf(reg);
                 if (entries == null) return null;
                 var p = new Pass { Reg = reg, Entries = entries, Hour = hour, Name = pass };
+                int partnerAside = 0;
                 for (int i = entries.Count - 1; i >= 0; i--)
                 {
                     var e = entries[i];
                     if (e?.spawnTime == null || e.spawnTime.Hour != hour) continue;
+                    if (live)
+                    {
+                        // Not billed here: each visit is billed by its own sale forward, its walk-out report, or not at all.
+                        p.Aside.Add(new KeyValuePair<int, CustomerEntry>(i, e));
+                        entries.RemoveAt(i);
+                        partnerAside++;
+                        continue;
+                    }
                     string? id = IdOfOrder(e.order);
                     if (id == null)
                     {
@@ -704,6 +778,12 @@ namespace BigAmbitionsMP
                     else p.Open.Add(new KeyValuePair<CustomerEntry, string>(e, id));
                 }
                 p.Aside.Reverse();   // descending index order -> ascending, for the re-insert
+                if (live)
+                {
+                    p.PartnerAside = partnerAside;
+                    PartnerLiveAside += partnerAside;
+                    Plugin.Logger.LogInfo($"[BookOnce] {GameStateReader.AddressKey(reg)} h{hour}: {partnerAside} entr{(partnerAside == 1 ? "y" : "ies")} set aside - {simPid}'s machine runs this shop's live customers ({fn}; single-player parity BusinessSimulatorHelper.cs:32 - each visit is billed by its own sale forward, its walk-out report or not at all; restock and stock tasks still run).");
+                }
                 if (p.Aside.Count == 0 && p.Open.Count == 0) return null;
                 return p;
             }
@@ -736,7 +816,8 @@ namespace BigAmbitionsMP
                     if (HasPaid(o)) { MarkBooked(kv.Value, r, $"{p.Name} hourly pass h{p.Hour}", o); booked++; }
                     else KeepInTill(p.Reg, o, kv.Value, r, $"{p.Name} hourly pass h{p.Hour}", false);
                 }
-                Plugin.Logger.LogInfo($"[BookOnce] hourly pass ({p.Name}) @{GameStateReader.AddressKey(p.Reg)} h{p.Hour}: {p.Open.Count + p.Aside.Count} registered entr{(p.Open.Count + p.Aside.Count == 1 ? "y" : "ies")} of this hour, {booked} booked here, {p.Aside.Count} already booked (set aside).");
+                int regN = p.Open.Count + p.Aside.Count - p.PartnerAside;
+                Plugin.Logger.LogInfo($"[BookOnce] hourly pass ({p.Name}) @{GameStateReader.AddressKey(p.Reg)} h{p.Hour}: {regN} registered entr{(regN == 1 ? "y" : "ies")} of this hour, {booked} booked here, {p.Aside.Count - p.PartnerAside} already booked (set aside){(p.PartnerAside > 0 ? $", {p.PartnerAside} set aside for a partner's live customers" : "")}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] hourly end: {ex.Message}"); }
         }
@@ -814,7 +895,8 @@ namespace BigAmbitionsMP
                 return $"boRegistered={reg} boBooked={booked} boUnbooked={reg - booked} boSuppressed={Suppressed} "
                      + $"boRegisteredBy={Tally(_registeredBy)} boBookedBy={Tally(_bookedBy)} boSuppressedBy={Tally(_suppressedBy)} "
                      + $"boUnpaidKept={UnpaidKept} boExitKept={ExitKept} boExitUnpaid={ExitUnpaid} boKeptBy={Tally(_keptBy)} "
-                     + $"boFinished={Finished} boCopyReturnsBlocked={CopyReturnsBlocked} {EndedReadout(addr)}";
+                     + $"boFinished={Finished} boCopyReturnsBlocked={CopyReturnsBlocked} {EndedReadout(addr)} "
+                     + $"boPassBooked={PassBooked} boPartnerAside={PartnerLiveAside}";
             }
             catch (Exception ex) { return "boERR " + ex.Message; }
         }

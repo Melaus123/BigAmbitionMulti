@@ -659,6 +659,10 @@ namespace BigAmbitionsMP
     public interface IClientTransport
     {
         void Disconnect();
+        /// <summary>D1 (review of 147e031, 2026-09-28): reliable data this client has handed the transport that the
+        /// host has not acknowledged yet (queued or sent-unacked; bytes or packets - only 0 vs more matters).
+        /// 0 = nothing pending, -1 = unknown. The deliberate-leave close waits for 0 (MPClient.TickDeferredDisconnect).</summary>
+        int PendingReliable { get; }
         /// <summary>Stop the poll loop WITHOUT tearing down or joining — safe to
         /// call from the Disconnected handler (which runs ON the poll thread;
         /// a full Disconnect there would join the thread against itself).  The
@@ -820,6 +824,21 @@ namespace BigAmbitionsMP
             _client?.Stop();
             if (_pollThread != null && _pollThread != Thread.CurrentThread) _pollThread.Join(1000);
             _client = null;
+        }
+
+        /// <summary>D1: packets still in the host peer's reliable-ordered queue on channel 0 (queued or sent and not yet
+        /// acknowledged) - Stop() drops them, so the deliberate-leave close waits for 0.</summary>
+        public int PendingReliable
+        {
+            get
+            {
+                try
+                {
+                    var p = _client?.FirstPeer;
+                    return p == null ? 0 : p.GetPacketsCountInReliableQueue(0, true);
+                }
+                catch { return -1; }
+            }
         }
 
         public void Send(byte[] data, bool reliable)

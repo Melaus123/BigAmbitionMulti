@@ -1,6 +1,6 @@
 {
   "id": "T-STANDINTILL",
-  "title": "H-STANDINTILL-1: a FRESH stand-in takes the absent owner's till over from the hand-over bundle (MergerAbsence.TakeOverTill -> PaperworkSync.FillTill), so its stale copies are never paid, the owner's pre-absence unpaid orders ride through the stint, and each order is paid exactly once across the machines (DEV lever tillledger: synthetic tagged orders T<tag>#<k>, per-order PAID ledger lines). H-STANDINTILL-2 leg 'hand-back flush': T5 orders taken <30 s before the owner returns reach the owner exactly once through the stand-in's hand-back publish. NO save. R2 leg T6 'leave publish': orders taken <30 s before the owner leaves ON PURPOSE (DEV leavegame menu) reach the host through the leave publish and are paid exactly once.",
+  "title": "H-STANDINTILL-1: a FRESH stand-in takes the absent owner's till over from the hand-over bundle (MergerAbsence.TakeOverTill -> PaperworkSync.FillTill), so its stale copies are never paid, the owner's pre-absence unpaid orders ride through the stint, and each order is paid exactly once across the machines (DEV lever tillledger: synthetic tagged orders T<tag>#<k>, per-order PAID ledger lines). H-STANDINTILL-2 leg 'hand-back flush': T5 orders taken <30 s before the owner returns reach the owner exactly once through the stand-in's hand-back publish. NO save. R2 leg T6 'leave publish': orders taken <30 s before the owner leaves ON PURPOSE (DEV leavegame menu) reach the host through the leave publish and are paid exactly once. D1 leg T7 'leavegame disc' (review of 147e031, 2026-09-28): orders taken <30 s before the owner leaves through the mod's Disconnect button reach the host through the leave publish - the client's close waits until its transport reports nothing pending (2 s ceiling) and lingers - and are paid exactly once.",
   "preconditions": "Fixture fx-hq1 (merged pair melaus + Client1, keepMerger); Client1 owns the fast food at vars.shop. Client2 joins new and is grown into the company (as t-standinput). The member host is the stand-in. Dev build with tillledger / absence / regstate / mergestatus / exitbuilding. Tags: T1 = A's pre-absence unpaid orders, T2 = B's stale copies, T3 = B's stint orders paid at B's roll, T4 = stint orders still unpaid at A's return. T5 = stint orders taken after a forced publish, carried only by the hand-back publish. T6 = A's orders taken right before it leaves on purpose (leavegame menu), carried only by the leave publish.",
   "instances": 3,
   "vars": {
@@ -495,6 +495,132 @@
       "cmd": "tillledger pay ${shop}",
       "expect_result": "^OK tillledger pay key='${shop}' books=True .*paid=\\[\\]",
       "note": "R2: nothing (T6 included) is paid a second time"
+    },
+    {
+      "seq": 70,
+      "role": "all",
+      "cmd": "mark TEST STANDINTILL LEG5 DISCONNECT LEAVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 71,
+      "role": "c",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "note": "D1 leg T7: restarts A's 30 s publish clock, so the T7 orders below reach the host ONLY through A's leave publish"
+    },
+    {
+      "seq": 72,
+      "role": "c",
+      "cmd": "tillledger seed 7 2 ${shop}",
+      "expect_result": "^OK tillledger seed key='${shop}' books=True .*tagged=\\[T7#1,T7#2\\]",
+      "note": "A's orders taken seconds before it leaves through the Disconnect button"
+    },
+    {
+      "seq": 73,
+      "role": "c",
+      "cmd": "leavegame disc",
+      "expect_result": "^OK leavegame disc",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Paperwork\\] leave publish \\(disconnect\\): published day \\d+",
+          "within_s": 10
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] deferred disconnect: closing now .*\\(drained\\)",
+          "within_s": 10
+        }
+      ],
+      "note": "D1: the mod's Disconnect-button path - the leave publish is sent, then the close waits for the transport to report no pending reliable data (event; 2 s ceiling logged as '(ceiling)') and closes WITH linger"
+    },
+    {
+      "seq": 74,
+      "role": "c",
+      "drop": true,
+      "note": "A (disconnected on purpose) is dropped; B stands in again",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] till of '${shop}' for '${clientPid}' taken over: \\d+ local order\\(s\\)",
+          "within_s": 90
+        }
+      ]
+    },
+    {
+      "seq": 75,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 76,
+      "role": "h",
+      "cmd": "tillledger show ${shop}",
+      "expect_result": "^OK tillledger show key='${shop}' books=True .*tagged=\\[T7#1,T7#2\\]",
+      "note": "D1 THE CHECK: A's T7 orders (taken <30 s before the Disconnect) reached the host - only through the leave publish, which the close no longer discards"
+    },
+    {
+      "seq": 77,
+      "role": "h",
+      "cmd": "tillledger pay ${shop}",
+      "expect_result": "^OK tillledger pay key='${shop}' books=True .*paid=\\[T7#1,T7#2\\]",
+      "note": "B pays A's T7 once"
+    },
+    {
+      "seq": 78,
+      "role": "c",
+      "relaunch": true,
+      "note": "A returns so the merger can be dissolved"
+    },
+    {
+      "seq": 79,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 80,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] owner '${clientPid}' returned",
+          "within_s": 120
+        },
+        {
+          "role": "c",
+          "regex": "\\[Paperwork\\] returned books for '${shop}'",
+          "within_s": 180
+        }
+      ]
+    },
+    {
+      "seq": 81,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 82,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 83,
+      "role": "c",
+      "cmd": "tillledger show ${shop}",
+      "expect_result": "^OK tillledger show key='${shop}' books=True .*tagged=\\[\\]",
+      "note": "D1: T7 was paid once by the stand-in - it is not back on A's till unpaid"
+    },
+    {
+      "seq": 84,
+      "role": "c",
+      "cmd": "tillledger pay ${shop}",
+      "expect_result": "^OK tillledger pay key='${shop}' books=True .*paid=\\[\\]",
+      "note": "D1: nothing (T7 included) is paid a second time"
     },
     {
       "seq": 61,

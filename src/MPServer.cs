@@ -1711,6 +1711,7 @@ namespace BigAmbitionsMP
             lock (_transfers) _transfers.Clear();
             lock (_cargo) { _cargo.Clear(); _cargoSeq = 0; }
             try { CargoTransfer.ResetSession(); } catch { }
+            try { ImportTransfer.ResetSession(); } catch { }   // D4 (pre-existing): the import tables die with the session too
             MPSaveCoordinator.ConsumeDevHostLoadAs("new game");   // round-285: a fresh world has no member slots to impersonate
 
             // Re-arm the startup pause hold for this new game.

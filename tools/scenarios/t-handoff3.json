@@ -8,7 +8,8 @@
     "hostPid": "melaus",
     "session": "fx-hq1",
     "keepMerger": true,
-    "shop": "20 ba:street_fifthavenue"
+    "shop": "20 ba:street_fifthavenue",
+    "gym": "60 ba:street_fifthavenue"
   },
   "oracles_absent": [
     "\\[Stock\\] (settle unsold|unsold leave in|unsold leave send|unsold release|unsold cancel|unsold flush|settled credits|HandleCustomerUnsoldLeave)\\b[^:]*: ",
@@ -17,7 +18,8 @@
     "\\[Guard\\]",
     "(?<!swallowed )NullReferenceException",
     "\\[Handoff\\] (capture|capture live|apply|apply visit|stream|exit snapshot|take-over|wait tick|final received|citizen|leave|send final|hourly pass)\\b[^:(]*: ",
-    "\\[Customers\\] (puppet tick|adopt puppet):"
+    "\\[Customers\\] (puppet tick|adopt puppet):",
+    "\\[BookOnce\\] .* set aside - melaus's machine runs"
   ],
   "oracles_present": [],
   "oracles_report": [
@@ -40,7 +42,8 @@
     "\\[Stock\\] leaving notice ",
     "\\[Stock\\] unsold walk-out \\S+ from \\S+ @.+: no line reported",
     "\\[BookOnce\\] ending marks over the cap",
-    "\\[Stock\\] unsold hold cap"
+    "\\[Stock\\] unsold hold cap",
+    "adopted helper-served order"
   ],
   "steps": [
     {
@@ -506,36 +509,65 @@
     {
       "seq": 119,
       "role": "c",
-      "cmd": "custevict 1 empty",
-      "expect_result": "^OK custevict asked=1 evicted=1 ",
+      "cmd": "custevict 1 empty await z1 90",
+      "expect_result": "^OK custevict armed empty tag=z1 ",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] custevict empty: (evicted \\S+ \\(premise z1 met\\)|premise z1 not met)",
+          "within_s": 110
+        }
+      ],
+      "note": "PREMISE WAIT (rig fold 2026-09-28: step 119 failed with evicted=0 when no empty-handed customer was on the floor): `custevict 1 empty await z1 90` tries `custevict 1 empty` on every poll for up to 90 s; the first eviction sets premise z1 met, the bound sets it unmet ('[Premise] not met (z1)'). An unmet premise SKIPS the U1 assertions below (their regexes accept the explicit skip line), never a fail; the money / stock oracles stay hard. U1 LEG (re-check of f132da7, 2026-09-28): the OWNER is OUTSIDE; the client (simulator) sends home one live body that holds NOTHING (no taken, processed or paid line; never one at a till). Before the fold the partner sent nothing for it, so the owner's entry stayed open and his hourly pass (no completed filter) billed it. Now the early notice marks it 'ending' and the release report (no lines) ends it: the owner's EndUnsold marks the entry completed (U5, kept in the table). The owner then stays outside across the hour change (F1 leg below); step 117 asserts no ended id was booked (boEndedBooked=0), this one included. (The 'leaving unsold here' line is written inside the custevict command itself, so it is searched from the previous step's mark. Runs T-HANDOFF3-20260928-031240/-032113 failed on the capture: it took 'h13#...=melaus-21', not the visit id.)"
+    },
+    {
+      "seq": 130,
+      "role": "c",
+      "cmd": "custevict last",
+      "expect_result": "^OK custevict last tag=z1 state=(met|unmet) id=\\S+",
       "abort_on_fail": false,
       "capture": {
-        "zId": "=([^:,\\s=#]+):proc0/taken0/"
+        "zId": "id=(\\S+)",
+        "pZ1": "state=(met|unmet)"
       },
       "expect_log": [
         {
           "role": "c",
-          "regex": "\\[Stock\\] ${zId} leaving unsold here @${shop}: 0 processed unit\\(s\\) held .* it took nothing",
+          "regex": "(\\[Stock\\] ${zId} leaving unsold here @${shop}: 0 processed unit\\(s\\) held .* it took nothing|\\[Premise\\] not met \\(z1\\))",
           "within_s": 10,
           "since_prev_step": true
         },
         {
-          "role": "h",
-          "regex": "\\[BookOnce\\] ${zId} ending - leaving on ${clientPid}'s machine",
-          "within_s": 15
-        },
-        {
           "role": "c",
-          "regex": "\\[Stock\\] ${zId} walked out unsold here @${shop} \\(the owner keeps the books\\): 0 processed unit",
-          "within_s": 45
-        },
-        {
-          "role": "h",
-          "regex": "\\[BookOnce\\] ${zId} ended unsold - kept out of the hourly pass",
-          "within_s": 45
+          "regex": "(\\[Stock\\] ${zId} walked out unsold here @${shop} \\(the owner keeps the books\\): 0 processed unit|\\[Premise\\] not met \\(z1\\))",
+          "within_s": 45,
+          "since_prev_step": true
         }
       ],
-      "note": "U1 LEG (re-check of f132da7, 2026-09-28): the OWNER is OUTSIDE; the client (simulator) sends home one live body that holds NOTHING (no taken, processed or paid line; never one at a till). Before the fold the partner sent nothing for it, so the owner's entry stayed open and his hourly pass (no completed filter) billed it. Now the early notice marks it 'ending' and the release report (no lines) ends it: the owner's EndUnsold marks the entry completed (U5, kept in the table). The owner then stays outside across the hour change (F1 leg below); step 117 asserts no ended id was booked (boEndedBooked=0), this one included. (The 'leaving unsold here' line is written inside the custevict command itself, so it is searched from the previous step's mark. Runs T-HANDOFF3-20260928-031240/-032113 failed on the capture: it took 'h13#...=melaus-21', not the visit id.)"
+      "note": "U1 leg: the evicted visit id (id=none when the premise was unmet) and the premise verdict for the owner"
+    },
+    {
+      "seq": 131,
+      "role": "h",
+      "cmd": "premise set z1 ${pZ1}",
+      "expect_result": "^OK premise z1=(met|unmet)",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "(\\[BookOnce\\] ${zId} ending - leaving on ${clientPid}'s machine|\\[Premise\\] not met \\(z1\\))",
+          "within_s": 15,
+          "since_prev_step": true
+        },
+        {
+          "role": "h",
+          "regex": "(\\[BookOnce\\] ${zId} ended unsold - kept out of the hourly pass|\\[Premise\\] not met \\(z1\\))",
+          "within_s": 45,
+          "since_prev_step": true
+        }
+      ],
+      "note": "U1 leg on the OWNER (searched from the LEG1D mark): the early notice marks the visit 'ending' and the release report ends it unsold - or the explicit premise skip"
     },
     {
       "seq": 38,
@@ -550,7 +582,7 @@
           "within_s": 150
         }
       ],
-      "note": "(2026-09-26 re-check: THE WAIT is for the next game-hour boundary on the host - the hourly employee pass line, printed every hour in fx-hq1 - so the owner is outside across an hour while marks exist (run T-HANDOFF1-20260926-221904 had no wait and no hour crossed). The 'hourly pass (native)' line is now an oracles_present search over the whole run - a step's expect_log searches only from its own mark, and run T-HANDOFF1-20260926-214358 printed the line during leg 1, before this mark; the line can only exist once leg 1's exit has set marks, so the whole-run search is a search from the leg's start.) FOLD F1 LEG: the owner stays OUTSIDE across an hour boundary while the client serves the customers he handed off; his native hourly pass for the shop runs with hand-off marks present (the line is written only while a mark exists for this shop - if the client already sold every handed-off customer before the hour closed there is no mark and no line: report-only). A handed-off entry that pass books loses its mark (first booking wins), so the client's later sale for it is rejected; the ledger below must show each one booked exactly once"
+      "note": "(2026-09-26 re-check: THE WAIT is for the next game-hour boundary on the host - the hourly employee pass line, printed every hour in fx-hq1 - so the owner is outside across an hour while marks exist (run T-HANDOFF1-20260926-221904 had no wait and no hour crossed). The 'hourly pass (native)' line is now an oracles_present search over the whole run - a step's expect_log searches only from its own mark, and run T-HANDOFF1-20260926-214358 printed the line during leg 1, before this mark; the line can only exist once leg 1's exit has set marks, so the whole-run search is a search from the leg's start.) FOLD F1 LEG: the owner stays OUTSIDE across an hour boundary while the client serves the customers he handed off; his native hourly pass for the shop runs with hand-off marks present (the line is written only while a mark exists for this shop - if the client already sold every handed-off customer before the hour closed there is no mark and no line: report-only). H-HOURROLL (2026-09-28): while the client runs the shop's live customers (inside, elected simulator) the owner's pass sets the WHOLE hour aside ('[BookOnce] <shop> hN: k entries set aside - Client1's machine runs this shop's live customers', single-player parity BusinessSimulatorHelper.cs:32) - it no longer books handed-off visits, so no client sale is rejected; each visit is booked by its own forward, its walk-out report or not at all. The ledger below must show each one booked exactly once"
     },
     {
       "seq": 39,
@@ -612,6 +644,214 @@
         "h2EndingCleared": "boEndingCleared=(\\d+)"
       },
       "note": "H2 LEG (review of 95cf5e1, HIGH): the leg-1B visit walked out UNSOLD on the partner while the owner was outside; the owner stayed outside across the hour boundary (F1 leg). His hourly pass must NOT book that id (boEndedBooked=0 - the entry left his live table at the settle; stockdelta above flags any settled id booked: settledAndSold=0)."
+    },
+    {
+      "seq": 140,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 F1C PARTNER-LIVE-ACROSS-HOUR",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 141,
+      "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "expect_result": "^OK handoffbook .* books=True .*identity=ok .*passAfterLeave=0 passPreempt=0 ",
+      "abort_on_fail": false,
+      "capture": {
+        "f1cSoldSkip": "soldSkipped=(\\d+)",
+        "f1cFwdCons": "fwdConsumed=(\\d+)",
+        "f1cPassBooked": "boPassBooked=(\\d+)",
+        "f1cAside": "boPartnerAside=(\\d+)"
+      },
+      "note": "F1C baselines on the owner (outside): the counters behind the 'absent after the mark' oracles - a later equal value means no new line"
+    },
+    {
+      "seq": 142,
+      "role": "c",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${shop}' sim='${clientPid}'",
+      "abort_on_fail": false,
+      "note": "PREMISE: the client is inside and runs the store's live customers (report its bodies)"
+    },
+    {
+      "seq": 143,
+      "role": "h",
+      "cmd": "stockdelta ${shop} mark",
+      "expect_result": "^OK stockdelta .* marked ",
+      "note": "STOCK ORACLE mark before the F1C leg"
+    },
+    {
+      "seq": 144,
+      "role": "h",
+      "cmd": "clock next",
+      "expect_result": "^OK clock ",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BookOnce\\] ${shop} h[0-9]+: [0-9]+ entr(y|ies) set aside - ${clientPid}'s machine runs this shop's live customers",
+          "within_s": 20
+        }
+      ],
+      "note": "F1C ACT: the host (owner, outside) jumps to <H+1>:01 through RunMainGameTick - one hour roll. His native pass for the store sets every entry of that hour aside because Client1's machine runs its live customers (BSH:32 parity); restock and stock tasks still run"
+    },
+    {
+      "seq": 145,
+      "role": "c",
+      "cmd": "custevict 1 taken",
+      "expect_result": "^OK custevict asked=1 evicted=1 ",
+      "abort_on_fail": false,
+      "capture": {
+        "f1cEvict": "ids=(\\S+)"
+      },
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BookOnce\\] \\S+ ended unsold - kept out of the hourly pass",
+          "within_s": 45
+        }
+      ],
+      "note": "F1C: a walk-out on the partner after the roll - the owner ends it unsold ('ended unsold' present); before H-HOURROLL his pass had billed it and the 220 was skipped as sold (billed for nothing)"
+    },
+    {
+      "seq": 146,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "F1C: time for a live customer to pay on the client (report-only: '[Business] forwarded helper-served order' on the client, 'adopted helper-served order' in oracles_report)"
+    },
+    {
+      "seq": 147,
+      "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok .*passAfterLeave=0 passPreempt=0 soldSkipped=${f1cSoldSkip} fwdConsumed=${f1cFwdCons} .*boPassBooked=${f1cPassBooked} ",
+      "expect_gt": {
+        "boPartnerAside=(\\d+)": "${f1cAside}"
+      },
+      "abort_on_fail": false,
+      "capture": {
+        "f1cAside2": "boPartnerAside=(\\d+)",
+        "f1cFwdIn": "forwardsIn=(\\d+)"
+      },
+      "note": "F1C ORACLES (HARD) after the mark: no 220 for a pass-booked visit (passAfterLeave=0), no forward pre-empted by a pass (passPreempt=0), no new 'was sold ... skipped' (soldSkipped unchanged), no new 'already consumed on the owner's machine' (fwdConsumed unchanged), no new '[BookOnce] <id> booked by (native|skip) hourly pass' (boPassBooked unchanged); the roll set entries aside (boPartnerAside rose - an hour with no entry at all would read equal: see the run log's set-aside line count)"
+    },
+    {
+      "seq": 148,
+      "role": "h",
+      "cmd": "stockdelta ${shop}",
+      "expect_result": "^OK stockdelta .* settledAndSold=0 .*lostUnexplained=0 .*stockOk=True ",
+      "abort_on_fail": false,
+      "note": "STOCK ORACLE (HARD) for the F1C leg"
+    },
+    {
+      "seq": 149,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 F1C-CONTROL CLIENT-EXITS-BEFORE-ROLL",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 150,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 151,
+      "role": "h",
+      "sleep_s": 10,
+      "note": "the client's position stream / the host election see the client outside"
+    },
+    {
+      "seq": 152,
+      "role": "h",
+      "cmd": "clock next",
+      "expect_result": "^OK clock ",
+      "abort_on_fail": false,
+      "note": "CONTROL: nobody runs the store's live customers - the owner's pass bills that hour natively (parity line report: '[BookOnce] hourly pass (native)')"
+    },
+    {
+      "seq": 153,
+      "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok .*passAfterLeave=0 passPreempt=0 .*boPartnerAside=${f1cAside2} ",
+      "abort_on_fail": false,
+      "capture": {
+        "ctlPassBooked": "boPassBooked=(\\d+)"
+      },
+      "note": "CONTROL (HARD): no set-aside at this roll (boPartnerAside unchanged) - the hour is billed natively"
+    },
+    {
+      "seq": 154,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 GYM PARTNER-INSIDE-SERVICE-SHOP",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 155,
+      "role": "c",
+      "cmd": "handoffbook ${gym}",
+      "expect_result": "^OK handoffbook .* books=True ",
+      "abort_on_fail": false,
+      "capture": {
+        "gymAside0": "boPartnerAside=(\\d+)"
+      },
+      "note": "the client OWNS the gym (fx-hq1) and stays outside; its set-aside counter before the leg"
+    },
+    {
+      "seq": 156,
+      "role": "h",
+      "cmd": "enterbuilding ${gym}",
+      "expect_result": "^OK enterbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 157,
+      "role": "h",
+      "sleep_s": 15,
+      "note": "the host (partner) becomes the gym's simulator"
+    },
+    {
+      "seq": 158,
+      "role": "h",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${gym}' sim='${hostPid}'",
+      "abort_on_fail": false,
+      "note": "PREMISE: the partner runs the gym's live customers"
+    },
+    {
+      "seq": 159,
+      "role": "h",
+      "cmd": "clock next",
+      "expect_result": "^OK clock ",
+      "abort_on_fail": false,
+      "note": "GYM ACT: an hour roll while the partner runs the owner's gym"
+    },
+    {
+      "seq": 160,
+      "role": "c",
+      "sleep_s": 10,
+      "note": "the client's clock follows the host across the roll"
+    },
+    {
+      "seq": 161,
+      "role": "c",
+      "cmd": "handoffbook ${gym}",
+      "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok .*boPartnerAside=${gymAside0} ",
+      "abort_on_fail": false,
+      "note": "GYM (HARD, user ruling 2026-09-27): a partner-run SERVICE shop (gym: sales never forwarded) is still billed by the OWNER's paper pass - nothing set aside (boPartnerAside unchanged; oracles_absent: no 'set aside - melaus's machine runs' line on any machine)"
+    },
+    {
+      "seq": 162,
+      "role": "c",
+      "cmd": "shopday ${gym}",
+      "abort_on_fail": false,
+      "note": "REPORT: the owner's gym day identity (idUnbilled; the floor is read locally, so bodies on the partner do not count)"
+    },
+    {
+      "seq": 163,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
     },
     {
       "seq": 41,

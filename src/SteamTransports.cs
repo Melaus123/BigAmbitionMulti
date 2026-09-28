@@ -674,6 +674,10 @@ namespace BigAmbitionsMP
         private volatile bool _running;
         private static int _nextId = 1_000_000;
         private readonly System.Collections.Concurrent.ConcurrentDictionary<uint, SteamLink> _links = new();
+        // D1 (review of 147e031, 2026-09-28): Receive runs on the pump; the disconnect callback on the main thread drains
+        // the socket under the same lock before it removes the link, so messages a leaving client delivered before its
+        // close are processed (OnMessage drops any message whose link is already gone).
+        private readonly object _rxLock = new();
 
         public event Action<MPLink>? PeerConnected;
         public event Action<MPLink, string>? PeerDisconnected;
@@ -718,7 +722,7 @@ namespace BigAmbitionsMP
         {
             while (_running)
             {
-                try { _socket?.Receive(); }
+                try { lock (_rxLock) _socket?.Receive(); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[SteamHost] Receive: {ex}"); }
                 // Round-283: express FIRST — the lane is worthless if a refused express
                 // message has to wait for the retry queue it was meant to overtake.
@@ -754,6 +758,9 @@ namespace BigAmbitionsMP
 
         public void OnDisconnected(Connection connection, ConnectionInfo info)
         {
+            // D1: the link is still registered here, so what the peer delivered before its close reaches OnMessage first.
+            try { if (_links.ContainsKey(connection.Id)) lock (_rxLock) _socket?.Receive(); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamHost] drain before disconnect: {ex.Message}"); }
             if (_links.TryRemove(connection.Id, out var link))
             {
                 try { link.Watch.OnClose(info.EndReason.ToString()); } catch { }   // H-STEAMNET-1
@@ -832,9 +839,31 @@ namespace BigAmbitionsMP
             Interlocked.Exchange(ref _closeReported, 1);
             _running = false;
             try { _watch?.OnClose("local disconnect"); } catch { }   // H-STEAMNET-1
-            try { _mgr?.Close(); } catch { }
+            // D1 (review of 147e031, 2026-09-28): Close() WITHOUT linger discards queued reliable data (the host side's
+            // own note at SteamLink.CloseNow) - so a client close lingers too, as SteamLink.CloseNow(true) does.
+            try { _mgr?.Close(true, 1000, "BAMP client leave"); } catch { }
             if (_pumpThread != null && _pumpThread != Thread.CurrentThread) _pumpThread.Join(1000);
             _mgr = null;
+        }
+
+        /// <summary>D1: reliable data not yet acknowledged by the host - this transport's own retry queue and paced queue,
+        /// plus Steam's PendingReliable + SentUnackedReliable (bytes). 0 = nothing pending, -1 = unknown.</summary>
+        public int PendingReliable
+        {
+            get
+            {
+                try
+                {
+                    var mgr = _mgr;
+                    if (mgr == null) return 0;
+                    long ours; lock (_pending) ours = _pending.Count;
+                    if (_paced.Bytes > 0) ours++;
+                    var st = mgr.Connection.QuickStatus();
+                    long all = ours + st.PendingReliable + st.SentUnackedReliable;
+                    return all > int.MaxValue ? int.MaxValue : (int)all;
+                }
+                catch { return -1; }
+            }
         }
 
         // Same silent-loss fix as SteamLink (field 2026-07-19): check the send

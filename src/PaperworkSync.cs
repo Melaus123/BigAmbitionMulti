@@ -946,9 +946,6 @@ namespace BigAmbitionsMP
 
         // ── Mutation points (the game's OWN events; no timers, no one-shot delays) ──
 
-        /// <summary>Order completion — the one choke point every business simulator funnels through
-        /// (RetailBusinessSimulator :219, Gym :70, Office :64, CinemaTheater :54 all Add() the order
-        /// that Pay() just settled).  Marks the till + orderHistory paperwork dirty.</summary>
         /// <summary>R2 anchor 1: the pause-menu Main Menu after its confirm (MiniMenu.OpenMainMenu) and the funeral
         /// screen both start LoadScene.LoadMainMenuFromCity (LoadScene.cs:27); the prefix runs when the coroutine is
         /// created, before its first step - the world is still loaded and the socket open.</summary>
@@ -974,6 +971,9 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>Order completion — the one choke point every business simulator funnels through
+        /// (RetailBusinessSimulator :219, Gym :70, Office :64, CinemaTheater :54 all Add() the order
+        /// that Pay() just settled).  Marks the till + orderHistory paperwork dirty.</summary>
         [HarmonyPatch(typeof(Order), "Pay")]
         internal static class Patch_OrderPay
         {
