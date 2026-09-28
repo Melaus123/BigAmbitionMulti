@@ -453,8 +453,17 @@ namespace BigAmbitionsMP
                     MPPhoneButton.HubOpenRequested = true;   // the Business icon's own toggle closes it (MPCanvasUI Update)
                     return "OK hubview close: requested " + ui.DevHubState();
                 }
-                int tab = a == "transfers" ? 0 : a == "loans" ? 1 : a == "permissions" ? 2 : -1;
-                if (tab < 0) return "ERR usage: hubview <transfers|loans|permissions|close|state>";
+                if (a == "mergerpopup") return "OK hubview mergerpopup: " + ui.DevBizMergerPopup(true);   // opens it, sends nothing
+                if (a == "popupclose") return "OK hubview popupclose: " + ui.DevBizMergerPopup(false);
+                // One Esc press through both halves of the key's path (ours + the game's CancelButtonHandler); sends nothing.
+                if (a == "escbox") return "OK hubview escbox: " + ui.DevBizEsc(true);
+                if (a == "escmenu") return "OK hubview escmenu: " + ui.DevBizEsc(false);
+                // 'Pay all' then an instant second click: reports the 0.5 s guard; never requests a repayment.
+                if (a == "paydouble") return "OK hubview paydouble: " + ui.DevBizPayDouble();
+                // Tabs of the rebuilt page (2026-09-28); the old names map onto their successors.
+                int tab = a == "offers" || a == "transfers" ? 0 : a == "yours" ? 1 : a == "loans" ? 2
+                        : a == "access" || a == "permissions" ? 3 : a == "company" ? 4 : -1;
+                if (tab < 0) return "ERR usage: hubview <offers|yours|loans|access|company|mergerpopup|popupclose|escbox|escmenu|paydouble|close|state>";
                 if (!MPHubNativePage.Ready) return "ERR hubview: the Business page is not injected yet " + ui.DevHubState();
                 ui.DevSetHubTab(tab);
                 if (ui.DevHubVisible) return $"OK hubview {a}: tab set (already open) " + ui.DevHubState();
@@ -544,6 +553,7 @@ namespace BigAmbitionsMP
         }
 
         private const string HubShotsFillId = "DEVFILL-";
+        private static readonly System.Collections.Generic.HashSet<string> _hubShotsNamed = new System.Collections.Generic.HashSet<string>();
         private static readonly System.Collections.Generic.List<ChatLine> _hubShotsChat = new System.Collections.Generic.List<ChatLine>();
         private static readonly string[] HubShotsNames =
         {
@@ -602,8 +612,11 @@ namespace BigAmbitionsMP
                     int h = MPHub.IncomingOffers.RemoveAll(o => o.Id.StartsWith(HubShotsFillId))
                           + MPHub.OutgoingOffers.RemoveAll(o => o.Id.StartsWith(HubShotsFillId))
                           + MPHub.Loans.RemoveAll(l => l.Id.StartsWith(HubShotsFillId));
+                    int gr = GrantSync.MyGrantees().RemoveAll(g => g != null && (g.Handle ?? "").StartsWith(HubShotsFillId));
+                    foreach (var sp in _hubShotsNamed) MPServer._characterNamesByPlayerId.TryRemove(sp, out _);
+                    _hubShotsNamed.Clear();
                     MPHub.Version++;
-                    return $"OK uifill clear: chat={c} hub={h}";
+                    return $"OK uifill clear: chat={c} hub={h} grantees={gr}";
                 }
                 if ((what != "hub" && what != "chat") || tk.Length < 2 || !int.TryParse(tk[1], out int n) || n < 1 || n > 200)
                     return "ERR usage: uifill <hub|chat> <n 1-200> | uifill clear";
@@ -616,7 +629,15 @@ namespace BigAmbitionsMP
                 }
                 catch { }
                 int real = names.Count;
-                names.AddRange(HubShotsNames);
+                // Sample players get DEV pids (2026-09-28): the host's own name table names all but the LAST one, which stays
+                // unknown so the pages show 'Unknown player' for it (never the id). Removed again by `uifill clear`.
+                for (int j = 0; j < HubShotsNames.Length; j++)
+                {
+                    string spid = HubShotsFillId + "p" + j;
+                    names.Add(spid);
+                    if (j < HubShotsNames.Length - 1 && MPServer.IsRunning)
+                    { MPServer._characterNamesByPlayerId[spid] = HubShotsNames[j]; _hubShotsNamed.Add(spid); }
+                }
                 if (what == "chat")
                 {
                     // In-game times spread 9 minutes apart ending now, so the window's hour lines show.
@@ -656,8 +677,14 @@ namespace BigAmbitionsMP
                     MPHub.Loans.Add(new LoanEntry { Id = $"{HubShotsFillId}loan-{stamp}-{i}", Lender = iOwe ? cp : me, Borrower = iOwe ? me : cp,
                         Remaining = principal * 0.6f, DailyInterest = intr, DailyPayment = pay });
                 }
+                // Two OFFLINE sample grantees: one whose name is unknown, one sharing the first sample player's name (each
+                // must keep its own card and Access row - matched by handle, never by name).
+                var gl = GrantSync.MyGrantees();
+                gl.RemoveAll(g => g != null && (g.Handle ?? "").StartsWith(HubShotsFillId));
+                gl.Add(new OwnGrantEntry { Handle = HubShotsFillId + "g1", Name = "", Online = false, Kinds = { GrantKind.Vehicle } });
+                gl.Add(new OwnGrantEntry { Handle = HubShotsFillId + "g2", Name = HubShotsNames[0], Online = false, Kinds = { GrantKind.Housing } });
                 MPHub.Version++;
-                return $"OK uifill hub: added={n} per list realOthers={real} in={MPHub.IncomingOffers.Count} out={MPHub.OutgoingOffers.Count} loans={MPHub.Loans.Count}";
+                return $"OK uifill hub: added={n} per list realOthers={real} in={MPHub.IncomingOffers.Count} out={MPHub.OutgoingOffers.Count} loans={MPHub.Loans.Count} grantees=2";
             }
             catch (Exception ex) { return "ERR uifill: " + ex.Message; }
         }

@@ -148,9 +148,10 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(pid)) return "";
                 string n = MPNames.Resolve(pid);
                 if (!string.IsNullOrEmpty(n) && n != pid) { _cwNames[pid] = n; return n; }
-                return _cwNames.TryGetValue(pid, out var c) ? c : n;
+                return _cwNames.TryGetValue(pid, out var c) ? c : pid;   // manager 2026-09-28: a player id IS the account name (Steam / name box),
+                                                                         // readable; 'Unknown player' is only for grantees known by a stable handle alone
             }
-            catch { return pid; }
+            catch { return B_UNKNOWN; }
         }
 
         // ── build ──
