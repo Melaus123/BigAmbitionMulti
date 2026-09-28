@@ -661,7 +661,9 @@ namespace BigAmbitionsMP
         void Disconnect();
         /// <summary>D1 (review of 147e031, 2026-09-28): reliable data this client has handed the transport that the
         /// host has not acknowledged yet (queued or sent-unacked; bytes or packets - only 0 vs more matters).
-        /// 0 = nothing pending, -1 = unknown. The deliberate-leave close waits for 0 (MPClient.TickDeferredDisconnect).</summary>
+        /// 0 = nothing pending, -1 = unknown. H5 (review of 480184b): NOT proof of delivery on every transport (LiteNetLib
+        /// counts only unsent packets) - the deliberate-leave close waits for the host's receipt instead and logs this only
+        /// when it closes at the ceiling (MPClient.TickDeferredDisconnect).</summary>
         int PendingReliable { get; }
         /// <summary>Stop the poll loop WITHOUT tearing down or joining — safe to
         /// call from the Disconnected handler (which runs ON the poll thread;
@@ -826,8 +828,10 @@ namespace BigAmbitionsMP
             _client = null;
         }
 
-        /// <summary>D1: packets still in the host peer's reliable-ordered queue on channel 0 (queued or sent and not yet
-        /// acknowledged) - Stop() drops them, so the deliberate-leave close waits for 0.</summary>
+        /// <summary>D1 / H5 (review of 480184b, 2026-09-28): packets in the host peer's reliable-ordered queue on channel 0
+        /// that LiteNetLib has NOT SENT yet (GetPacketsCountInReliableQueue counts only unsent packets - sent-but-unacked ones
+        /// are not in it), so 0 does not mean the host has them. Stop() drops them. Logged by the held close at its ceiling
+        /// only; the close itself waits for the host's receipt (PaperworkSync.LeaveReceiptIn).</summary>
         public int PendingReliable
         {
             get

@@ -239,8 +239,10 @@ namespace BigAmbitionsMP
         // paperwork publish is sent first; a bare socket close discards queued reliable data (SteamClientTransport
         // .Disconnect -> ConnectionManager.Close without linger), so when a bundle went out the close waits one frame.
         private static int _deferredDisconnectFrame = -1;
-        // D1 (review of 147e031, 2026-09-28): the held close waits for the event "the transport reports no pending reliable
-        // data" (IClientTransport.PendingReliable == 0), bounded by this ceiling in real seconds.
+        // H5 (review of 480184b, 2026-09-28): the held close waits for the event "the host acknowledged receiving the leave
+        // bundle" (PaperworkSync.LeaveReceiptIn - the host's receipt), bounded by this ceiling in real seconds. The transport's
+        // PendingReliable is no proof: LiteNetLib's GetPacketsCountInReliableQueue counts only packets not yet SENT, so it
+        // can read 0 before the host has the bundle; it is logged at the ceiling only.
         private static float _deferredDisconnectSince;
         private const float DeferredCloseCeilingS = 2f;
 
@@ -263,7 +265,7 @@ namespace BigAmbitionsMP
             {
                 _deferredDisconnectFrame = UnityEngine.Time.frameCount;
                 _deferredDisconnectSince = UnityEngine.Time.unscaledTime;
-                Plugin.Logger.LogInfo($"[Client] disconnect ({anchor}) held (frame {_deferredDisconnectFrame}) until the transport reports the leave publish delivered (at most {DeferredCloseCeilingS:0} s).");
+                Plugin.Logger.LogInfo($"[Client] disconnect ({anchor}) held (frame {_deferredDisconnectFrame}) until the host acknowledges receiving the leave publish (at most {DeferredCloseCeilingS:0} s).");
             }
             catch (Exception ex)
             {
@@ -281,17 +283,37 @@ namespace BigAmbitionsMP
             {
                 int now = UnityEngine.Time.frameCount;
                 if (now <= _deferredDisconnectFrame) return;
-                int pend = -1;
-                try { pend = _transport?.PendingReliable ?? 0; } catch { pend = -1; }
+                bool acked = false;
+                try { acked = PaperworkSync.LeaveReceiptIn; } catch { acked = false; }
                 float waited = UnityEngine.Time.unscaledTime - _deferredDisconnectSince;
-                if (pend > 0 && waited < DeferredCloseCeilingS) return;   // the event: nothing pending (or the ceiling)
+                if (!acked && waited < DeferredCloseCeilingS) return;   // the event: the host's receipt (or the ceiling)
                 _deferredDisconnectFrame = -1;
-                Plugin.Logger.LogInfo(pend > 0
-                    ? $"[Client] deferred disconnect: closing now (frame {now}, {waited * 1000f:0} ms) at the {DeferredCloseCeilingS:0} s ceiling with {pend} reliable unit(s) still pending - the close lingers (ceiling)."
-                    : $"[Client] deferred disconnect: closing now (frame {now}, {waited * 1000f:0} ms) - {(pend == 0 ? "no reliable data pending, the leave publish is delivered (drained)" : "pending data unknown (unknown)")}.");
+                if (acked)
+                    Plugin.Logger.LogInfo($"[Client] deferred disconnect: closing now (frame {now}, {waited * 1000f:0} ms) - the host acknowledged receiving the leave publish (acked); the close lingers.");
+                else
+                {
+                    int pend = -1;
+                    try { pend = _transport?.PendingReliable ?? -1; } catch { pend = -1; }
+                    Plugin.Logger.LogInfo($"[Client] deferred disconnect: closing now (frame {now}, {waited * 1000f:0} ms) at the {DeferredCloseCeilingS:0} s ceiling without the host's receipt ({pend} reliable unit(s) not yet sent by the transport, -1 = unknown) - the close lingers (ceiling).");
+                }
                 Disconnect();
             }
             catch (Exception ex) { _deferredDisconnectFrame = -1; Plugin.Logger.LogWarning($"[Client] deferred disconnect: {ex.Message}"); }
+        }
+
+        /// <summary>H6 (review of 480184b, 2026-09-28): the application is quitting while the held close still waits for the
+        /// host's receipt - close now through Disconnect() (the Steam close lingers) instead of leaving the socket to the
+        /// shutdown, which drops what is queued. MPCanvasUI.OnApplicationQuit, main thread.</summary>
+        internal static void CloseHeldOnQuit()
+        {
+            if (_deferredDisconnectFrame < 0) return;
+            try
+            {
+                _deferredDisconnectFrame = -1;
+                Plugin.Logger.LogInfo("[Client] application quit with the held close pending - closing now (the close lingers).");
+                Disconnect();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Client] held close on quit: {ex.Message}"); }
         }
 
         // ── Events ────────────────────────────────────────────────────────────
@@ -748,11 +770,22 @@ namespace BigAmbitionsMP
                 }
 
                 case MessageType.BusinessPaperwork:
-                    // Merger phase 3-A is client -> HOST only: nothing here sends paperwork the other
+                {
+                    // H5 (review of 480184b, 2026-09-28): the host's RECEIPT for a bundle this client published
+                    // (StableId = PaperworkSync.ReceiptTag, no content) - the held Disconnect close waits for it.
+                    var pwReceipt = env.GetPayload<BusinessPaperworkPayload>();
+                    if (pwReceipt != null && pwReceipt.StableId == PaperworkSync.ReceiptTag)
+                    {
+                        int pwReceiptDay = pwReceipt.Day;
+                        GameStatePatcher.EnqueueOnMainThread(() => PaperworkSync.OnHostReceipt(pwReceiptDay));
+                        break;
+                    }
+                    // Otherwise merger phase 3-A is client -> HOST only: nothing here sends paperwork the other
                     // way, so an arriving bundle means a future build (or a confused peer). Log and
                     // drop - never write game state off an unexpected direction.
                     Plugin.Logger.LogWarning("[Paperwork] a BusinessPaperwork arrived from the host - P3-A publishes client -> host only; ignored.");
                     break;
+                }
 
                 case MessageType.MergerHandover:
                 {

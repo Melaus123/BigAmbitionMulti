@@ -555,10 +555,12 @@ namespace BigAmbitionsMP
             // ("<n> ba:street_parking") instead of "". Before that tag existed a garage player read as outdoors
             // and was shown to everyone - a partner in the same garage included - so a garage tag keeps exactly
             // that: shown. (The tag exists for the traffic rule, which must not read garage coordinates as street.)
+            // Re-check of 66a37fb: every garage loads the same layout, so a viewer IN a garage sees only players in
+            // THAT garage (others would stand on the same coordinates in another garage).
             bool visible = (p.Bldg ?? "") == (MPRegisterSync.CurrentShopAddress ?? "")
                         || string.IsNullOrEmpty(p.Bldg)
                         || HamptonsAccess.IsHamptonsAddress(p.Bldg)
-                        || VehicleManager.IsStreetParking(p.Bldg ?? "");
+                        || (VehicleManager.IsStreetParking(p.Bldg ?? "") && GarageVisibleHere(p.Bldg ?? ""));
             if (go.activeSelf != visible)
             {
                 go.SetActive(visible);
@@ -588,6 +590,19 @@ namespace BigAmbitionsMP
         /// masked (RemotePlayerMover.SetTarget snaps it to the interior coordinates on the teleport-sized jump, hidden or
         /// not). No street position yet (they loaded inside) = no position: the caller keeps its verdict. Fold G1: an
         /// underground GARAGE tag counts as inside here too (any non-empty, non-Hamptons tag does).</summary>
+        /// <summary>A remote player's garage tag is shown to a viewer who is outdoors, or in the SAME garage.</summary>
+        private static bool GarageVisibleHere(string tag)
+        {
+            try
+            {
+                if (!Parking.UndergroundParking.UndergroundParkingManager.IsInsideParking) return true;
+                var sg = SaveGameManager.Current;
+                if (sg == null) return true;
+                return string.Equals(tag, $"{sg.CurrentStreetNumber} {sg.CurrentStreetName}", System.StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return true; }
+        }
+
         internal static bool TryGetTrafficJudgePosition(string playerId, out Vector3 pos)
         {
             pos = default;

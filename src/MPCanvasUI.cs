@@ -550,6 +550,9 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] OnApplicationQuit save: {ex.Message}"); }
+            // H6 (review of 480184b, 2026-09-28): a Disconnect close still held for the host's receipt closes now, with
+            // linger, after the disconnect save above (which needs the session state) - not dropped by the shutdown.
+            try { MPClient.CloseHeldOnQuit(); } catch { }
         }
 
         private void OnLifecyclePhase(MPLifecycle.MPPhase prev, MPLifecycle.MPPhase next)

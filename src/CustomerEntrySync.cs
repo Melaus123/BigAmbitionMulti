@@ -104,6 +104,72 @@ namespace BigAmbitionsMP
             return id;
         }
 
+        // ── H-HOURROLL H1 (review of 480184b, 2026-09-28): the entry ids this OWNER actually SENT to partners ──
+        // Per shop: the ids CaptureFor put on the wire today (Cur) and yesterday (Prev - only for an hour-23 pass that runs
+        // after midnight). A new owner day starts Cur empty. Only these entries can sit on a partner's schedule with this
+        // owner's id, so only they may be set aside by the owner's hourly pass (BookOnce.HourlyBegin); ids are minted per
+        // entry object, so a regenerated schedule never matches an old record.
+        private sealed class SentRecord { public int Day = int.MinValue; public HashSet<string> Cur = new(); public HashSet<string> Prev = new(); }
+        private static readonly Dictionary<string, SentRecord> _sent = new();
+        // DEV lever hourroll unsend: ids kept OUT of the record for good - a later re-push (CaptureFor on the next interior
+        // snapshot) would otherwise record them again (rig run T-HANDOFF3-20260928-052416: 4 dropped, all 7 set aside).
+        private static readonly HashSet<string> _devUnsent = new();
+
+        private static SentRecord? SentRecordFor(string addr)
+        {
+            if (string.IsNullOrEmpty(addr)) return null;
+            int day = GameStateReader.GetGameTime().day;
+            if (!_sent.TryGetValue(addr, out var r)) { r = new SentRecord { Day = day }; _sent[addr] = r; return r; }
+            if (r.Day != day)
+            {
+                r.Prev = r.Day == day - 1 ? r.Cur : new HashSet<string>();   // the owner's new day: the record starts over
+                r.Cur = new HashSet<string>();
+                r.Day = day;
+            }
+            return r;
+        }
+
+        /// <summary>H1: was this owner entry sent to partners (today, or yesterday for a late hour-23 pass)?</summary>
+        internal static bool WasSent(BuildingRegistration reg, CustomerEntry e)
+        {
+            try
+            {
+                if (reg == null || e == null || !_ownerIds.TryGetValue(e, out var id)) return false;
+                var r = SentRecordFor(GameStateReader.AddressKey(reg));
+                return r != null && (r.Cur.Contains(id) || r.Prev.Contains(id));
+            }
+            catch { return false; }
+        }
+
+        /// <summary>H1 rig read-only: ids in the sent record for this shop.</summary>
+        internal static int SentCountFor(string addr)
+        {
+            try { var r = SentRecordFor(addr); return r == null ? 0 : r.Cur.Count + r.Prev.Count; } catch { return -1; }
+        }
+
+        /// <summary>H1 DEV lever (hourroll unsend): drop every other SENT id among this hour's entries from the record, as if
+        /// the partner held them without this owner's id (its midnight, a stale schedule, the cap).</summary>
+        internal static string DevUnsend(BuildingRegistration reg, int hour)
+        {
+            try
+            {
+                var table = Table();
+                if (reg == null || table == null || !table.TryGetValue(reg.Address, out var entries) || entries == null) return "no schedule";
+                var r = SentRecordFor(GameStateReader.AddressKey(reg));
+                if (r == null) return "no address";
+                int seen = 0, dropped = 0, kept = 0;
+                foreach (var e in entries)
+                {
+                    if (e?.spawnTime == null || e.spawnTime.Hour != hour || !_ownerIds.TryGetValue(e, out var id)) continue;
+                    if (!r.Cur.Contains(id) && !r.Prev.Contains(id)) continue;
+                    if (seen++ % 2 == 0) { r.Cur.Remove(id); r.Prev.Remove(id); _devUnsent.Add(id); dropped++; } else kept++;
+                }
+                Plugin.Logger.LogInfo($"[Customers] DEV unsend {GameStateReader.AddressKey(reg)} h{hour}: {dropped} id(s) dropped from the sent record, {kept} kept.");
+                return $"hour={hour} dropped={dropped} kept={kept} sent={r.Cur.Count + r.Prev.Count}";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
         /// <summary>The synced-schedule id of a PAID order on a receiver machine — null for orders that
         /// didn't come from the owner's schedule (nothing to forward against).</summary>
         internal static string? EntryIdOf(Order order)
@@ -186,6 +252,8 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[Customers] CAPPED '{capAddr}' pending={entries.Count} cap={MaxEntries} type={capType} completed={done} day={capDay}");
                     }
                 }
+                HashSet<string>? sentRec = null;   // H-HOURROLL H1: record exactly what goes on the wire (the cap included)
+                try { sentRec = SentRecordFor(GameStateReader.AddressKey(reg))?.Cur; } catch { sentRec = null; }
                 for (int i = 0; i < entries.Count && list.Count < MaxEntries; i++)
                 {
                     var e = entries[i];
@@ -216,6 +284,7 @@ namespace BigAmbitionsMP
                         for (int j = 0; j < dem.Count; j++)
                             if (!string.IsNullOrEmpty(dem[j])) dto.Demands.Add(dem[j]);
                     list.Add(dto);
+                    try { if (!string.IsNullOrEmpty(dto.EntryId) && !_devUnsent.Contains(dto.EntryId)) sentRec?.Add(dto.EntryId); } catch { }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] capture: {ex.Message}"); }
@@ -435,6 +504,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                try { CustomerHandoff.NoteLife(p.PlayerId, p.AddressKey, "sale forward"); } catch { }   // H-HOURROLL H3
                 if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.EntryId)) return;
                 if (_processedForwards.Contains(p.EntryId)) return;
 

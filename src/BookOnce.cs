@@ -108,6 +108,7 @@ namespace BigAmbitionsMP
             try
             {
                 _recs.Clear();
+                _hourEnd.Clear();   // H-HOURROLL H2
                 _orderIds = new ConditionalWeakTable<Order, string>();
                 _paidHere = new ConditionalWeakTable<Order, object>();
                 _registeredBy.Clear(); _bookedBy.Clear(); _suppressedBy.Clear(); _keptBy.Clear();
@@ -174,6 +175,10 @@ namespace BigAmbitionsMP
         // PartnerLiveAside = hour entries set aside for it; PassBooked = bookings made by an hourly pass; PassPreempt = a
         // sale forward suppressed because an hourly pass booked the visit first (rig oracle: 0).
         internal static int PartnerLiveAside, PassPreempt, PassBooked;
+        // H-HOURROLL folds (review of 480184b, 2026-09-28): NotSentBilled = entries of a partner-run hour billed by the pass
+        // because they were never sent to a partner (H1); SilentHours = hour ends where the elected partner stood inside but
+        // showed no recent sign of life, so the pass billed the hour normally (H3).
+        internal static int NotSentBilled, SilentHours;
 
         /// <summary>The funnel that booked this visit ("" = not registered here or not booked yet).</summary>
         internal static string SourceOf(string id)
@@ -207,24 +212,82 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
-        /// <summary>H-HOURROLL: another machine runs this shop's live customers RIGHT NOW (the host's elected simulator is
-        /// a partner who stands inside), outside a skip and outside the hour a skip ended in, for a forwarded-sales shop
-        /// type. Single-player parity: BusinessSimulatorHelper.cs:32 skips the whole occupied shop.</summary>
-        private static bool PartnerSimulates(BuildingRegistration reg, int hour, out string pid)
+        /// <summary>H-HOURROLL: another machine runs this shop's live customers (the host's elected simulator is a partner
+        /// who stands inside), outside a skip and outside the hour a skip ended in, for a forwarded-sales shop type, AND
+        /// that partner shows a recent sign of life for this shop (H3, review of 480184b). Single-player parity:
+        /// BusinessSimulatorHelper.cs:32 skips the whole occupied shop. Evaluated at the hour's END (RecordHourEnd).
+        /// <paramref name="why"/> names the rule that decided.</summary>
+        private static bool PartnerSimulates(BuildingRegistration reg, int hour, out string pid, out string why)
         {
-            pid = "";
+            pid = ""; why = "";
             string a = GameStateReader.AddressKey(reg);
-            if (string.IsNullOrEmpty(a)) return false;
+            if (string.IsNullOrEmpty(a)) { why = "no address"; return false; }
             pid = CustomerPuppets.SimulatorFor(a) ?? "";
-            if (pid.Length == 0 || pid == MPConfig.PlayerId || !CustomerHandoff.PlayerInside(pid, a)) return false;
-            if (!ForwardedSalesType(reg)) return false;
-            if (MPRestSync.SkipActive) return false;   // a skip: the partner's spawner denies bodies - the pass bills them
-            try { if (InstanceBehavior<global::UI.UIs>.Instance.timeMachine.isRunning) return false; } catch { }   // BSH:32 parity
+            if (pid.Length == 0 || pid == MPConfig.PlayerId) { why = "no partner is the elected simulator"; return false; }
+            if (!CustomerHandoff.PlayerInside(pid, a)) { why = "the partner is not inside"; return false; }
+            if (!ForwardedSalesType(reg)) { why = "not a forwarded-sales shop type"; return false; }
+            if (MPRestSync.SkipActive) { why = "a skip is running"; return false; }   // a skip: the partner's spawner denies bodies - the pass bills them
+            try { if (InstanceBehavior<global::UI.UIs>.Instance.timeMachine.isRunning) { why = "the time machine runs"; return false; } } catch { }   // BSH:32 parity
             var (gd, gh) = GameStateReader.GetGameTime();
             double passStartMin = gd * 1440.0 + hour * 60.0;
             if (hour > (int)gh) passStartMin -= 1440.0;   // the pass is for an hour of the previous day
-            if (MPRestSync.LastSkipEndMinutes >= passStartMin) return false;   // H-SKIPTAIL analogue: the hour a skip ended in
+            if (MPRestSync.LastSkipEndMinutes >= passStartMin) { why = "the hour a skip ended in"; return false; }   // H-SKIPTAIL analogue
+            // H3 (review of 480184b, 2026-09-28): a partner whose machine went quiet (frozen, stuck, a stale presence) does
+            // not get the hour - the owner's pass bills it as before (when in doubt the owner's pass bills).
+            if (!CustomerHandoff.SignOfLife(pid, a, out var life)) { why = "no recent sign of life from the partner (" + life + ")"; SilentHours++; return false; }
+            why = life;
             return true;
+        }
+
+        // H-HOURROLL H2 (review of 480184b, 2026-09-28): WHO runs a shop's live customers is decided at the moment the hour
+        // ENDS - the prefix on the game's BusinessSimulatorHelper.RunHourly, its own decision point (BSH:19-32: the occupied
+        // shop is skipped right there in single-player) - and the pass reads that record, never a later live read: the
+        // pass can be queued on DistributedWork (BSH:36-39) and run after the partner walked in or out.
+        private sealed class HourEnd { public string Pid = "", Why = ""; public bool Live; public float AtMin; }
+        private static readonly Dictionary<string, HourEnd> _hourEnd = new();
+
+        /// <summary>H2: the RunHourly prefix - one decision per shop that books here and has a partner as its elected
+        /// simulator (no record = no partner = the pass bills normally). Main thread.</summary>
+        internal static void RecordHourEnd()
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.BuildingRegistrations == null) return;
+                int hour = gi.Hour;
+                float now = TimeHelper.NowInMinutes();
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    try
+                    {
+                        if (reg == null || !MergerFlip.BooksHere(reg)) continue;
+                        string a = GameStateReader.AddressKey(reg);
+                        if (string.IsNullOrEmpty(a)) continue;
+                        string key = a + "|" + hour;
+                        string sim = CustomerPuppets.SimulatorFor(a) ?? "";
+                        if (sim.Length == 0 || sim == MPConfig.PlayerId) { _hourEnd.Remove(key); continue; }
+                        bool live = PartnerSimulates(reg, hour, out var pid, out var why);
+                        _hourEnd[key] = new HourEnd { Pid = pid, Why = why, Live = live, AtMin = now };
+                        Plugin.Logger.LogInfo(live
+                            ? $"[BookOnce] hour-end record {a} h{hour}: partner {pid} runs the live customers - the pass sets aside the entries sent to partners ({why})."
+                            : $"[BookOnce] hour-end record {a} h{hour}: partner {pid} is the elected simulator but the pass bills normally ({why}).");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] hour-end record: {ex.Message}"); }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] hour-end record: {ex.Message}"); }
+        }
+
+        /// <summary>H2: the pass's read of the hour-end record (a record older than two game hours is stale: bill).</summary>
+        private static bool HourEndSaysPartner(BuildingRegistration reg, int hour, out string pid, out string why)
+        {
+            pid = ""; why = "no hour-end record";
+            string a = GameStateReader.AddressKey(reg);
+            if (string.IsNullOrEmpty(a) || !_hourEnd.TryGetValue(a + "|" + hour, out var d) || d == null) return false;
+            float age = TimeHelper.NowInMinutes() - d.AtMin;
+            if (age < -1f || age > 120f) { why = $"stale hour-end record ({age:0} game min old)"; return false; }
+            pid = d.Pid; why = d.Why;
+            return d.Live;
         }
         private static int NowAbsHour()
         {
@@ -732,27 +795,41 @@ namespace BigAmbitionsMP
             {
                 if (reg == null || !MergerFlip.BooksHere(reg)) return null;
                 // H-HOURROLL (2026-09-28): a partner runs this shop's live customers right now - the whole hour is theirs.
-                string simPid = "";
+                // H2 (review of 480184b): decided at the hour's END (RecordHourEnd), not by a live read now.
+                string simPid = "", liveRule = "";
                 bool live = false;
-                try { live = PartnerSimulates(reg, hour, out simPid); } catch { live = false; }
+                try { live = HourEndSaysPartner(reg, hour, out simPid, out liveRule); } catch { live = false; }
                 if (!live && _recs.Count == 0 && _ended.Count == 0 && _ending.Count == 0) return null;
                 string fn = $"{pass} hourly pass h{hour}";
                 ExpireEnding(reg, hour, fn);   // R2: an 'ending' mark lives through one hour boundary after the one it was marked in
                 var entries = CustomerEntrySync.EntriesOf(reg);
                 if (entries == null) return null;
                 var p = new Pass { Reg = reg, Entries = entries, Hour = hour, Name = pass };
-                int partnerAside = 0;
+                int partnerAside = 0, notSent = 0;
                 for (int i = entries.Count - 1; i >= 0; i--)
                 {
                     var e = entries[i];
                     if (e?.spawnTime == null || e.spawnTime.Hour != hour) continue;
                     if (live)
                     {
-                        // Not billed here: each visit is billed by its own sale forward, its walk-out report, or not at all.
-                        p.Aside.Add(new KeyValuePair<int, CustomerEntry>(i, e));
-                        entries.RemoveAt(i);
-                        partnerAside++;
-                        continue;
+                        // H1 (review of 480184b, 2026-09-28): only an entry this owner SENT to partners can sit on the
+                        // partner's schedule with this owner's id, so only its sale can ever reach these books (the
+                        // forward drops a sale with no id). Anything else - regenerated at the partner's own midnight
+                        // (BusinessHelper.cs:173 -> CustomerEntriesHelper.cs:28), a stale schedule the partner never got
+                        // re-pushed, past the 300-entry wire cap - is billed by this pass as before.
+                        // H4 (accepted, design risk 4): a late spawn on the partner rewrites only the PARTNER's copy of
+                        // the entry to the spawn moment (IndoorCustomerSpawner.cs:198-199), which can be the next hour;
+                        // this copy keeps its hour, so the visit is set aside at THIS hour's end and no later pass here
+                        // sees it - it is billed by its own sale forward, its walk-out report or not at all.
+                        if (CustomerEntrySync.WasSent(reg, e))
+                        {
+                            // Not billed here: each visit is billed by its own sale forward, its walk-out report, or not at all.
+                            p.Aside.Add(new KeyValuePair<int, CustomerEntry>(i, e));
+                            entries.RemoveAt(i);
+                            partnerAside++;
+                            continue;
+                        }
+                        notSent++;   // falls through: stays in the pass's list and is billed by it
                     }
                     string? id = IdOfOrder(e.order);
                     if (id == null)
@@ -782,7 +859,8 @@ namespace BigAmbitionsMP
                 {
                     p.PartnerAside = partnerAside;
                     PartnerLiveAside += partnerAside;
-                    Plugin.Logger.LogInfo($"[BookOnce] {GameStateReader.AddressKey(reg)} h{hour}: {partnerAside} entr{(partnerAside == 1 ? "y" : "ies")} set aside - {simPid}'s machine runs this shop's live customers ({fn}; single-player parity BusinessSimulatorHelper.cs:32 - each visit is billed by its own sale forward, its walk-out report or not at all; restock and stock tasks still run).");
+                    NotSentBilled += notSent;
+                    Plugin.Logger.LogInfo($"[BookOnce] {GameStateReader.AddressKey(reg)} h{hour}: {partnerAside} entr{(partnerAside == 1 ? "y" : "ies")} set aside - {simPid}'s machine runs this shop's live customers ({fn}; decided at the hour's end: {liveRule}; single-player parity BusinessSimulatorHelper.cs:32 - each visit is billed by its own sale forward, its walk-out report or not at all; restock and stock tasks still run); {notSent} billed by this pass because never sent to a partner.");
                 }
                 if (p.Aside.Count == 0 && p.Open.Count == 0) return null;
                 return p;
@@ -896,7 +974,7 @@ namespace BigAmbitionsMP
                      + $"boRegisteredBy={Tally(_registeredBy)} boBookedBy={Tally(_bookedBy)} boSuppressedBy={Tally(_suppressedBy)} "
                      + $"boUnpaidKept={UnpaidKept} boExitKept={ExitKept} boExitUnpaid={ExitUnpaid} boKeptBy={Tally(_keptBy)} "
                      + $"boFinished={Finished} boCopyReturnsBlocked={CopyReturnsBlocked} {EndedReadout(addr)} "
-                     + $"boPassBooked={PassBooked} boPartnerAside={PartnerLiveAside}";
+                     + $"boPassBooked={PassBooked} boPartnerAside={PartnerLiveAside} boNotSentBilled={NotSentBilled} boSilentHours={SilentHours}";
             }
             catch (Exception ex) { return "boERR " + ex.Message; }
         }
@@ -973,6 +1051,24 @@ namespace BigAmbitionsMP
             }
             catch { }
             return true;
+        }
+    }
+
+    /// <summary>H-HOURROLL H2 (review of 480184b, 2026-09-28): the game's hourly decision point (BusinessSimulatorHelper
+    /// .RunHourly :19-32 decides right here which shops are simulated and skips the occupied one) - record, per shop that
+    /// books here, whether a partner runs its live customers at the moment the hour ends. The passes it queues read it.</summary>
+    [HarmonyPatch(typeof(BusinessSimulatorHelper), nameof(BusinessSimulatorHelper.RunHourly))]
+    public static class Patch_RunHourly_BookOnceHourEnd
+    {
+        [HarmonyPriority(Priority.First)]
+        static void Prefix()
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                BookOnce.RecordHourEnd();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] hour-end record: {ex.Message}"); }
         }
     }
 }

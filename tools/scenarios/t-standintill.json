@@ -529,11 +529,16 @@
         },
         {
           "role": "c",
-          "regex": "\\[Client\\] deferred disconnect: closing now .*\\(drained\\)",
+          "regex": "\\[Paperwork\\] host receipt for the leave publish \\(bundle #\\d+",
+          "within_s": 10
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] deferred disconnect: closing now .*the host acknowledged receiving the leave publish \\(acked\\)",
           "within_s": 10
         }
       ],
-      "note": "D1: the mod's Disconnect-button path - the leave publish is sent, then the close waits for the transport to report no pending reliable data (event; 2 s ceiling logged as '(ceiling)') and closes WITH linger"
+      "note": "D1 / H5 (review of 480184b, 2026-09-28): the mod's Disconnect-button path - the leave publish is sent, the host answers it with a receipt ('[Paperwork] host receipt for the leave publish'), and only then the close runs ('(acked)'; 2 s ceiling logged as '(ceiling)') and closes WITH linger. LiteNetLib's reliable-queue count (unsent packets only) no longer decides."
     },
     {
       "seq": 74,

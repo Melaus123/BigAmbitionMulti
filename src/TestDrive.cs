@@ -1251,6 +1251,34 @@ namespace BigAmbitionsMP
                          + $"sig={csSig} natList={string.Join(";", csNatives)} copyList={string.Join(";", csCopies)}";
                 }
 
+                // ── H-HOURROLL folds (review of 480184b, 2026-09-28): the sent record and a partner's signs of life ──
+                case "hourroll":
+                {
+                    // `hourroll unsend <num> <ba:street_x>` drops every other SENT id among the current hour's entries from
+                    // the owner's sent record (the partner still holds them, as after its own midnight / a stale schedule /
+                    // the cap); `hourroll mute <pid>` / `hourroll unmute <pid>` ignores / restores that partner's signs of
+                    // life on this machine; `hourroll state <num> <ba:street_x>`.
+                    string hrVerb = arg, hrRest = "";
+                    int hrSp = arg.IndexOf(' ');
+                    if (hrSp > 0) { hrVerb = arg.Substring(0, hrSp); hrRest = arg.Substring(hrSp + 1).Trim(); }
+                    if (hrVerb == "mute" || hrVerb == "unmute")
+                    {
+                        if (hrRest.Length == 0) return "ERR usage: hourroll mute|unmute <pid>";
+                        if (hrVerb == "mute") CustomerHandoff.DevLifeMuted.Add(hrRest); else CustomerHandoff.DevLifeMuted.Remove(hrRest);
+                        return $"OK hourroll {hrVerb} {hrRest} muted=[{string.Join(",", CustomerHandoff.DevLifeMuted)}]";
+                    }
+                    if (hrVerb != "unsend" && hrVerb != "state") return "ERR usage: hourroll unsend|state <num> <ba:street_x> | mute|unmute <pid>";
+                    var hrReg = GameStatePatcher.FindRegistration(hrRest);
+                    if (hrReg == null) return $"ERR no registration at '{hrRest}'";
+                    string hrKey = hrRest; try { hrKey = GameStateReader.AddressKey(hrReg); } catch { }
+                    int hrHour = -1; try { hrHour = SaveGameManager.Current.Hour; } catch { }
+                    if (hrVerb == "unsend") return $"OK hourroll unsend {hrKey} " + CustomerEntrySync.DevUnsend(hrReg, hrHour);
+                    string hrSim = CustomerPuppets.SimulatorFor(hrKey);
+                    string hrRule = "";
+                    bool hrLife = hrSim.Length > 0 && CustomerHandoff.SignOfLife(hrSim, hrKey, out hrRule);
+                    return $"OK hourroll state {hrKey} hour={hrHour} sent={CustomerEntrySync.SentCountFor(hrKey)} sim='{hrSim}' life={hrLife} rule='{hrRule}' muted=[{string.Join(",", CustomerHandoff.DevLifeMuted)}]";
+                }
+
                 // ── H-HANDOFF-1 folds: the till oracle on the machine that keeps the books ──
                 case "handoffbook":
                 {

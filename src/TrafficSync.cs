@@ -2199,7 +2199,7 @@ namespace BigAmbitionsMP
                     try { inside = BuildingManager.IsInsideBuilding; } catch { }
                     LocalInBuilding = inside;   // resync the event flag
                     // H-CARSTACK-1 fold G1: an underground garage keeps the anchor at the last street position as a
-                    // building does (the event flag above stays the building's own - the garage never fires it).
+                    // building does (the event flag above stays the building's own - the garage never fires ENTER; its exit does raise onExitBuilding, harmless since the flag is re-read above).
                     if (!inside && LocalInParking()) inside = true;
                     if (!inside)
                     {

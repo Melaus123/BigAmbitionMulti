@@ -156,6 +156,59 @@ namespace BigAmbitionsMP
             return false;
         }
 
+        // ── H-HOURROLL H3 (review of 480184b, 2026-09-28): a recent sign of life from a partner ──
+        // The owner's pass sets a partner-run hour aside only when that partner is demonstrably running the shop: a position
+        // report from inside it within the last few real seconds (sent at ~10 Hz), OR a customer stream / sale forward /
+        // walk-out report (220) from that machine for that shop within the last game hour. Otherwise the pass bills.
+        private static readonly Dictionary<string, KeyValuePair<float, string>> _lifePos = new();    // pid -> (unscaled time, building tag)
+        private static readonly Dictionary<string, KeyValuePair<float, string>> _lifeShop = new();   // pid|addr -> (game minutes, kind)
+        internal static readonly HashSet<string> DevLifeMuted = new();   // DEV lever hourroll mute: that pid's signs of life are ignored
+        private const float LifePositionWindowS = 5f;
+        private const float LifeShopWindowGameMin = 60f;
+
+        /// <summary>H3: every remote position report (RemotePlayerManager.SpawnOrUpdate postfix). Main thread.</summary>
+        internal static void NotePosition(string pid, string bldg)
+        {
+            try { if (!string.IsNullOrEmpty(pid)) _lifePos[pid] = new KeyValuePair<float, string>(Time.unscaledTime, bldg ?? ""); } catch { }
+        }
+
+        /// <summary>H3: a customer stream, sale forward or walk-out report from <paramref name="pid"/> for a shop.</summary>
+        internal static void NoteLife(string pid, string addr, string kind)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(pid) || string.IsNullOrEmpty(addr) || pid == MPConfig.PlayerId) return;
+                if (_lifeShop.Count > 512) _lifeShop.Clear();
+                _lifeShop[pid + "|" + addr] = new KeyValuePair<float, string>(TimeHelper.NowInMinutes(), kind ?? "");
+            }
+            catch { }
+        }
+
+        /// <summary>H3: does <paramref name="pid"/> show a recent sign of life for <paramref name="addr"/>? <paramref name="rule"/>
+        /// names the rule that decided.</summary>
+        internal static bool SignOfLife(string pid, string addr, out string rule)
+        {
+            rule = "";
+            try
+            {
+                if (DevLifeMuted.Contains(pid ?? "")) { rule = "DEV lever: its signs of life are ignored"; return false; }
+                if (_lifePos.TryGetValue(pid ?? "", out var lp) && lp.Value == addr)
+                {
+                    float ago = Time.unscaledTime - lp.Key;
+                    if (ago >= 0f && ago <= LifePositionWindowS) { rule = $"sign of life: a position report from inside {ago:0.0} s ago"; return true; }
+                }
+                if (_lifeShop.TryGetValue((pid ?? "") + "|" + addr, out var ls))
+                {
+                    float agoMin = TimeHelper.NowInMinutes() - ls.Key;
+                    if (agoMin >= -1f && agoMin <= LifeShopWindowGameMin) { rule = $"sign of life: a {ls.Value} for this shop {agoMin:0} game min ago"; return true; }
+                }
+                string posTxt = _lifePos.TryGetValue(pid ?? "", out var lp2) ? $"last position report {Time.unscaledTime - lp2.Key:0.0} s ago from '{lp2.Value}'" : "no position report";
+                rule = $"silent: {posTxt}, no customer stream / sale / walk-out report for this shop in the last {LifeShopWindowGameMin:0} game min";
+                return false;
+            }
+            catch (Exception ex) { rule = "the sign-of-life check failed: " + ex.Message; return false; }
+        }
+
         // ── Source: capture one live customer ────────────────────────────────────────────────────────
         internal static void NoteLeaving(Customer c)
         {
@@ -364,7 +417,7 @@ namespace BigAmbitionsMP
                     CustomerPuppets.HoldForHandoff(p.Rows, p.SimulatorPid ?? "");
                     CustomerPuppets.OnFinalReceived(p.SimulatorPid ?? "");
                 }
-                else StreamRowsReceived += n;
+                else { StreamRowsReceived += n; NoteLife(p.SimulatorPid ?? "", p.AddressKey ?? "", "customer stream"); }   // H-HOURROLL H3
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Handoff] apply: {ex.Message}"); }
         }
@@ -1017,6 +1070,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.EntryId)) return;
+                try { NoteLife(p.PlayerId, p.AddressKey, "walk-out report (220)"); } catch { }   // H-HOURROLL H3
                 if (p.EntryId.Length > MaxUnsoldIdLen) { Plugin.Logger.LogInfo($"[Stock] unsold walk-out from {p.PlayerId}: an id over {MaxUnsoldIdLen} chars - dropped."); return; }   // L3
                 if (p.Items != null && p.Items.Count > MaxUnsoldItems) p.Items = p.Items.GetRange(0, MaxUnsoldItems);   // L3
                 BuildingRegistration? reg = null;
@@ -1931,6 +1985,17 @@ namespace BigAmbitionsMP
         static void Finalizer(BookOnce.Pass? __state)
         {
             try { if (__state != null) BookOnce.HourlyEnd(__state); } catch { }
+        }
+    }
+
+    /// <summary>H-HOURROLL H3 (review of 480184b, 2026-09-28): every remote position report is a sign of life of that
+    /// player in the building it names (the owner's hourly pass reads it through CustomerHandoff.SignOfLife).</summary>
+    [HarmonyPatch(typeof(RemotePlayerManager), nameof(RemotePlayerManager.SpawnOrUpdate))]
+    public static class Patch_RemotePlayerManager_SpawnOrUpdate_SignOfLife
+    {
+        static void Postfix(PlayerPositionPayload p)
+        {
+            try { if (p != null) CustomerHandoff.NotePosition(p.PlayerId ?? "", p.Bldg ?? ""); } catch { }
         }
     }
 

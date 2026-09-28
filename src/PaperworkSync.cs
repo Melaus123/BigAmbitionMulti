@@ -104,6 +104,53 @@ namespace BigAmbitionsMP
         // -- H-STANDINTILL-1 remnant (R2, 2026-09-28): one final publish when the player DELIBERATELY leaves --
         private static bool _leaveFlushed;   // one leave publishes once; cleared in Reset and on every connect
         private static bool _quitHooked;
+        // H5 (review of 480184b, 2026-09-28): LiteNetLib's GetPacketsCountInReliableQueue counts only UNSENT packets, so
+        // "nothing pending" could be read before the host had the leave bundle. The host now answers every bundle it
+        // receives with a tiny RECEIPT (a BusinessPaperwork back to the sender: StableId = ReceiptTag, no content; a build
+        // without this logs and ignores it) and the held Disconnect close waits for the receipt of the LEAVE bundle
+        // (MPClient.TickDeferredDisconnect, 2 s ceiling). Client side: the bundles sent and not yet receipted, in order
+        // (the channel is reliable-ordered and the host handles them in order). Main thread.
+        internal const string ReceiptTag = "bamp:paperwork-receipt";
+        private static readonly System.Collections.Generic.Queue<System.Collections.Generic.KeyValuePair<int, float>> _unreceipted = new();
+        private static int _bundleSeq, _leaveSeq = -1;
+        internal static int ReceiptsIn, ReceiptsSent;
+
+        /// <summary>H5: the host has receipted the leave bundle (false when no leave bundle was sent).</summary>
+        internal static bool LeaveReceiptIn => _leaveSeq > 0 && (_unreceipted.Count == 0 || _unreceipted.Peek().Key > _leaveSeq);
+
+        private static void ResetReceipts() { _unreceipted.Clear(); _bundleSeq = 0; _leaveSeq = -1; }
+
+        /// <summary>H5, CLIENT, MAIN THREAD: the host's receipt for the oldest bundle not yet receipted.</summary>
+        internal static void OnHostReceipt(int day)
+        {
+            try
+            {
+                ReceiptsIn++;
+                if (_unreceipted.Count == 0) return;
+                var k = _unreceipted.Dequeue();
+                if (_leaveSeq > 0 && k.Key == _leaveSeq)
+                    Plugin.Logger.LogInfo($"[Paperwork] host receipt for the leave publish (bundle #{k.Key}, day {day}) - {(UnityEngine.Time.unscaledTime - k.Value) * 1000f:0} ms after it was sent.");
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] host receipt: {ex.Message}"); }
+        }
+
+        /// <summary>H5, HOST: every bundle a client delivers is answered with a receipt (StorePaperwork runs on the main
+        /// thread for a bundle whose sender checked out; the host's own local store is not answered).</summary>
+        [HarmonyLib.HarmonyPatch(typeof(MPServer), nameof(MPServer.StorePaperwork))]
+        internal static class Patch_StorePaperwork_Receipt
+        {
+            static void Postfix(BusinessPaperworkPayload p, string senderPid)
+            {
+                try
+                {
+                    if (p == null || string.IsNullOrEmpty(senderPid) || senderPid == MPConfig.PlayerId || !MPServer.IsRunning) return;
+                    MPServer.SendToPlayer(senderPid, MessageEnvelope.Create(MessageType.BusinessPaperwork, MPConfig.PlayerId,
+                        new BusinessPaperworkPayload { PlayerId = MPConfig.PlayerId, StableId = ReceiptTag, Day = p.Day }));
+                    ReceiptsSent++;
+                }
+                catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] receipt to '{senderPid}': {ex.Message}"); }
+            }
+        }
 
         /// <summary>R2: publish this machine's books one last time at the moment the player commits to leaving
         /// while the world is still live - the pause-menu Main Menu (and the funeral screen), Quit to Desktop (also
@@ -122,6 +169,15 @@ namespace BigAmbitionsMP
                 var p = FlushNow("leave: " + anchor);
                 if (p != null)
                 {
+                    try
+                    {
+                        // H5: the leave bundle is the newest one sent; receipts presumed lost for bundles over 10 s old are
+                        // dropped from the front so they cannot hold the leave's receipt back.
+                        _leaveSeq = _bundleSeq;
+                        float lnow = UnityEngine.Time.unscaledTime;
+                        while (_unreceipted.Count > 0 && _unreceipted.Peek().Key < _leaveSeq && lnow - _unreceipted.Peek().Value > 10f) _unreceipted.Dequeue();
+                    }
+                    catch { }
                     Plugin.Logger.LogInfo($"[Paperwork] leave publish ({anchor}): published day {p.Day} ({p.Businesses.Count} business(es)).");
                     return true;
                 }
@@ -135,7 +191,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>R2: a new connection may publish its own leave once (MPClient.OnConnected).</summary>
-        public static void ClearLeaveLatch() { _leaveFlushed = false; }
+        public static void ClearLeaveLatch() { _leaveFlushed = false; try { ResetReceipts(); } catch { } }
 
         /// <summary>R2 anchor 3 (window close): Application.wantsToQuit fires on a raw window close and on
         /// Application.Quit, before OnApplicationQuit - while the world may still be loaded. Registered once from
@@ -186,7 +242,15 @@ namespace BigAmbitionsMP
                 if (MPServer.IsRunning)
                     MPServer.StorePaperwork(p, MPConfig.PlayerId);   // the host is a member too — applied locally
                 else if (MPClient.IsConnected)
+                {
                     MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BusinessPaperwork, MPConfig.PlayerId, p));
+                    try
+                    {   // H5: awaiting the host's receipt (bounded: a host that never answers cannot grow this)
+                        _unreceipted.Enqueue(new System.Collections.Generic.KeyValuePair<int, float>(++_bundleSeq, UnityEngine.Time.unscaledTime));
+                        while (_unreceipted.Count > 64) _unreceipted.Dequeue();
+                    }
+                    catch { }
+                }
                 else
                     return null;   // not in a session: nothing to publish to
 
@@ -942,6 +1006,7 @@ namespace BigAmbitionsMP
         {
             _dirty = false; _urgent = false; _wasMember = false; _lastPublishedDay = -1; _lastPublishAt = -999f;
             _leaveFlushed = false;   // R2: a new world / session may publish its own leave once
+            try { ResetReceipts(); } catch { }   // H5
         }
 
         // ── Mutation points (the game's OWN events; no timers, no one-shot delays) ──
