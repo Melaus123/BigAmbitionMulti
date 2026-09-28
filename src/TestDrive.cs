@@ -3084,6 +3084,17 @@ namespace BigAmbitionsMP
                     // Phase 4b (people) P1: the candidate list AS THIS MACHINE SEES IT - own rows and the
                     // company copies together, each naming its origin and who (if anyone) has claimed it.
                     // An argument filters to one origin pid.
+                    if (arg.StartsWith("holdpub", StringComparison.OrdinalIgnoreCase))
+                    {
+                        // H-XFERROSTER-1 / H-HIREDUP-1 race rig: `candidates holdpub <seconds>` delays THIS machine's
+                        // own pool publish (0 = release now), so a hire can reach the partner before the pool does.
+                        var hpk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        float hps = 0f;
+                        if (hpk.Length < 2 || !float.TryParse(hpk[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out hps) || hps < 0f)
+                            return "ERR usage: candidates holdpub <seconds>";
+                        CompanyCandidates.DevHoldPublish(hps);
+                        return $"OK candidates holdpub {hps.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}s";
+                    }
                     var clines = CompanyCandidates.Readout();
                     var csb = new StringBuilder();
                     int cshown = 0, ctotal = 0;
@@ -3097,6 +3108,38 @@ namespace BigAmbitionsMP
                         csb.Append(cline);
                     }
                     return $"OK {ctotal} candidate(s){(arg.Length > 0 ? $" from '{arg}'" : "")}: {csb}";
+                }
+
+                case "hire":
+                {
+                    // H-XFERROSTER-1 / H-HIREDUP-1: `hire <candidateId> [num street]` = the candidate dropdown's
+                    // assignedAddress write (CandidateCellView), then the game's own EmployeeHelper.HireCandidate
+                    // (AcceptOffer minus the bonus). A hire pointed at a partner's shop is then carried by the 2 s
+                    // merger scan exactly as a player's is.
+                    try
+                    {
+                        var hk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (hk.Length != 1 && hk.Length != 3) return "ERR usage: hire <candidateId> [num street]";
+                        var hgi = SaveGameManager.Current;
+                        if (hgi?.CandidateEmployeeInstances == null || hgi.EmployeeInstances == null) return "ERR no save loaded";
+                        Entities.EmployeeInstance? hc = null;
+                        foreach (var c in hgi.CandidateEmployeeInstances) if (c != null && c.id == hk[0]) { hc = c; break; }
+                        if (hc == null) return $"ERR no candidate '{hk[0]}' on this machine";
+                        bool hcopy = CompanyCandidates.IsInjectedCandidate(hk[0]);
+                        if (hk.Length == 3)
+                        {
+                            var hreg = GameStatePatcher.FindRegistration(hk[1] + " " + hk[2]);
+                            if (hreg == null) return $"ERR no registration for '{hk[1]} {hk[2]}'";
+                            hc.assignedAddress = hreg.Address;
+                        }
+                        string herr = "";
+                        try { Helpers.EmployeeHelper.HireCandidate(hc); }
+                        catch (Exception hx) { herr = $" threw='{hx.GetType().Name}: {hx.Message}'"; }
+                        bool hhired = false; try { hhired = hgi.EmployeeInstances.Contains(hc) && !hc.IsCandidate; } catch { }
+                        string haddr = ""; try { if (hc.assignedAddress != null) haddr = GameStateReader.AddressKey(hc.assignedAddress); } catch { }
+                        return $"OK hire employee='{hk[0]}' companyCopy={hcopy} hired={hhired} assigned='{haddr}'{herr}";
+                    }
+                    catch (Exception ex) { return $"ERR hire: {ex.GetType().Name}: {ex.Message}"; }
                 }
 
                 case "claim":

@@ -1033,6 +1033,20 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[MergerStaff] adopt of '{p.EmployeeId}' @ '{p.AddressKey}' replaces this machine's injected copy (H-ADOPT-2).");
                         exists = false;
                     }
+                    if (exists && CompanyCandidates.IsInjectedCandidate(p.EmployeeId ?? ""))
+                    {
+                        // H-XFERROSTER-1 (user-approved 2026-09-27): the record here is this machine's COMPANY-CANDIDATE
+                        // COPY of the member's pool - they hired that person (pointed at my shop) and the move arrived
+                        // before their next pool publish. The 'idempotent' return below mistook the copy for a completed
+                        // adoption: the ack said "adopted" and the next pool apply then dropped the copy, so the person
+                        // existed in no save. Forget the copy (no candidate-drop evidence) and reconstruct the real record.
+                        string cOwner = CompanyCandidates.OwnerOfCandidate(p.EmployeeId ?? "");
+                        if (CompanyCandidates.ForgetCopyForAdopt(p.EmployeeId ?? ""))
+                        {
+                            Plugin.Logger.LogInfo($"[MergerStaff] adopt of '{p.EmployeeId}' @ '{p.AddressKey}' replaces this machine's company-candidate copy of '{cOwner}'s pool (H-XFERROSTER-1: the hire outran the pool publish).");
+                            exists = false;
+                        }
+                    }
                     if (exists) { MPRegisterSync.ForceRosterRepublish(p.AddressKey); return; }   // idempotent (retry after a lost confirm)
                     var gi = SaveGameManager.Current;
                     if (gi?.BuildingRegistrations == null || gi.EmployeeInstances == null) return;
@@ -1099,6 +1113,16 @@ namespace BigAmbitionsMP
                     gi.EmployeeInstances.Add(inst);
                     try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
                     Plugin.Logger.LogInfo($"[MergerStaff] ADOPTED '{inst.characterData?.name}' ({inst.id}) into '{(toBench ? "the bench" : p.AddressKey)}' at ${p.Wage:F0}/h (from '{p.PlayerId}').");
+                    if (!toBench)
+                    {
+                        // H-XFERROSTER-1 (manager decision 2026-09-27): the native assign's side effects for the new
+                        // workplace (dec MyEmployees.AssignSelectedEmployeeToBusiness :192-218) - the demand cache and
+                        // the registration-change event, so the shop's panels count the new staff at once.
+                        try { CustomerDemandHelper.ReloadCachedFulfilled(inst.assignedAddress); }
+                        catch (Exception rx) { Plugin.Logger.LogWarning($"[MergerStaff] adopt '{inst.id}': ReloadCachedFulfilled: {rx.GetType().Name}: {rx.Message}"); }
+                        try { GlobalEvents.onBuildingRegistrationChange?.Invoke(inst.assignedAddress); }
+                        catch (Exception gx) { Plugin.Logger.LogWarning($"[MergerStaff] adopt '{inst.id}': onBuildingRegistrationChange: {gx.GetType().Name}: {gx.Message}"); }
+                    }
                     MPRegisterSync.ForceRosterRepublish(p.AddressKey);   // the member's confirm signal (a no-op for the bench)
                 }
             }
@@ -1126,6 +1150,22 @@ namespace BigAmbitionsMP
             EmployeeInstance? inst = null;
             try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(rec.EmployeeId, out inst); } catch { }
             if (inst == null) return false;
+            // H-XFERROSTER-1 invariant: the promotion only counts when it produced a REAL employee (not a candidate,
+            // in the employee list) at the named workplace (or the bench). Anything else is refused, so the host
+            // gives the record back instead of closing its holding entry on a record no save holds.
+            try
+            {
+                bool pBench = string.IsNullOrEmpty(rec.AddressKey);
+                bool pCand = false; try { pCand = inst.IsCandidate; } catch { }
+                bool pListed = false; try { var pgi = SaveGameManager.Current; pListed = pgi?.EmployeeInstances != null && pgi.EmployeeInstances.Contains(inst); } catch { }
+                string pAt = ""; try { if (inst.assignedAddress != null) pAt = GameStateReader.AddressKey(inst.assignedAddress) ?? ""; } catch { }
+                if (pCand || !pListed || (!pBench && pAt != rec.AddressKey))
+                {
+                    Plugin.Logger.LogWarning($"[Transfer] promote of '{rec.EmployeeId}' did not produce a real employee at '{(pBench ? "the bench" : rec.AddressKey)}' (candidate={pCand} at='{pAt}') - refused, the host gives the record back.");
+                    return false;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] promote of '{rec.EmployeeId}': invariant check threw {ex.GetType().Name}: {ex.Message} - refused."); return false; }
             StampExtendedFields(inst, rec);
             return true;
         }

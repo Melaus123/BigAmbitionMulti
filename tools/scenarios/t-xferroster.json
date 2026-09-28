@@ -1,0 +1,266 @@
+{
+  "id": "T-XFERROSTER",
+  "title": "H-XFERROSTER-1: a pool owner (the host) hires one of its OWN candidates pointed at the partner's (the client's) shop and the move reaches the client before the host's next pool publish (holdpub) - the client replaces its company-candidate copy with the real record (ADOPTED into its shop), no candidate-drop for that id, the shop's roster republishes with the new hire, and the host ends up holding the client's copy at that shop; ends dissolved",
+  "preconditions": "Fixture save1 + in-run merge as T-P4B-PEOPLE-A. Dev build with the levers `hire` and `candidates holdpub` (BAMP_DEV). ROLES MIRRORED from the brief: save1's Client1 has no candidate pool (run T-XFERROSTER-20260927-200852, step 14 'OK 0 candidate(s) from Client1'), so the pool owner is the host and the copy holder / adopter is the client - the same adopt code path (ApplyOnOwner 'adopt' on the machine that holds the company copy). PREMISE: the host has at least one unclaimed candidate that the client holds as a company copy - step 14 FAILING with 'OK 0 candidate(s)' = SKIP (premise not met), not a defect. The hired candidate stays at the client's shop (a mutation of the rig save root only). Candidate counts are reported, not asserted.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "KeyNotFoundException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "\\[Transfer\\] .*the record is lost",
+    "\\[Transfer\\] .*held nowhere",
+    "\\[Transfer\\] promote of .* did not produce a real employee",
+    "Employee with ID (?!07rOQYJ4e0qG7VgOlCEZ2w==|y1PaNF5sUq\\+aXFkRExjOA==|\\+pKpXD8cEChXGXcyhu75w==).* not found"
+  ],
+  "oracles_report": [
+    "\\[Transfer\\]",
+    "\\[MergerStaff\\] adopt of .* replaces this machine's company-candidate copy",
+    "\\[MergerStaff\\] ADOPTED",
+    "\\[StaffRoster\\] published",
+    "\\[StaffRoster\\] '.*' employs '.*'; this save held a leftover",
+    "\\[Staff\\] removed '.*' via candidate-drop",
+    "\\[Candidates\\]"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST XFERROSTER START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "clientShop": "keys=\\['([^']+)'"
+      },
+      "note": "host view: the client's first flipped building = the hire's destination"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "the client's world settles; the host's staff copies and both candidate pools land"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "candidates ${hostPid}",
+      "expect_result": "^OK [1-9]\\d* candidate\\(s\\) from '${hostPid}': ",
+      "capture": {
+        "cand": "(?:': |; )([^|]+)\\|[^|]*\\|wage=[^|]*\\|expires=[^|]*\\|origin=${hostPid}\\|claimed=(?= ;|$)"
+      },
+      "note": "PREMISE (SKIP if 0): the client's company copies of the host's pool; the first unclaimed one"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "candidates mine",
+      "expect_result": "(?:': |; )${cand}\\|[^|]*\\|wage=[^|]*\\|expires=[^|]*\\|origin=mine\\|",
+      "note": "the host owns that candidate"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "employees ${clientShop}",
+      "expect_result": "^OK \\d+ employee",
+      "capture": {
+        "shopBefore": "^OK (\\d+) employee"
+      }
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "candidates holdpub 120",
+      "expect_result": "^OK candidates holdpub 120s",
+      "note": "the host's own pool publish is held, so the hire's move outruns it (the field race)"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "hire ${cand} ${clientShop}",
+      "expect_result": "^OK hire employee='${cand}' companyCopy=False hired=True assigned='${clientShop}'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Transfer\\] .*: released to the host - '.*' \\(${cand}\\) left '[^']*' for '${clientShop}'",
+          "within_s": 40
+        },
+        {
+          "role": "c",
+          "regex": "\\[MergerStaff\\] adopt of '${cand}' @ '${clientShop}' replaces this machine's company-candidate copy of '${hostPid}'s pool",
+          "within_s": 40
+        },
+        {
+          "role": "c",
+          "regex": "\\[MergerStaff\\] ADOPTED '.*' \\(${cand}\\) into '${clientShop}'",
+          "within_s": 40
+        },
+        {
+          "role": "h",
+          "regex": "\\[Transfer\\] .*: ADOPTED by '${clientPid}' at '${clientShop}' - one save holds the record again",
+          "within_s": 40
+        },
+        {
+          "role": "c",
+          "regex": "\\[StaffRoster\\] published '${clientShop}': \\d+ staff",
+          "within_s": 60
+        }
+      ],
+      "note": "pre-pointed hire (the native candidate dropdown + HireCandidate) -> the 2 s scan moves the new own record 'from the bench' to the partner's shop -> the copy holder replaces its candidate copy (H-XFERROSTER-1) and reconstructs the real record"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "transfers",
+      "expect_result": "^OK transfers pending=0$"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "employees id=${cand}",
+      "expect_result": "(?:': |; )${cand}\\|[^|]*\\|assigned=${clientShop}\\|injected=False",
+      "note": "the client's own real record at its shop"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "employees ${clientShop}",
+      "expect_result": "^OK \\d+ employee",
+      "expect_gt": {
+        "^OK ([0-9]+) employee": "${shopBefore}"
+      },
+      "note": "the shop's staff count grew (the +1 itself is read from the published line in the report)"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "sleep_s": 15,
+      "note": "roster apply cadence (10 s)"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "employees id=${cand}",
+      "expect_result": "(?:': |; )${cand}\\|[^|]*\\|assigned=${clientShop}\\|injected=True",
+      "note": "the host (the hirer) now holds the CLIENT's copy of the person at the client's shop"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "candidates holdpub 0",
+      "expect_result": "^OK candidates holdpub 0s",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Candidates\\] published my candidate pool",
+          "within_s": 20
+        }
+      ],
+      "note": "the host's delayed pool publish goes out WITHOUT the hired id; on the client the pool apply must skip it (no candidate-drop for it - see the report rows)"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "employees id=${cand}",
+      "expect_result": "(?:': |; )${cand}\\|[^|]*\\|assigned=${clientShop}\\|injected=False",
+      "note": "the record survived the owner's pool publish (the field loss was exactly this drop)"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 30,
+      "role": "both",
+      "cmd": "mark TEST XFERROSTER END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

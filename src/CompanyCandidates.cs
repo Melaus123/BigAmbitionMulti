@@ -80,8 +80,93 @@ namespace BigAmbitionsMP
         // -- identity --
 
         /// <summary>A display copy of a partner's candidate (never one of this save's own).</summary>
+        /// <summary>H-HIREDUP-1 (diagnostic): where the local record carrying a candidate id last came from -
+        /// (source, game day, hour, owner). Sources: pool-add / pool-readd (ApplyPool), purge-repair
+        /// (RepairAfterMessagePurge), restore-untagged (RestoreInjected put back a record that is no longer
+        /// tagged). Read only by the roster collision line; never consulted by a decision.</summary>
+        private static readonly Dictionary<string, (string src, int day, int hour, string owner)> _copyOrigin = new();
+#if BAMP_DEV
+        private static float _devHoldPubUntil;   // DEV `candidates holdpub <s>`: my own pool publish is held until then (race rig)
+#endif
+
         public static bool IsInjectedCandidate(string id)
             => !string.IsNullOrEmpty(id) && _injected.ContainsKey(id);
+
+        /// <summary>H-XFERROSTER-1 / H-HIREDUP-1 (user-approved 2026-09-27): a partner now EMPLOYS the person
+        /// this machine holds only as a company-candidate copy (the origin's hire, or the adopt of that hire
+        /// here, outran the origin's next pool publish). The copy is forgotten WITHOUT the candidate-drop
+        /// evidence line - nothing was dropped, the person was hired - and leaves the tag, the claim /
+        /// keep-alive / pending tables, the pool sets, the candidate list and the id dictionary; a later pool
+        /// that omits the id then skips it (RemoveInjected returns early for an untagged id). True = a tagged
+        /// copy was forgotten. MAIN THREAD.</summary>
+        public static bool ForgetCopyForAdopt(string id)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(id) || !_injected.TryGetValue(id, out var have)) return false;
+                _injected.Remove(id);
+                _claims.Remove(id); _keepalive.Remove(id); _pending.Remove(id);
+                _pendingAccept.Remove(id);   // a late GRANTED hire verdict must never re-run the native hire on the forgotten copy
+                foreach (var kv in _poolByOwner) kv.Value.Remove(id);
+                var gi = SaveGameManager.Current;
+                if (gi?.CandidateEmployeeInstances != null)
+                    for (int i = gi.CandidateEmployeeInstances.Count - 1; i >= 0; i--)
+                        if (gi.CandidateEmployeeInstances[i]?.id == id) gi.CandidateEmployeeInstances.RemoveAt(i);
+                try
+                {
+                    // Only the copy (or another candidate record) leaves the dictionary - never a hired record.
+                    if (EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(id, out var d)
+                        && (d == null || ReferenceEquals(d, have.inst) || d.IsCandidate))
+                        EmployeeHelper.EmployeeInstancesDictionary.Remove(id);
+                }
+                catch { }
+                RefreshIfOpen();
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} ForgetCopyForAdopt '{id}': {ex.GetType().Name}: {ex.Message}"); return false; }
+        }
+
+        /// <summary>H-HIREDUP-1 diagnostic: "source@day:hour" of the record carrying this id, or "unknown".</summary>
+        public static string CopyOriginOf(string id)
+        {
+            try { if (!string.IsNullOrEmpty(id) && _copyOrigin.TryGetValue(id, out var o)) return $"{o.src}@{o.day}:{o.hour}"; } catch { }
+            return "unknown";
+        }
+
+        /// <summary>H-HIREDUP-1 diagnostic: the pool owner last stamped for this id ("" when none).</summary>
+        public static string CopyOriginOwner(string id)
+        {
+            try { if (!string.IsNullOrEmpty(id) && _copyOrigin.TryGetValue(id, out var o)) return o.owner ?? ""; } catch { }
+            return "";
+        }
+
+        private static void StampOrigin(string id, string src, string owner)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(id)) return;
+                int d = 0, h = 0;
+                try { d = SaveGameManager.Current?.Day ?? 0; h = SaveGameManager.Current?.Hour ?? 0; } catch { }
+                if (string.IsNullOrEmpty(owner) && _copyOrigin.TryGetValue(id, out var was)) owner = was.owner;
+                _copyOrigin[id] = (src, d, h, owner ?? "");
+            }
+            catch { }
+        }
+
+#if BAMP_DEV
+        /// <summary>DEV `candidates holdpub <seconds>`: hold my own pool publish for a race rig (0 = release now).</summary>
+        public static void DevHoldPublish(float seconds)
+        {
+            try
+            {
+                _devHoldPubUntil = seconds > 0f ? Time.unscaledTime + seconds : 0f;
+                if (seconds <= 0f) PublishNow();
+                string what = seconds > 0f ? "held for " + seconds.ToString("F0", System.Globalization.CultureInfo.InvariantCulture) + " s" : "released";
+                Plugin.Logger.LogInfo($"{Tag} DEV holdpub: my own pool publish is {what}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} DevHoldPublish: {ex.GetType().Name}: {ex.Message}"); }
+        }
+#endif
 
         public static string OwnerOfCandidate(string id)
             => !string.IsNullOrEmpty(id) && _injected.TryGetValue(id, out var v) ? v.owner : "";
@@ -113,7 +198,11 @@ namespace BigAmbitionsMP
                 // own pool, so the host had nothing listing the candidate and logged "no member lists that
                 // candidate, dropped" three times before finally granting. Publish FIRST, and hold the
                 // re-assert until PublishMine has run once since this connection.
-                PublishMine();
+                bool holdPub = false;
+#if BAMP_DEV
+                holdPub = Time.unscaledTime < _devHoldPubUntil;   // DEV `candidates holdpub`
+#endif
+                if (!holdPub) PublishMine();
                 if (_publishedOnce) ReassertClaims();
                 SweepClaims();
                 SweepPending();
@@ -242,6 +331,7 @@ namespace BigAmbitionsMP
                     {
                         gi.CandidateEmployeeInstances.Add(have.inst);
                         try { EmployeeHelper.EmployeeInstancesDictionary[id] = have.inst; } catch { }
+                        StampOrigin(id, "pool-readd", ownerPid);   // H-HIREDUP-1 provenance
                         if (_logged.Add("readd|" + id))
                             Plugin.Logger.LogInfo($"{Tag} the copy of '{id}' had been removed here without a discard - put back from '{ownerPid}'s pool.");
                     }
@@ -266,6 +356,7 @@ namespace BigAmbitionsMP
                 try { EmployeeHelper.EmployeeInstancesDictionary[id] = inst; } catch { }
                 _injected[id] = (ownerPid, inst);
                 _everCopied.Add(id);
+                StampOrigin(id, "pool-add", ownerPid);   // H-HIREDUP-1 provenance
                 added++;
             }
             // ABSOLUTE set: a row this owner stopped listing has been hired, discarded or expired on the
@@ -827,6 +918,7 @@ namespace BigAmbitionsMP
                     if (there) continue;
                     gi.CandidateEmployeeInstances.Add(kv.Value.inst);
                     try { EmployeeHelper.EmployeeInstancesDictionary[id] = kv.Value.inst; } catch { }
+                    StampOrigin(id, "purge-repair", kv.Value.owner);   // H-HIREDUP-1 provenance
                     back++;
                 }
                 if (back > 0)
@@ -927,6 +1019,14 @@ namespace BigAmbitionsMP
                     if (c == null || string.IsNullOrEmpty(c.id)) continue;
                     bool there = false;
                     for (int i = 0; i < list.Count; i++) if (list[i]?.id == c.id) { there = true; break; }
+                    if (!_injected.ContainsKey(c.id))
+                    {
+                        // H-HIREDUP-1 (diagnostic only - the put-back itself is unchanged): the copy was untagged
+                        // while it sat out, so what goes back is an untagged leftover no pool will ever drop.
+                        StampOrigin(c.id, "restore-untagged", "");
+                        if (_logged.Add("restore-untagged|" + c.id))
+                            Plugin.Logger.LogInfo($"{Tag} restore ({context}) put back '{c.id}' which is no longer a company copy (dropped during the strip window) - untagged leftover.");
+                    }
                     if (!there) list.Add(c);
                     try { EmployeeHelper.EmployeeInstancesDictionary[c.id] = c; } catch { }
                 }
@@ -953,6 +1053,10 @@ namespace BigAmbitionsMP
             _logged.Clear(); _sigSent = null; _committing = false; _nextTick = 0f;
             _pendingAccept.Clear(); _verbHeld.Clear(); _hiring = false;
             _publishedOnce = false; _poolSeen = false; MessagePurgeArmed = false;
+            _copyOrigin.Clear();
+#if BAMP_DEV
+            _devHoldPubUntil = 0f;
+#endif
         }
 
         /// <summary>TestDrive readout: one line per candidate this machine can see.</summary>

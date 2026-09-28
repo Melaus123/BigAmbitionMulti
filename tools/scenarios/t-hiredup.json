@@ -1,0 +1,248 @@
+{
+  "id": "T-HIREDUP",
+  "title": "H-HIREDUP-1: the HOST hires one of its own candidates at its shop while the client still holds the company copy (the host's pool publish held) - the client's roster apply finds the leftover copy, logs the collision line 'owner's record wins' and injects the owner's record at that shop; no KeyNotFoundException, the schedule rows stay intact; ends dissolved",
+  "preconditions": "Fixture save1 + in-run merge as T-P4B-PEOPLE-A (host melaus owns '6 ba:street_seventhstreet'). Dev build with the levers `hire` and `candidates holdpub` (BAMP_DEV). PREMISE: the host has at least one unclaimed candidate that the client holds as a company copy - step 14 FAILING with 'OK 0 candidate(s)' means the pool is empty: report it as SKIP (premise not met), not as a defect. The hire is a mutation of the rig save root only. Candidate counts are reported, not asserted.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "hostShop": "6 ba:street_seventhstreet"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "KeyNotFoundException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "\\[Transfer\\] .*the record is lost",
+    "\\[Transfer\\] .*held nowhere",
+    "\\[Transfer\\] promote of .* did not produce a real employee",
+    "Employee with ID (?!07rOQYJ4e0qG7VgOlCEZ2w==|y1PaNF5sUq\\+aXFkRExjOA==|\\+pKpXD8cEChXGXcyhu75w==).* not found"
+  ],
+  "oracles_report": [
+    "\\[Transfer\\]",
+    "\\[MergerStaff\\] adopt of .* replaces this machine's company-candidate copy",
+    "\\[MergerStaff\\] ADOPTED",
+    "\\[StaffRoster\\] published",
+    "\\[StaffRoster\\] '.*' employs '.*'; this save held a leftover",
+    "\\[Staff\\] removed '.*' via candidate-drop",
+    "\\[Candidates\\]",
+    "\\[Candidates\\] restore .* untagged leftover"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST HIREDUP START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "the client's world settles; the host's staff copies and both candidate pools land"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "candidates ${hostPid}",
+      "expect_result": "^OK [1-9]\\d* candidate\\(s\\) from '${hostPid}': ",
+      "capture": {
+        "cand": "(?:': |; )([^|]+)\\|[^|]*\\|wage=[^|]*\\|expires=[^|]*\\|origin=${hostPid}\\|claimed=(?= ;|$)"
+      },
+      "note": "PREMISE (SKIP if 0): the client's company copies of the host's pool; the first unclaimed one"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "candidates mine",
+      "expect_result": "(?:': |; )${cand}\\|[^|]*\\|wage=[^|]*\\|expires=[^|]*\\|origin=mine\\|",
+      "note": "the host owns that candidate"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "schedrows ${hostShop}",
+      "expect_result": "^OK schedrows ",
+      "capture": {
+        "nidBefore": " notInDict=(\\d+) "
+      },
+      "note": "baseline of the client's schedule rows for the host's shop"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "candidates holdpub 120",
+      "expect_result": "^OK candidates holdpub 120s",
+      "note": "the host's pool publish is held, so its roster publish (the hire) reaches the client first"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "hire ${cand} ${hostShop}",
+      "expect_result": "^OK hire employee='${cand}' companyCopy=False hired=True assigned='${hostShop}'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[StaffRoster\\] published '${hostShop}': \\d+ staff",
+          "within_s": 60
+        },
+        {
+          "role": "c",
+          "regex": "\\[StaffRoster\\] '${hostPid}' employs '${cand}' .*this save held a leftover copy \\(tagged=True .* - owner's record wins, leftover discarded",
+          "within_s": 60
+        }
+      ],
+      "note": "H-HIREDUP-1: the client's local collision is a tagged company copy -> ForgetCopyForAdopt, then the owner's record is injected"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "sleep_s": 3
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "employees id=${cand}",
+      "expect_result": "(?:': |; )${cand}\\|[^|]*\\|assigned=${hostShop}\\|injected=True",
+      "note": "the client holds the HOST's record at the host's shop"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "rostertip ${hostShop}",
+      "expect_result": "^OK rostertip .*rows=.*${cand}:h=",
+      "note": "the tooltip view of the host's shop on the client lists the new hire"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "candidates ${hostPid}",
+      "refute_result": "(?:': |; )${cand}\\|",
+      "note": "the copy is no longer in the client's candidate list"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "schedrows ${hostShop}",
+      "expect_result": "^OK schedrows .* notInDict=${nidBefore} ",
+      "abort_on_fail": false,
+      "note": "schedule rows intact: no shift names an id missing from the page dictionary beyond the baseline"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "candidates holdpub 0",
+      "expect_result": "^OK candidates holdpub 0s",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Candidates\\] published my candidate pool",
+          "within_s": 20
+        }
+      ],
+      "note": "the host's delayed pool publish goes out without the hired id; the client's pool apply must skip it"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "employees id=${cand}",
+      "expect_result": "(?:': |; )${cand}\\|[^|]*\\|assigned=${hostShop}\\|injected=True",
+      "note": "the injected copy survived the pool publish"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 30,
+      "role": "both",
+      "cmd": "mark TEST HIREDUP END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

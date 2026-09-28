@@ -2212,6 +2212,51 @@ namespace BigAmbitionsMP
             return list;
         }
 
+        /// <summary>H-HIREDUP-1: the owner's roster names an id this save already holds and no adopt is pending.
+        /// A leftover company-candidate copy (ForgetCopyForAdopt) or an untagged candidate (the game's own
+        /// DiscardCandidate, which also ends a negotiation the local player has open, as declined) makes way:
+        /// true = removed, the caller injects the owner's record. A HIRED local record is kept (false; said once
+        /// per id). MAIN THREAD (TickRosterApply).</summary>
+        private static bool ResolveLocalCollision(GameInstance gi, string pid, StaffInfo s, string addr)
+        {
+            try
+            {
+                EmployeeInstance? le = null;
+                try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(s.Id, out le); } catch { }
+                bool tagged = CompanyCandidates.IsInjectedCandidate(s.Id);
+                bool isCand = false; try { isCand = le != null && le.IsCandidate; } catch { }
+                bool inCand = false, inEmp = false;
+                try { if (gi.CandidateEmployeeInstances != null) foreach (var c in gi.CandidateEmployeeInstances) if (c != null && c.id == s.Id) { inCand = true; break; } } catch { }
+                try { if (gi.EmployeeInstances != null) foreach (var e in gi.EmployeeInstances) if (e != null && e.id == s.Id) { inEmp = true; break; } } catch { }
+                string localAddr = ""; try { if (le?.assignedAddress != null) localAddr = GameStateReader.AddressKey(le.assignedAddress) ?? ""; } catch { }
+                int dayHired = 0; try { dayHired = le?.dayHired ?? 0; } catch { }
+                string copyOwner = tagged ? CompanyCandidates.OwnerOfCandidate(s.Id) : CompanyCandidates.CopyOriginOwner(s.Id);
+                string origin = CompanyCandidates.CopyOriginOf(s.Id);
+                string kind = tagged ? "copy" : isCand ? "candidate" : "hired";
+                string head = $"[StaffRoster] '{pid}' employs '{s.Id}' ('{s.Name}') at '{addr}'; this save held a leftover {kind} (tagged={tagged} copyOwner='{copyOwner}' inCandList={inCand} inEmpList={inEmp} localAddr='{localAddr}' dayHired={dayHired} origin={origin})";
+                if (!tagged && !isCand)
+                {
+                    if (_localCollisionLogged.Add(s.Id))
+                        Plugin.Logger.LogWarning(head + " - kept: a hired local record is never shadowed.");
+                    return false;
+                }
+                if (tagged) CompanyCandidates.ForgetCopyForAdopt(s.Id);
+                else if (le != null)
+                {
+                    try { Helpers.EmployeeHelper.DiscardCandidate(le); }
+                    catch (Exception dx)
+                    {
+                        Plugin.Logger.LogWarning($"[StaffRoster] discard of the leftover candidate '{s.Id}' threw {dx.GetType().Name}: {dx.Message} - removed by hand.");
+                        try { gi.CandidateEmployeeInstances?.Remove(le); } catch { }
+                        try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.Id); } catch { }
+                    }
+                }
+                Plugin.Logger.LogWarning(head + " - owner's record wins, leftover discarded.");
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] local collision on '{s?.Id}': {ex.GetType().Name}: {ex.Message} - left alone."); return false; }
+        }
+
         // Receiver main-thread apply: inject/update/remove records so gi matches the synced rosters.
         private static void TickRosterApply()
         {
@@ -2287,15 +2332,11 @@ namespace BigAmbitionsMP
                             // defensive skip (never shadow a genuinely local record).
                             if (!MergerEmployeeSync.ConfirmAdopt(s.Id))
                             {
-                                // A local record with a partner's id would be skipped in silence here - said once per id so a
-                                // duplicate can be reported (CROSS-HR-2b; no such case has been seen yet). The record stays
-                                // exactly as it is: a genuine local record is never shadowed.
-                                if (_localCollisionLogged.Add(s.Id))
-                                {
-                                    string localAddr = ""; try { if (Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(s.Id, out var le) && le != null) localAddr = GameStateReader.AddressKey(le.assignedAddress) ?? ""; } catch { }
-                                    Plugin.Logger.LogWarning($"[StaffRoster] '{v.pid}' publishes '{s.Id}' at '{addr}' but this save holds a LOCAL record with that id (address '{localAddr}') - left alone; two saves holding one id is a leak worth a report.");
-                                }
-                                continue;
+                                // H-HIREDUP-1 (user-approved 2026-09-27): split by what the local record IS. A leftover
+                                // company-candidate copy or an untagged candidate yields - the owner EMPLOYS this person
+                                // now - and the inject below runs; a HIRED local record keeps the CROSS-HR-2b skip (a
+                                // genuine local record is never shadowed).
+                                if (!ResolveLocalCollision(gi, v.pid, s, addr)) continue;
                             }
                             try
                             {
