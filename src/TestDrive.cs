@@ -763,7 +763,16 @@ namespace BigAmbitionsMP
                     var ceArgs = arg.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                     bool ceTakenOnly = ceArgs.Length > 1 && ceArgs[1] == "taken";   // R1: only bodies holding a taken line
                     if (ceArgs.Length == 0 || !int.TryParse(ceArgs[0], out ceWant) || ceWant <= 0)
-                        return "ERR usage: custevict <n> [taken] (a positive count of live bodies to send home)";
+                        return "ERR usage: custevict <n> [taken|served [seconds]] (a positive count of live bodies to send home)";
+                    if (ceArgs.Length > 1 && ceArgs[1] == "served")
+                    {
+                        // H1 leg (review of 95cf5e1): the first body a till is serving (checkout in progress) is sent home
+                        // by the per-tick arm; one body. Logs '[TestDrive] custevict served: evicted <id> ...'.
+                        float ceSec = 150f;
+                        if (ceArgs.Length > 2) float.TryParse(ceArgs[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out ceSec);
+                        CustomerHandoff.ArmEvictServed(ceSec);
+                        return $"OK custevict armed served for={ceSec:0}s bldg='{CustomerPuppets.MyBuilding}'";
+                    }
                     var ceTake = new System.Collections.Generic.List<Customer>();
                     try
                     {
@@ -780,6 +789,7 @@ namespace BigAmbitionsMP
                             if (ceC.order == null || ceC.order.completed) continue;  // Leave and the unpaid-exit counter read the BODY's
                             if (ceTakenOnly)
                             {
+                                if (ceC.state == CustomerState.BeingServed) continue;   // H1: a body at the till may still pay - the served leg's case
                                 bool ceHas = false;
                                 if (ceC.order.entries != null) foreach (var ceX in ceC.order.entries) if (CustomerHandoff.TakenOe(ceX) && !ceX.paid) ceHas = true;
                                 if (!ceHas) continue;

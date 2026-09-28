@@ -537,6 +537,7 @@ namespace BigAmbitionsMP
                 // handed-off body (CustomerHandoff.TakeOut), then the ones a live body of the same visit holds here (its
                 // order is finished once this forward books) - are booked without a second deduction.
                 var credits = CustomerHandoff.TakeOut(p.EntryId);
+                CustomerHandoff.AddSettledCredits(p.EntryId, credits);   // H1 backstop: units an unsold settle of this visit wrote off
                 var liveCredits = CustomerPuppets.LiveTakenOf(p.EntryId, reg);
                 var tillCredits = CustomerHandoff.TillTakenOf(reg, p.EntryId);   // then the visit's snapshot lines in the till
                 int credited = 0; bool bagCredited = false; float bagWs = 0f;

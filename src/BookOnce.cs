@@ -154,6 +154,82 @@ namespace BigAmbitionsMP
             catch { }
         }
 
+        // H2 (review of 95cf5e1): visits that walked out UNSOLD (released with nothing paid) on a partner's machine. Their
+        // entry leaves the owner's live hourly table (as a forward's claimed entry does, CustomerEntrySync Recheck B2) and
+        // the hourly pass sets any entry of theirs aside (HourlyBegin) - single-player never bills a customer who left. A
+        // later sale forward can still book the visit. Survives Reset (the entry is gone from the table anyway).
+        private static readonly Dictionary<string, string> _ended = new();
+        internal static int EndedUnsold;
+        internal static bool IsEnded(string id) => !string.IsNullOrEmpty(id) && _ended.ContainsKey(id);
+
+        // Fold R2 (2026-09-28): visits whose customer turned to leave on a partner's machine (early 220) - 'ending': the
+        // hourly pass sets their entry aside WITHOUT touching stock; the entry stays in the table so a sale forward still
+        // claims and books it (a forward wins over 'ending'). Ends at the release-time settle (EndUnsold), at a booking, or
+        // - if neither comes (the partner dropped) - at the owner's second hour boundary after the mark (logged).
+        private sealed class Ending { public string Addr = "", From = ""; public int MarkAbs; }
+        private static readonly Dictionary<string, Ending> _ending = new();
+        internal static int EndingMarked, EndingCleared;
+        private static int NowAbsHour()
+        {
+            try { var tm = TimeHelper.Now(); return (int)tm.Day * 24 + (int)tm.Hour; } catch { return -1; }
+        }
+
+        /// <summary>R2: the visit's sale arrived (a forward, which also covers a visit never registered here) - the mark ends.</summary>
+        internal static void ClearEnding(string id, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(id) || !_ending.Remove(id)) return;
+                Plugin.Logger.LogInfo($"[BookOnce] {id} ending mark ended: {why}.");
+            }
+            catch { }
+        }
+
+        /// <summary>R2, OWNER, MAIN THREAD: the early notice of a partner's leaving customer.</summary>
+        internal static void MarkEnding(BuildingRegistration? reg, string id, string from)
+        {
+            try
+            {
+                if (reg == null || string.IsNullOrEmpty(id) || IsBooked(id) || _ended.ContainsKey(id) || _ending.ContainsKey(id)) return;
+                if (_ending.Count > 2000) _ending.Clear();
+                var en = new Ending { Addr = GameStateReader.AddressKey(reg), From = from ?? "", MarkAbs = NowAbsHour() };
+                _ending[id] = en;
+                EndingMarked++;
+                Plugin.Logger.LogInfo($"[BookOnce] {id} ending - leaving on {en.From}'s machine: kept out of the hourly pass until its release report or its sale (stock untouched; cleared after the next hour if neither comes).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] mark ending: {ex.Message}"); }
+        }
+
+        /// <summary>H2, OWNER, MAIN THREAD (CustomerHandoff.SettleUnsoldWalkOut): the visit ended unsold - kept out of the
+        /// hourly pass. Idempotent.</summary>
+        internal static void EndUnsold(BuildingRegistration? reg, string id)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(id)) _ending.Remove(id);   // R2: the release report replaces the early mark
+                if (reg == null || string.IsNullOrEmpty(id) || IsBooked(id) || _ended.ContainsKey(id)) return;
+                if (_ended.Count > 4000) _ended.Clear();
+                string addr = GameStateReader.AddressKey(reg);
+                _ended[id] = addr;
+                EndedUnsold++;
+                int removed = 0;
+                var entries = CustomerEntrySync.EntriesOf(reg);
+                if (entries != null)
+                    for (int i = entries.Count - 1; i >= 0; i--)
+                    {
+                        var e = entries[i];
+                        if (e == null) continue;
+                        string? eid = IdOfOrder(e.order) ?? CustomerEntrySync.KnownIdOf(e);
+                        if (eid != id) continue;
+                        e.completed = true;
+                        entries.RemoveAt(i);
+                        removed++;
+                    }
+                Plugin.Logger.LogInfo($"[BookOnce] {id} ended unsold - kept out of the hourly pass ({(removed > 0 ? $"{removed} live entr{(removed == 1 ? "y" : "ies")} retired from @{addr}'s table" : "no live entry of it here")}; a later sale forward can still book it).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] end unsold: {ex.Message}"); }
+        }
+
         internal static int Count => _recs.Count;
         internal static bool IsRegistered(string id) => !string.IsNullOrEmpty(id) && _recs.ContainsKey(id);
         internal static bool IsBooked(string id) => !string.IsNullOrEmpty(id) && _recs.TryGetValue(id, out var r) && r.Booked;
@@ -568,11 +644,12 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (reg == null || _recs.Count == 0 || !MergerFlip.BooksHere(reg)) return null;
+                if (reg == null || (_recs.Count == 0 && _ended.Count == 0 && _ending.Count == 0) || !MergerFlip.BooksHere(reg)) return null;
+                string fn = $"{pass} hourly pass h{hour}";
+                ExpireEnding(reg, hour, fn);   // R2: an 'ending' mark lives through one hour boundary after the one it was marked in
                 var entries = CustomerEntrySync.EntriesOf(reg);
                 if (entries == null) return null;
                 var p = new Pass { Reg = reg, Entries = entries, Hour = hour, Name = pass };
-                string fn = $"{pass} hourly pass h{hour}";
                 for (int i = entries.Count - 1; i >= 0; i--)
                 {
                     var e = entries[i];
@@ -584,10 +661,17 @@ namespace BigAmbitionsMP
                         id = CustomerEntrySync.KnownIdOf(e);
                         if (id != null && e.order != null && _recs.ContainsKey(id)) MapOrder(e.order, id);
                     }
-                    if (id == null || !_recs.TryGetValue(id, out var r)) continue;
-                    if (r.Booked)
+                    if (id == null) continue;
+                    _recs.TryGetValue(id, out var r);
+                    bool isEnded = _ended.ContainsKey(id), isEnding = !isEnded && _ending.ContainsKey(id);
+                    bool ended = (isEnded || isEnding) && (r == null || !r.Booked);   // H2 / R2: a visit that left (or is leaving) unsold
+                    if (r == null && !ended) continue;
+                    if (ended || (r != null && r.Booked))
                     {
-                        NoteSuppressed(id, r, fn);
+                        if (ended) Plugin.Logger.LogInfo(isEnding
+                            ? $"[BookOnce] {id} ending (walking out on a partner's machine) - set aside by the {fn}; a sale forward can still book it."
+                            : $"[BookOnce] {id} ended unsold - kept out of the hourly pass ({fn}).");
+                        else if (r != null) NoteSuppressed(id, r, fn);
                         p.Aside.Add(new KeyValuePair<int, CustomerEntry>(i, e));
                         entries.RemoveAt(i);
                     }
@@ -640,6 +724,56 @@ namespace BigAmbitionsMP
             return string.Join(",", l);
         }
 
+        /// <summary>R2: at an hourly pass of <paramref name="reg"/> for <paramref name="hour"/>, an 'ending' mark made in an
+        /// EARLIER game hour (this is at least its second boundary) is cleared - booked ones silently, the rest logged.</summary>
+        private static void ExpireEnding(BuildingRegistration reg, int hour, string fn)
+        {
+            try
+            {
+                if (_ending.Count == 0) return;
+                string addr = GameStateReader.AddressKey(reg);
+                int nowAbs = NowAbsHour();
+                if (nowAbs < 0) return;
+                int passAbs = nowAbs - (nowAbs % 24) + hour;
+                if (hour > nowAbs % 24) passAbs -= 24;   // the pass is for an hour of the previous day
+                var drop = new List<string>();
+                foreach (var kv in _ending)
+                {
+                    if (kv.Value.Addr != addr) continue;
+                    if (IsBooked(kv.Key)) { drop.Add(kv.Key); continue; }
+                    if (kv.Value.MarkAbs >= 0 && passAbs > kv.Value.MarkAbs) drop.Add(kv.Key);
+                }
+                foreach (var id in drop)
+                {
+                    var en = _ending[id];
+                    _ending.Remove(id);
+                    if (IsBooked(id)) continue;
+                    EndingCleared++;
+                    Plugin.Logger.LogInfo($"[BookOnce] {id} ending mark cleared at the {fn}: no release report or sale from {en.From} since it was marked (h{(en.MarkAbs % 24 + 24) % 24}) - the entry is back in the normal flow.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] expire ending: {ex.Message}"); }
+        }
+
+        /// <summary>H2 readout: visits ended unsold at this address, and how many of them got booked all the same (must be 0).</summary>
+        private static string EndedReadout(string addr)
+        {
+            int n = 0, booked = 0;
+            try
+            {
+                foreach (var kv in _ended)
+                {
+                    if (!string.IsNullOrEmpty(addr) && kv.Value != addr) continue;
+                    n++;
+                    if (IsBooked(kv.Key)) booked++;
+                }
+            }
+            catch { }
+            int ending = 0;
+            try { foreach (var kv in _ending) if (string.IsNullOrEmpty(addr) || kv.Value.Addr == addr) ending++; } catch { }
+            return $"boEnded={n} boEndedBooked={booked} boEnding={ending} boEndingMarked={EndingMarked} boEndingCleared={EndingCleared}";
+        }
+
         internal static string Readout(string addr)
         {
             try
@@ -654,7 +788,7 @@ namespace BigAmbitionsMP
                 return $"boRegistered={reg} boBooked={booked} boUnbooked={reg - booked} boSuppressed={Suppressed} "
                      + $"boRegisteredBy={Tally(_registeredBy)} boBookedBy={Tally(_bookedBy)} boSuppressedBy={Tally(_suppressedBy)} "
                      + $"boUnpaidKept={UnpaidKept} boExitKept={ExitKept} boExitUnpaid={ExitUnpaid} boKeptBy={Tally(_keptBy)} "
-                     + $"boFinished={Finished} boCopyReturnsBlocked={CopyReturnsBlocked}";
+                     + $"boFinished={Finished} boCopyReturnsBlocked={CopyReturnsBlocked} {EndedReadout(addr)}";
             }
             catch (Exception ex) { return "boERR " + ex.Message; }
         }

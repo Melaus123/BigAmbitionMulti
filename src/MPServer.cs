@@ -4489,10 +4489,15 @@ namespace BigAmbitionsMP
             try
             {
                 if (p == null || string.IsNullOrEmpty(p.EntryId)) return;
+                // L3 (review of 95cf5e1): bounded - an id over 128 chars is dropped, at most 64 lines ride along.
+                if (p.EntryId.Length > 128) { Plugin.Logger.LogInfo($"[Stock] unsold walk-out from {senderPid}: an id over 128 chars - dropped."); return; }
+                if (p.Items != null && p.Items.Count > 64) p.Items = p.Items.GetRange(0, 64);
                 string? ownerPid = HelperRouteOwner(p.AddressKey, p.PlayerId, senderPid, MessageType.CustomerUnsoldLeave);
                 if (ownerPid == null) return;
                 if (ownerPid == MPConfig.PlayerId)
                     GameStatePatcher.EnqueueOnMainThread(() => CustomerHandoff.OnUnsoldLeave(p));
+                else if (!IsOnlinePid(ownerPid))
+                    Plugin.Logger.LogInfo($"[Stock] unsold walk-out {p.EntryId} for '{p.AddressKey}' from {p.PlayerId}: the owner {ownerPid} is offline - dropped (not queued).");
                 else
                     SendHubTo(ownerPid, MessageType.CustomerUnsoldLeave, p);
             }

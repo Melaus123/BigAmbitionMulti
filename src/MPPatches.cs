@@ -9410,6 +9410,16 @@ namespace BigAmbitionsMP
                 try { return HarmonyLib.AccessTools.FieldRefAccess<EmployeeStationController, bool>("_isUpdatingEmployee"); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] _isUpdatingEmployee ref: {ex.Message}"); return null; }
             }
+            private static readonly Func<EmployeeStationController, bool>? _placing = MakePlacingCheck();
+            private static Func<EmployeeStationController, bool>? MakePlacingCheck()
+            {
+                try
+                {
+                    var m = HarmonyLib.AccessTools.Method(typeof(EmployeeStationController), "IsItemBeingModifiedInPlacementMode");
+                    return m == null ? null : (Func<EmployeeStationController, bool>)Delegate.CreateDelegate(typeof(Func<EmployeeStationController, bool>), m);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] placement-mode check: {ex.Message}"); return null; }
+            }
             static void Postfix(EmployeeStationController __instance, ref bool __result)
             {
                 if (__result) return;
@@ -9422,6 +9432,7 @@ namespace BigAmbitionsMP
                     bool duty = MPRegisterSync.IsEmployeeDutyStation(__instance);   // field 150521: identity-matched
                     bool roster = !duty && MPRegisterSync.HasRosterFor(MPRegisterSync.CurrentShopAddress);
                     if (!duty && !roster) return;
+                    try { if (_placing != null && _placing(__instance)) return; } catch { }   // re-check #1: never while the item is being moved (the native gate's own refusal)
                     bool unstaffed = false;
                     try { unstaffed = __instance.employeeInstance == null; } catch { }
                     int stale = 0;

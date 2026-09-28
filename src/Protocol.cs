@@ -1081,6 +1081,9 @@ namespace BigAmbitionsMP
         public string PlayerId   { get; set; } = "";   // the partner whose machine the visit walked out on
         public string EntryId    { get; set; } = "";   // the visit id (schedule entry id)
         public List<string> Items { get; set; } = new();
+        // Fold R2 (2026-09-28, additive): true = the EARLY notice sent when the customer turns to leave (no stock): the
+        // owner keeps the visit out of its hourly pass ('ending'); false = the release-time report that settles the stock.
+        public bool Leaving { get; set; }
     }
 
     public class CustomerVisitStatePayload

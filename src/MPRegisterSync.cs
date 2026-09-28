@@ -1487,6 +1487,7 @@ namespace BigAmbitionsMP
                     var d = kv.Value;
                     if (!d.employee || d.playerId == MPConfig.PlayerId || string.IsNullOrEmpty(d.address)) continue;
                     if (_hideBodyAt.ContainsKey(kv.Key)) continue;                                  // F3: a player's stand-in holds this key
+                    try { if (!string.IsNullOrEmpty(d.stationId) && Helpers.PlayerHelper.IsPlayerWorkingInEmployeeStation(d.stationId)) continue; } catch { }   // re-check #2: this machine's player works it
                     if (!regByAddr.TryGetValue(d.address, out var reg))
                     {
                         reg = null;

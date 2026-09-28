@@ -11,8 +11,8 @@
     "shop": "20 ba:street_fifthavenue"
   },
   "oracles_absent": [
-    "\\[Stock\\] (settle unsold|unsold leave in|unsold leave send|HandleCustomerUnsoldLeave)\\b[^:]*: ",
-    "\\[BookOnce\\] (register|book|till watch|hourly begin|hourly restore|hourly end)\\b[^:]*: ",
+    "\\[Stock\\] (settle unsold|unsold leave in|unsold leave send|unsold release|unsold cancel|unsold flush|settled credits|HandleCustomerUnsoldLeave)\\b[^:]*: ",
+    "\\[BookOnce\\] (register|book|end unsold|mark ending|expire ending|till watch|hourly begin|hourly restore|hourly end)\\b[^:]*: ",
     "\\[TickIso\\]",
     "\\[Guard\\]",
     "(?<!swallowed )NullReferenceException",
@@ -31,7 +31,13 @@
     "\\[Business\\] forwarded order .* accepted \\(handed off\\)",
     "\\[Business\\] forwarded order .* rejected",
     "\\[Business\\] adopted helper-served order",
-    "\\[Handoff\\] hourly pass \\(native\\) @.+ h[0-9]+: [0-9]+ handed-off entr"
+    "\\[Handoff\\] hourly pass \\(native\\) @.+ h[0-9]+: [0-9]+ handed-off entr",
+    "\\[TestDrive\\] custevict served",
+    "\\[Stock\\] \\S+ (leaving unsold here|paid at the till after its Leave began|was paid after its Leave began)",
+    "\\[Stock\\] forward \\S+ arrived after its unsold settle",
+    "\\[BookOnce\\] \\S+ ended unsold",
+    "\\[BookOnce\\] \\S+ ending",
+    "\\[Stock\\] leaving notice "
   ],
   "steps": [
     {
@@ -244,7 +250,13 @@
       "cmd": "tilldupes ${shop}",
       "note": "REPORT-ONLY (2026-09-26 manager ruling: the game's own hourly pass re-adds orders already in the till when the owner leaves mid-hour - a native duplicate reference cleaned at the day roll, not this change's defect; the money PASS criterion is the handoffbook line dupIds=0 lostIds=0 identity=ok): the till starts clean"
     },
-    {"seq": 101, "role": "h", "cmd": "stockdelta ${shop} mark", "expect_result": "^OK stockdelta .* marked ", "note": "STOCK ORACLE mark before the leg"},
+    {
+      "seq": 101,
+      "role": "h",
+      "cmd": "stockdelta ${shop} mark",
+      "expect_result": "^OK stockdelta .* marked ",
+      "note": "STOCK ORACLE mark before the leg"
+    },
     {
       "seq": 31,
       "role": "both",
@@ -329,17 +341,159 @@
         "l1Booked": "booked=(\\d+)",
         "l1Paid": "paid=(\\d+)",
         "l1Fwd": "forwardsIn=(\\d+)",
-        "l1BoReg": "boRegistered=(\\d+)", "l1BoSup": "boSuppressed=(\\d+)", "l1BoBy": "boBookedBy=(\\S+)", "l1BoSupBy": "boSuppressedBy=(\\S+)"
+        "l1BoReg": "boRegistered=(\\d+)",
+        "l1BoSup": "boSuppressed=(\\d+)",
+        "l1BoBy": "boBookedBy=(\\S+)",
+        "l1BoSupBy": "boSuppressedBy=(\\S+)"
       },
       "note": "LEG 1 ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },
-    {"seq": 102, "role": "h", "cmd": "stockdelta ${shop}", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sdC1Lost": "lostTotal=(\\d+)", "sdC1LostNamed": "lostNamed=(\\S+)", "sdC1LostUnx": "lostUnexplained=(\\d+)", "sdC1Bad": "bad=(\\S+)", "sdC1Once": "once=(\\S+)"}, "note": "STOCK ORACLE (fold S1 2026-09-27, HARD): stockOk=True needs the per-unit identity AND lostUnexplained=0 (every lost unit has a named cause: exitNative / pending) - the leg before this step"},
-    {"seq": 103, "role": "h", "cmd": "stockdelta ${shop} mark", "expect_result": "^OK stockdelta .* marked ", "note": "STOCK ORACLE mark before the leg"},
-    {"seq": 105, "role": "both", "cmd": "mark TEST T-HANDOFF3 LEG1B PARTNER-EVICTS-UNSOLD", "expect_result": "OK MARK"},
-    {"seq": 106, "role": "c", "cmd": "custevict 1 taken", "expect_result": "^OK custevict asked=1 evicted=1 ", "abort_on_fail": false, "capture": {"r1Evict": "ids=(\\S+)"}, "expect_log": [{"role": "c", "regex": "\\[Stock\\] \\S+ walked out unsold here @${shop} \\(the owner keeps the books\\): [0-9]+ processed unit", "within_s": 10}, {"role": "h", "regex": "\\[Stock\\] \\S+ walked out unsold on ${clientPid}'s machine: [0-9]+/[1-9][0-9]* unit\\(s\\) my shelves gave back on a shelf; [0-9]+ picked-but-unprocessed", "within_s": 10}], "note": "R1 (hand-off stock S4, 2026-09-27): the OWNER is OUTSIDE; the client (simulator) sends one live body holding a taken line home through the game's own InstantlyLeave -> Leave, with its order open and nothing paid. The client reports the processed lines to the owner (message 220 via the host); the owner puts back on HIS shelves min(those lines, the units his shelves gave the visit) and names the rest as the native pick-then-leave loss (leftUnprocessed). ids= prints visit:proc/taken/lines per body."},
-    {"seq": 107, "role": "h", "sleep_s": 2},
-    {"seq": 108, "role": "h", "cmd": "stockdelta ${shop}", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sdR1Left": "leftUnprocessed=(\\d+)", "sdR1Out": "outDelta=(-?\\d+)", "sdR1Drop": "dropTotal=(-?\\d+)", "sdR1Bad": "bad=(\\S+)", "sdR1Once": "once=(\\S+)"}, "note": "STOCK ORACLE (R1, HARD) on the OWNER, still outside: the returned units are back in his stock (dropTotal falls), the visit's out units are gone (outDelta), and the picked-but-unprocessed rest is leftUnprocessed - stockOk=True lostUnexplained=0"},
-    {"seq": 109, "role": "h", "cmd": "handoffbook ${shop}", "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ", "abort_on_fail": false, "note": "R1: the unsold walk-out books nothing"},
+    {
+      "seq": 102,
+      "role": "h",
+      "cmd": "stockdelta ${shop}",
+      "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ",
+      "abort_on_fail": false,
+      "capture": {
+        "sdC1Lost": "lostTotal=(\\d+)",
+        "sdC1LostNamed": "lostNamed=(\\S+)",
+        "sdC1LostUnx": "lostUnexplained=(\\d+)",
+        "sdC1Bad": "bad=(\\S+)",
+        "sdC1Once": "once=(\\S+)"
+      },
+      "note": "STOCK ORACLE (fold S1 2026-09-27, HARD): stockOk=True needs the per-unit identity AND lostUnexplained=0 (every lost unit has a named cause: exitNative / pending) - the leg before this step"
+    },
+    {
+      "seq": 103,
+      "role": "h",
+      "cmd": "stockdelta ${shop} mark",
+      "expect_result": "^OK stockdelta .* marked ",
+      "note": "STOCK ORACLE mark before the leg"
+    },
+    {
+      "seq": 105,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 LEG1B PARTNER-EVICTS-UNSOLD",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 106,
+      "role": "c",
+      "cmd": "custevict 1 taken",
+      "expect_result": "^OK custevict asked=1 evicted=1 ",
+      "abort_on_fail": false,
+      "capture": {
+        "r1Evict": "ids=(\\S+)"
+      },
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Stock\\] \\S+ walked out unsold here @${shop} \\(the owner keeps the books\\): [0-9]+ processed unit",
+          "within_s": 45
+        },
+        {
+          "role": "h",
+          "regex": "\\[Stock\\] (\\S+ walked out unsold on ${clientPid}'s machine: [0-9]+/[1-9][0-9]* unit\\(s\\) my shelves gave back on a shelf; [0-9]+ picked-but-unprocessed|unsold walk-out \\S+ from ${clientPid} @.+: no unit of my shelves was out for it)",
+          "within_s": 45
+        },
+        {
+          "role": "h",
+          "regex": "\\[BookOnce\\] \\S+ ended unsold - kept out of the hourly pass",
+          "within_s": 45
+        },
+        {
+          "role": "h",
+          "regex": "\\[BookOnce\\] \\S+ ending - leaving on ${clientPid}'s machine",
+          "within_s": 15
+        }
+      ],
+      "note": "R1 (hand-off stock S4, 2026-09-27): the OWNER is OUTSIDE; the client (simulator) sends one live body holding a taken line home through the game's own InstantlyLeave -> Leave, with its order open and nothing paid. The client reports the processed lines to the owner (message 220 via the host); the owner puts back on HIS shelves min(those lines, the units his shelves gave the visit) and names the rest as the native pick-then-leave loss (leftUnprocessed). ids= prints visit:proc/taken/lines per body. H1/H2 (review of 95cf5e1): the client HOLDS the report at Leave and sends it when the body is released at the exit (hence 45 s), only if nothing was paid; 'taken' never picks a body the till is serving. The owner's settle also ends the visit in BookOnce (its entry leaves his live hourly table). R2 (2026-09-28): the moment the customer turns to leave the client sends an EARLY notice (220 Leaving, no stock); the owner marks the visit 'ending' so an hour boundary during the walk out sets its entry aside ('ending ... set aside by the native hourly pass', report) instead of billing it. R2 rig fold (run T-HANDOFF3-20260928-012720): 'taken' can pick a visit born on the client after leg 1, whose units came off the client's replica shelves - none of the owner's units are out for it, so the owner correctly settles nothing ('no unit of my shelves was out for it'); either outcome passes, the stock identity below stays hard."
+    },
+    {
+      "seq": 107,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 108,
+      "role": "h",
+      "cmd": "stockdelta ${shop}",
+      "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ",
+      "abort_on_fail": false,
+      "capture": {
+        "sdR1Left": "leftUnprocessed=(\\d+)",
+        "sdR1Out": "outDelta=(-?\\d+)",
+        "sdR1Drop": "dropTotal=(-?\\d+)",
+        "sdR1Bad": "bad=(\\S+)",
+        "sdR1Once": "once=(\\S+)"
+      },
+      "note": "STOCK ORACLE (R1, HARD) on the OWNER, still outside: the returned units are back in his stock (dropTotal falls), the visit's out units are gone (outDelta), and the picked-but-unprocessed rest is leftUnprocessed - stockOk=True lostUnexplained=0"
+    },
+    {
+      "seq": 109,
+      "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ",
+      "abort_on_fail": false,
+      "note": "R1: the unsold walk-out books nothing"
+    },
+    {
+      "seq": 110,
+      "role": "h",
+      "cmd": "stockdelta ${shop} mark",
+      "expect_result": "^OK stockdelta .* marked ",
+      "note": "STOCK ORACLE mark before the H1 leg"
+    },
+    {
+      "seq": 111,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 LEG1C H1 EVICT-AT-THE-TILL",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 112,
+      "role": "c",
+      "cmd": "custevict 1 served 150",
+      "expect_result": "^OK custevict armed served ",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] custevict served: evicted \\S+ at the till",
+          "within_s": 160
+        }
+      ],
+      "abort_on_fail": false,
+      "note": "H1 LEG (review of 95cf5e1, HIGH): the OWNER is outside; the client (simulator) sends home the first body its cashier is SERVING (CustomerState.BeingServed - the checkout is in progress) through the game's own InstantlyLeave -> Leave. Leave only starts the walk out; the cashier's Order.Pay still runs (no completed check) - a real sale. The client must hold its unsold report and cancel it at the Pay (report line 'paid at the till after its Leave began'), the forward books the sale once on the owner, and ONE unit leaves the owner's shelves - no 220 settle for that id (stockdelta M1: settledAndSold=0)."
+    },
+    {
+      "seq": 113,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "the checkout finishes, the body walks out and is released, the forward reaches the owner"
+    },
+    {
+      "seq": 114,
+      "role": "h",
+      "cmd": "stockdelta ${shop}",
+      "expect_result": "^OK stockdelta .* settledAndSold=0 .*lostUnexplained=0 .*stockOk=True ",
+      "abort_on_fail": false,
+      "capture": {
+        "sdH1Settled": "settledUnsold=(\\d+)",
+        "sdH1Fwd": "fwdSold=(\\d+)",
+        "sdH1Drop": "dropTotal=(-?\\d+)",
+        "sdH1Bad": "bad=(\\S+)",
+        "sdH1Once": "once=(\\S+)"
+      },
+      "note": "H1 STOCK ORACLE (HARD, M1 stricter): no visit id is both settled unsold and forwarded/booked (settledAndSold=0, a flagged id fails stockOk), the per-unit identity holds (the served sale's units: fwdSold, no fresh second deduction) and lostUnexplained=0"
+    },
+    {
+      "seq": 115,
+      "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok .*boEndedBooked=0",
+      "abort_on_fail": false,
+      "note": "H1: the served sale books exactly once"
+    },
     {
       "seq": 38,
       "role": "both",
@@ -373,11 +527,49 @@
         "f1Booked": "booked=(\\d+)",
         "f1Paid": "paid=(\\d+)",
         "f1Fwd": "forwardsIn=(\\d+)",
-        "f1BoReg": "boRegistered=(\\d+)", "f1BoSup": "boSuppressed=(\\d+)", "f1BoBy": "boBookedBy=(\\S+)", "f1BoSupBy": "boSuppressedBy=(\\S+)"
+        "f1BoReg": "boRegistered=(\\d+)",
+        "f1BoSup": "boSuppressed=(\\d+)",
+        "f1BoBy": "boBookedBy=(\\S+)",
+        "f1BoSupBy": "boSuppressedBy=(\\S+)"
       },
       "note": "F1 LEG ORDER-COUNT IDENTITY on the booking machine: every customer that crossed a hand-off is booked exactly once - orders booked == customers who paid on either machine (live checkout / hourly pass here, or a forwarded sale from the partner)"
     },
-    {"seq": 104, "role": "h", "cmd": "stockdelta ${shop}", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sdC2Lost": "lostTotal=(\\d+)", "sdC2LostNamed": "lostNamed=(\\S+)", "sdC2LostUnx": "lostUnexplained=(\\d+)", "sdC2Bad": "bad=(\\S+)", "sdC2Once": "once=(\\S+)"}, "note": "STOCK ORACLE (fold S1 2026-09-27, HARD): stockOk=True needs the per-unit identity AND lostUnexplained=0 (every lost unit has a named cause: exitNative / pending) - the leg before this step"},
+    {
+      "seq": 104,
+      "role": "h",
+      "cmd": "stockdelta ${shop}",
+      "expect_result": "^OK stockdelta .* settledAndSold=0 .*lostUnexplained=0 .*stockOk=True ",
+      "abort_on_fail": false,
+      "capture": {
+        "sdC2Lost": "lostTotal=(\\d+)",
+        "sdC2LostNamed": "lostNamed=(\\S+)",
+        "sdC2LostUnx": "lostUnexplained=(\\d+)",
+        "sdC2Bad": "bad=(\\S+)",
+        "sdC2Once": "once=(\\S+)"
+      },
+      "note": "STOCK ORACLE (fold S1 2026-09-27, HARD): stockOk=True needs the per-unit identity AND lostUnexplained=0 (every lost unit has a named cause: exitNative / pending) - the leg before this step"
+    },
+    {
+      "seq": 116,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 F1B H2 ENDED-UNSOLD-NOT-REBOOKED",
+      "expect_result": "OK MARK",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 117,
+      "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok .*boEnded=[1-9][0-9]* boEndedBooked=0 ",
+      "abort_on_fail": false,
+      "capture": {
+        "h2Ended": "boEnded=(\\d+)",
+        "h2EndedBooked": "boEndedBooked=(\\d+)",
+        "h2Ending": "boEndingMarked=(\\d+)",
+        "h2EndingCleared": "boEndingCleared=(\\d+)"
+      },
+      "note": "H2 LEG (review of 95cf5e1, HIGH): the leg-1B visit walked out UNSOLD on the partner while the owner was outside; the owner stayed outside across the hour boundary (F1 leg). His hourly pass must NOT book that id (boEndedBooked=0 - the entry left his live table at the settle; stockdelta above flags any settled id booked: settledAndSold=0)."
+    },
     {
       "seq": 41,
       "role": "both",
