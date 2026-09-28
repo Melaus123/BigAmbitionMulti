@@ -304,7 +304,99 @@ namespace BigAmbitionsMP
         }
 
         // ── D. Release the holders of an item about to be destroyed (H-REFRESHSEAT-1, 2026-09-27) ────────
-        internal static int ReleasedSeated, ReleasedWalking, ReleasedOther, ReleasedQueueMoved, ReleasedQueueLeft;
+        internal static int ReleasedSeated, ReleasedWalking, ReleasedOther, ReleasedQueueMoved, ReleasedQueueLeft, ReleasedOrdersCancelled;
+        /// <summary>The last non-empty release batch: moved/left/cancelled (DEV readout, lastRel=).</summary>
+        internal static string LastRelease = "-";
+
+        private sealed class HolderRow { public Customer C = null!; public int Kind; public bool Queue; }
+        private sealed class QueueMove { public Customer C = null!; public WaitingLine Line = null!; public int Index; }
+        // One release BATCH = one refresh's kill loop (or one grab / dev remove): the id -> holders map is built ONCE, at
+        // the batch's first item (review fold R5: one ReadHeld per customer, not per item), while every item is still
+        // live and listed; seat / machine holders go at their item's call (before its destroy, as before); queuers are
+        // held until FlushRelease, when the whole kill set of the batch is known (folds R1/R2).
+        private static Dictionary<string, List<HolderRow>>? _relMap;
+        private static int _relFrame = -1;
+        private static readonly HashSet<string> _relKilled = new HashSet<string>();
+        private static readonly HashSet<Customer> _relDone = new HashSet<Customer>();
+        private static readonly List<QueueMove> _relQueue = new List<QueueMove>();
+        private static readonly List<string> _relItems = new List<string>();
+        private static int _bSeated, _bWalking, _bOther, _bCancelled;
+        private static string _bWhy = "";
+
+        private static void AddHolder(Dictionary<string, List<HolderRow>> map, string id, Customer c, int kind, bool queue)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            if (!map.TryGetValue(id, out var l)) { l = new List<HolderRow>(); map[id] = l; }
+            foreach (var r in l) if (ReferenceEquals(r.C, c) && r.Queue == queue) return;
+            l.Add(new HolderRow { C = c, Kind = kind, Queue = queue });
+        }
+
+        /// <summary>The live station waiting lines of the active building, read from its item controllers
+        /// (EmployeeStationController.GetWaitingLine - the game's own IWaitingLineHolder route, WaitingLinesHelper:39-48).</summary>
+        internal static List<WaitingLine> StationLines()
+        {
+            var l = new List<WaitingLine>();
+            try
+            {
+                var bm = BM();
+                if (bm == null || bm.allItemControllers == null) return l;
+                foreach (var ic in bm.allItemControllers)
+                {
+                    try
+                    {
+                        if (!(ic is EmployeeStationController esc) || esc == null) continue;
+                        var wl = esc.GetWaitingLine();
+                        if (wl != null && wl.data != null) l.Add(wl);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return l;
+        }
+
+        private static Dictionary<string, List<HolderRow>> BuildHolderMap()
+        {
+            var map = new Dictionary<string, List<HolderRow>>();
+            try
+            {
+                var all = IndoorCustomerSpawner.Customers;
+                if (all == null || all.Count == 0) return map;
+                foreach (var c in all.ToArray())
+                {
+                    try
+                    {
+                        if (c == null || c.isPlayer) continue;
+                        var h = ReadHeld(c);
+                        if (h.Kind != KNone) AddHolder(map, h.Item, c, h.Kind, false);
+                        try { var st = c.isSittingOn; if (st != null) AddHolder(map, IdOf(st.GetAttachedChair), c, KSeat, false); } catch { }
+                        // Review fold R3: a slot-machine sitter holds the CHAIR (ReadHeld) AND the machine the chair is
+                        // parented to (SitInASlotMachine.OnStart: chair.parentItemController is the controller) - editing
+                        // or grabbing the machine must release it too (else the chair stays Occupied and the task NREs).
+                        try
+                        {
+                            foreach (var t in Tasks<SitInASlotMachine>(c))
+                                if (t != null && t._slotMachineChair != null)
+                                {
+                                    AddHolder(map, IdOf(t._slotMachineChair.parentItemController), c, KSlot, false);
+                                    if (t._slotMachineController != null) AddHolder(map, IdOf(t._slotMachineController), c, KSlot, false);
+                                }
+                            foreach (var t in Tasks<SitInASlotMachineInstantly>(c))
+                                if (t != null && t._slotMachineChair != null)
+                                {
+                                    AddHolder(map, IdOf(t._slotMachineChair.parentItemController), c, KSlot, false);
+                                    if (t._slotMachineController != null) AddHolder(map, IdOf(t._slotMachineController), c, KSlot, false);
+                                }
+                        }
+                        catch { }
+                        if (h.QueueItem.Length > 0) AddHolder(map, h.QueueItem, c, KNone, true);
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: holder map: {ex.GetType().Name}: {ex.Message}"); }
+            return map;
+        }
 
         /// <summary>H-REFRESHSEAT-1 (user-approved 2026-09-27): a remote edit (interior refresh kill loop, conveyed
         /// grab) is about to Destroy item <paramref name="id"/>. The game itself never destroys an occupied item (pick-up
@@ -312,32 +404,45 @@ namespace BigAmbitionsMP
         /// object: ResetItemsInTable then throws at the seat transform after clearing 'occupied' but before nulling
         /// isSittingOn, and every later leave re-throws (the field hang). Runs BEFORE the Destroy (frame-deferred),
         /// while the seat transforms still live, on the live NATIVE customers of THIS machine only (followers hold
-        /// puppets, which hold no seat): a holder of the item (table seat taken or walked to, gym machine, slot chair,
-        /// casino table, cinema seat) or of the seat's attached chair takes the game's own shop-closing exit
-        /// (InstantlyLeave = off the line + Leave); a queuer of the item's line takes the game's own station-lost-
-        /// worker path (MoveCustomerToAnotherWaitingLine: the least crowded OTHER line, else Leave).</summary>
+        /// puppets, which hold no seat): a holder of the item (table seat taken or walked to, gym machine, slot chair
+        /// or its machine, casino table, cinema seat) or of the seat's attached chair takes the game's own shop-closing
+        /// exit (InstantlyLeave = off the line + Leave) at once. A station's in-progress checkout is cancelled the
+        /// game's way (Employee.OnNewHour -> CancelCurrentOrder; review fold R4) so it cannot book a sale after the
+        /// customer's goods went back. Its queuers are QUEUED for <see cref="FlushRelease"/>, which the caller runs
+        /// once every item of the batch has been through here. NOT handled (manager, 2026-09-27): a PLAYER standing
+        /// in the edited till's line (the native path would set playerCustomer on the new station) - skipped.</summary>
         internal static void ReleaseHoldersOf(ItemController? ic, string id, string why)
         {
             try
             {
                 if (string.IsNullOrEmpty(id)) return;
-                var all = IndoorCustomerSpawner.Customers;
-                if (all == null || all.Count == 0) return;
-                int seated = 0, walking = 0, other = 0, qMoved = 0, qLeft = 0;
-                var snap = all.ToArray();   // Leave / a line move may touch the list; only on a destroy, never per frame
-                foreach (var c in snap)
+                int f = Time.frameCount;
+                if (_relMap != null && _relFrame != f) FlushRelease();   // a batch whose flush never ran (a throw): close it first
+                if (_relMap == null) { _relMap = BuildHolderMap(); _relFrame = f; _bWhy = why; }
+                _relKilled.Add(id);
+                MarkDying(ic);
+                // R4: the station's own checkout in progress is cancelled before its queue is touched.
+                try
+                {
+                    if (ic is EmployeeStationController esc && esc.employee != null)
+                    {
+                        var emp = esc.employee;
+                        var cu = emp.customer;
+                        if (cu != null && !cu.isPlayer && emp.isActiveAndEnabled) { emp.StartCoroutine(emp.CancelCurrentOrder()); _bCancelled++; }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: '{id}' ({why}) cancel order: {ex.GetType().Name}: {ex.Message}"); }
+                if (!_relMap.TryGetValue(id, out var rows)) return;
+                bool any = false;
+                foreach (var r in rows)
                 {
                     try
                     {
-                        if (c == null || c.isPlayer) continue;
-                        var h = ReadHeld(c);
-                        bool holds = h.Kind != KNone && h.Item == id;
-                        if (!holds)
+                        var c = r.C;
+                        if (c == null || _relDone.Contains(c)) continue;
+                        if (!r.Queue)
                         {
-                            try { var st = c.isSittingOn; if (st != null && IdOf(st.GetAttachedChair) == id) holds = true; } catch { }
-                        }
-                        if (holds)
-                        {
+                            _relDone.Add(c);
                             bool sat = false;
                             try { sat = c.tpc != null && c.tpc.isSittingOn != null; } catch { }
                             if (CustomerHandoff.IsLeavingBody(c))
@@ -346,30 +451,188 @@ namespace BigAmbitionsMP
                                 if (c.isSittingOn != null) c.ResetItemsInTable();
                             }
                             else c.InstantlyLeave();
-                            if (h.Kind == KSeat || h.Kind == KNone) { if (sat) seated++; else walking++; }
-                            else other++;
+                            if (r.Kind == KSeat || r.Kind == KNone) { if (sat) _bSeated++; else _bWalking++; }
+                            else _bOther++;
+                            any = true;
                             continue;
                         }
-                        if (h.QueueItem.Length > 0 && h.QueueItem == id)
-                        {
-                            var wl = c.assignedWaitingLine;
-                            if (wl == null || wl.customersManagement == null || CustomerHandoff.IsLeavingBody(c)) continue;
-                            wl.customersManagement.MoveCustomerToAnotherWaitingLine(c);
-                            var now = c.assignedWaitingLine;
-                            if (now != null && !ReferenceEquals(now, wl)) qMoved++; else qLeft++;
-                        }
+                        var wl = c.assignedWaitingLine;
+                        if (wl == null || wl.customersManagement == null || wl.data == null || CustomerHandoff.IsLeavingBody(c)) continue;
+                        if (IdOf(wl.ItemController) != id) continue;
+                        int idx = -1;
+                        try { idx = wl.data.customers != null ? wl.data.customers.IndexOf(c) : -1; } catch { }
+                        _relQueue.Add(new QueueMove { C = c, Line = wl, Index = idx < 0 ? int.MaxValue : idx });
+                        any = true;
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: '{id}' ({why}): {ex.GetType().Name}: {ex.Message}"); }
                 }
-                int n = seated + walking + other, q = qMoved + qLeft;
-                if (n + q == 0) return;
-                ReleasedSeated += seated; ReleasedWalking += walking; ReleasedOther += other;
-                ReleasedQueueMoved += qMoved; ReleasedQueueLeft += qLeft;
-                string nm = "";
-                try { nm = ic != null && ic.ItemInstance != null ? ic.ItemInstance.itemName ?? "" : ""; } catch { }
-                Plugin.Logger.LogInfo($"[SeatRelease] '{CustomerPuppets.MyBuilding}' item '{id}' ('{nm}') {why}: {n} customer(s) sent out the game's own way (seated={seated} walking={walking} other={other}), {q} moved off its line (other line={qMoved}, left={qLeft}).");
+                if (any)
+                {
+                    string nm = "";
+                    try { nm = ic != null && ic.ItemInstance != null ? ic.ItemInstance.itemName ?? "" : ""; } catch { }
+                    if (_relItems.Count < 12) _relItems.Add($"'{id}' ('{nm}')");
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: '{id}' ({why}): {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>Folds R1/R2: the queue target is picked HERE, not by MoveCustomerToAnotherWaitingLine - the native pick
+        /// (GetLessCrowdedWaitingLine over the AVAILABLE lines) still sees the dying line (its cashier lives until the frame
+        /// ends) and every other line killed in the same refresh. Same order as native (WaitingLinesHelper: spots
+        /// available, then GetCustomersInWaitingLine(true), then customers.Count, first wins ties), minus the releasing
+        /// line and every line whose item this batch kills.</summary>
+        private static WaitingLine? PickSurvivingLine(WaitingLine dying)
+        {
+            WaitingLine? best = null;
+            int b1 = 0, b2 = 0;
+            var names = dying.data != null ? dying.data.controllerNames : null;
+            if (names == null) return null;
+            foreach (var x in WaitingLinesHelper.GetAvailableWaitingLines(names))
+            {
+                try
+                {
+                    if (x == null || ReferenceEquals(x, dying) || x.data == null || x.customersManagement == null) continue;
+                    if (ReferenceEquals(x.customersManagement, dying.customersManagement)) continue;
+                    var xi = x.ItemController;
+                    if (xi == null || _relKilled.Contains(IdOf(xi))) continue;
+                    if (x.data.GetAmountOfSpotsAvailable() <= 0) continue;
+                    int k1 = x.data.GetCustomersInWaitingLine(true), k2 = x.data.customers != null ? x.data.customers.Count : 0;
+                    if (best == null || k1 < b1 || (k1 == b1 && k2 < b2)) { best = x; b1 = k1; b2 = k2; }
+                }
+                catch { }
+            }
+            return best;
+        }
+
+        /// <summary>Closes the release batch: every queued queuer (front of its line first) moves to the least crowded
+        /// SURVIVING line (MoveCustomerToGivenEmployeeStation), or - none left - is taken off the line and Leaves, as the
+        /// native else-branch does; one '[SeatRelease]' line for the batch. Safe to call with no batch open.</summary>
+        internal static void FlushRelease()
+        {
+            if (_relMap == null) return;
+            int qMoved = 0, qLeft = 0;
+            try
+            {
+                var moves = new List<QueueMove>(_relQueue);
+                var movedTo = new List<(Customer c, WaitingLine line)>();
+                moves.Sort((a, b) => a.Index.CompareTo(b.Index));
+                foreach (var m in moves)
+                {
+                    try
+                    {
+                        var c = m.C;
+                        if (c == null || _relDone.Contains(c)) continue;
+                        _relDone.Add(c);
+                        if (!ReferenceEquals(c.assignedWaitingLine, m.Line)) continue;   // the game moved it meanwhile
+                        WaitingLine? target = null;
+                        if (m.Line) { try { target = PickSurvivingLine(m.Line); } catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: line pick: {ex.GetType().Name}: {ex.Message}"); } }
+                        if (target != null)
+                        {
+                            m.Line.customersManagement.MoveCustomerToGivenEmployeeStation(c, target);
+                            qMoved++;
+                            movedTo.Add((c, target));
+                        }
+                        else
+                        {
+                            try { m.Line.data?.customers?.Remove(c); } catch { }
+                            c.Leave();
+                            qLeft++;
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: queue move ({_bWhy}): {ex.GetType().Name}: {ex.Message}"); }
+                }
+                if (movedTo.Count > 0) { _lastMoved.Clear(); _lastMoved.AddRange(movedTo); }
+                int n = _bSeated + _bWalking + _bOther, q = qMoved + qLeft;
+                ReleasedSeated += _bSeated; ReleasedWalking += _bWalking; ReleasedOther += _bOther;
+                ReleasedQueueMoved += qMoved; ReleasedQueueLeft += qLeft; ReleasedOrdersCancelled += _bCancelled;
+                if (n + q + _bCancelled > 0)
+                {
+                    LastRelease = $"{qMoved}/{qLeft}/{_bCancelled}";
+                    Plugin.Logger.LogInfo($"[SeatRelease] '{CustomerPuppets.MyBuilding}' {_bWhy}: {_relKilled.Count} item(s) killed, holders on {(_relItems.Count > 0 ? string.Join(", ", _relItems) : "-")}: {n} customer(s) sent out the game's own way (seated={_bSeated} walking={_bWalking} other={_bOther}), {q} moved off its line (other line={qMoved}, left={qLeft}), checkout(s) cancelled={_bCancelled}.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: flush ({_bWhy}): {ex.GetType().Name}: {ex.Message}"); }
+            finally
+            {
+                _relMap = null; _relFrame = -1; _relKilled.Clear(); _relDone.Clear(); _relQueue.Clear(); _relItems.Clear();
+                _bSeated = _bWalking = _bOther = _bCancelled = 0; _bWhy = "";
+            }
+        }
+
+        // ── Dead / dying waiting lines (review pass 2, 2026-09-27) ─────────────────────────────────────
+        // Field symptom (run T-REFRESHSEAT-20260927-203403: deadLineQ=1): a customer waiting in a DESTROYED line. The
+        // game's line cache (WaitingLinesHelper.LinesDictionary / WaitingLinesInBuilding) only rebuilds after Init, which
+        // native runs a frame later (ScheduleUpdateAvailableProducers -> RunAfterOneFrame); meanwhile IsWaitingLineAvailable
+        // passes a destroyed station ((bool)esc false skips the cashier test) and its emptied line reads LEAST crowded
+        // (CustomerJoinQueue.StartJoiningWaitingLine). So: the cache is reset right after the destroy pass (the killed
+        // controllers are already off allItemControllers), and every line lookup drops lines whose item is destroyed or
+        // dying this frame.
+        private static readonly HashSet<ItemController> _dying = new HashSet<ItemController>();
+        private static int _dyingFrame = -1;
+        private static bool _filterLogged;
+        internal static int LineCacheResets, DeadLinesSkipped;
+        private static readonly List<(Customer c, WaitingLine line)> _lastMoved = new List<(Customer c, WaitingLine line)>();
+
+        internal static bool IsDying(ItemController? ic) => ic != null && _dyingFrame == Time.frameCount && _dying.Contains(ic);
+
+        private static void MarkDying(ItemController? ic)
+        {
+            try
+            {
+                if (ic == null) return;
+                int f = Time.frameCount;
+                if (_dyingFrame != f) { _dying.Clear(); _dyingFrame = f; }
+                _dying.Add(ic);
+            }
+            catch { }
+        }
+
+        /// <summary>Clears the game's waiting-line cache (WaitingLinesHelper.Init with the building's controller list, the
+        /// call native makes on interior load / producers refresh) right after a destroy pass; the next lookup rebuilds it
+        /// without the destroyed stations. One log line per refresh.</summary>
+        internal static void ResetLineCache(string why)
+        {
+            try
+            {
+                var bm = BM();
+                if (bm == null || bm.allItemControllers == null) return;
+                WaitingLinesHelper.Init(bm.allItemControllers);
+                LineCacheResets++;
+                _filterLogged = false;
+                int dying = _dyingFrame == Time.frameCount ? _dying.Count : 0;
+                Plugin.Logger.LogInfo($"[SeatRelease] '{CustomerPuppets.MyBuilding}' waiting-line cache reset after the destroy pass ({why}): {dying} dying controller(s) kept out of line picks.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: line cache reset ({why}): {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>WaitingLinesHelper.FindWaitingLines postfix body: the same lines minus destroyed / dying-this-frame ones.
+        /// The helper's cached list is never mutated (a filtered copy is returned only when something is dropped).</summary>
+        internal static IEnumerable<WaitingLine> FilterDeadLines(IEnumerable<WaitingLine> lines)
+        {
+            var src = lines as IList<WaitingLine> ?? new List<WaitingLine>(lines);
+            List<WaitingLine>? keep = null;
+            int dropped = 0;
+            for (int i = 0; i < src.Count; i++)
+            {
+                var x = src[i];
+                bool dead;
+                try { dead = x == null || x.ItemController == null || IsDying(x.ItemController); } catch { dead = true; }
+                if (dead)
+                {
+                    if (keep == null) { keep = new List<WaitingLine>(); for (int j = 0; j < i; j++) keep.Add(src[j]); }
+                    dropped++;
+                    continue;
+                }
+                keep?.Add(x!);
+            }
+            if (keep == null) return src;
+            DeadLinesSkipped += dropped;
+            if (!_filterLogged)
+            {
+                _filterLogged = true;
+                Plugin.Logger.LogInfo($"[SeatRelease] '{CustomerPuppets.MyBuilding}' line lookup skipped {dropped} destroyed/dying waiting line(s) (logged once per refresh).");
+            }
+            return keep;
         }
 
         // ── B. Wants (taker) ─────────────────────────────────────────────────────────────────────────
@@ -912,7 +1175,11 @@ namespace BigAmbitionsMP
                 catch { }
                 try
                 {
-                    foreach (var wl in UnityEngine.Object.FindObjectsOfType<WaitingLine>())
+                    // Review pass 2: FindObjectsOfType<WaitingLine> found NO line in the rig (lines=- in run 1), so this
+                    // count never checked anything - the station lines come from the tills themselves now (union).
+                    var leakLines = new HashSet<WaitingLine>(StationLines());
+                    try { foreach (var fw in UnityEngine.Object.FindObjectsOfType<WaitingLine>()) if (fw != null) leakLines.Add(fw); } catch { }
+                    foreach (var wl in leakLines)
                     {
                         if (wl == null || wl.data == null || wl.data.customers == null) continue;
                         foreach (var qc in wl.data.customers)
@@ -957,11 +1224,66 @@ namespace BigAmbitionsMP
                 }
                 var fbl = new List<string>();
                 foreach (var f in _fallback) fbl.Add($"{Clean(f.Key)}:{f.Value}");
+                // H-REFRESHSEAT-1 review folds: live customers still assigned to a waiting line that is gone (destroyed, or its
+                // item destroyed) and each live line's count (DEV readout, deadLineQ= / lines=).
+                int deadQ = 0, deadRef = 0;
+                var lineRows = new List<string>();
+                var deadRows = new List<string>();
+                try
+                {
+                    foreach (var c in live)
+                    {
+                        try
+                        {
+                            var wl = c.assignedWaitingLine;
+                            if (!ReferenceEquals(wl, null) && (wl == null || wl.ItemController == null))
+                            {
+                                // WAITING in a dead line = still in that line's customer list (joined, never taken off);
+                                // a customer sent home keeps the stale pointer while it walks out (native Leave does not
+                                // clear assignedWaitingLine) - counted apart as deadRef (T-REFRESHSEAT-20260927-211425).
+                                bool inData = false;
+                                try { var wd = wl!.data; inData = wd != null && wd.customers != null && wd.customers.Contains(c); } catch { }
+                                if (inData) deadQ++; else deadRef++;
+                                if (deadRows.Count < 4)
+                                    deadRows.Add($"{Clean(CustomerPuppets.RowIdForCustomer(c) ?? "")}:{(inData ? 1 : 0)}:{(int)c.state}:{(c.order != null && c.order.completed ? 1 : 0)}");
+                            }
+                        }
+                        catch { }
+                    }
+                    foreach (var wl in StationLines())
+                        if (lineRows.Count < 8) lineRows.Add($"{Short(IdOf(wl.ItemController))}:{wl.data.GetCustomersInWaitingLine(true)}");
+                }
+                catch { }
+                // The last batch's MOVED queuers now: still on their target line / served or gone / anywhere else.
+                int mvOn = 0, mvDone = 0, mvElse = 0;
+                foreach (var mv in _lastMoved)
+                {
+                    try
+                    {
+                        var mc = mv.c;
+                        if (mc == null || !mc.isActiveAndEnabled) { mvDone++; continue; }
+                        // on = in a LIVE station line's list (the surviving one, or - run T-REFRESHSEAT-20260927-212923 -
+                        // the respawned till's new line the game rebalanced it onto); wrong = in a DEAD line's list;
+                        // else served / left (a sale, the game's own impatience exit) = done.
+                        bool onLive = mv.line != null && mv.line.data != null && mv.line.data.customers != null && mv.line.data.customers.Contains(mc);
+                        if (!onLive) foreach (var sl in StationLines()) if (sl.data.customers != null && sl.data.customers.Contains(mc)) { onLive = true; break; }
+                        if (onLive) { mvOn++; continue; }
+                        bool wrong = false;
+                        try
+                        {
+                            var al = mc.assignedWaitingLine;
+                            if (!ReferenceEquals(al, null) && (al == null || al.ItemController == null) && al!.data != null && al.data.customers != null && al.data.customers.Contains(mc)) wrong = true;
+                        }
+                        catch { }
+                        if (wrong) mvElse++; else mvDone++;
+                    }
+                    catch { mvElse++; }
+                }
                 return $"leakSeats={leakSeats} leakSlots={leakSlots} leakSpots={leakSpots} leakLine={leakLine} leakDance={leakDance} seatsTaken={seatsTaken} live={live.Count} "
                      + $"wantTaken={WantsTaken}/{WantsMade} qTaken={QWantsTaken}/{QWantsMade} wantsPending={_wants.Count} resumed={Resumed} "
                      + $"heldRows={rows} heldSame={same} heldDone={done} heldPending={pending} heldFallback={fb} heldMismatch={mismatch} qRows={qRows} qSame={qSame} "
                      + $"endN={endN} endDelta={endMax.ToString("F2", inv)} clampMax={_clampMax.ToString("F2", inv)} "
-                     + $"freed={FreedSeats}/{FreedLines}/{FreedSlots}/{FreedSpots}/{FreedDance} released={ReleasedSeated}/{ReleasedWalking}/{ReleasedOther}/{ReleasedQueueMoved}/{ReleasedQueueLeft} fallback={(fbl.Count > 0 ? string.Join(",", fbl) : "-")} bad={(bad.Count > 0 ? string.Join(",", bad) : "-")}";
+                     + $"freed={FreedSeats}/{FreedLines}/{FreedSlots}/{FreedSpots}/{FreedDance} released={ReleasedSeated}/{ReleasedWalking}/{ReleasedOther}/{ReleasedQueueMoved}/{ReleasedQueueLeft} cancelled={ReleasedOrdersCancelled} lastRel={LastRelease} deadLineQ={deadQ} deadRef={deadRef} deadQ={(deadRows.Count > 0 ? string.Join(",", deadRows) : "-")} lines={(lineRows.Count > 0 ? string.Join(",", lineRows) : "-")} movedNow={_lastMoved.Count}:{mvOn}/{mvDone}/{mvElse} lineResets={LineCacheResets} deadSkipped={DeadLinesSkipped} fallback={(fbl.Count > 0 ? string.Join(",", fbl) : "-")} bad={(bad.Count > 0 ? string.Join(",", bad) : "-")}";
             }
             catch (Exception ex) { return "ERR held " + ex.Message; }
         }
@@ -1356,6 +1678,16 @@ namespace BigAmbitionsMP
     {
         static void Prefix(CustomerJoinQueueInstantly __instance) { try { CustomerSeatPins.CtxSet(__instance.sharedCustomer?.Value); } catch { } }
         static void Finalizer() { CustomerSeatPins.CtxClear(); }
+    }
+
+    [HarmonyPatch(typeof(WaitingLinesHelper), nameof(WaitingLinesHelper.FindWaitingLines))]
+    public static class Patch_WaitingLinesHelper_FindWaitingLines_SeatPins
+    {
+        static void Postfix(ref IEnumerable<WaitingLine> __result)
+        {
+            try { if (__result != null) __result = CustomerSeatPins.FilterDeadLines(__result); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: line filter: {ex.GetType().Name}: {ex.Message}"); }
+        }
     }
 
     [HarmonyPatch(typeof(WaitingLinesHelper), nameof(WaitingLinesHelper.GetLessCrowdedWaitingLine))]

@@ -947,6 +947,46 @@ namespace BigAmbitionsMP
                     // `custstate pick seat|queue <tag>` (H-REFRESHSEAT-1): the item of the first live native SEATED at a table
                     //                    (sat down, seat time known) / holding a queue place; sets premise <tag> met (found) or
                     //                    unmet (none) on this machine and prints pick=<full item id|-> holders=<n on that item>.
+                    // `custstate pick lines <tag>` (H-REFRESHSEAT-1 review folds): the STAFFED station lines here, busiest first;
+                    //                    <tag> met when >= 2 exist and the busiest holds >= 1 (queued or walking to it; `pick lines <tag> both`: the two busiest);
+                    //                    pick=<busiest item id> other=<second> holders=<n> otherN=<n>.
+                    // `custstate linecount <item id>` that station line's count (queued + walking to it), n=-1 when none.
+                    if (csArg.StartsWith("pick lines", StringComparison.OrdinalIgnoreCase) || csArg.StartsWith("linecount", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            string[] pl = csArg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                            bool plCount = pl[0].Equals("linecount", StringComparison.OrdinalIgnoreCase);
+                            if (plCount ? pl.Length < 2 : pl.Length < 3) return "ERR usage: custstate pick lines <tag> | custstate linecount <item id>";
+                            var plRows = new System.Collections.Generic.List<(string id, int n, bool staffed)>();
+                            foreach (var plW in CustomerSeatPins.StationLines())
+                            {
+                                try
+                                {
+                                    if (plW == null || plW.data == null) continue;
+                                    var plIc = plW.ItemController;
+                                    string plId = plIc != null && plIc.ItemInstance != null ? plIc.ItemInstance.id ?? "" : "";
+                                    if (plId.Length == 0) continue;
+                                    var plEsc = plW.EmployeeStationController;
+                                    bool plStaffed = plEsc != null && plEsc.employee != null && !plEsc.employee.IsAway;
+                                    plRows.Add((plId, plW.data.GetCustomersInWaitingLine(true), plStaffed));
+                                }
+                                catch { }
+                            }
+                            if (plCount)
+                            {
+                                foreach (var r in plRows) if (r.id == pl[1]) return $"OK custstate linecount n={r.n} staffed={(r.staffed ? 1 : 0)} bldg='{CustomerPuppets.MyBuilding}'";
+                                return $"OK custstate linecount n=-1 staffed=0 bldg='{CustomerPuppets.MyBuilding}'";
+                            }
+                            plRows.RemoveAll(r => !r.staffed);
+                            plRows.Sort((x, y) => y.n.CompareTo(x.n));
+                            bool plBoth = pl.Length > 3 && pl[3].Equals("both", StringComparison.OrdinalIgnoreCase);
+                            bool plMet = plRows.Count >= 2 && plRows[0].n >= 1 && (!plBoth || plRows[1].n >= 1);
+                            CustomerHandoff.PremiseSet(pl[2], plMet);
+                            return $"OK custstate pick lines {pl[2]}={(plMet ? "met" : "unmet")} pick={(plRows.Count > 0 ? plRows[0].id : "-")} other={(plRows.Count > 1 ? plRows[1].id : "-")} holders={(plRows.Count > 0 ? plRows[0].n : 0)} otherN={(plRows.Count > 1 ? plRows[1].n : 0)} lines={plRows.Count} bldg='{CustomerPuppets.MyBuilding}'";
+                        }
+                        catch (Exception exPl) { return "ERR custstate pick lines: " + exPl.Message; }
+                    }
                     if (csArg.StartsWith("pick ", StringComparison.OrdinalIgnoreCase))
                     {
                         try
@@ -1094,6 +1134,48 @@ namespace BigAmbitionsMP
                         var ieReg = GameStatePatcher.FindRegistration(ieAddr);
                         if (ieReg == null || ieReg.itemInstances == null) return $"ERR no registration at '{ieAddr}'";
                         string ieKey = ieAddr; try { ieKey = GameStateReader.AddressKey(ieReg); } catch { }
+                        // H-REFRESHSEAT-1 review folds: `itemedit <addr> <idPrefix>,<idPrefix>[,...] paint` paints SEVERAL items and
+                        // forwards ONE delta (the owner's refresh kills them all in one pass).
+                        if (ieWho.IndexOf(',') >= 0)
+                        {
+                            if (ieMode != "paint") return "ERR itemedit: a comma list is paint only";
+                            var ieDone = new System.Collections.Generic.List<string>();
+                            var ieBmM = InstanceBehavior<BuildingManager>.Instance;
+                            foreach (var ieW in ieWho.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+                            {
+                                string mId = ""; BigAmbitions.Items.ItemInstance? mInst = null;
+                                foreach (var kv in ieReg.itemInstances)
+                                    if (kv.Value != null && !string.IsNullOrEmpty(kv.Key) && kv.Key.StartsWith(ieW, StringComparison.OrdinalIgnoreCase)) { mId = kv.Key; mInst = kv.Value; break; }
+                                if (mInst == null) return $"ERR itemedit: no item '{ieW}' in '{ieKey}'";
+                                ItemController? mIc = null;
+                                try
+                                {
+                                    if (ieBmM != null && ieBmM.buildingRegistration == ieReg && ieBmM.allItemControllers != null)
+                                        foreach (var iec in ieBmM.allItemControllers)
+                                            if (iec != null && iec.ItemInstance != null && iec.ItemInstance.id == mId) { mIc = iec; break; }
+                                }
+                                catch { }
+                                var mCols = mInst.customColors;
+                                if (mCols == null) { mCols = new System.Collections.Generic.List<BigAmbitions.Items.CustomColor>(); mInst.customColors = mCols; }
+                                if (mCols.Count > 0 && mCols[0] != null)
+                                {
+                                    int mOld = (int)mCols[0].color.color;
+                                    var mCh = mCols[0].channel;
+                                    mCols[0] = new BigAmbitions.Items.CustomColor { channel = mCh, color = new SerializableColor(mOld ^ 0x00FFFF00) };
+                                }
+                                else
+                                {
+                                    int mChAdd = 1;
+                                    try { if (mIc != null && mIc.Item != null) { int m = (int)mIc.Item.customColorChannels; if (m != 0) mChAdd = m & -m; } } catch { }
+                                    mCols.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)mChAdd, color = new SerializableColor(unchecked((int)0xFF3040C0)) });
+                                }
+                                try { if (mIc != null) mIc.SetCustomColors(mCols); } catch { }
+                                ieDone.Add(mId);
+                            }
+                            InteriorSync.ForwardGuestInteriorEditDelta(ieKey);
+                            Plugin.Logger.LogInfo($"[TestDrive] itemedit '{ieKey}' paint {ieDone.Count} item(s) {string.Join(",", ieDone)}; ONE edit forwarded.");
+                            return $"OK itemedit paint ids={string.Join(",", ieDone)} n={ieDone.Count}";
+                        }
                         string ieId = ""; BigAmbitions.Items.ItemInstance? ieInst = null;
                         foreach (var kv in ieReg.itemInstances)
                             if (kv.Value != null && !string.IsNullOrEmpty(kv.Key) && kv.Key.StartsWith(ieWho, StringComparison.OrdinalIgnoreCase)) { ieId = kv.Key; ieInst = kv.Value; break; }
@@ -1140,7 +1222,9 @@ namespace BigAmbitionsMP
                         if (ieIc != null)
                         {
                             CustomerSeatPins.ReleaseHoldersOf(ieIc, ieId, "dev-remove");
+                            CustomerSeatPins.FlushRelease();
                             try { ieBm?.allItemControllers?.Remove(ieIc); } catch { }
+                            CustomerSeatPins.ResetLineCache("dev-remove");
                             try { UnityEngine.Object.Destroy(ieIc.gameObject); } catch { }
                         }
                         ieReg.itemInstances.Remove(ieId);
@@ -1149,6 +1233,26 @@ namespace BigAmbitionsMP
                         return $"OK itemedit remove id={ieId} name={ieName} live={(ieIc != null ? 1 : 0)}";
                     }
                     catch (Exception ex) { return $"ERR itemedit: {ex.GetType().Name}: {ex.Message}"; }
+                }
+
+                // `tillhold <seconds>|off` (H-REFRESHSEAT-1 review pass 2, DEV lever): this machine's self-service cashiers
+                // (tills) stop calling their next customer for <seconds> real seconds, so queues form at every till (the
+                // game's own least-crowded pick spreads the arrivals); `off` lifts it. Nobody is served meanwhile.
+                case "tillhold":
+                {
+                    string th = (arg ?? "").Trim();
+                    if (th.Equals("off", StringComparison.OrdinalIgnoreCase) || th == "0")
+                    {
+                        DevTillHold.Until = 0f;
+                        Plugin.Logger.LogInfo($"[TestDrive] tillhold off (calls skipped={DevTillHold.Skipped}).");
+                        return $"OK tillhold off skipped={DevTillHold.Skipped}";
+                    }
+                    float ths;
+                    if (!float.TryParse(th, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out ths) || ths <= 0f) return "ERR usage: tillhold <seconds>|off";
+                    DevTillHold.Until = UnityEngine.Time.realtimeSinceStartup + ths;
+                    DevTillHold.Skipped = 0;
+                    Plugin.Logger.LogInfo($"[TestDrive] tillhold {ths:F0}s: tills stop calling the next customer.");
+                    return $"OK tillhold {ths:F0}s bldg='{CustomerPuppets.MyBuilding}'";
                 }
 
                 case "skipvote":
@@ -5883,6 +5987,27 @@ namespace BigAmbitionsMP
                 ConfirmCustomizerArmed = false;
                 Plugin.Logger.LogWarning($"[TestDrive] charconfirm: {ex.Message} — disarmed.");
             }
+        }
+    }
+    /// <summary>DEV lever state for `tillhold` (H-REFRESHSEAT-1 review pass 2).</summary>
+    internal static class DevTillHold { internal static float Until; internal static int Skipped; }
+
+    /// <summary>DEV `tillhold`: while armed, a SelfServiceEmployee (till cashier) does not call its next customer
+    /// (Employee.CallForNextCustomer, from SelfServiceEmployee.Update) - the queue stays put.</summary>
+    [HarmonyLib.HarmonyPatch(typeof(global::Employee), "CallForNextCustomer")]
+    public static class Patch_Employee_CallForNextCustomer_DevTillHold
+    {
+        static bool Prefix(global::Employee __instance)
+        {
+            try
+            {
+                if (DevTillHold.Until <= 0f) return true;
+                if (UnityEngine.Time.realtimeSinceStartup >= DevTillHold.Until) { DevTillHold.Until = 0f; return true; }
+                if (!(__instance is global::SelfServiceEmployee)) return true;
+                DevTillHold.Skipped++;
+                return false;
+            }
+            catch { return true; }
         }
     }
 }

@@ -348,7 +348,9 @@ namespace BigAmbitionsMP
                                     // H-REFRESHSEAT-1: its seat / queue holders take the game's own exits first,
                                     // while the seat transforms still live (Destroy is frame-deferred).
                                     CustomerSeatPins.ReleaseHoldersOf(gone, p.ItemInstanceId, "grab");
+                                    CustomerSeatPins.FlushRelease();   // one-item batch: its queuers move / leave now
                                     try { bm.allItemControllers.Remove(gone); } catch { }
+                                    CustomerSeatPins.ResetLineCache("grab");
                                     // SALE-DETACH-1: the ItemInstance object stays alive (other
                                     // native structures still reference it) — take this dying
                                     // controller's cargo subscriptions with it.
@@ -4261,6 +4263,10 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] item destroy pass: {ex.Message}"); }
+                // H-REFRESHSEAT-1 review folds R1/R2: the kill loop's queuers move only now, once this refresh's whole kill
+                // set is known - never onto a line destroyed in the same refresh (still before the spawn pass, same frame).
+                CustomerSeatPins.FlushRelease();
+                if (destroyed > 0) CustomerSeatPins.ResetLineCache(fullRebuild ? "full" : "refresh");   // review pass 2: no pick of a destroyed line
 
                 // Spawn: changed ids + any id with no surviving controller.
                 int spawned = 0;
