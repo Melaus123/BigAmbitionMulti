@@ -2849,6 +2849,82 @@ namespace BigAmbitionsMP
                          + $"rented={breg.RentedByPlayer} flipped={MergerFlip.IsFlipped(baddr)}" + (bErr.Length > 0 ? $" threw='{bErr}'" : "") + bPost;
                 }
 
+                // H-STAFFBODY-1 (READ-ONLY): the hired-staff stand-in picture for ONE shop as THIS machine holds it.
+                // synth = stand-ins this machine keeps there; dutyRecs / dutyShifts = BAMP_DUTY_ records assigned to the
+                // shop and shifts naming them; holds = roster copies + the owner's schedule held here (the gate the fix
+                // reads). Station part (only for stations of that shop in the LOADED interior): body = a worker body is
+                // standing at the station (a player working it is not counted); now = a REAL (non-stand-in) shift of
+                // today covers the current hour; gap = no real shift now but real shifts earlier AND later today.
+                // occ = sorted sid:employeeId of every station's body ('-' = empty) - equal strings on two machines =
+                // the same people at the same stations.
+                case "staffbody":
+                {
+                    if (arg.Length == 0) return "ERR usage: staffbody <addressKey>";
+                    var sbReg = GameStatePatcher.FindRegistration(arg);
+                    if (sbReg == null) return $"ERR no registration for '{arg}'";
+                    var sbGi = SaveGameManager.Current;
+                    if (sbGi == null) return "ERR no save";
+                    int sbHour = sbGi.Hour;
+                    int sbRecs = 0, sbDutyShifts = 0;
+                    try
+                    {
+                        if (sbGi.EmployeeInstances != null)
+                            foreach (var e in sbGi.EmployeeInstances)
+                            {
+                                if (e == null || !MPRegisterSync.IsSyntheticDuty(e.id)) continue;
+                                string ea = ""; try { if (e.assignedAddress != null) ea = GameStateReader.AddressKey(e.assignedAddress); } catch { }
+                                if (string.Equals(ea, arg, StringComparison.OrdinalIgnoreCase)) sbRecs++;
+                            }
+                        if (sbReg.scheduleDays != null)
+                            foreach (var sd in sbReg.scheduleDays)
+                                if (sd?.workShifts != null)
+                                    foreach (var w in sd.workShifts)
+                                        if (w != null && MPRegisterSync.IsSyntheticDuty(w.employeeId)) sbDutyShifts++;
+                    }
+                    catch { }
+                    bool sbHolds = MPRegisterSync.HoldsOwnerStaff(arg, out int sbCopies);
+                    int sbStations = 0, sbBodies = 0, sbBodyNoShift = 0, sbGap = 0, sbBodyInGap = 0;
+                    var sbOcc = new System.Collections.Generic.List<string>();
+                    try
+                    {
+                        global::ScheduleDay? sbToday = null;
+                        try { sbToday = Helpers.BuildingHelper.GetTodaySchedule(sbReg); } catch { }
+                        foreach (var st in StationsHere())
+                        {
+                            if (st == null) continue;
+                            string sa = ""; try { var rr = st.BuildingContext?.Registration; if (rr != null) sa = GameStateReader.AddressKey(rr); } catch { }
+                            if (!string.Equals(sa, arg, StringComparison.OrdinalIgnoreCase)) continue;
+                            string sid = ""; try { sid = st.ItemInstance?.id ?? ""; } catch { }
+                            if (sid.Length == 0) continue;
+                            sbStations++;
+                            bool player = StationHasPlayer(st);
+                            bool body = false; try { body = st.employee != null && !player; } catch { }
+                            string rec = "-"; try { if (body) rec = st.employeeInstance?.id ?? "?"; } catch { }
+                            bool now = false, earlier = false, later = false;
+                            if (sbToday?.workShifts != null)
+                                foreach (var w in sbToday.workShifts)
+                                {
+                                    if (w == null || w.itemInstanceId != sid || string.IsNullOrEmpty(w.employeeId) || MPRegisterSync.IsSyntheticDuty(w.employeeId)) continue;
+                                    if (sbHour >= w.startingHour && sbHour < w.endingHour) now = true;
+                                    else if (w.endingHour <= sbHour) earlier = true;
+                                    else if (w.startingHour > sbHour) later = true;
+                                }
+                            bool gap = !now && earlier && later;
+                            if (body) sbBodies++;
+                            if (body && !now) sbBodyNoShift++;
+                            if (gap) { sbGap++; if (body) sbBodyInGap++; }
+                            sbOcc.Add(sid + ":" + rec);
+                        }
+                    }
+                    catch (Exception sx) { return $"ERR staffbody stations: {sx.Message}"; }
+                    sbOcc.Sort(string.CompareOrdinal);
+                    string sbLine = $"OK staffbody {arg} hour={sbHour} synth={MPRegisterSync.StandInCountAt(arg)} dutyRecs={sbRecs} dutyShifts={sbDutyShifts} "
+                                  + $"holds={sbHolds} copies={sbCopies} stations={sbStations} bodies={sbBodies} bodyNoShift={sbBodyNoShift} gap={sbGap} bodyInGap={sbBodyInGap} "
+                                  + $"occ=[{string.Join(",", sbOcc)}]";
+                    Plugin.Logger.LogWarning($"[TestDrive] {sbLine}");
+                    return sbLine;
+                }
+
                 case "employees":
                 {
                     // RAW roster (the no-arg EmployeeHelper.GetEmployeeInstances() - the same list

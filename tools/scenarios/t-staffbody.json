@@ -1,0 +1,271 @@
+{
+  "id": "T-STAFFBODY",
+  "title": "H-STAFFBODY-1 (user-approved 2026-09-22): on a merged partner that already holds the owner's staff roster copies AND the owner's schedule, an employee-duty (hired-staff) broadcast creates no stand-in and any earlier one is retired - so both machines show the SAME employees, the SAME shifts per day and the SAME bodies at the SAME stations, with nobody at a station the real schedule leaves empty. NO save.",
+  "preconditions": "Reporter fixture session fx-hq1 (MERGED - vars.keepMerger true). Dev build with employees / schedcount / staffbody / enterbuilding / exitbuilding / skipvote / skipstate / pause (BAMP_DEV) on both machines. THE SHOP is the client-owned gym at vars.shop (owner Client1, 6 staff); the host is the merged partner. The setup skip goes to 12:20 next day (station FAaWqTU8 had real shifts 7-12 and 14-22 in run T-SHOPDAY-LIVE-20260921-020706, so 12:xx is a gap on at least one day - the gap steps are report-only). NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "shop": "60 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "\\[TickIso\\]",
+    "\\[Guard\\]",
+    "(?<!swallowed )NullReferenceException",
+    "\\[SynthStaff\\] (holds-owner-staff|retire redundant)"
+  ],
+  "oracles_report": [
+    "\\[SynthStaff\\] ",
+    "\\[StaffRoster\\] applied",
+    "\\[StaffEval\\] "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST T-STAFFBODY START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "both worlds settle; the owner's roster publish (30 s) and duty scan (5 s) run"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "report-only: an outdoor player only warns"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "skipvote 12:20",
+      "expect_result": "^OK skipvote goal="
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "skipvote 12:20",
+      "expect_result": "^OK skipvote goal=",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Rest\\] CONSENSUS \\(2/2\\)",
+          "within_s": 60
+        }
+      ],
+      "note": "the setup skip, taken OUTDOORS with no shop occupied"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "sleep_s": 40
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "skipstate",
+      "expect_result": "active=False"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "skipvote off",
+      "expect_result": "^OK skipvote goal=-"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the OWNER (Client1) stands in his own shop"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "the other player stands in the same shop"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "stations evaluate natively; the roster-apply pass (10 s) retires any redundant stand-in"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK",
+      "note": "the world clock STOPS so every read below is taken at the SAME game minute on both machines"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "employees ${shop}",
+      "expect_result": "^OK [1-9]\\d* employee",
+      "capture": {
+        "ownerEmp": "^OK (\\d+) employee"
+      },
+      "note": "the OWNER's roster for the gym (6 real records last time)"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "employees ${shop}",
+      "expect_result": "^OK ${ownerEmp} employee",
+      "note": "THE FIX: the partner holds exactly the owner's records - no BAMP_DUTY stand-in on top (was owner 6 / partner 8)"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "schedcount ${shop}",
+      "expect_result": "^OK schedcount",
+      "capture": {
+        "ownerDays": "(d1=-?\\d+ d2=-?\\d+ d3=-?\\d+ d4=-?\\d+ d5=-?\\d+ d6=-?\\d+ d7=-?\\d+)"
+      },
+      "note": "the OWNER's shifts per day (5,4,5,6,4,5,2 last time)"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "schedcount ${shop}",
+      "expect_result": "${ownerDays}",
+      "note": "THE FIX: the partner's shifts per day equal the owner's (was +2 on every day)"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "synth=0 dutyRecs=0 dutyShifts=0 holds=True copies=[1-9]",
+      "note": "THE FIX: no stand-in, no BAMP_DUTY record, no BAMP_DUTY shift on the partner - which holds the owner's roster copies and schedule"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "synth=0 dutyRecs=0 .*stations=[1-9]\\d* bodies=\\d+ bodyNoShift=0 ",
+      "capture": {
+        "ownerOcc": "occ=(\\[[^\\]]*\\])",
+        "ownerBodies": "bodies=(\\d+)"
+      },
+      "note": "the OWNER's stations: a body only where a real shift covers this hour"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "bodies=${ownerBodies} bodyNoShift=0 .*occ=${ownerOcc}",
+      "note": "THE FIX: the partner shows the SAME people at the SAME stations, and nobody where the real schedule leaves a station empty"
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "gap=[1-9]\\d* bodyInGap=0",
+      "abort_on_fail": false,
+      "note": "GAP PREMISE (report-only: which stations are between two real shifts at 12:xx depends on the weekday): an hour gap exists and the owner's station is empty"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "gap=[1-9]\\d* bodyInGap=0",
+      "abort_on_fail": false,
+      "note": "GAP: the same station is empty on the partner too (the old 0-24 stand-in filled it)"
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    }
+  ]
+}
