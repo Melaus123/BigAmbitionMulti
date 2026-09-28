@@ -3502,6 +3502,10 @@ namespace BigAmbitionsMP
                         // SALE-DETACH-1: the in-place policy KEEPS this controller's ItemInstance alive —
                         // detach its cargo subscriptions before the object goes.
                         try { DetachCargoCallbacks(ic); } catch { }
+                        // I4 fold (re-check of 7348b28, 2026-09-28): off its parent's childItemControllers too, as the shop refresh
+                        // does since fold F1 (fcff4da/0e660c7; native ItemController.cs:1323, scene side only) - a destroyed child
+                        // left there made OverlayHelper.GetRelevantEntity return it and every hover NRE'd.
+                        try { var par = ic.parentItemController; if (par != null) par.childItemControllers?.Remove(ic); } catch { }
                         UnityEngine.Object.Destroy(ic.gameObject);
                         destroyed++;
                     }

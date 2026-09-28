@@ -68,8 +68,13 @@ namespace BigAmbitionsMP
         // midnight gets the owner's new-day schedule. The signature also folds into ComputeHashes' `full` band, because the
         // receiver skips a payload whose hashes match the last one it applied (GameStatePatcher applySig) - rig run
         // T-HANDOFF3-20260928-063549: the new-day send went out and the partner dropped it as identical.
-        private static readonly Dictionary<string, int> _lastSchedSigByAddr = new();
-        private static readonly Dictionary<string, int> _lastLocalOwnerSchedByAddr = new();
+        // I1 fold (re-check of 7348b28, 2026-09-28): these now hold the MARK of the last sent schedule (its day and ids,
+        // CustomerEntrySync.ScheduleMark) and the trigger is a schedule that GAINS against it - an id not carried before, or a
+        // new day. A removal-only change (each forwarded partner sale retires the claimed entry) no longer forces a full
+        // snapshot at once: it moves only the `full` band, so it rides the next ordinary send (the cargo channel when
+        // nothing else moved); the partner already marked that entry completed.
+        private static readonly Dictionary<string, CustomerEntrySync.ScheduleMark> _lastSchedSigByAddr = new();
+        private static readonly Dictionary<string, CustomerEntrySync.ScheduleMark> _lastLocalOwnerSchedByAddr = new();
         private static float _lastPollAt;
         private static float _lastOwnerPollAt;
         private static string _localOwnerAddress = "";
@@ -397,7 +402,7 @@ namespace BigAmbitionsMP
                     _lastHashByAddr[addressKey] = hvSub;
                     _lastStructHashByAddr[addressKey] = hsSub;
                     _structVolHashByAddr[addressKey] = hnSub;   // round-281: the cargo-only discriminator's baseline
-                    _lastSchedSigByAddr[addressKey] = CustomerEntrySync.ScheduleSig(snap.CustomerEntries);   // K1 fold: this serve carries the schedule
+                    CustomerEntrySync.StampMark(_lastSchedSigByAddr, addressKey, snap.CustomerEntries, clearWhenEmpty: true);   // K1/I1 fold: this serve carries the schedule
                     _lastDirtHashByAddr[addressKey] = hdSub;    // v10: this serve carries dirt, and it went to the only subscriber there is
                     _volatileSentAtByAddr[addressKey] = UnityEngine.Time.realtimeSinceStartup;
                 }
@@ -561,8 +566,9 @@ namespace BigAmbitionsMP
                     }
                     bool fullChanged = !_lastHashByAddr.TryGetValue(addr, out var pf) || pf != hv;
                     // K1 fold: a changed shopper schedule (the owner's new day) sends too - full, at once.
-                    int sched = CustomerEntrySync.ScheduleSig(snap.CustomerEntries);
-                    bool schedChanged = sched != 0 && (!_lastSchedSigByAddr.TryGetValue(addr, out var pSch) || pSch != sched);
+                    // I1 fold: only a schedule that GAINS (a new id, a new day); a removal-only change rides the ordinary send.
+                    _lastSchedSigByAddr.TryGetValue(addr, out var pSch);
+                    bool schedChanged = CustomerEntrySync.ScheduleGained(snap.CustomerEntries, pSch);
                     if (!fullChanged && !schedChanged) continue;
                     bool structChanged = !_lastStructHashByAddr.TryGetValue(addr, out var ps) || ps != hs;
                     if (!structChanged && !schedChanged
@@ -598,8 +604,10 @@ namespace BigAmbitionsMP
                             if (TrySendCargoOnly(addr, entrySubs, snap, sv, "tick")) continue;
                         }
                         MPServer.BroadcastInteriorSnapshotTo(set, snap);
-                        if (sched != 0) _lastSchedSigByAddr[addr] = sched;                      // K1 fold
+                        CustomerEntrySync.StampMark(_lastSchedSigByAddr, addr, snap.CustomerEntries);   // K1/I1 fold
                         CustomerEntrySync.NoteSent(addr, snap.CustomerEntries, "host tick");   // K1 fold: recorded where it is sent
+                        if (schedChanged)
+                            Plugin.Logger.LogInfo($"[InteriorSync] full snapshot for '{addr}' sent for a GAINED shopper schedule ({snap.CustomerEntries?.Count ?? 0} entries, host tick; I1 fold).");
                     }
                 }
             }
@@ -786,6 +794,27 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleOwnerSnapshot: {ex.Message}"); }
         }
 
+        /// <summary>I3 fold (re-check of 7348b28, 2026-09-28): a client owner records a pushed schedule as SENT the moment it
+        /// hands it to the transport (SendLocalOwnerSnapshot: NoteSent + the gain mark), so a push this host then DISCARDS
+        /// (mid-edit, empty-over-good) left the owner believing its list went out while the host kept serving the old one.
+        /// Keep the list: its CustomerEntries replace the cached snapshot's (items, design and the cache Hash untouched - the
+        /// Hash still names the last ACCEPTED state, so the next accepted push reads as changed and applies locally with this
+        /// list; the Tick relays it to subscribers as a gained schedule). No cache yet: nothing to merge into (the mid-edit
+        /// re-ask's answer is a force push that carries the schedule again). Main thread.</summary>
+        private static void AdoptDiscardedSchedule(string playerId, InteriorSnapshotPayload payload, string why)
+        {
+            try
+            {
+                if (payload?.CustomerEntries == null || payload.CustomerEntries.Count == 0 || string.IsNullOrEmpty(payload.AddressKey)) return;
+                if (!_ownerSnapshotsByAddr.TryGetValue(payload.AddressKey, out var st) || st?.Snapshot == null) return;
+                if (CustomerEntrySync.ScheduleSig(st.Snapshot.CustomerEntries) == CustomerEntrySync.ScheduleSig(payload.CustomerEntries)) return;
+                int was = st.Snapshot.CustomerEntries?.Count ?? 0;
+                st.Snapshot.CustomerEntries = payload.CustomerEntries;
+                Plugin.Logger.LogInfo($"[InteriorSync] owner push from '{playerId}' for '{payload.AddressKey}' {why}: its shopper schedule ({payload.CustomerEntries.Count} entries) kept in the cache (was {was}) - the owner already counts it as sent (I3 fold).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] adopt discarded schedule: {ex.Message}"); }
+        }
+
         private static void AcceptOwnerSnapshot(string playerId, InteriorSnapshotPayload payload)
         {
             try
@@ -800,12 +829,12 @@ namespace BigAmbitionsMP
                     if (busy != null)
                     {
                         NoteResyncOwed(payload.AddressKey, $"owner push from '{playerId}' discarded ({busy} here)");
+                        AdoptDiscardedSchedule(playerId, payload, "discarded mid-edit");   // I3 fold
                         Plugin.Logger.LogInfo($"[InteriorSync] OwnerSnapshot for '{payload.AddressKey}' DISCARDED — local player mid-edit ({busy}); cache and world both kept, re-ask owed (Stage 0).");
                         return;
                     }
                 }
-                int hash = CacheHash(payload);   // v10 review M1: full + dirt — see CacheHash
-                bool changed = !_ownerSnapshotsByAddr.TryGetValue(payload.AddressKey, out var prev) || prev.Hash != hash;
+                _ownerSnapshotsByAddr.TryGetValue(payload.AddressKey, out var prev);
                 // Round-103b: an EMPTY push must not replace a cached NON-EMPTY one either. This cache is
                 // what BuildSnapshotForHostSend serves to everyone who enters the building, so caching the
                 // empty version would keep the world's copy protected while still handing out nothing —
@@ -815,6 +844,7 @@ namespace BigAmbitionsMP
                                      && prev?.Snapshot?.ItemInstances != null && prev.Snapshot.ItemInstances.Count > 0;
                 if (emptyOverGood)
                 {
+                    AdoptDiscardedSchedule(playerId, payload, "empty push kept out");   // I3 fold
                     Plugin.Logger.LogWarning(
                         $"[InteriorSync] KEEPING the stored interior for '{payload.AddressKey}': '{playerId}' pushed an empty one " +
                         $"over {prev!.Snapshot.ItemInstances.Count} stored item(s). They will receive the stored copy when they enter.");
@@ -838,6 +868,11 @@ namespace BigAmbitionsMP
                 if ((payload.FulfilledDemands == null || payload.FulfilledDemands.Count == 0)
                     && prev?.Snapshot?.FulfilledDemands != null && prev.Snapshot.FulfilledDemands.Count > 0)
                     payload.FulfilledDemands = prev.Snapshot.FulfilledDemands;
+                // I2 fold (re-check of 7348b28, 2026-09-28): hashed AFTER the empty-schedule merge above. Hashed before it, a
+                // push that merely omitted an unchanged schedule read as changed (the schedule folds into the `full` band) and
+                // re-applied locally for nothing.
+                int hash = CacheHash(payload);   // v10 review M1: full + dirt — see CacheHash
+                bool changed = prev == null || prev.Hash != hash;
                 _ownerSnapshotsByAddr[payload.AddressKey] = new OwnerInteriorState
                 {
                     OwnerPlayerId = playerId,
@@ -977,8 +1012,10 @@ namespace BigAmbitionsMP
                 // K1 fold (2026-09-28): ...except when the schedule CHANGED since the last push that carried it (the owner's
                 // new day, a regeneration): then this push carries it, as a full one - a partner inside keeps the owner's
                 // real schedule across midnight instead of spawning nothing.
-                int osched = CustomerEntrySync.ScheduleSig(snap.CustomerEntries);
-                bool oschedChanged = osched != 0 && (!_lastLocalOwnerSchedByAddr.TryGetValue(addressKey, out var pOsch) || pOsch != osched);
+                // I1 fold (2026-09-28): ...and only when it GAINED (a new id, a new day): a forwarded partner sale that merely
+                // retired the claimed entry does not ship the schedule; the host keeps serving its cached copy.
+                _lastLocalOwnerSchedByAddr.TryGetValue(addressKey, out var pOsch);
+                bool oschedChanged = CustomerEntrySync.ScheduleGained(snap.CustomerEntries, pOsch);
                 if (!force && !oschedChanged) snap.CustomerEntries = new List<CustomerEntryInfo>();
                 // K1 fold: the owner-side trackers stay schedule-free, exactly as before (a force push carrying the schedule must
                 // not make the next stripped tick look changed); the schedule's own trigger is oschedChanged above.
@@ -1047,7 +1084,7 @@ namespace BigAmbitionsMP
                 MPClient.SendInteriorOwnerSnapshot(snap);
                 if (snap.CustomerEntries != null && snap.CustomerEntries.Count > 0)
                 {   // K1 fold: recorded where it is sent
-                    _lastLocalOwnerSchedByAddr[addressKey] = osched;
+                    CustomerEntrySync.StampMark(_lastLocalOwnerSchedByAddr, addressKey, snap.CustomerEntries);   // I1 fold
                     CustomerEntrySync.NoteSent(addressKey, snap.CustomerEntries, "owner push (" + reason + ")");
                 }
                 // Sweep 3c (user-approved): promoted to ALL builds — this line is the completion
@@ -1170,8 +1207,8 @@ namespace BigAmbitionsMP
                         float nowIp = UnityEngine.Time.realtimeSinceStartup;
                         var (hsIp, hvIp, hnIp, _) = ComputeHashes(snap);
                         bool fullChangedIp = !_lastHashByAddr.TryGetValue(addressKey, out var pfIp) || pfIp != hvIp;
-                        int schedIp = CustomerEntrySync.ScheduleSig(snap.CustomerEntries);   // K1 fold: as the Tick
-                        bool schedChangedIp = schedIp != 0 && (!_lastSchedSigByAddr.TryGetValue(addressKey, out var pSchIp) || pSchIp != schedIp);
+                        _lastSchedSigByAddr.TryGetValue(addressKey, out var pSchIp);   // K1/I1 fold: as the Tick - a GAINED schedule only
+                        bool schedChangedIp = CustomerEntrySync.ScheduleGained(snap.CustomerEntries, pSchIp);
                         if (!fullChangedIp && !schedChangedIp)
                         {
                             _suppressedPushes.TryGetValue(addressKey, out var n0); _suppressedPushes[addressKey] = n0 + 1;
@@ -1204,8 +1241,10 @@ namespace BigAmbitionsMP
                         // cargo now costs a few KB instead of the whole interior.
                         if (cargoOnlyIp && TrySendCargoOnly(addressKey, set, snap, svIp, "immediate-push")) return;
                         MPServer.BroadcastInteriorSnapshotTo(set, snap);
-                        if (schedIp != 0) _lastSchedSigByAddr[addressKey] = schedIp;                        // K1 fold
+                        CustomerEntrySync.StampMark(_lastSchedSigByAddr, addressKey, snap.CustomerEntries);   // K1/I1 fold
                         CustomerEntrySync.NoteSent(addressKey, snap.CustomerEntries, "immediate push");   // K1 fold
+                        if (schedChangedIp)
+                            Plugin.Logger.LogInfo($"[InteriorSync] full snapshot for '{addressKey}' sent for a GAINED shopper schedule ({snap.CustomerEntries?.Count ?? 0} entries, immediate push; I1 fold).");
                     }
                 }
                 else

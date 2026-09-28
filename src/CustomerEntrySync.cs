@@ -249,6 +249,66 @@ namespace BigAmbitionsMP
             catch { return 0; }
         }
 
+        /// <summary>I1 fold (re-check of 7348b28, 2026-09-28): what the last FULL send of a shopper schedule carried, per
+        /// address - its latest spawn day and its entry ids. A schedule forces an immediate full send only when it GAINS
+        /// against this mark (an id not carried before, or a new day). A removal-only change - every forwarded partner sale
+        /// retires the claimed entry from the owner's list (HandleForwardedOrder, 'retire claimed entry') - rides the next
+        /// ordinary send: the partner already marked that entry completed. Stamped only where a schedule is really sent.</summary>
+        internal sealed class ScheduleMark { public int Day = int.MinValue; public HashSet<string> Ids = new(StringComparer.Ordinal); }
+
+        /// <summary>I1 fold: the mark of a schedule (null = no schedule).</summary>
+        internal static ScheduleMark? MarkOf(List<CustomerEntryInfo>? entries)
+        {
+            try
+            {
+                if (entries == null || entries.Count == 0) return null;
+                var m = new ScheduleMark();
+                foreach (var d in entries)
+                {
+                    if (d == null || string.IsNullOrEmpty(d.EntryId)) continue;
+                    m.Ids.Add(d.EntryId);
+                    if (d.SpawnDay > m.Day) m.Day = d.SpawnDay;
+                }
+                return m.Ids.Count == 0 ? null : m;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>I1 fold: does this schedule GAIN against the last sent mark - an id the mark does not hold, a different
+        /// latest day, or no mark at all? A schedule that only LOST ids (claimed by forwarded sales) does not. No schedule = false.</summary>
+        internal static bool ScheduleGained(List<CustomerEntryInfo>? entries, ScheduleMark? last)
+        {
+            try
+            {
+                if (entries == null || entries.Count == 0) return false;
+                int day = int.MinValue;
+                bool any = false, gained = false;
+                foreach (var d in entries)
+                {
+                    if (d == null || string.IsNullOrEmpty(d.EntryId)) continue;
+                    any = true;
+                    if (d.SpawnDay > day) day = d.SpawnDay;
+                    if (last == null || !last.Ids.Contains(d.EntryId)) gained = true;
+                }
+                return any && (gained || last == null || day != last.Day);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>I1 fold: stamp the mark where a full send really carried the schedule. An empty schedule leaves the old mark
+        /// (as the K1 signature did), unless clearWhenEmpty (the entry serve: that send carried no schedule).</summary>
+        internal static void StampMark(Dictionary<string, ScheduleMark> marks, string addressKey, List<CustomerEntryInfo>? entries, bool clearWhenEmpty = false)
+        {
+            try
+            {
+                if (marks == null || string.IsNullOrEmpty(addressKey)) return;
+                var m = MarkOf(entries);
+                if (m != null) marks[addressKey] = m;
+                else if (clearWhenEmpty) marks.Remove(addressKey);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] stamp schedule mark: {ex.Message}"); }
+        }
+
         /// <summary>H1 DEV lever (hourroll unsend): drop every other SENT id among this hour's entries from the record, as if
         /// the partner held them without this owner's id (its midnight, a stale schedule, the cap).</summary>
         internal static string DevUnsend(BuildingRegistration reg, int hour)
