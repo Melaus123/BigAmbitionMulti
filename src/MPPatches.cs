@@ -9404,6 +9404,12 @@ namespace BigAmbitionsMP
             }
 
             private static float _nextGateLogAt;
+            private static readonly HarmonyLib.AccessTools.FieldRef<EmployeeStationController, bool>? _updating = MakeUpdatingRef();
+            private static HarmonyLib.AccessTools.FieldRef<EmployeeStationController, bool>? MakeUpdatingRef()
+            {
+                try { return HarmonyLib.AccessTools.FieldRefAccess<EmployeeStationController, bool>("_isUpdatingEmployee"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] _isUpdatingEmployee ref: {ex.Message}"); return null; }
+            }
             static void Postfix(EmployeeStationController __instance, ref bool __result)
             {
                 if (__result) return;
@@ -9418,12 +9424,28 @@ namespace BigAmbitionsMP
                     if (!duty && !roster) return;
                     bool unstaffed = false;
                     try { unstaffed = __instance.employeeInstance == null; } catch { }
-                    if (!unstaffed) return;
+                    int stale = 0;
+                    if (!unstaffed)
+                    {
+                        // H-STAFFBODY-1 fold F1/F2 (2026-09-28): on a machine where the shop is not the local player's,
+                        // this bypass was the ONLY way a station's worker changes - and it needed the station empty, so
+                        // once a roster copy stood there the hourly update never ran again (no shift handover, the
+                        // worker stayed past its shift / closing). Also force it when the worker is one of the owner's
+                        // roster copies, or its record is gone (a retired stand-in's body). The native gate's own
+                        // other refusals still hold on this path.
+                        stale = MPRegisterSync.StaleStationWorker(__instance);
+                        if (stale == 0) return;
+                        if (!__instance.gameObject.activeInHierarchy) return;
+                        if (_updating != null && _updating(__instance)) return;
+                        try { if (__instance.Item == null || !__instance.Item.assignable) return; } catch { return; }
+                        try { var reg = __instance.BuildingContext?.Registration; if (reg == null || !reg.HasValidAddress) return; } catch { return; }
+                    }
                     __result = true;
                     if (UnityEngine.Time.unscaledTime >= _nextGateLogAt)
                     {
                         _nextGateLogAt = UnityEngine.Time.unscaledTime + 5f;   // roster shops re-evaluate often — keep the log sane
-                        Plugin.Logger.LogInfo($"[StaffEval] ShouldUpdateEmployee FORCED TRUE ({(duty ? "employee-duty station" : "roster shop")}, unstaffed).");
+                        Plugin.Logger.LogInfo($"[StaffEval] ShouldUpdateEmployee FORCED TRUE ({(duty ? "employee-duty station" : "roster shop")}, "
+                            + (unstaffed ? "unstaffed" : stale == 1 ? "worker is a roster copy" : "worker's record is gone") + ").");
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffEval] gate: {ex.Message}"); }

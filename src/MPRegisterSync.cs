@@ -68,7 +68,7 @@ namespace BigAmbitionsMP
             foreach (var id in new List<string>(_injectedStaff.Keys)) RemoveInjectedStaff(id);
             lock (_rosterByAddr) { _rosterByAddr.Clear(); }
             _rosterApplied.Clear(); _rosterSigSent.Clear(); _rosterLogSig.Clear(); _rosterNotSentLogged.Clear();
-            _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _crossOwnerLogged.Clear(); _noStandInLogged.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = "";
+            _cashiers.Clear(); _empDuty.Clear(); _synthetics.Clear(); _crossOwnerLogged.Clear(); _noStandInLogged.Clear(); _standInPassLogged.Clear(); _onDuty = false; CurrentShopOwner = ""; CurrentShopAddress = "";
         }
 
         // ── Current building context (set by the building entry patch) ────────
@@ -517,7 +517,10 @@ namespace BigAmbitionsMP
                         // the shop - the game's own spawner builds the real bodies from them, and a 0-24 stand-in
                         // there is an EXTRA body (it even fills the hours the real schedule leaves empty).
                         // A PLAYER on duty (personal) always keeps its stand-in: it is the queueing mechanism.
-                        if (!personal && HoldsOwnerStaff(addr ?? "", out int held)) { NoteNoStandIn(addr ?? "", held); return; }
+                        // H-STAFFBODY-1 fold F5 (2026-09-28): with the owner's roster copies already held for the
+                        // address, the ON apply creates nothing - the recurring stand-in pass (TickRosterApply, 10 s)
+                        // decides per station and hour whether the game's own spawner covers this station.
+                        if (!personal && LiveRosterCopiesAt(addr ?? "") > 0) { NoteNoStandIn(addr ?? "", LiveRosterCopiesAt(addr ?? "")); return; }
                         TryStaffSynthetic(addr, pid, st, dutyPos);
                         if (personal) _hideBodyAt[hk] = (addr, dutyPos);   // the player's own avatar is the visual
                     });
@@ -869,6 +872,12 @@ namespace BigAmbitionsMP
                         // schedule query — that's PERSONAL duty, not staff (user
                         // saw a staff NPC spawn on top of their working avatar).
                         if (_onDuty && RegKey(_dutyStationId, _dutyPos) == RegKey(stationId, pos)) continue;
+                        // H-STAFFBODY-1 fold F6 (2026-09-28): _onDuty covers registers only - the native schedule
+                        // query also reads "employed" for ANY station the owner stands at working (EmployeeHelper
+                        // GetEmployeeAtStationAndHour returns the player there first). Same exclusion, live-read.
+                        bool ownerWorksHere = false;
+                        try { ownerWorksHere = Helpers.PlayerHelper.IsPlayerWorkingInEmployeeStation(stationId); } catch { }
+                        if (ownerWorksHere) continue;
                         live[RegKey(stationId, pos)] = (pos, addr, stationId);   // item 7: instance id is the identity
                     }
                 }
@@ -1346,14 +1355,7 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(addressKey)) return false;
                 var gi = SaveGameManager.Current;
                 if (gi?.BuildingRegistrations == null) return false;
-                var ids = new HashSet<string>();
-                foreach (var kv in _injectedStaff)
-                {
-                    if (kv.Value.addr != addressKey || kv.Value.inst == null) continue;
-                    bool live = false;
-                    try { live = Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(kv.Key, out var li) && ReferenceEquals(li, kv.Value.inst); } catch { }
-                    if (live) ids.Add(kv.Key);
-                }
+                var ids = LiveRosterCopyIds(addressKey);
                 rosterCopies = ids.Count;
                 if (ids.Count == 0) return false;
                 foreach (var r in gi.BuildingRegistrations)
@@ -1381,38 +1383,194 @@ namespace BigAmbitionsMP
             catch { }
         }
 
-        /// <summary>H-STAFFBODY-1: retire every HIRED-staff (employee-duty) stand-in whose shop this machine now holds
-        /// the owner's roster + schedule for (a stand-in made before the roster or the schedule landed). Personal-duty
-        /// stand-ins and test injections (no employee-duty record) are never touched. MAIN THREAD (TickRosterApply).</summary>
+        /// <summary>H-STAFFBODY-1 fold: ids of the roster copies WE injected for the address that are still the
+        /// live records in the game's staff list. MAIN THREAD.</summary>
+        private static HashSet<string> LiveRosterCopyIds(string addressKey)
+        {
+            var ids = new HashSet<string>();
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey)) return ids;
+                foreach (var kv in _injectedStaff)
+                {
+                    if (kv.Value.addr != addressKey || kv.Value.inst == null) continue;
+                    bool live = false;
+                    try { live = Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(kv.Key, out var li) && ReferenceEquals(li, kv.Value.inst); } catch { }
+                    if (live) ids.Add(kv.Key);
+                }
+            }
+            catch { }
+            return ids;
+        }
+
+        internal static int LiveRosterCopiesAt(string addressKey) => LiveRosterCopyIds(addressKey).Count;
+
+        /// <summary>H-STAFFBODY-1 fold F4 (2026-09-28): will THIS machine's own spawner put one of the owner's roster
+        /// copies at this station this hour? The game's own test (EmployeeHelper.GetEmployeeAtStationAndHour); when
+        /// our own stand-in's 0-24 shift is the one it hits, the same walk is repeated past stand-in shifts.
+        /// MAIN THREAD.</summary>
+        private static bool RosterCopyStaffsStation(BuildingRegistration reg, string stationId, int hour)
+        {
+            try
+            {
+                if (reg == null || string.IsNullOrEmpty(stationId)) return false;
+                EmployeeInstance? e = null;
+                try { e = Helpers.EmployeeHelper.GetEmployeeAtStationAndHour(reg, stationId, hour); } catch { }
+                if (e != null && !IsSyntheticDuty(e.id)) return IsInjectedStaff(e.id);
+                if (e == null) return false;
+                // The native walk stopped at our stand-in's shift: repeat it (EmployeeHelper.cs 407-434) past stand-ins.
+                var today = Helpers.BuildingHelper.GetTodaySchedule(reg);
+                if (today?.workShifts == null) return false;
+                foreach (var w in today.workShifts)
+                {
+                    if (w == null || w.itemInstanceId != stationId || IsSyntheticDuty(w.employeeId)) continue;
+                    if (hour < w.startingHour || hour > w.endingHour - 1) continue;
+                    if (w.employeeId == null) return false;
+                    var r = Helpers.EmployeeHelper.GetEmployeeById(w.employeeId, showError: false);
+                    return r != null && r.IsEmployeeAvailable() && IsInjectedStaff(r.id);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] reconcile stand-ins test '{stationId}': {ex.Message}"); }
+            return false;
+        }
+
+        /// <summary>H-STAFFBODY-1 fold: does the schedule WE hold name any real (non-stand-in) worker at this station
+        /// this hour? Used only to hold a stand-in back while the owner's OFF for an emptied station is in flight.</summary>
+        private static bool AnyRealShiftNow(BuildingRegistration reg, string stationId, int hour)
+        {
+            try
+            {
+                var today = Helpers.BuildingHelper.GetTodaySchedule(reg);
+                if (today?.workShifts == null) return false;
+                foreach (var w in today.workShifts)
+                    if (w != null && w.itemInstanceId == stationId && !string.IsNullOrEmpty(w.employeeId) && !IsSyntheticDuty(w.employeeId)
+                        && hour >= w.startingHour && hour < w.endingHour) return true;
+            }
+            catch { }
+            return false;
+        }
+
+        private static readonly HashSet<string> _standInPassLogged = new();   // "key|hour|verb" - one line per station per hour
+
+        private static void NoteStandInPass(string key, int hour, string verb, string addr)
+        {
+            try
+            {
+                if (_standInPassLogged.Count > 512) _standInPassLogged.Clear();
+                if (_standInPassLogged.Add(key + "|" + hour + "|" + verb))
+                    Plugin.Logger.LogInfo($"[SynthStaff] stand-in pass '{addr}' {key} hour {hour}: {verb}");
+            }
+            catch { }
+        }
+
+        /// <summary>H-STAFFBODY-1 folds F3/F4/F5 (2026-09-28): the recurring stand-in pass (after every roster apply,
+        /// 10 s). For every HIRED-staff duty entry that is not this player's, keep a BAMP_DUTY stand-in exactly when
+        /// this machine's own spawner will NOT put one of the owner's roster copies at that station this hour
+        /// (create or retire as needed). Never touches a PLAYER's stand-in (the key is held by _hideBodyAt) or a
+        /// stand-in made for a different player than the entry names (a hired ON that overwrote a player's entry).
+        /// Held back: no stand-in when the owner's schedule we hold names nobody at the station now (the owner's
+        /// OFF is on its way). MAIN THREAD (TickRosterApply).</summary>
         private static void RetireRedundantStandIns()
         {
             try
             {
-                if (_synthetics.Count == 0) return;
+                if (_cashiers.IsEmpty) return;
+                var gi = SaveGameManager.Current;
+                if (gi?.BuildingRegistrations == null) return;
+                int hour = gi.Hour;
+                var regByAddr = new Dictionary<string, BuildingRegistration?>();
+                var holdsByAddr = new Dictionary<string, bool>();
                 List<(string key, string addr)>? dead = null;
-                foreach (var kv in _synthetics)
+                HashSet<string>? created = null;
+                foreach (var kv in _cashiers)
                 {
-                    if (!_cashiers.TryGetValue(kv.Key, out var duty) || !duty.employee) continue;   // personal duty / test hook: keep
-                    if (HoldsOwnerStaff(kv.Value.addressKey, out int held)) { (dead ??= new()).Add((kv.Key, kv.Value.addressKey)); NoteNoStandIn(kv.Value.addressKey, held); }
+                    var d = kv.Value;
+                    if (!d.employee || d.playerId == MPConfig.PlayerId || string.IsNullOrEmpty(d.address)) continue;
+                    if (_hideBodyAt.ContainsKey(kv.Key)) continue;                                  // F3: a player's stand-in holds this key
+                    if (!regByAddr.TryGetValue(d.address, out var reg))
+                    {
+                        reg = null;
+                        foreach (var r in gi.BuildingRegistrations)
+                            if (r != null && GameStateReader.AddressKey(r) == d.address) { reg = r; break; }
+                        regByAddr[d.address] = reg;
+                    }
+                    if (reg == null) continue;
+                    if (MergerAbsence.SimulatesHere(d.address)) continue;                            // our records ARE the staff there
+                    bool real = RosterCopyStaffsStation(reg, d.stationId ?? "", hour);
+                    bool have = _synthetics.TryGetValue(kv.Key, out var s);
+                    if (real && have)
+                    {
+                        if (s.playerId != d.playerId) continue;                                     // F3: not this duty's stand-in
+                        (dead ??= new()).Add((kv.Key, d.address));
+                    }
+                    else if (!real && !have)
+                    {
+                        if (!holdsByAddr.TryGetValue(d.address, out bool holds)) { holds = HoldsOwnerStaff(d.address, out _); holdsByAddr[d.address] = holds; }
+                        if (holds && !AnyRealShiftNow(reg, d.stationId ?? "", hour)) continue;       // transient: the owner's OFF is due
+                        TryStaffSynthetic(d.address, d.playerId, d.stationId ?? "", d.pos);
+                        if (_synthetics.ContainsKey(kv.Key)) { NoteStandInPass(kv.Key, hour, "stand-in created (no roster copy staffs it here)", d.address); (created ??= new()).Add(d.address); }
+                    }
                 }
-                if (dead == null) return;
-                var prod = new HashSet<string>();
-                foreach (var (key, addr) in dead) { RemoveSynthetic(key); prod.Add(addr); }
-                // Standing inside: have the stations re-evaluate now so the real shift takes over at once
-                // (the same prod the roster apply gives; otherwise the native hourly pass picks it up).
+                if (dead == null && created == null) return;
+                var prod = created ?? new HashSet<string>();
+                var goneIds = new HashSet<string>();
+                foreach (var (key, addr) in dead ?? new List<(string key, string addr)>())
+                {
+                    try { if (_synthetics.TryGetValue(key, out var s) && s.inst?.id != null) goneIds.Add(s.inst.id); } catch { }
+                    RemoveSynthetic(key); prod.Add(addr);
+                    NoteStandInPass(key, hour, "stand-in retired (a roster copy staffs it here)", addr);
+                }
+                // Standing inside: the retired stand-in's BODY goes now (F2 - its record is gone), then the stations
+                // re-evaluate so the real shift takes over at once (otherwise the native hourly pass picks it up).
                 try
                 {
                     if (!string.IsNullOrEmpty(CurrentShopAddress) && prod.Contains(CurrentShopAddress))
                     {
                         var arr = GetStationsCached();
                         if (arr != null)
+                        {
+                            foreach (var o in arr)
+                            {
+                                var st = o as EmployeeStationController;
+                                if (st == null) continue;
+                                try
+                                {
+                                    var body = st.employee;
+                                    string wid = st.employeeInstance?.id ?? body?.employeeInstance?.id ?? "";
+                                    if (body != null && !body.isPlayer && goneIds.Contains(wid)) st.UnassignEmployee();
+                                }
+                                catch { }
+                            }
                             foreach (var o in arr)
                                 (o as EmployeeStationController)?.UpdateEmployee(false);
+                        }
                     }
                 }
                 catch { }
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] retire redundant stand-ins: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SynthStaff] reconcile stand-ins: {ex.Message}"); }
+        }
+
+        /// <summary>H-STAFFBODY-1 fold F1 (2026-09-28): the station's current worker (a non-player body) can no longer
+        /// be trusted to hand over by itself on a machine where the shop is not the local player's: 1 = it is one of the
+        /// owner's roster copies (the native hourly update never runs there), 2 = its record is gone from the live
+        /// staff list (a retired stand-in or a removed copy). 0 = none of these.</summary>
+        internal static int StaleStationWorker(EmployeeStationController? st)
+        {
+            try
+            {
+                if (st == null) return 0;
+                var body = st.employee;
+                if (body == null || body.isPlayer) return 0;
+                var inst = body.employeeInstance ?? st.employeeInstance;
+                string id = inst?.id ?? "";
+                if (id.Length == 0) return 0;
+                if (IsInjectedStaff(id)) return 1;
+                bool live = false;
+                try { live = Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(id, out var li) && ReferenceEquals(li, inst); } catch { }
+                return live ? 0 : 2;
+            }
+            catch { return 0; }
         }
 
         /// <summary>H-STAFFBODY-1 readout (TestDrive 'staffbody'): stand-ins this machine keeps for the address.</summary>
@@ -2524,7 +2682,7 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] apply: {ex.Message}"); }
-            RetireRedundantStandIns();   // H-STAFFBODY-1: its own try/catch; after the apply so fresh copies count
+            RetireRedundantStandIns();   // H-STAFFBODY-1 (+ folds F3-F5): the per-station/hour stand-in pass; own try/catch; after the apply so fresh copies count
         }
 
         // ── Shared-shop slice 3 (the Business PERMISSION feature): an owner's BENCH on a helper's machine ──

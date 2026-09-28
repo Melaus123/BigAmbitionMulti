@@ -1,6 +1,6 @@
 {
   "id": "T-STAFFBODY-VISITOR",
-  "title": "H-STAFFBODY-1 control: a PLAIN (unmerged) visitor in another player's staffed shop still sees workers after the fix - the game's own staff where the visitor holds the owner's roster + schedule, the hired-staff stand-in where it does not. NO save.",
+  "title": "H-STAFFBODY-1 control: a PLAIN (unmerged) visitor in another player's staffed shop still sees workers after the fix - the game's own staff where the visitor holds the owner's roster + schedule, the hired-staff stand-in where it does not. Fold (2026-09-28, F1/F2): the visitor then STAYS INSIDE while the host clock steps hour by hour to 23:05 (every shift handover and the closing hour of the day) - at each step, at the same paused minute, the visitor's station occupants equal the owner's. NO save.",
   "preconditions": "Fixture save1 (host melaus, client Client1, NOT merged). Dev build with staffbody / employees / enterbuilding / exitbuilding / skipvote / skipstate / pause (BAMP_DEV). THE SHOP is Client1's gym at vars.shop (t-skipstandin uses it as Client1's gym). The setup skip goes to 14:20 next day so the shop is open and staffed. NOTHING is saved.",
   "instances": 2,
   "vars": {
@@ -13,12 +13,14 @@
     "\\[TickIso\\]",
     "\\[Guard\\]",
     "(?<!swallowed )NullReferenceException",
-    "\\[SynthStaff\\] (holds-owner-staff|retire redundant)"
+    "\\[SynthStaff\\] (holds-owner-staff|retire redundant|reconcile stand-ins)"
   ],
   "oracles_report": [
     "\\[SynthStaff\\] ",
     "\\[StaffRoster\\] applied",
-    "\\[StaffEval\\] "
+    "\\[StaffEval\\] ",
+    "\\[SynthStaff\\] stand-in pass",
+    "\\[StaffEval\\] .*(roster copy|record is gone)"
   ],
   "steps": [
     {
@@ -227,6 +229,486 @@
     },
     {
       "seq": 32,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "clock 16:05",
+      "expect_result": "^OK clock",
+      "note": "HOUR STEP 16:05: the host moves the world clock through the game's own tick (every hour crossed runs); both players stay INSIDE the shop"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "the client follows the clock; stations re-evaluate on the new hour; the stand-in pass (10 s) runs"
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 38,
+      "role": "c",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "^OK staffbody .*synth=0 ",
+      "capture": {
+        "occ16": "occ=(\\[[^\\]]*\\])",
+        "bodies16": "bodies=(\\d+)"
+      },
+      "note": "the OWNER's station occupants at 16:05"
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "bodies=${bodies16} .*occ=${occ16}",
+      "note": "THE VISITOR FOLLOWS THE OWNER at 16:05: the same number of bodies and the same person at every station (before the fold a roster copy never handed over / stayed past closing)"
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "clock 17:05",
+      "expect_result": "^OK clock",
+      "note": "HOUR STEP 17:05: the host moves the world clock through the game's own tick (every hour crossed runs); both players stay INSIDE the shop"
+    },
+    {
+      "seq": 43,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "the client follows the clock; stations re-evaluate on the new hour; the stand-in pass (10 s) runs"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 47,
+      "role": "c",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "^OK staffbody .*synth=0 ",
+      "capture": {
+        "occ17": "occ=(\\[[^\\]]*\\])",
+        "bodies17": "bodies=(\\d+)"
+      },
+      "note": "the OWNER's station occupants at 17:05"
+    },
+    {
+      "seq": 48,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "bodies=${bodies17} .*occ=${occ17}",
+      "note": "THE VISITOR FOLLOWS THE OWNER at 17:05: the same number of bodies and the same person at every station (before the fold a roster copy never handed over / stayed past closing)"
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 50,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 51,
+      "role": "h",
+      "cmd": "clock 18:05",
+      "expect_result": "^OK clock",
+      "note": "HOUR STEP 18:05: the host moves the world clock through the game's own tick (every hour crossed runs); both players stay INSIDE the shop"
+    },
+    {
+      "seq": 52,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "the client follows the clock; stations re-evaluate on the new hour; the stand-in pass (10 s) runs"
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 54,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 55,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 56,
+      "role": "c",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "^OK staffbody .*synth=0 ",
+      "capture": {
+        "occ18": "occ=(\\[[^\\]]*\\])",
+        "bodies18": "bodies=(\\d+)"
+      },
+      "note": "the OWNER's station occupants at 18:05"
+    },
+    {
+      "seq": 57,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "bodies=${bodies18} .*occ=${occ18}",
+      "note": "THE VISITOR FOLLOWS THE OWNER at 18:05: the same number of bodies and the same person at every station (before the fold a roster copy never handed over / stayed past closing)"
+    },
+    {
+      "seq": 58,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 59,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 60,
+      "role": "h",
+      "cmd": "clock 19:05",
+      "expect_result": "^OK clock",
+      "note": "HOUR STEP 19:05: the host moves the world clock through the game's own tick (every hour crossed runs); both players stay INSIDE the shop"
+    },
+    {
+      "seq": 61,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "the client follows the clock; stations re-evaluate on the new hour; the stand-in pass (10 s) runs"
+    },
+    {
+      "seq": 62,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 63,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 64,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 65,
+      "role": "c",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "^OK staffbody .*synth=0 ",
+      "capture": {
+        "occ19": "occ=(\\[[^\\]]*\\])",
+        "bodies19": "bodies=(\\d+)"
+      },
+      "note": "the OWNER's station occupants at 19:05"
+    },
+    {
+      "seq": 66,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "bodies=${bodies19} .*occ=${occ19}",
+      "note": "THE VISITOR FOLLOWS THE OWNER at 19:05: the same number of bodies and the same person at every station (before the fold a roster copy never handed over / stayed past closing)"
+    },
+    {
+      "seq": 67,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 68,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 69,
+      "role": "h",
+      "cmd": "clock 20:05",
+      "expect_result": "^OK clock",
+      "note": "HOUR STEP 20:05: the host moves the world clock through the game's own tick (every hour crossed runs); both players stay INSIDE the shop"
+    },
+    {
+      "seq": 70,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "the client follows the clock; stations re-evaluate on the new hour; the stand-in pass (10 s) runs"
+    },
+    {
+      "seq": 71,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 72,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 73,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 74,
+      "role": "c",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "^OK staffbody .*synth=0 ",
+      "capture": {
+        "occ20": "occ=(\\[[^\\]]*\\])",
+        "bodies20": "bodies=(\\d+)"
+      },
+      "note": "the OWNER's station occupants at 20:05"
+    },
+    {
+      "seq": 75,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "bodies=${bodies20} .*occ=${occ20}",
+      "note": "THE VISITOR FOLLOWS THE OWNER at 20:05: the same number of bodies and the same person at every station (before the fold a roster copy never handed over / stayed past closing)"
+    },
+    {
+      "seq": 76,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 77,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 78,
+      "role": "h",
+      "cmd": "clock 21:05",
+      "expect_result": "^OK clock",
+      "note": "HOUR STEP 21:05: the host moves the world clock through the game's own tick (every hour crossed runs); both players stay INSIDE the shop"
+    },
+    {
+      "seq": 79,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "the client follows the clock; stations re-evaluate on the new hour; the stand-in pass (10 s) runs"
+    },
+    {
+      "seq": 80,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 81,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 82,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 83,
+      "role": "c",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "^OK staffbody .*synth=0 ",
+      "capture": {
+        "occ21": "occ=(\\[[^\\]]*\\])",
+        "bodies21": "bodies=(\\d+)"
+      },
+      "note": "the OWNER's station occupants at 21:05"
+    },
+    {
+      "seq": 84,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "bodies=${bodies21} .*occ=${occ21}",
+      "note": "THE VISITOR FOLLOWS THE OWNER at 21:05: the same number of bodies and the same person at every station (before the fold a roster copy never handed over / stayed past closing)"
+    },
+    {
+      "seq": 85,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 86,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 87,
+      "role": "h",
+      "cmd": "clock 22:05",
+      "expect_result": "^OK clock",
+      "note": "HOUR STEP 22:05: the host moves the world clock through the game's own tick (every hour crossed runs); both players stay INSIDE the shop"
+    },
+    {
+      "seq": 88,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "the client follows the clock; stations re-evaluate on the new hour; the stand-in pass (10 s) runs"
+    },
+    {
+      "seq": 89,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 90,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 91,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 92,
+      "role": "c",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "^OK staffbody .*synth=0 ",
+      "capture": {
+        "occ22": "occ=(\\[[^\\]]*\\])",
+        "bodies22": "bodies=(\\d+)"
+      },
+      "note": "the OWNER's station occupants at 22:05"
+    },
+    {
+      "seq": 93,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "bodies=${bodies22} .*occ=${occ22}",
+      "note": "THE VISITOR FOLLOWS THE OWNER at 22:05: the same number of bodies and the same person at every station (before the fold a roster copy never handed over / stayed past closing)"
+    },
+    {
+      "seq": 94,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 95,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 96,
+      "role": "h",
+      "cmd": "clock 23:05",
+      "expect_result": "^OK clock",
+      "note": "HOUR STEP 23:05: the host moves the world clock through the game's own tick (every hour crossed runs); both players stay INSIDE the shop"
+    },
+    {
+      "seq": 97,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "the client follows the clock; stations re-evaluate on the new hour; the stand-in pass (10 s) runs"
+    },
+    {
+      "seq": 98,
+      "role": "h",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 99,
+      "role": "c",
+      "cmd": "pause on",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 100,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 101,
+      "role": "c",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "^OK staffbody .*synth=0 ",
+      "capture": {
+        "occ23": "occ=(\\[[^\\]]*\\])",
+        "bodies23": "bodies=(\\d+)"
+      },
+      "note": "the OWNER's station occupants at 23:05"
+    },
+    {
+      "seq": 102,
+      "role": "h",
+      "cmd": "staffbody ${shop}",
+      "expect_result": "bodies=${bodies23} .*occ=${occ23}",
+      "note": "THE VISITOR FOLLOWS THE OWNER at 23:05: the same number of bodies and the same person at every station (before the fold a roster copy never handed over / stayed past closing)"
+    },
+    {
+      "seq": 103,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 104,
       "role": "c",
       "cmd": "pause off",
       "expect_result": "^OK"
