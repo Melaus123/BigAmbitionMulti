@@ -944,6 +944,34 @@ namespace BigAmbitionsMP
                         CustomerHandoff.Arm(csN);
                         return $"OK custstate armed n={csN} bldg='{CustomerPuppets.MyBuilding}'";
                     }
+                    // `custstate pick seat|queue <tag>` (H-REFRESHSEAT-1): the item of the first live native SEATED at a table
+                    //                    (sat down, seat time known) / holding a queue place; sets premise <tag> met (found) or
+                    //                    unmet (none) on this machine and prints pick=<full item id|-> holders=<n on that item>.
+                    if (csArg.StartsWith("pick ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            string[] pk = csArg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                            string pkWhat = pk.Length > 1 ? pk[1].ToLowerInvariant() : "";
+                            if (pk.Length < 3 || (pkWhat != "seat" && pkWhat != "queue")) return "ERR usage: custstate pick seat|queue <tag>";
+                            string pkItem = ""; int pkN = 0;
+                            var pkAll = IndoorCustomerSpawner.Customers;
+                            if (pkAll != null)
+                                foreach (var pkC in pkAll)
+                                {
+                                    if (pkC == null || pkC.isPlayer || !pkC.isActiveAndEnabled || CustomerHandoff.IsLeavingBody(pkC)) continue;
+                                    var pkH = CustomerSeatPins.ReadHeld(pkC);
+                                    string pkIt = pkWhat == "seat" ? (pkH.Kind == CustomerSeatPins.KSeat && pkH.EndMin >= 0f ? pkH.Item ?? "" : "") : pkH.QueueItem ?? "";
+                                    if (pkIt.Length == 0) continue;
+                                    if (pkItem.Length == 0) pkItem = pkIt;
+                                    if (pkIt == pkItem) pkN++;
+                                }
+                            bool pkMet = pkItem.Length > 0;
+                            CustomerHandoff.PremiseSet(pk[2], pkMet);
+                            return $"OK custstate pick {pkWhat} {pk[2]}={(pkMet ? "met" : "unmet")} pick={(pkMet ? pkItem : "-")} holders={pkN} bldg='{CustomerPuppets.MyBuilding}'";
+                        }
+                        catch (Exception exPk) { return "ERR custstate pick: " + exPk.Message; }
+                    }
                     if (csArg.Equals("held", StringComparison.OrdinalIgnoreCase))
                     {
                         string chAddr = CustomerPuppets.MyBuilding;
@@ -1044,6 +1072,83 @@ namespace BigAmbitionsMP
                     var sdReg = GameStatePatcher.FindRegistration(sdArg);
                     if (sdReg == null) return $"ERR no registration at '{sdArg}'";
                     return "OK stockdelta " + CustomerHandoff.StockDelta(sdReg, sdMark);
+                }
+
+                // ── H-REFRESHSEAT-1 (2026-09-27): a partner's furniture edit on demand ──
+                // `itemedit <num> <ba:street_x> <idPrefix|itemName> paint|remove`  on THIS machine's copy of the building:
+                //                    the first item whose id starts with the given prefix (else whose item name matches)
+                //                    gets one paint channel flipped (or one added when it has none) - or is removed - and
+                //                    the edit is forwarded like an interior-designer edit (InteriorSync.
+                //                    ForwardGuestInteriorEditDelta). The owner's refresh destroys + respawns the item:
+                //                    the path that must first send its seat / queue holders on their way.
+                case "itemedit":
+                {
+                    try
+                    {
+                        string[] ie = (arg ?? "").Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (ie.Length < 4) return "ERR usage: itemedit <num> <ba:street_x> <idPrefix|itemName> paint|remove";
+                        string ieMode = ie[ie.Length - 1].ToLowerInvariant();
+                        string ieWho = ie[ie.Length - 2];
+                        string ieAddr = string.Join(" ", ie, 0, ie.Length - 2);
+                        if (ieMode != "paint" && ieMode != "remove") return "ERR usage: itemedit <num> <ba:street_x> <idPrefix|itemName> paint|remove";
+                        var ieReg = GameStatePatcher.FindRegistration(ieAddr);
+                        if (ieReg == null || ieReg.itemInstances == null) return $"ERR no registration at '{ieAddr}'";
+                        string ieKey = ieAddr; try { ieKey = GameStateReader.AddressKey(ieReg); } catch { }
+                        string ieId = ""; BigAmbitions.Items.ItemInstance? ieInst = null;
+                        foreach (var kv in ieReg.itemInstances)
+                            if (kv.Value != null && !string.IsNullOrEmpty(kv.Key) && kv.Key.StartsWith(ieWho, StringComparison.OrdinalIgnoreCase)) { ieId = kv.Key; ieInst = kv.Value; break; }
+                        if (ieInst == null)
+                            foreach (var kv in ieReg.itemInstances)
+                                if (kv.Value != null && string.Equals(kv.Value.itemName, ieWho, StringComparison.OrdinalIgnoreCase)) { ieId = kv.Key; ieInst = kv.Value; break; }
+                        if (ieInst == null) return $"ERR itemedit: no item '{ieWho}' in '{ieKey}'";
+                        string ieName = ieInst.itemName ?? "";
+                        ItemController? ieIc = null;
+                        var ieBm = InstanceBehavior<BuildingManager>.Instance;
+                        try
+                        {
+                            if (ieBm != null && ieBm.buildingRegistration == ieReg && ieBm.allItemControllers != null)
+                                foreach (var iec in ieBm.allItemControllers)
+                                    if (iec != null && iec.ItemInstance != null && iec.ItemInstance.id == ieId) { ieIc = iec; break; }
+                        }
+                        catch { }
+                        if (ieMode == "paint")
+                        {
+                            var ieCols = ieInst.customColors;
+                            if (ieCols == null) { ieCols = new System.Collections.Generic.List<BigAmbitions.Items.CustomColor>(); ieInst.customColors = ieCols; }
+                            string ieWhat;
+                            if (ieCols.Count > 0 && ieCols[0] != null)
+                            {
+                                int ieOld = (int)ieCols[0].color.color;
+                                int ieNew = ieOld ^ 0x00FFFF00;
+                                var ieCh = ieCols[0].channel;
+                                ieCols[0] = new BigAmbitions.Items.CustomColor { channel = ieCh, color = new SerializableColor(ieNew) };
+                                ieWhat = $"channel={(int)ieCh} {ieOld:X8}->{ieNew:X8}";
+                            }
+                            else
+                            {
+                                int ieChAdd = 1;
+                                try { if (ieIc != null && ieIc.Item != null) { int m = (int)ieIc.Item.customColorChannels; if (m != 0) ieChAdd = m & -m; } } catch { }
+                                ieCols.Add(new BigAmbitions.Items.CustomColor { channel = (BigAmbitions.Items.CustomColorChannel)ieChAdd, color = new SerializableColor(unchecked((int)0xFF3040C0)) });
+                                ieWhat = $"channel={ieChAdd} added";
+                            }
+                            try { if (ieIc != null) ieIc.SetCustomColors(ieCols); } catch { }
+                            InteriorSync.ForwardGuestInteriorEditDelta(ieKey);
+                            Plugin.Logger.LogInfo($"[TestDrive] itemedit '{ieKey}' '{ieId}' ('{ieName}') paint {ieWhat}; edit forwarded.");
+                            return $"OK itemedit paint id={ieId} name={ieName} {ieWhat}";
+                        }
+                        // remove: this machine's live copy goes the grab path's way (holders out first, list, destroy)
+                        if (ieIc != null)
+                        {
+                            CustomerSeatPins.ReleaseHoldersOf(ieIc, ieId, "dev-remove");
+                            try { ieBm?.allItemControllers?.Remove(ieIc); } catch { }
+                            try { UnityEngine.Object.Destroy(ieIc.gameObject); } catch { }
+                        }
+                        ieReg.itemInstances.Remove(ieId);
+                        InteriorSync.ForwardGuestInteriorEditDelta(ieKey, ieId);
+                        Plugin.Logger.LogInfo($"[TestDrive] itemedit '{ieKey}' '{ieId}' ('{ieName}') removed (live copy {(ieIc != null ? "destroyed" : "absent")}); edit forwarded.");
+                        return $"OK itemedit remove id={ieId} name={ieName} live={(ieIc != null ? 1 : 0)}";
+                    }
+                    catch (Exception ex) { return $"ERR itemedit: {ex.GetType().Name}: {ex.Message}"; }
                 }
 
                 case "skipvote":

@@ -287,6 +287,7 @@ namespace BigAmbitionsMP
 
         // SALE-DETACH-1: session budget for the detach notice (40 lines) + first-failure flag.
         private static int _cargoDetachLines;
+        private static int _respawnWhyLines;   // H-REFRESHSEAT-1 diagnostic: first 20 per game run
         private static bool _cargoDetachFailLogged;
 
         /// <summary>Round-269: apply a granted guest's conveyed grab on the OWNER's (or the
@@ -344,6 +345,9 @@ namespace BigAmbitionsMP
                                     // a dead entry (OnPlacementModeEnd → ForceUpdateNavMesh; two loops
                                     // inside CancelPlacementMode; HamptonsHouse.HideItems). Every native
                                     // removal path removes explicitly before destroying — so do we.
+                                    // H-REFRESHSEAT-1: its seat / queue holders take the game's own exits first,
+                                    // while the seat transforms still live (Destroy is frame-deferred).
+                                    CustomerSeatPins.ReleaseHoldersOf(gone, p.ItemInstanceId, "grab");
                                     try { bm.allItemControllers.Remove(gone); } catch { }
                                     // SALE-DETACH-1: the ItemInstance object stays alive (other
                                     // native structures still reference it) — take this dying
@@ -2091,6 +2095,33 @@ namespace BigAmbitionsMP
                     else ctx.CargoOnlyIds.Add(i.Id);         // in-place restock/no-op — nothing to refresh
                     return;
                 }
+                // H-REFRESHSEAT-1 diagnostic: WHICH identity field sends this item through destroy+respawn
+                // (a partner edit hit 9 restaurant booths in the field and the log never said why).
+                try
+                {
+                    if (_respawnWhyLines < 20)
+                    {
+                        _respawnWhyLines++;
+                        var rwWhy = new List<string>();
+                        if (typeMismatch) rwWhy.Add("type");
+                        var rwN = ns.Split('#'); var rwL = ls.Split('#');
+                        string rwNc = rwN.Length > 0 ? rwN[0] : "", rwLc = rwL.Length > 0 ? rwL[0] : "";
+                        if (rwNc != rwLc)
+                        {
+                            string[] rwNames = { "name", "parent", "linked", "secured", "state", "alias", "custom", "worldtext", "priceOnPurchase" };
+                            var rwNf = rwNc.Split('|'); var rwLf = rwLc.Split('|');
+                            for (int rk = 0; rk < rwNames.Length; rk++)
+                                if ((rk < rwNf.Length ? rwNf[rk] : "") != (rk < rwLf.Length ? rwLf[rk] : "")) rwWhy.Add(rwNames[rk]);
+                            string rwNp = rwNf.Length > rwNames.Length ? string.Join("|", rwNf, rwNames.Length, rwNf.Length - rwNames.Length) : "";
+                            string rwLp = rwLf.Length > rwNames.Length ? string.Join("|", rwLf, rwNames.Length, rwLf.Length - rwNames.Length) : "";
+                            if (rwNp != rwLp) rwWhy.Add("paint");
+                        }
+                        if ((rwN.Length > 1 ? rwN[1] : "") != (rwL.Length > 1 ? rwL[1] : "")) rwWhy.Add("cargo");
+                        if ((rwN.Length > 2 ? rwN[2] : "") != (rwL.Length > 2 ? rwL[2] : "")) rwWhy.Add("stacked");
+                        Plugin.Logger.LogInfo($"[Patcher] '{i.Id}' ('{i.ItemName}') respawns: core field(s) changed: {(rwWhy.Count > 0 ? string.Join(",", rwWhy) : "none")}.");
+                    }
+                }
+                catch { }
                 // Core/stacked changed → respawn below; the shield still applies: the
                 // replacement keeps the OWNER's live cargo, not the guest replica's.
                 if (ctx.ReceiverOwnsThis)
@@ -4169,6 +4200,11 @@ namespace BigAmbitionsMP
                                         || isRemoved;
                             if (kill)
                             {
+                                // H-REFRESHSEAT-1 (2026-09-27): customers seated at / walking to / queuing at this item
+                                // leave (or change line) the game's own way BEFORE the destroy - else ResetItemsInTable
+                                // NREs on the dead seat transform and the diner hangs. Must precede the
+                                // allItemControllers removal below (the seat -> table lookup walks that list).
+                                CustomerSeatPins.ReleaseHoldersOf(ic, id, fullRebuild ? "full" : isRemoved ? "removed" : string.IsNullOrEmpty(id) ? "no-id" : "changed");
                                 // Round-278/F1 (field 20260818-222130): attached children are Unity
                                 // transform children — Destroy(parent) takes them down at frame end,
                                 // AFTER the spawn pass already recorded them as live survivors, so

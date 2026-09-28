@@ -303,6 +303,75 @@ namespace BigAmbitionsMP
             // the part-B report: dirt travels owner -> others only, so the two writes never meet in one state).
         }
 
+        // ── D. Release the holders of an item about to be destroyed (H-REFRESHSEAT-1, 2026-09-27) ────────
+        internal static int ReleasedSeated, ReleasedWalking, ReleasedOther, ReleasedQueueMoved, ReleasedQueueLeft;
+
+        /// <summary>H-REFRESHSEAT-1 (user-approved 2026-09-27): a remote edit (interior refresh kill loop, conveyed
+        /// grab) is about to Destroy item <paramref name="id"/>. The game itself never destroys an occupied item (pick-up
+        /// refuses "cant_pick_occupied_objects"), so its customers would keep a SeatSpot / WaitingLine on a dead
+        /// object: ResetItemsInTable then throws at the seat transform after clearing 'occupied' but before nulling
+        /// isSittingOn, and every later leave re-throws (the field hang). Runs BEFORE the Destroy (frame-deferred),
+        /// while the seat transforms still live, on the live NATIVE customers of THIS machine only (followers hold
+        /// puppets, which hold no seat): a holder of the item (table seat taken or walked to, gym machine, slot chair,
+        /// casino table, cinema seat) or of the seat's attached chair takes the game's own shop-closing exit
+        /// (InstantlyLeave = off the line + Leave); a queuer of the item's line takes the game's own station-lost-
+        /// worker path (MoveCustomerToAnotherWaitingLine: the least crowded OTHER line, else Leave).</summary>
+        internal static void ReleaseHoldersOf(ItemController? ic, string id, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(id)) return;
+                var all = IndoorCustomerSpawner.Customers;
+                if (all == null || all.Count == 0) return;
+                int seated = 0, walking = 0, other = 0, qMoved = 0, qLeft = 0;
+                var snap = all.ToArray();   // Leave / a line move may touch the list; only on a destroy, never per frame
+                foreach (var c in snap)
+                {
+                    try
+                    {
+                        if (c == null || c.isPlayer) continue;
+                        var h = ReadHeld(c);
+                        bool holds = h.Kind != KNone && h.Item == id;
+                        if (!holds)
+                        {
+                            try { var st = c.isSittingOn; if (st != null && IdOf(st.GetAttachedChair) == id) holds = true; } catch { }
+                        }
+                        if (holds)
+                        {
+                            bool sat = false;
+                            try { sat = c.tpc != null && c.tpc.isSittingOn != null; } catch { }
+                            if (CustomerHandoff.IsLeavingBody(c))
+                            {
+                                // Already on its way out: free the seat while its transforms still live.
+                                if (c.isSittingOn != null) c.ResetItemsInTable();
+                            }
+                            else c.InstantlyLeave();
+                            if (h.Kind == KSeat || h.Kind == KNone) { if (sat) seated++; else walking++; }
+                            else other++;
+                            continue;
+                        }
+                        if (h.QueueItem.Length > 0 && h.QueueItem == id)
+                        {
+                            var wl = c.assignedWaitingLine;
+                            if (wl == null || wl.customersManagement == null || CustomerHandoff.IsLeavingBody(c)) continue;
+                            wl.customersManagement.MoveCustomerToAnotherWaitingLine(c);
+                            var now = c.assignedWaitingLine;
+                            if (now != null && !ReferenceEquals(now, wl)) qMoved++; else qLeft++;
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: '{id}' ({why}): {ex.GetType().Name}: {ex.Message}"); }
+                }
+                int n = seated + walking + other, q = qMoved + qLeft;
+                if (n + q == 0) return;
+                ReleasedSeated += seated; ReleasedWalking += walking; ReleasedOther += other;
+                ReleasedQueueMoved += qMoved; ReleasedQueueLeft += qLeft;
+                string nm = "";
+                try { nm = ic != null && ic.ItemInstance != null ? ic.ItemInstance.itemName ?? "" : ""; } catch { }
+                Plugin.Logger.LogInfo($"[SeatRelease] '{CustomerPuppets.MyBuilding}' item '{id}' ('{nm}') {why}: {n} customer(s) sent out the game's own way (seated={seated} walking={walking} other={other}), {q} moved off its line (other line={qMoved}, left={qLeft}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: '{id}' ({why}): {ex.GetType().Name}: {ex.Message}"); }
+        }
+
         // ── B. Wants (taker) ─────────────────────────────────────────────────────────────────────────
         private sealed class Want
         {
@@ -892,7 +961,7 @@ namespace BigAmbitionsMP
                      + $"wantTaken={WantsTaken}/{WantsMade} qTaken={QWantsTaken}/{QWantsMade} wantsPending={_wants.Count} resumed={Resumed} "
                      + $"heldRows={rows} heldSame={same} heldDone={done} heldPending={pending} heldFallback={fb} heldMismatch={mismatch} qRows={qRows} qSame={qSame} "
                      + $"endN={endN} endDelta={endMax.ToString("F2", inv)} clampMax={_clampMax.ToString("F2", inv)} "
-                     + $"freed={FreedSeats}/{FreedLines}/{FreedSlots}/{FreedSpots}/{FreedDance} fallback={(fbl.Count > 0 ? string.Join(",", fbl) : "-")} bad={(bad.Count > 0 ? string.Join(",", bad) : "-")}";
+                     + $"freed={FreedSeats}/{FreedLines}/{FreedSlots}/{FreedSpots}/{FreedDance} released={ReleasedSeated}/{ReleasedWalking}/{ReleasedOther}/{ReleasedQueueMoved}/{ReleasedQueueLeft} fallback={(fbl.Count > 0 ? string.Join(",", fbl) : "-")} bad={(bad.Count > 0 ? string.Join(",", bad) : "-")}";
             }
             catch (Exception ex) { return "ERR held " + ex.Message; }
         }
