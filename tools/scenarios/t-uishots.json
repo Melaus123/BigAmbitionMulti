@@ -1,0 +1,304 @@
+{
+  "id": "T-UISHOTS",
+  "title": "DEV palette capture - the DEV lever 'uiview' opens the game's OWN main-menu screens (start column, Load Game, Options first tab, New Game sheet, the delete-save HudConfirm) through their own button onClick, plus our MP submenu and lobby window as a before-picture, and 'screenshot ui-<view>' captures each. Host only; the client idles at its main menu. NO save, no world load. Keep the host window unfocused but NOT minimised (a minimised window does not render).",
+  "preconditions": "Dev build with the 'uiview' lever (TestDrive.cs). At least one save on disk so Load Game lists something (the lever opens the window either way).",
+  "instances": 2,
+  "vars": {},
+  "oracles_absent": [
+    "\\[TestDrive\\] uiview: ",
+    "\\[TestDrive\\] screenshot: ",
+    "HudConfirm is already open"
+  ],
+  "oracles_report": [
+    "\\[TestDrive\\] uiview ",
+    "\\[TestDrive\\] screenshot "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "both",
+      "cmd": "mark TEST UISHOTS START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "let the main menu finish building (menu injection, theme frontload) before the first open"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "uiview start",
+      "expect_result": "^OK uiview start: closed:",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview start: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the start view animate in"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "screenshot ui-start",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-start\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "uiview load",
+      "expect_result": "^OK uiview load: .*active=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview load: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the load view animate in"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "screenshot ui-load",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-load\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "uiview options",
+      "expect_result": "^OK uiview options: .*active=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview options: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the options view animate in"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "screenshot ui-options",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-options\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "uiview newgame",
+      "expect_result": "^OK uiview newgame: button '.*' onClick .*opened=[1-9]",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview newgame: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the newgame view animate in"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "screenshot ui-newgame",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-newgame\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "uiview confirm",
+      "expect_result": "^OK uiview confirm: .*isOpen=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview confirm: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the confirm view animate in"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "screenshot ui-confirm",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-confirm\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "uiview mp",
+      "expect_result": "^OK uiview mp: ShowView\\(Submenu\\)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview mp: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the mp view animate in"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "screenshot ui-mp",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-mp\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "uiview lobby",
+      "expect_result": "^OK uiview lobby: ShowView\\(Lobby\\) server=False",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview lobby: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the lobby view animate in"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "screenshot ui-lobby",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-lobby\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK server started",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Listening on port 7777$",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "uiview lobby",
+      "expect_result": "^OK uiview lobby: ShowView\\(Lobby\\) server=True"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the lobby roster refresh"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "screenshot ui-lobbyhost",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-lobbyhost\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "uiview close",
+      "expect_result": "^OK uiview close: closed:"
+    },
+    {
+      "seq": 29,
+      "role": "both",
+      "cmd": "mark TEST UISHOTS END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

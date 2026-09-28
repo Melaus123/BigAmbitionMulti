@@ -197,6 +197,206 @@ namespace BigAmbitionsMP
             return n;
         }
 
+        // DEV lever 'uiview <start|load|options|newgame|confirm|close|mp|lobby>' (2026-09-28): opens the game's
+        // OWN main-menu screens the way a click would (the button's own onClick), so real screenshots can give the
+        // native palette. mp/lobby = our current submenu / lobby window (private ShowView) as a before-picture.
+        // Runs on the main thread (Execute is called from Tick). No player-facing change.
+        private static string UiView(string arg)
+        {
+            try
+            {
+                string which = (arg ?? "").Trim().ToLowerInvariant();
+                var mmc = InstanceBehavior<MainMenuController>.Instance;
+                if (mmc == null) return "ERR uiview: not at the main menu (no MainMenuController)";
+                var bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+                var mt = typeof(MainMenuController);
+                var loadGame  = mt.GetField("loadGame", bf)?.GetValue(mmc) as global::Scenes.MainMenu.LoadGame;
+                var options   = mt.GetField("options", bf)?.GetValue(mmc) as global::Scenes.MainMenu.Options;
+                var newGameGO = mt.GetField("newGameOptions", bf)?.GetValue(mmc) as UnityEngine.GameObject;
+                var loadBtn   = mt.GetField("loadGameButton", bf)?.GetValue(mmc) as UnityEngine.UI.Button;
+                string res;
+                switch (which)
+                {
+                    case "start":
+                    case "close":
+                        res = UiViewCloseAll(mmc, loadGame, options, newGameGO);
+                        break;
+                    case "load":
+                    {
+                        UiViewCloseAll(mmc, loadGame, options, newGameGO);
+                        if (loadGame == null) return "ERR uiview load: LoadGame field not found";
+                        string how;
+                        if (loadBtn != null) { loadBtn.onClick.Invoke(); UiViewRecordOpened(loadBtn, mmc.startView); how = "loadGameButton '" + loadBtn.name + "' onClick" + UiViewPersist(loadBtn); }
+                        else how = UiViewClickFor(mmc.startView, loadGame, null);
+                        if (!loadGame.gameObject.activeInHierarchy)
+                        {
+                            try { mmc.startView.SetActive(false); loadGame.gameObject.SetActive(true); loadGame.LoadSaveGames(); } catch (Exception ex) { how += " fallbackErr=" + ex.Message; }
+                            how += " (FALLBACK: click did not open it; SetActive+LoadSaveGames)";
+                        }
+                        res = how + " active=" + loadGame.gameObject.activeInHierarchy;
+                        break;
+                    }
+                    case "options":
+                    {
+                        UiViewCloseAll(mmc, loadGame, options, newGameGO);
+                        if (options == null) return "ERR uiview options: Options field not found";
+                        string how = UiViewClickFor(mmc.startView, options, null);
+                        if (!options.gameObject.activeInHierarchy)
+                        {
+                            try { mmc.startView.SetActive(false); options.gameObject.SetActive(true); } catch (Exception ex) { how += " fallbackErr=" + ex.Message; }
+                            how += " (FALLBACK: no button opened it; SetActive)";
+                        }
+                        res = how + " active=" + options.gameObject.activeInHierarchy;
+                        break;
+                    }
+                    case "newgame":
+                    {
+                        UiViewCloseAll(mmc, loadGame, options, newGameGO);
+                        string how = UiViewClickNamed(mmc.startView, "newgame");
+                        res = how + " opened=" + _uiOpened.Count;
+                        break;
+                    }
+                    case "confirm":
+                        UiViewCloseAll(mmc, loadGame, options, newGameGO);
+                        // The delete-save confirm style (LoadGame.DeleteSaveGame): body key, negative, no action.
+                        HudConfirm.Show((string?)null, "main_menu_delete_save_game_confirm", null, null, null, null, false, true);
+                        res = "HudConfirm.Show(body='main_menu_delete_save_game_confirm', isNegative) isOpen=" + HudConfirm.isOpen;
+                        break;
+                    case "mp":
+                        UiViewCloseAll(mmc, loadGame, options, newGameGO);
+                        res = UiViewMp("Submenu");
+                        break;
+                    case "lobby":
+                        UiViewCloseAll(mmc, loadGame, options, newGameGO);
+                        res = UiViewMp("Lobby") + " server=" + MPServer.IsRunning;
+                        break;
+                    default:
+                        return "ERR usage: uiview start|load|options|newgame|confirm|close|mp|lobby";
+                }
+                Plugin.Logger.LogInfo("[TestDrive] uiview " + which + ": " + res);
+                return "OK uiview " + which + ": " + res;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning("[TestDrive] uiview: " + ex);
+                return "ERR uiview: " + ex.GetType().Name + ": " + ex.Message;
+            }
+        }
+
+        private static string UiViewCloseAll(MainMenuController mmc, global::Scenes.MainMenu.LoadGame? loadGame,
+                                             global::Scenes.MainMenu.Options? options, UnityEngine.GameObject? newGameGO)
+        {
+            var sb = new StringBuilder("closed:");
+            try { if (HudConfirm.isOpen) { HudConfirm.onClose?.Invoke(); sb.Append(" confirm"); } } catch (Exception ex) { sb.Append(" confirmErr=" + ex.Message); }
+            try { if (loadGame != null && loadGame.gameObject.activeSelf) { loadGame.CloseLoadGames(); sb.Append(" load"); } } catch (Exception ex) { sb.Append(" loadErr=" + ex.Message); }
+            try { if (options != null && options.gameObject.activeSelf) { options.CloseOptions(); sb.Append(" options"); } } catch (Exception ex) { sb.Append(" optionsErr=" + ex.Message); }
+            try { if (newGameGO != null && newGameGO.activeSelf) { newGameGO.SetActive(false); sb.Append(" newgame"); } } catch (Exception ex) { sb.Append(" newgameErr=" + ex.Message); }
+            try
+            {
+                foreach (var go in _uiOpened)
+                    if (go != null && go.activeSelf) { go.SetActive(false); sb.Append(" " + go.name); }
+                _uiOpened.Clear();
+            }
+            catch (Exception ex) { sb.Append(" openedErr=" + ex.Message); }
+            try { if (mmc.startView != null && !mmc.startView.activeSelf) mmc.startView.SetActive(true); } catch { }
+            sb.Append(" mp->" + UiViewMp("Main"));
+            return sb.ToString();
+        }
+
+        private static string UiViewPersist(UnityEngine.UI.Button b)
+        {
+            var sb = new StringBuilder(" [");
+            try
+            {
+                int n = b.onClick.GetPersistentEventCount();
+                for (int i = 0; i < n; i++)
+                {
+                    var t = b.onClick.GetPersistentTarget(i);
+                    sb.Append((i > 0 ? "; " : "") + (t == null ? "null" : t.GetType().Name + ":" + t.name) + "." + b.onClick.GetPersistentMethodName(i));
+                }
+            }
+            catch (Exception ex) { sb.Append("err=" + ex.Message); }
+            return sb.Append("]").ToString();
+        }
+
+        /// <summary>Click (onClick.Invoke) the first button under root whose PERSISTENT (scene-wired) call targets comp
+        /// or its UnityEngine.GameObject (and, when given, calls method). Our cloned buttons have no persistent calls.</summary>
+        private static string UiViewClickFor(UnityEngine.GameObject root, UnityEngine.Component comp, string? method)
+        {
+            try
+            {
+                if (root == null || comp == null) return "no root/target";
+                foreach (var b in root.GetComponentsInChildren<UnityEngine.UI.Button>(true))
+                {
+                    int n = b.onClick.GetPersistentEventCount();
+                    for (int i = 0; i < n; i++)
+                    {
+                        var t = b.onClick.GetPersistentTarget(i);
+                        if (t == null) continue;
+                        bool hit = ReferenceEquals(t, comp) || ReferenceEquals(t, comp.gameObject);
+                        if (hit && method != null) hit = b.onClick.GetPersistentMethodName(i) == method;
+                        if (!hit) continue;
+                        b.onClick.Invoke();
+                        UiViewRecordOpened(b, root);
+                        return "button '" + b.name + "' onClick" + UiViewPersist(b);
+                    }
+                }
+                return "no scene button targets " + comp.GetType().Name;
+            }
+            catch (Exception ex) { return "clickErr=" + ex.Message; }
+        }
+
+        private static readonly System.Collections.Generic.List<UnityEngine.GameObject> _uiOpened = new System.Collections.Generic.List<UnityEngine.GameObject>();
+
+        private static void UiViewRecordOpened(UnityEngine.UI.Button b, UnityEngine.GameObject root)
+        {
+            try
+            {
+                int n = b.onClick.GetPersistentEventCount();
+                for (int i = 0; i < n; i++)
+                    if (b.onClick.GetPersistentTarget(i) is UnityEngine.GameObject go && go != root && go.activeSelf && !_uiOpened.Contains(go))
+                        _uiOpened.Add(go);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning("[TestDrive] uiview record: " + ex.Message); }
+        }
+
+        /// <summary>Click (onClick.Invoke) the first scene button under root whose name contains key (case- and
+        /// space-insensitive; our BAMP_ clones skipped). On a miss, lists the button names seen.</summary>
+        private static string UiViewClickNamed(UnityEngine.GameObject root, string key)
+        {
+            try
+            {
+                if (root == null) return "no root";
+                var seen = new StringBuilder();
+                foreach (var b in root.GetComponentsInChildren<UnityEngine.UI.Button>(true))
+                {
+                    string nm = b.name ?? "";
+                    if (nm.StartsWith("BAMP_", StringComparison.Ordinal)) continue;
+                    seen.Append(nm).Append(',');
+                    if (nm.Replace(" ", "").IndexOf(key, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    b.onClick.Invoke();
+                    UiViewRecordOpened(b, root);
+                    return "button '" + nm + "' onClick" + UiViewPersist(b);
+                }
+                return "no button named like '" + key + "' (seen: " + seen + ")";
+            }
+            catch (Exception ex) { return "clickErr=" + ex.Message; }
+        }
+
+        private static string UiViewMp(string view)
+        {
+            try
+            {
+                var ui = MPCanvasUI.Instance;
+                if (ui == null) return "noMPCanvasUI";
+                var m = HarmonyLib.AccessTools.Method(typeof(MPCanvasUI), "ShowView");
+                if (m == null) return "noShowView";
+                m.Invoke(ui, new object[] { Enum.Parse(m.GetParameters()[0].ParameterType, view) });
+                return "ShowView(" + view + ")";
+            }
+            catch (Exception ex) { return "ShowViewErr=" + (ex.InnerException ?? ex).Message; }
+        }
+
         private static string Execute(string line)
         {
             if (string.IsNullOrEmpty(line)) return "ERR empty command";
@@ -2322,6 +2522,8 @@ namespace BigAmbitionsMP
                     GameStatePatcher.EnqueueOnMainThread(() => MPWeatherSync.TryForceRain(on));
                     return $"OK rain {(on ? "on" : "off")} queued (same apply path as the F7 key)";
                 }
+                case "uiview":   // DEV (2026-09-28): open the game's OWN main-menu screens for palette screenshots
+                    return UiView(arg);
                 case "screenshot":
                 {
                     string name = arg.Length == 0 ? DateTime.Now.ToString("HHmmss") : arg;
