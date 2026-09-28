@@ -1,0 +1,565 @@
+{
+  "id": "T-CARSTACK-DOOR",
+  "title": "H-CARSTACK-1 attempt 1 (2026-09-28): the host judged an INDOOR client by its avatar, which the mover snaps to the interior's coordinates (a detached island 700-800 m from the city), so every walk-in beside the host flipped the client to its OWN traffic and every walk-out flipped it back onto the host's ghosts - the stacked cars. Fixed: an indoor player is judged by its last OUTSIDE position, as the host judges itself. (a) The host stands inside his salon; the client walks in and out of that shop and the neighbouring gym 3 times: the host's flip counter for the client and the client's applied seq never move. (b) CONTROL: the client far away -> local; back at the door -> ghost. REPORT per leg: [CarStack] LIFTED / [CarHit] counts. NO save.",
+  "preconditions": "Reporter fixture session fx-hq1 (MERGED - vars.keepMerger true): '58 ba:street_fifthavenue' is the host's salon, '60 ba:street_fifthavenue' Client1's gym next door. Dev build with the `traffic` readout tail (host: peers=<pid>:<mode>:<flip seq>; client: mseq=<applied seq> near=<own reading>; both: at=x,y,z). enterbuilding teleports, so each player first enters and leaves its door once to make its last outside position the door. ORACLE NOTE: NullReferenceException carries the `(?<!swallowed )` lookbehind (fx-hq1's own Gley diagnostic).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-hq1",
+    "keepMerger": true,
+    "hostShop": "58 ba:street_fifthavenue",
+    "nextShop": "60 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "(?<!swallowed )NullReferenceException",
+    "HarmonyException",
+    "CarHitProbe\\.OnContact",
+    "\\[TrafficSync\\] .*(failed|exception|threw)"
+  ],
+  "oracles_report": [
+    "\\[TrafficSync\\] traffic mode for \\S+: ",
+    "\\[TrafficSync\\] traffic mode: (local|ghost)",
+    "\\[CarStack\\] LIFTED ",
+    "\\[CarStack\\] LIFT ",
+    "\\[CarHit\\] (parked-player|traffic|traffic-replica|car-ghost|parked-ambient|parked-replica|ghost-other|other) ",
+    "\\[InteriorMask\\] ",
+    "\\[TestDrive\\] enterbuilding "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST T-CARSTACK-DOOR START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 32,
+      "note": "both worlds settle"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only)"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "status",
+      "abort_on_fail": false,
+      "note": "settle poll (report-only)"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 18
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "note": "ASSERT the host settled (~90 s after the load)"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "fx-hq1 loads Client1 inside a building; report-only"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "enterbuilding ${hostShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] enterbuilding '${hostShop}' \\S+ OK",
+          "within_s": 30
+        }
+      ],
+      "note": "SET-UP: the host walks to his shop's door the rig's way (enter, then exit) so his last outside position IS the door, as a real walk-in makes it"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "sleep_s": 10
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "enterbuilding ${nextShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${nextShop}' \\S+ OK",
+          "within_s": 30
+        }
+      ],
+      "note": "SET-UP: the client comes to the neighbouring door the same way"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "sleep_s": 30,
+      "note": "both outdoors at neighbouring doors: the client is (or becomes) a ghost-mode client and its approach handover finishes"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=ghost ",
+      "capture": {
+        "cSeq0": "mseq=(\\d+)",
+        "cNear0": "near=(\\S+)"
+      },
+      "note": "PREMISE: the client runs the host's traffic with the host beside it"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "enterbuilding ${hostShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] enterbuilding '${hostShop}' \\S+ OK",
+          "within_s": 30
+        }
+      ],
+      "note": "the host is INSIDE his shop for every leg (judged by his door, his last outside position)"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "sleep_s": 10
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:\\d+",
+      "capture": {
+        "hSeq0": "${clientPid}:ghost:(\\d+)"
+      },
+      "note": "BASELINE: the host's per-peer flip counter for the client before the legs"
+    },
+    {
+      "seq": 29,
+      "role": "both",
+      "cmd": "mark TEST T-CARSTACK-DOOR LEG1",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "enterbuilding ${hostShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${hostShop}' \\S+ OK",
+          "within_s": 30
+        }
+      ],
+      "note": "LEG 1: the client walks into the HOST'S shop (same building: its avatar is shown there at interior coordinates)"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "cmd": "enterbuilding ${nextShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${nextShop}' \\S+ OK",
+          "within_s": 30
+        }
+      ],
+      "note": "LEG 1: ... then the neighbouring shop (a different interior: masked on the host)"
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:${hSeq0}(,|\\s|$)",
+      "note": "ASSERT LEG 1: the host never flipped the client (same mode, same flip counter) - no 'traffic mode for Client1: ghost -> local'"
+    },
+    {
+      "seq": 39,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=ghost .*mseq=${cSeq0} ",
+      "note": "ASSERT LEG 1: the client applied no mode change ('traffic mode: local' never taken)"
+    },
+    {
+      "seq": 40,
+      "role": "both",
+      "cmd": "mark TEST T-CARSTACK-DOOR LEG2",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "enterbuilding ${hostShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${hostShop}' \\S+ OK",
+          "within_s": 30
+        }
+      ],
+      "note": "LEG 2: the client walks into the HOST'S shop (same building: its avatar is shown there at interior coordinates)"
+    },
+    {
+      "seq": 42,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 44,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "enterbuilding ${nextShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${nextShop}' \\S+ OK",
+          "within_s": 30
+        }
+      ],
+      "note": "LEG 2: ... then the neighbouring shop (a different interior: masked on the host)"
+    },
+    {
+      "seq": 46,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 47,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 48,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:${hSeq0}(,|\\s|$)",
+      "note": "ASSERT LEG 2: the host never flipped the client (same mode, same flip counter) - no 'traffic mode for Client1: ghost -> local'"
+    },
+    {
+      "seq": 50,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=ghost .*mseq=${cSeq0} ",
+      "note": "ASSERT LEG 2: the client applied no mode change ('traffic mode: local' never taken)"
+    },
+    {
+      "seq": 51,
+      "role": "both",
+      "cmd": "mark TEST T-CARSTACK-DOOR LEG3",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 52,
+      "role": "c",
+      "cmd": "enterbuilding ${hostShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${hostShop}' \\S+ OK",
+          "within_s": 30
+        }
+      ],
+      "note": "LEG 3: the client walks into the HOST'S shop (same building: its avatar is shown there at interior coordinates)"
+    },
+    {
+      "seq": 53,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 54,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 55,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 56,
+      "role": "c",
+      "cmd": "enterbuilding ${nextShop}",
+      "expect_result": "^OK enterbuilding",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] enterbuilding '${nextShop}' \\S+ OK",
+          "within_s": 30
+        }
+      ],
+      "note": "LEG 3: ... then the neighbouring shop (a different interior: masked on the host)"
+    },
+    {
+      "seq": 57,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 58,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 59,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 60,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:${hSeq0}(,|\\s|$)",
+      "note": "ASSERT LEG 3: the host never flipped the client (same mode, same flip counter) - no 'traffic mode for Client1: ghost -> local'"
+    },
+    {
+      "seq": 61,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=ghost .*mseq=${cSeq0} ",
+      "note": "ASSERT LEG 3: the client applied no mode change ('traffic mode: local' never taken)"
+    },
+    {
+      "seq": 62,
+      "role": "both",
+      "cmd": "mark TEST T-CARSTACK-DOOR CONTROL",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 63,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c ",
+      "capture": {
+        "ax": "at=(-?[\\d.]+),",
+        "ay": "at=-?[\\d.]+,(-?[\\d.]+),",
+        "az": "at=-?[\\d.]+,-?[\\d.]+,(-?[\\d.]+)"
+      },
+      "note": "the client's door position, to walk it back to"
+    },
+    {
+      "seq": 64,
+      "role": "c",
+      "cmd": "tproad -500 -150",
+      "expect_result": "^OK tproad ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TrafficSync\\] traffic mode for ${clientPid}: ghost -> local \\(nearest other player \\d+ m\\)",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[TrafficSync\\] traffic mode: local \\(seq \\d+\\) - this client is far from every other player by the HOST's verdict",
+          "within_s": 30
+        }
+      ],
+      "note": "CONTROL (b): the client far away (T-CARHIT's far road point, ~700 m from the fifth-avenue row) -> local mode still happens"
+    },
+    {
+      "seq": 65,
+      "role": "c",
+      "sleep_s": 20
+    },
+    {
+      "seq": 66,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=local ",
+      "abort_on_fail": false,
+      "capture": {
+        "cNearFar": "near=(\\S+)"
+      }
+    },
+    {
+      "seq": 67,
+      "role": "c",
+      "cmd": "tp ${ax} ${ay} ${az}",
+      "expect_result": "^OK tp ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TrafficSync\\] traffic mode for ${clientPid}: local -> ghost",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[TrafficSync\\] traffic mode: ghost \\(seq \\d+\\) - another player is near",
+          "within_s": 30
+        }
+      ],
+      "note": "CONTROL (b): back at the door -> ghost (the approach handover still works)"
+    },
+    {
+      "seq": 68,
+      "role": "c",
+      "sleep_s": 20
+    },
+    {
+      "seq": 69,
+      "role": "c",
+      "cmd": "carhit",
+      "expect_result": "^OK carhit ",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 70,
+      "role": "h",
+      "cmd": "carhit",
+      "expect_result": "^OK carhit ",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 71,
+      "role": "both",
+      "cmd": "mark TEST T-CARSTACK-DOOR END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

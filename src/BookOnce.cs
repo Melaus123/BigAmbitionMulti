@@ -191,13 +191,38 @@ namespace BigAmbitionsMP
             try
             {
                 if (reg == null || string.IsNullOrEmpty(id) || IsBooked(id) || _ended.ContainsKey(id) || _ending.ContainsKey(id)) return;
-                if (_ending.Count > 2000) _ending.Clear();
+                if (_ending.Count > 2000) EvictEnding();   // U4: expired / oldest marks go, never all of them
                 var en = new Ending { Addr = GameStateReader.AddressKey(reg), From = from ?? "", MarkAbs = NowAbsHour() };
                 _ending[id] = en;
                 EndingMarked++;
                 Plugin.Logger.LogInfo($"[BookOnce] {id} ending - leaving on {en.From}'s machine: kept out of the hourly pass until its release report or its sale (stock untouched; cleared after the next hour if neither comes).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] mark ending: {ex.Message}"); }
+        }
+
+        /// <summary>U4 (re-check of f132da7, 2026-09-28): the ending-mark overflow. Marks that are over (booked, ended, or
+        /// past the hour boundary ExpireEnding would clear them at) go first, then the oldest, down to 1900 - a Clear()
+        /// would reopen every live walk-out to its hourly pass at once.</summary>
+        private static void EvictEnding()
+        {
+            try
+            {
+                int nowAbs = NowAbsHour();
+                var drop = new List<string>();
+                foreach (var kv in _ending)
+                    if (IsBooked(kv.Key) || _ended.ContainsKey(kv.Key) || (nowAbs >= 0 && kv.Value.MarkAbs >= 0 && nowAbs - 1 > kv.Value.MarkAbs))
+                        drop.Add(kv.Key);
+                foreach (var id in drop) _ending.Remove(id);
+                int oldest = 0;
+                if (_ending.Count > 1900)
+                {
+                    var rest = new List<KeyValuePair<string, Ending>>(_ending);
+                    rest.Sort((a, b) => a.Value.MarkAbs.CompareTo(b.Value.MarkAbs));
+                    for (int i = 0; i < rest.Count && _ending.Count > 1900; i++) { _ending.Remove(rest[i].Key); oldest++; }
+                }
+                Plugin.Logger.LogInfo($"[BookOnce] ending marks over the cap: {drop.Count} expired and {oldest} oldest evicted, {_ending.Count} kept.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] evict ending: {ex.Message}"); }
         }
 
         /// <summary>H2, OWNER, MAIN THREAD (CustomerHandoff.SettleUnsoldWalkOut): the visit ended unsold - kept out of the
@@ -221,11 +246,12 @@ namespace BigAmbitionsMP
                         if (e == null) continue;
                         string? eid = IdOfOrder(e.order) ?? CustomerEntrySync.KnownIdOf(e);
                         if (eid != id) continue;
+                        // U5 (re-check of f132da7, 2026-09-28): the entry STAYS in the table, marked completed - removing it
+                        // let a mid-day entry regeneration create a replacement customer. HourlyBegin sets ended ids aside.
                         e.completed = true;
-                        entries.RemoveAt(i);
                         removed++;
                     }
-                Plugin.Logger.LogInfo($"[BookOnce] {id} ended unsold - kept out of the hourly pass ({(removed > 0 ? $"{removed} live entr{(removed == 1 ? "y" : "ies")} retired from @{addr}'s table" : "no live entry of it here")}; a later sale forward can still book it).");
+                Plugin.Logger.LogInfo($"[BookOnce] {id} ended unsold - kept out of the hourly pass ({(removed > 0 ? $"{removed} live entr{(removed == 1 ? "y" : "ies")} marked completed in @{addr}'s table" : "no live entry of it here")}; a later sale forward can still book it).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] end unsold: {ex.Message}"); }
         }

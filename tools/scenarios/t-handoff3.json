@@ -12,7 +12,7 @@
   },
   "oracles_absent": [
     "\\[Stock\\] (settle unsold|unsold leave in|unsold leave send|unsold release|unsold cancel|unsold flush|settled credits|HandleCustomerUnsoldLeave)\\b[^:]*: ",
-    "\\[BookOnce\\] (register|book|end unsold|mark ending|expire ending|till watch|hourly begin|hourly restore|hourly end)\\b[^:]*: ",
+    "\\[BookOnce\\] (register|book|end unsold|mark ending|expire ending|evict ending|till watch|hourly begin|hourly restore|hourly end)\\b[^:]*: ",
     "\\[TickIso\\]",
     "\\[Guard\\]",
     "(?<!swallowed )NullReferenceException",
@@ -37,7 +37,10 @@
     "\\[Stock\\] forward \\S+ arrived after its unsold settle",
     "\\[BookOnce\\] \\S+ ended unsold",
     "\\[BookOnce\\] \\S+ ending",
-    "\\[Stock\\] leaving notice "
+    "\\[Stock\\] leaving notice ",
+    "\\[Stock\\] unsold walk-out \\S+ from \\S+ @.+: no line reported",
+    "\\[BookOnce\\] ending marks over the cap",
+    "\\[Stock\\] unsold hold cap"
   ],
   "steps": [
     {
@@ -393,7 +396,7 @@
         },
         {
           "role": "h",
-          "regex": "\\[Stock\\] (\\S+ walked out unsold on ${clientPid}'s machine: [0-9]+/[1-9][0-9]* unit\\(s\\) my shelves gave back on a shelf; [0-9]+ picked-but-unprocessed|unsold walk-out \\S+ from ${clientPid} @.+: no unit of my shelves was out for it)",
+          "regex": "\\[Stock\\] (\\S+ walked out unsold on ${clientPid}'s machine: [0-9]+/[1-9][0-9]* unit\\(s\\) my shelves gave back on a shelf; [0-9]+ picked-but-unprocessed|unsold walk-out \\S+ from ${clientPid} @.+: no unit of my shelves was out for it|unsold walk-out \\S+ from ${clientPid}: the visit was sold \\(forwarded or booked\\) - skipped)",
           "within_s": 45
         },
         {
@@ -407,7 +410,7 @@
           "within_s": 15
         }
       ],
-      "note": "R1 (hand-off stock S4, 2026-09-27): the OWNER is OUTSIDE; the client (simulator) sends one live body holding a taken line home through the game's own InstantlyLeave -> Leave, with its order open and nothing paid. The client reports the processed lines to the owner (message 220 via the host); the owner puts back on HIS shelves min(those lines, the units his shelves gave the visit) and names the rest as the native pick-then-leave loss (leftUnprocessed). ids= prints visit:proc/taken/lines per body. H1/H2 (review of 95cf5e1): the client HOLDS the report at Leave and sends it when the body is released at the exit (hence 45 s), only if nothing was paid; 'taken' never picks a body the till is serving. The owner's settle also ends the visit in BookOnce (its entry leaves his live hourly table). R2 (2026-09-28): the moment the customer turns to leave the client sends an EARLY notice (220 Leaving, no stock); the owner marks the visit 'ending' so an hour boundary during the walk out sets its entry aside ('ending ... set aside by the native hourly pass', report) instead of billing it. R2 rig fold (run T-HANDOFF3-20260928-012720): 'taken' can pick a visit born on the client after leg 1, whose units came off the client's replica shelves - none of the owner's units are out for it, so the owner correctly settles nothing ('no unit of my shelves was out for it'); either outcome passes, the stock identity below stays hard."
+      "note": "R1 (hand-off stock S4, 2026-09-27): the OWNER is OUTSIDE; the client (simulator) sends one live body holding a taken line home through the game's own InstantlyLeave -> Leave, with its order open and nothing paid. The client reports the processed lines to the owner (message 220 via the host); the owner puts back on HIS shelves min(those lines, the units his shelves gave the visit) and names the rest as the native pick-then-leave loss (leftUnprocessed). ids= prints visit:proc/taken/lines per body. H1/H2 (review of 95cf5e1): the client HOLDS the report at Leave and sends it when the body is released at the exit (hence 45 s), only if nothing was paid; 'taken' never picks a body the till is serving. The owner's settle also ends the visit in BookOnce (its entry leaves his live hourly table). R2 (2026-09-28): the moment the customer turns to leave the client sends an EARLY notice (220 Leaving, no stock); the owner marks the visit 'ending' so an hour boundary during the walk out sets its entry aside ('ending ... set aside by the native hourly pass', report) instead of billing it. R2 rig fold (run T-HANDOFF3-20260928-012720): 'taken' can pick a visit born on the client after leg 1, whose units came off the client's replica shelves - none of the owner's units are out for it, so the owner correctly settles nothing ('no unit of my shelves was out for it'); either outcome passes, the stock identity below stays hard. RIG FOLD (run T-HANDOFF3-20260928-031240, 2026-09-28): 'taken' can pick a visit the owner's own native hourly pass already BOOKED while he stood outside (first booking wins - the 'live on a partner across its spawn hour' case the manager left unfolded); the owner then correctly skips it as sold. That outcome passes too; the stock identity stays hard."
     },
     {
       "seq": 107,
@@ -493,6 +496,46 @@
       "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok .*boEndedBooked=0",
       "abort_on_fail": false,
       "note": "H1: the served sale books exactly once"
+    },
+    {
+      "seq": 118,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 LEG1D U1 ZERO-TAKE-WALK-OUT",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 119,
+      "role": "c",
+      "cmd": "custevict 1 empty",
+      "expect_result": "^OK custevict asked=1 evicted=1 ",
+      "abort_on_fail": false,
+      "capture": {
+        "zId": "=([^:,\\s=#]+):proc0/taken0/"
+      },
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Stock\\] ${zId} leaving unsold here @${shop}: 0 processed unit\\(s\\) held .* it took nothing",
+          "within_s": 10,
+          "since_prev_step": true
+        },
+        {
+          "role": "h",
+          "regex": "\\[BookOnce\\] ${zId} ending - leaving on ${clientPid}'s machine",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[Stock\\] ${zId} walked out unsold here @${shop} \\(the owner keeps the books\\): 0 processed unit",
+          "within_s": 45
+        },
+        {
+          "role": "h",
+          "regex": "\\[BookOnce\\] ${zId} ended unsold - kept out of the hourly pass",
+          "within_s": 45
+        }
+      ],
+      "note": "U1 LEG (re-check of f132da7, 2026-09-28): the OWNER is OUTSIDE; the client (simulator) sends home one live body that holds NOTHING (no taken, processed or paid line; never one at a till). Before the fold the partner sent nothing for it, so the owner's entry stayed open and his hourly pass (no completed filter) billed it. Now the early notice marks it 'ending' and the release report (no lines) ends it: the owner's EndUnsold marks the entry completed (U5, kept in the table). The owner then stays outside across the hour change (F1 leg below); step 117 asserts no ended id was booked (boEndedBooked=0), this one included. (The 'leaving unsold here' line is written inside the custevict command itself, so it is searched from the previous step's mark. Runs T-HANDOFF3-20260928-031240/-032113 failed on the capture: it took 'h13#...=melaus-21', not the visit id.)"
     },
     {
       "seq": 38,

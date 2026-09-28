@@ -458,6 +458,7 @@ namespace BigAmbitionsMP
             foreach (var kv in _players)
                 if (kv.Value != null) { TrafficSync.NotifyCollidersRemoved(kv.Value); UnityEngine.Object.Destroy(kv.Value); }   // review #2 MAJOR-4
             _players.Clear();
+            _lastOutsidePos.Clear();   // H-CARSTACK-1
             Plugin.Logger.LogInfo("[RemotePlayer] Destroyed all remote players (kill-switch).");
         }
 
@@ -513,6 +514,16 @@ namespace BigAmbitionsMP
             }
 
             _remoteBuildings[p.PlayerId] = p.Bldg ?? "";
+            // H-CARSTACK-1 (2026-09-28): the last STREET position of this player - what the host's traffic rule judges an
+            // indoor player by, exactly as it judges the host itself (TrafficSync.LocalAnchorPosition). An empty tag ships
+            // with street coordinates only (the sender derives it from BuildingManager.IsInsideBuilding, MPCanvasUI), and a
+            // Hamptons plot is street coordinates too (see the mask comment below); an interior tag is never recorded.
+            try
+            {
+                if (string.IsNullOrEmpty(p.Bldg) || HamptonsAccess.IsHamptonsAddress(p.Bldg))
+                    _lastOutsidePos[p.PlayerId] = new Vector3(p.X, p.Y, p.Z);
+            }
+            catch { }
             // Round-87 (user-approved, probe-confirmed): an OUTDOORS player (bldg='') stands at STREET
             // coordinates and can never overlap an interior island (~x900 detached space) — the mask's
             // reason doesn't apply to them. Hiding them was a root-level SetActive(false), which removes
@@ -560,6 +571,27 @@ namespace BigAmbitionsMP
 
         // ── Cross-interior mask state (see SpawnOrUpdate) ─────────────────────
         private static readonly Dictionary<string, string> _remoteBuildings = new();
+        /// <summary>H-CARSTACK-1: pid -> the last position received with an OUTDOORS tag (street coordinates).</summary>
+        private static readonly Dictionary<string, Vector3> _lastOutsidePos = new();
+
+        /// <summary>H-CARSTACK-1 (2026-09-28): the position the TRAFFIC RULE judges a remote player by. Outdoors (or on a
+        /// Hamptons plot): the avatar itself. Inside a genuine interior: the last street position received from them - an
+        /// interior sits on a detached coordinate island far from the city, and the avatar is NOT kept at the door while
+        /// masked (RemotePlayerMover.SetTarget snaps it to the interior coordinates on the teleport-sized jump, hidden or
+        /// not). No street position yet (they loaded inside) = no position: the caller keeps its verdict.</summary>
+        internal static bool TryGetTrafficJudgePosition(string playerId, out Vector3 pos)
+        {
+            pos = default;
+            try
+            {
+                if (string.IsNullOrEmpty(playerId)) return false;
+                string b = BuildingOf(playerId);
+                bool indoors = b.Length > 0 && !HamptonsAccess.IsHamptonsAddress(b);
+                if (!indoors) return TryGetRemotePosition(playerId, out pos);
+                return _lastOutsidePos.TryGetValue(playerId, out pos);
+            }
+            catch { pos = default; return false; }
+        }
 
         /// <summary>Round-41 (customer puppets): which building a remote player is inside ("" = outdoors /
         /// unknown). Fed by every position payload; the host's simulator election reads it for presence.</summary>
@@ -658,6 +690,7 @@ namespace BigAmbitionsMP
             _heldApplied.Remove(playerId);
             _heldProps.Remove(playerId);
             _remoteBuildings.Remove(playerId);
+            _lastOutsidePos.Remove(playerId);   // H-CARSTACK-1
             VehicleManager.DespawnAllOwnedBy(playerId);
             Plugin.Logger.LogInfo($"[RemotePlayer] Removed '{playerId}'");
         }
@@ -670,6 +703,7 @@ namespace BigAmbitionsMP
             _players.Clear();
             _appearances.Clear();
             _remoteBuildings.Clear();   // interior-mask state dies with the avatars
+            _lastOutsidePos.Clear();    // H-CARSTACK-1: so does the traffic rule's street position
             _heldApplied.Clear();       // held-prop state too
             _mopApplied.Clear();        // mop state dies with the avatars (field 181203)
             _heldProps.Clear();

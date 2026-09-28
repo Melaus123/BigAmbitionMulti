@@ -690,17 +690,35 @@ namespace BigAmbitionsMP
         /// <summary>P9 test seam: pid -> "local"/"ghost" pinned by `trafficmode force`. Absent = the distance rule.</summary>
         private static readonly Dictionary<string, string> _peerTrafficPin = new();
 
-        /// <summary>The position the traffic rules judge a REMOTE player by: the ridden car when they are a passenger
-        /// (review M3 — their avatar is parked at the boarding door, which is not where they are), else the avatar
-        /// itself. A player INDOORS keeps their avatar at the building (RemotePlayerManager.GetPlayerPosition stays
-        /// valid while masked), and that is exactly the outside position to measure from. An unresolvable ride yields
-        /// no position at all rather than a wrong one.</summary>
+        /// <summary>The position the per-peer snapshot CULLING uses for a REMOTE player: the ridden car when they are a
+        /// passenger (review M3 — their avatar is parked at the boarding door, which is not where they are), else the
+        /// avatar itself. H-CARSTACK-1 (2026-09-28): an INDOOR player's avatar is NOT kept at the building - the mover
+        /// snaps it to the interior's coordinates (RemotePlayerMover.SetTarget, hidden or not) - so the traffic MODE
+        /// verdict does not use this; it uses TryGetPlayerJudgePosition. An unresolvable ride yields no position at all
+        /// rather than a wrong one.</summary>
         private static bool TryGetPlayerAnchorPosition(string pid, out Vector3 pos)
         {
             pos = default;
             if (PassengerSync.TryGetRide(pid, out var rideVid))
                 return VehicleManager.TryGetGhostPosition(rideVid, out pos);
             return RemotePlayerManager.TryGetRemotePosition(pid, out pos);
+        }
+
+        /// <summary>H-CARSTACK-1 (2026-09-28): the position the traffic MODE rule judges a REMOTE player by - the same rule
+        /// LocalAnchorPosition applies to this machine's own player: the ridden car, else the avatar outdoors, else their
+        /// LAST OUTSIDE position while inside a building (interiors sit on a coordinate island hundreds of metres from the
+        /// city; judging an indoor player there flipped a client to its own traffic beside the host's door). An indoor
+        /// player with no outside position yet has no position: no verdict without evidence.</summary>
+        private static bool TryGetPlayerJudgePosition(string pid, out Vector3 pos)
+        {
+            pos = default;
+            try
+            {
+                if (PassengerSync.TryGetRide(pid, out var rideVid))
+                    return VehicleManager.TryGetGhostPosition(rideVid, out pos);
+                return RemotePlayerManager.TryGetTrafficJudgePosition(pid, out pos);
+            }
+            catch { pos = default; return false; }
         }
 
         /// <summary>The position the traffic rules judge the LOCAL player by — the same one UpdateTrafficAnchors feeds
@@ -821,13 +839,15 @@ namespace BigAmbitionsMP
             // TRAFFIC-APART P2: every player's position FIRST. The verdict for ONE peer needs the distance to EVERY
             // other player, so the positions can no longer be resolved inside the send loop below.
             var posByPid = new Dictionary<string, Vector3>();
+            var judgeByPid = new Dictionary<string, Vector3>();   // H-CARSTACK-1: the MODE verdict's positions (indoor = last outside)
             foreach (var (link, pid) in peers)
             {
                 if (link == null || string.IsNullOrEmpty(pid)) continue;
                 livePids.Add(pid);
                 if (TryGetPlayerAnchorPosition(pid, out var ppos)) posByPid[pid] = ppos;
+                if (TryGetPlayerJudgePosition(pid, out var jpos)) judgeByPid[pid] = jpos;
             }
-            EvaluatePeerTrafficModes(peers, posByPid, now);
+            EvaluatePeerTrafficModes(peers, judgeByPid, now);
 
             foreach (var (link, pid) in peers)
             {
@@ -2885,7 +2905,9 @@ namespace BigAmbitionsMP
         private static void EnterLocalMode()
         {
             _localDensityIssued = false; _localDensityWaitLogged = false; _localDensityUninitLogged = false;
-            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: local (seq {_modeSeq}) - this client is far from every other player and takes over its own traffic; {_ghosts.Count} host ghost(s) fade out first. Measured here: nearest other player {MeasuredNearestOtherPlayer()}.");
+            // H-CARSTACK-1: the verdict and its distance are the HOST's (the mode message carries neither the distance nor
+            // who was nearest); this machine's own reading is printed beside it, labelled as such.
+            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: local (seq {_modeSeq}) - this client is far from every other player by the HOST's verdict (the host's distance is on its 'traffic mode for {MPConfig.PlayerId}' line) and takes over its own traffic; {_ghosts.Count} host ghost(s) fade out first. This machine's own reading (indoor players judged by their last outside position, as the host does): nearest other player {MeasuredNearestOtherPlayer()}.");
         }
 
         /// <summary>P6: someone is near again — the host's cars rule here. Acked IMMEDIATELY: in this direction there
@@ -2896,7 +2918,7 @@ namespace BigAmbitionsMP
             var tm = TrafficManager.Instance;
             if (tm != null) { SelfDensityCall = true; try { tm.SetTrafficDensity(0); } catch { } finally { SelfDensityCall = false; } }
             _localDensityIssued = false; _localDensityWaitLogged = false; _localDensityUninitLogged = false;
-            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: ghost (seq {_modeSeq}) - another player is near; the host's traffic takes over and the local cars fade out as its ghosts arrive. Measured here: nearest other player {MeasuredNearestOtherPlayer()}.");
+            Plugin.Logger.LogInfo($"[TrafficSync] traffic mode: ghost (seq {_modeSeq}) - another player is near by the HOST's verdict; the host's traffic takes over and the local cars fade out as its ghosts arrive. This machine's own reading (indoor players judged by their last outside position, as the host does): nearest other player {MeasuredNearestOtherPlayer()}.");
             MPClient.SendTrafficModeAck(ModeGhost, _modeSeq);
         }
 
@@ -3721,6 +3743,29 @@ namespace BigAmbitionsMP
         /// <summary>T4: what THIS machine measures to the nearest other player, printed on the flip lines beside the
         /// host's own number - a divergence between the two is what a wrong flip would look like. Every other player
         /// is remote from a client, so the same anchor rules apply (a rider is judged by the car it rides).</summary>
+        /// <summary>H-CARSTACK-1 rig readout (read-only): host = every peer's mode:seq (a seq that did not move = no flip
+        /// happened); client = the last mode seq applied here and this machine's own nearest-player reading.</summary>
+        internal static string ModeReadout()
+        {
+            try
+            {
+                if (MPServer.IsRunning)
+                {
+                    var sb = new System.Text.StringBuilder("peers=");
+                    bool first = true;
+                    foreach (var kv in _peerTraffic)
+                    {
+                        if (!first) sb.Append(',');
+                        first = false;
+                        sb.Append(kv.Key).Append(':').Append(kv.Value.Mode).Append(':').Append(kv.Value.Seq);
+                    }
+                    return sb.ToString();
+                }
+                return $"mseq={_modeSeq} near={MeasuredNearestOtherPlayer().Replace(" ", "")}";
+            }
+            catch (Exception ex) { return "modeReadoutErr=" + ex.GetType().Name; }
+        }
+
         private static string MeasuredNearestOtherPlayer()
         {
             try
@@ -3730,7 +3775,7 @@ namespace BigAmbitionsMP
                 foreach (var pid in RemotePlayerManager.GetRemotePlayerIds())
                 {
                     if (string.IsNullOrEmpty(pid)) continue;
-                    if (TryGetPlayerAnchorPosition(pid, out var op)) best = Mathf.Min(best, Vector3.Distance(me, op));
+                    if (TryGetPlayerJudgePosition(pid, out var op)) best = Mathf.Min(best, Vector3.Distance(me, op));   // H-CARSTACK-1: the host's rule
                 }
                 return float.IsPositiveInfinity(best) ? "unknown" : $"{best:F0} m";
             }

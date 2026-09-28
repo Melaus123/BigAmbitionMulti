@@ -140,6 +140,19 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>R3 readout: rival attention store rows of non-host keys (the store is private: DEV reflection).</summary>
+        /// <summary>H-CARSTACK-1 (2026-09-28): the `traffic` readout's tail - the mode seq(s) and this player's position.</summary>
+        private static string TrafficModeTail()
+        {
+            try
+            {
+                var ic = System.Globalization.CultureInfo.InvariantCulture;
+                string at = "?";
+                try { var ps = Helpers.PlayerHelper.GetPosition(); at = ps.x.ToString("F1", ic) + "," + ps.y.ToString("F1", ic) + "," + ps.z.ToString("F1", ic); } catch { }
+                return " " + TrafficSync.ModeReadout() + " at=" + at;
+            }
+            catch (Exception ex) { return " tailErr=" + ex.GetType().Name; }
+        }
+
         private static int DevRivalAttnRows()
         {
             var ty = typeof(MPRivalAttention);
@@ -193,6 +206,8 @@ namespace BigAmbitionsMP
 
                 case "traffic":
                 {
+                    // H-CARSTACK-1 (2026-09-28): the line also ends with the mode seq(s) (TrafficSync.ModeReadout) and this
+                    // player's position (at=x,y,z) so a rig can prove 'no flip happened' and walk the player back.
                     // TRAFFIC-SMOOTH S5 (2026-09-12): one line for the traffic stream's health.
                     // TRAFFIC-APART P9 (2026-09-12): plus WHICH traffic this machine runs (mode; "host" on the host),
                     // how many ambient cars of its own are alive, and whether a handover is still fading.
@@ -214,7 +229,8 @@ namespace BigAmbitionsMP
                            $"seq={TrafficSync.LastTrafficSeq} dropped={TrafficSync.StaleSnapshotsDropped} " +
                            $"lane={TrafficSync.TrafficLane} mode={tmode} local={localcars} " +
                            $"handover={TrafficSync.ClientHandover} " +
-                           $"published={published} foreign={foreign} pvsensed={pvsensed} standins={standins}";
+                           $"published={published} foreign={foreign} pvsensed={pvsensed} standins={standins}" +
+                           TrafficModeTail();
                 }
 
                 case "ghostjitter":
@@ -782,8 +798,9 @@ namespace BigAmbitionsMP
                     int ceWant;
                     var ceArgs = arg.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                     bool ceTakenOnly = ceArgs.Length > 1 && ceArgs[1] == "taken";   // R1: only bodies holding a taken line
+                    bool ceEmptyOnly = ceArgs.Length > 1 && ceArgs[1] == "empty";   // U1 (2026-09-28): only bodies holding NOTHING (no taken, no processed line)
                     if (ceArgs.Length == 0 || !int.TryParse(ceArgs[0], out ceWant) || ceWant <= 0)
-                        return "ERR usage: custevict <n> [taken|served [seconds]] (a positive count of live bodies to send home)";
+                        return "ERR usage: custevict <n> [taken|empty|served [seconds]] (a positive count of live bodies to send home)";
                     if (ceArgs.Length > 1 && ceArgs[1] == "served")
                     {
                         // H1 leg (review of 95cf5e1): the first body a till is serving (checkout in progress) is sent home
@@ -813,6 +830,13 @@ namespace BigAmbitionsMP
                                 bool ceHas = false;
                                 if (ceC.order.entries != null) foreach (var ceX in ceC.order.entries) if (CustomerHandoff.TakenOe(ceX) && !ceX.paid) ceHas = true;
                                 if (!ceHas) continue;
+                            }
+                            if (ceEmptyOnly)
+                            {
+                                if (ceC.state == CustomerState.BeingServed) continue;
+                                bool ceAny = false;
+                                if (ceC.order.entries != null) foreach (var ceX in ceC.order.entries) if (ceX != null && (ceX.processed || ceX.paid || CustomerHandoff.TakenOe(ceX))) ceAny = true;
+                                if (ceAny) continue;
                             }
                             ceTake.Add(ceC);
                         }
