@@ -4225,6 +4225,9 @@ namespace BigAmbitionsMP
         public string PlayerId { get; set; } = "";   // sender (validated SenderIs at the host)
         public string StableId { get; set; } = "";   // the durable key the host stores under
         public int    Day      { get; set; }         // the sender's game day at publish time
+        // K3 fold (2026-09-28): the client's bundle sequence number (1, 2, ... per connection); the host's RECEIPT echoes it
+        // so the client matches receipts by number. 0 = an older peer (no number): the client falls back to queue order.
+        public int    Seq      { get; set; }
         public List<BusinessPaperwork>   Businesses { get; set; } = new();
         public PaperworkOwnerLists       Lists      { get; set; } = new();
         public List<EmployeeEditPayload> Employees  { get; set; } = new();

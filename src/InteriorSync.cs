@@ -62,6 +62,14 @@ namespace BigAmbitionsMP
         }
         private static readonly Dictionary<string, OwnerInteriorState> _ownerSnapshotsByAddr = new();
         private static readonly Dictionary<string, int> _lastLocalOwnerHashByAddr = new();
+        // K1 fold (2026-09-28): the shopper-schedule signature (CustomerEntrySync.ScheduleSig) last SENT per address - by the
+        // host to subscribers, and by a client owner to the host. A changed schedule - the owner's new day - is its own send
+        // trigger, always a FULL snapshot (never the cargo channel, which carries no schedule): a partner inside across
+        // midnight gets the owner's new-day schedule. The signature also folds into ComputeHashes' `full` band, because the
+        // receiver skips a payload whose hashes match the last one it applied (GameStatePatcher applySig) - rig run
+        // T-HANDOFF3-20260928-063549: the new-day send went out and the partner dropped it as identical.
+        private static readonly Dictionary<string, int> _lastSchedSigByAddr = new();
+        private static readonly Dictionary<string, int> _lastLocalOwnerSchedByAddr = new();
         private static float _lastPollAt;
         private static float _lastOwnerPollAt;
         private static string _localOwnerAddress = "";
@@ -78,6 +86,8 @@ namespace BigAmbitionsMP
             _lastHashByAddr.Clear();
             _ownerSnapshotsByAddr.Clear();
             _lastLocalOwnerHashByAddr.Clear();
+            _lastSchedSigByAddr.Clear();          // K1 fold
+            _lastLocalOwnerSchedByAddr.Clear();   // K1 fold
             _lastStructHashByAddr.Clear();
             _volatileSentAtByAddr.Clear();
             _lastLocalOwnerStructByAddr.Clear();
@@ -387,6 +397,7 @@ namespace BigAmbitionsMP
                     _lastHashByAddr[addressKey] = hvSub;
                     _lastStructHashByAddr[addressKey] = hsSub;
                     _structVolHashByAddr[addressKey] = hnSub;   // round-281: the cargo-only discriminator's baseline
+                    _lastSchedSigByAddr[addressKey] = CustomerEntrySync.ScheduleSig(snap.CustomerEntries);   // K1 fold: this serve carries the schedule
                     _lastDirtHashByAddr[addressKey] = hdSub;    // v10: this serve carries dirt, and it went to the only subscriber there is
                     _volatileSentAtByAddr[addressKey] = UnityEngine.Time.realtimeSinceStartup;
                 }
@@ -399,6 +410,7 @@ namespace BigAmbitionsMP
                 // is RECOVERY traffic — the receiver applies it even mid-edit.  Cloned, never stamped
                 // on the (possibly cached) object itself.
                 MPServer.SendInteriorSnapshotTo(peer, AsSeedOrHeal(snap));
+                CustomerEntrySync.NoteSent(addressKey, snap.CustomerEntries, "entry serve");   // K1 fold: recorded where it is sent
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleRequest: {ex.Message}"); }
         }
@@ -548,9 +560,12 @@ namespace BigAmbitionsMP
                             MPServer.BroadcastInteriorDirtSyncTo(dirtSubs, BuildDirtSync(snap));
                     }
                     bool fullChanged = !_lastHashByAddr.TryGetValue(addr, out var pf) || pf != hv;
-                    if (!fullChanged) continue;
+                    // K1 fold: a changed shopper schedule (the owner's new day) sends too - full, at once.
+                    int sched = CustomerEntrySync.ScheduleSig(snap.CustomerEntries);
+                    bool schedChanged = sched != 0 && (!_lastSchedSigByAddr.TryGetValue(addr, out var pSch) || pSch != sched);
+                    if (!fullChanged && !schedChanged) continue;
                     bool structChanged = !_lastStructHashByAddr.TryGetValue(addr, out var ps) || ps != hs;
-                    if (!structChanged
+                    if (!structChanged && !schedChanged
                         && _volatileSentAtByAddr.TryGetValue(addr, out var tSent)
                         && now - tSent < VolatileCoalesceSeconds)
                         continue;
@@ -559,7 +574,7 @@ namespace BigAmbitionsMP
                     // would strand them until some unrelated structural edit forced a full snapshot.
                     // A missing baseline reads as "not cargo-only" — the full snapshot is always a
                     // correct answer, only a larger one.
-                    bool cargoOnly = !structChanged
+                    bool cargoOnly = !structChanged && !schedChanged
                                      && _structVolHashByAddr.TryGetValue(addr, out var pn) && pn == hn;
                     _lastHashByAddr[addr] = hv;
                     _lastStructHashByAddr[addr] = hs;
@@ -583,6 +598,8 @@ namespace BigAmbitionsMP
                             if (TrySendCargoOnly(addr, entrySubs, snap, sv, "tick")) continue;
                         }
                         MPServer.BroadcastInteriorSnapshotTo(set, snap);
+                        if (sched != 0) _lastSchedSigByAddr[addr] = sched;                      // K1 fold
+                        CustomerEntrySync.NoteSent(addr, snap.CustomerEntries, "host tick");   // K1 fold: recorded where it is sent
                     }
                 }
             }
@@ -957,8 +974,18 @@ namespace BigAmbitionsMP
                 // v10 (T7): the shopper schedule rides only the force pushes (entry/exit/publish) —
                 // the 2 s tick strips it, and the host cache keeps its last known copy (empty on an
                 // accepted push means "unchanged" there, per the round-103 convention).
-                if (!force) snap.CustomerEntries = new List<CustomerEntryInfo>();
+                // K1 fold (2026-09-28): ...except when the schedule CHANGED since the last push that carried it (the owner's
+                // new day, a regeneration): then this push carries it, as a full one - a partner inside keeps the owner's
+                // real schedule across midnight instead of spawning nothing.
+                int osched = CustomerEntrySync.ScheduleSig(snap.CustomerEntries);
+                bool oschedChanged = osched != 0 && (!_lastLocalOwnerSchedByAddr.TryGetValue(addressKey, out var pOsch) || pOsch != osched);
+                if (!force && !oschedChanged) snap.CustomerEntries = new List<CustomerEntryInfo>();
+                // K1 fold: the owner-side trackers stay schedule-free, exactly as before (a force push carrying the schedule must
+                // not make the next stripped tick look changed); the schedule's own trigger is oschedChanged above.
+                var keptSchedule = snap.CustomerEntries;
+                snap.CustomerEntries = new List<CustomerEntryInfo>();
                 var (ohs, ohv, ohn, ohd) = ComputeHashes(snap);
+                snap.CustomerEntries = keptSchedule;
                 float onow = UnityEngine.Time.realtimeSinceStartup;
                 // v10 (T7/ruling 33): dirt is its own band and no longer perturbs `full` — a
                 // dirt-only change ships as a tiny InteriorDirtSync (owner → host keeps the cache
@@ -977,9 +1004,9 @@ namespace BigAmbitionsMP
                 if (!force)
                 {
                     bool fullChanged = !_lastLocalOwnerHashByAddr.TryGetValue(addressKey, out var prev) || prev != ohv;
-                    if (!fullChanged) return true;
+                    if (!fullChanged && !oschedChanged) return true;
                     bool structChanged = !_lastLocalOwnerStructByAddr.TryGetValue(addressKey, out var pStruct) || pStruct != ohs;
-                    if (!structChanged
+                    if (!structChanged && !oschedChanged
                         && _lastLocalOwnerVolatileAt.TryGetValue(addressKey, out var tSent)
                         && onow - tSent < VolatileCoalesceSeconds)
                         return true;
@@ -987,7 +1014,7 @@ namespace BigAmbitionsMP
                     // instead of the ~300 KB full snapshot. The v10 handshake refuses any other build,
                     // so the host always has the client→host cargo handler; the OwnerStructHash lets
                     // the host verify its cache still matches this structure before grafting.
-                    bool cargoOnlyUp = !structChanged
+                    bool cargoOnlyUp = !structChanged && !oschedChanged
                                        && _lastLocalOwnerNonCargoByAddr.TryGetValue(addressKey, out var pNc) && pNc == ohn;
                     if (cargoOnlyUp)
                     {
@@ -1018,6 +1045,11 @@ namespace BigAmbitionsMP
                 // push and a later routine send wrongly bypassed the host's gate).
                 snap.SeedOrHeal = seedOrHeal;
                 MPClient.SendInteriorOwnerSnapshot(snap);
+                if (snap.CustomerEntries != null && snap.CustomerEntries.Count > 0)
+                {   // K1 fold: recorded where it is sent
+                    _lastLocalOwnerSchedByAddr[addressKey] = osched;
+                    CustomerEntrySync.NoteSent(addressKey, snap.CustomerEntries, "owner push (" + reason + ")");
+                }
                 // Sweep 3c (user-approved): promoted to ALL builds — this line is the completion
                 // evidence every field triage of "furniture never appeared" lacked (Release logs
                 // could show deferrals but structurally never a success). Change-gated by the
@@ -1138,13 +1170,15 @@ namespace BigAmbitionsMP
                         float nowIp = UnityEngine.Time.realtimeSinceStartup;
                         var (hsIp, hvIp, hnIp, _) = ComputeHashes(snap);
                         bool fullChangedIp = !_lastHashByAddr.TryGetValue(addressKey, out var pfIp) || pfIp != hvIp;
-                        if (!fullChangedIp)
+                        int schedIp = CustomerEntrySync.ScheduleSig(snap.CustomerEntries);   // K1 fold: as the Tick
+                        bool schedChangedIp = schedIp != 0 && (!_lastSchedSigByAddr.TryGetValue(addressKey, out var pSchIp) || pSchIp != schedIp);
+                        if (!fullChangedIp && !schedChangedIp)
                         {
                             _suppressedPushes.TryGetValue(addressKey, out var n0); _suppressedPushes[addressKey] = n0 + 1;
                             return;
                         }
                         bool structChangedIp = !_lastStructHashByAddr.TryGetValue(addressKey, out var psIp) || psIp != hsIp;
-                        if (!structChangedIp
+                        if (!structChangedIp && !schedChangedIp
                             && _volatileSentAtByAddr.TryGetValue(addressKey, out var tSentIp)
                             && nowIp - tSentIp < VolatileCoalesceSeconds)
                         {
@@ -1153,7 +1187,7 @@ namespace BigAmbitionsMP
                         }
                         // Round-281: same cargo-only test as the Tick (dirt/state deltas are NOT
                         // cargo-only and must keep riding the full snapshot).
-                        bool cargoOnlyIp = !structChangedIp
+                        bool cargoOnlyIp = !structChangedIp && !schedChangedIp
                                            && _structVolHashByAddr.TryGetValue(addressKey, out var pnIp) && pnIp == hnIp;
                         _lastHashByAddr[addressKey] = hvIp;
                         _lastStructHashByAddr[addressKey] = hsIp;
@@ -1170,6 +1204,8 @@ namespace BigAmbitionsMP
                         // cargo now costs a few KB instead of the whole interior.
                         if (cargoOnlyIp && TrySendCargoOnly(addressKey, set, snap, svIp, "immediate-push")) return;
                         MPServer.BroadcastInteriorSnapshotTo(set, snap);
+                        if (schedIp != 0) _lastSchedSigByAddr[addressKey] = schedIp;                        // K1 fold
+                        CustomerEntrySync.NoteSent(addressKey, snap.CustomerEntries, "immediate push");   // K1 fold
                     }
                 }
                 else
@@ -1223,6 +1259,7 @@ namespace BigAmbitionsMP
                 // Stage 0: every caller of this path is a heal or hand-over (sale, takeover,
                 // arbitration, round-184) — recovery traffic, applies even mid-edit.
                 MPServer.SendToPlayer(pid, MessageEnvelope.Create(MessageType.InteriorSnapshot, "host", AsSeedOrHeal(snap)));
+                CustomerEntrySync.NoteSent(addressKey, snap.CustomerEntries, "direct send");   // K1 fold: recorded where it is sent
                 Plugin.Logger.LogInfo($"[InteriorSync] snapshot of '{addressKey}' sent directly to '{pid}' ({SnapshotSummary(snap)}{(forceItemAuthority ? (vouchEmpty ? ", return-authoritative" : ", sale-authoritative") : "")}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] direct send: {ex.Message}"); }
@@ -1395,7 +1432,8 @@ namespace BigAmbitionsMP
         /// <summary>CLIENT-OWNER, after adopting a delta for a building it owns: stamp the owner-side
         /// send trackers to the post-adopt state so the 2 s tick does not answer the adoption with a
         /// full ~300 KB push — the host already grafted its cache and conveyed the subscribers with
-        /// the same delta (Q1's whole point). ComputeHashes ignores CustomerEntries/FulfilledDemands
+        /// the same delta (Q1's whole point). The schedule is stripped before hashing (K1 fold: ComputeHashes folds it into
+        /// `full`; the owner-side trackers are schedule-free); ComputeHashes ignores FulfilledDemands
         /// and the flag fields (review MINOR-P), so no shape adjustment is needed for the hashes to
         /// compare against what the tick would send. Any LATER real change moves the hashes again
         /// and pushes normally. Review MAJOR-K: the DIRT tracker is deliberately NOT stamped — the
@@ -1407,6 +1445,7 @@ namespace BigAmbitionsMP
                 if (!MPClient.IsConnected || MPServer.IsRunning || string.IsNullOrEmpty(addressKey)) return;
                 var snap = BuildSnapshot(addressKey);
                 if (snap == null) return;
+                snap.CustomerEntries = new List<CustomerEntryInfo>();   // K1 fold: the owner-side trackers are schedule-free (as the tick push)
                 var (hs, hv, hn, _) = ComputeHashes(snap);
                 _lastLocalOwnerHashByAddr[addressKey] = hv;
                 _lastLocalOwnerStructByAddr[addressKey] = hs;
@@ -2271,6 +2310,12 @@ namespace BigAmbitionsMP
                         foreach (var cc in c.CustomColors) { C(cc.Channel); C(cc.ColorPacked); }
                     }
                 }
+                // K1 fold (2026-09-28): the shopper schedule (its entries' day and ids, not their completion) folds into `full`
+                // ONLY - the structure and structAndNonCargo bands the cargo graft compares stay untouched. A schedule-only change
+                // is therefore never mistaken for identical by the receiver's apply skip; the senders route it as a full
+                // snapshot through their own schedule trigger (never cargo-only). No schedule = no term (hashes as before).
+                int schedSig = CustomerEntrySync.ScheduleSig(snap.CustomerEntries);
+                if (schedSig != 0) C(schedSig);
                 return (hs, hv, hn, hd);
             }
         }

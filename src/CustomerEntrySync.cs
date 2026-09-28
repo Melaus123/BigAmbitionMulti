@@ -90,6 +90,53 @@ namespace BigAmbitionsMP
             catch { return 0; }
         }
 
+        /// <summary>K1 fold rig read-only: of the seeded (owner-minted) entries here, how many are for TODAY - the partner's
+        /// copy of the owner's current-day schedule.</summary>
+        internal static int SeededTodayCountFor(Address? address)
+        {
+            try
+            {
+                var table = Table();
+                if (table == null || address == null || !table.TryGetValue(address, out var entries) || entries == null) return 0;
+                int today = GameStateReader.GetGameTime().day, n = 0;
+                foreach (var e in entries)
+                    if (e?.order != null && e.spawnTime != null && e.spawnTime.Day == today && _seededOrderIds.TryGetValue(e.order, out _)) n++;
+                return n;
+            }
+            catch { return 0; }
+        }
+
+        // K1 fold (2026-09-28): the owner's last schedule seeded here, per shop - re-seeded after this machine's own midnight
+        // clears the table (see Patch_CustomerEntries_AllPlayerBusinesses_KeepOwnerSchedule).
+        private static readonly Dictionary<string, KeyValuePair<BuildingRegistration, List<CustomerEntryInfo>>> _lastSeed = new();
+
+        /// <summary>K1 fold, MAIN THREAD (postfix of this machine's UpdateCustomerEntriesForAllPlayerBusinesses): the native
+        /// midnight clear (CustomerEntriesHelper.cs:28) also wiped the owner's schedule seeded here. When that seeded copy is
+        /// already the owner's schedule for TODAY (the owner's midnight ran first and its push arrived), seed it again - the
+        /// owner's change gate will not send the same schedule twice. A copy of an older day is left alone: the owner's
+        /// new-day schedule is a change and its gate sends it.</summary>
+        internal static void ReseedAfterLocalMidnight()
+        {
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+            if (_lastSeed.Count == 0) return;
+            int today = GameStateReader.GetGameTime().day;
+            foreach (var kv in new List<KeyValuePair<string, KeyValuePair<BuildingRegistration, List<CustomerEntryInfo>>>>(_lastSeed))
+            {
+                try
+                {
+                    var reg = kv.Value.Key; var entries = kv.Value.Value;
+                    if (reg == null || entries == null || entries.Count == 0) continue;
+                    if (MergerFlip.BooksHere(reg)) continue;
+                    int ofToday = 0;
+                    foreach (var d in entries) if (d != null && d.SpawnDay == today) ofToday++;
+                    if (ofToday == 0) continue;
+                    SeedFor(reg, entries);
+                    Plugin.Logger.LogInfo($"[Customers] re-seeded the owner's day-{today} schedule for '{kv.Key}' after this machine's midnight cleared it ({ofToday} of {entries.Count} entr(ies) are today's).");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] re-seed '{kv.Key}': {ex.Message}"); }
+            }
+        }
+
         /// <summary>H-SALEHOLE-1 rig read-only: forwarded orders this session's owner side ADOPTED for an
         /// address (never drained, unlike the econ-digest tally).</summary>
         private static readonly Dictionary<string, int> _adoptedSession = new();
@@ -105,14 +152,15 @@ namespace BigAmbitionsMP
         }
 
         // ── H-HOURROLL H1 (review of 480184b, 2026-09-28): the entry ids this OWNER actually SENT to partners ──
-        // Per shop: the ids CaptureFor put on the wire today (Cur) and yesterday (Prev - only for an hour-23 pass that runs
+        // Per shop: the ids actually HANDED TO THE TRANSPORT today (Cur, NoteSent - K1 fold 2026-09-28: building a snapshot
+        // records nothing, many builds are never sent) and yesterday (Prev - only for an hour-23 pass that runs
         // after midnight). A new owner day starts Cur empty. Only these entries can sit on a partner's schedule with this
         // owner's id, so only they may be set aside by the owner's hourly pass (BookOnce.HourlyBegin); ids are minted per
         // entry object, so a regenerated schedule never matches an old record.
         private sealed class SentRecord { public int Day = int.MinValue; public HashSet<string> Cur = new(); public HashSet<string> Prev = new(); }
         private static readonly Dictionary<string, SentRecord> _sent = new();
-        // DEV lever hourroll unsend: ids kept OUT of the record for good - a later re-push (CaptureFor on the next interior
-        // snapshot) would otherwise record them again (rig run T-HANDOFF3-20260928-052416: 4 dropped, all 7 set aside).
+        // DEV lever hourroll unsend: ids kept OUT of the record for good - a later re-push (NoteSent on the next send of the
+        // schedule) would otherwise record them again (rig run T-HANDOFF3-20260928-052416: 4 dropped, all 7 set aside).
         private static readonly HashSet<string> _devUnsent = new();
 
         private static SentRecord? SentRecordFor(string addr)
@@ -145,6 +193,60 @@ namespace BigAmbitionsMP
         internal static int SentCountFor(string addr)
         {
             try { var r = SentRecordFor(addr); return r == null ? 0 : r.Cur.Count + r.Prev.Count; } catch { return -1; }
+        }
+
+        /// <summary>K1 fold (re-check of ef9cf41, 2026-09-28): record the entry ids of a schedule that is ACTUALLY handed
+        /// to the transport (a host send to subscribers or to one player, or the owner's push to the host). Building a
+        /// snapshot records nothing - many builds are never sent (the 2 s change checks, the audit hash, the owner's tick
+        /// push that strips the schedule, NoteOwnerDeltaApplied). Only this owner's own ids (minted by IdOf) are recorded;
+        /// a partner owner's schedule the host relays is not this machine's to set aside. Main thread.</summary>
+        internal static void NoteSent(string addressKey, List<CustomerEntryInfo>? entries, string site)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || entries == null || entries.Count == 0) return;
+                string mine = MPConfig.PlayerId + "-";
+                var r = SentRecordFor(addressKey);
+                if (r == null) return;
+                int added = 0, ofMine = 0, day = int.MinValue;
+                foreach (var d in entries)
+                {
+                    if (d == null || string.IsNullOrEmpty(d.EntryId) || !d.EntryId.StartsWith(mine, StringComparison.Ordinal)) continue;
+                    ofMine++;
+                    if (d.SpawnDay > day) day = d.SpawnDay;
+                    if (_devUnsent.Contains(d.EntryId)) continue;
+                    if (r.Cur.Add(d.EntryId)) added++;
+                }
+                if (added > 0)
+                    Plugin.Logger.LogInfo($"[Customers] schedule '{addressKey}' handed to the transport ({site}): {ofMine} entr{(ofMine == 1 ? "y" : "ies")} of day {day}, {added} id(s) newly recorded as sent (record today={r.Cur.Count} yesterday={r.Prev.Count}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] note sent: {ex.Message}"); }
+        }
+
+        /// <summary>K1 fold: the schedule's change signature - each entry's spawn day and id (completion flags excluded, so a
+        /// customer finishing is not a change; the spawner only flags entries, IndoorCustomerSpawner.cs:209). 0 = no
+        /// schedule. Any owner's ids count: the host relays a partner owner's cached schedule through the same gate.</summary>
+        internal static int ScheduleSig(List<CustomerEntryInfo>? entries)
+        {
+            try
+            {
+                if (entries == null || entries.Count == 0) return 0;
+                unchecked
+                {
+                    int h = 17, n = 0;
+                    foreach (var d in entries)
+                    {
+                        if (d == null || string.IsNullOrEmpty(d.EntryId)) continue;
+                        h = h * 31 + d.SpawnDay;
+                        h = h * 31 + MPAudit.StableHash(d.EntryId);
+                        n++;
+                    }
+                    if (n == 0) return 0;
+                    h = h * 31 + n;
+                    return h == 0 ? 1 : h;
+                }
+            }
+            catch { return 0; }
         }
 
         /// <summary>H1 DEV lever (hourroll unsend): drop every other SENT id among this hour's entries from the record, as if
@@ -252,8 +354,6 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[Customers] CAPPED '{capAddr}' pending={entries.Count} cap={MaxEntries} type={capType} completed={done} day={capDay}");
                     }
                 }
-                HashSet<string>? sentRec = null;   // H-HOURROLL H1: record exactly what goes on the wire (the cap included)
-                try { sentRec = SentRecordFor(GameStateReader.AddressKey(reg))?.Cur; } catch { sentRec = null; }
                 for (int i = 0; i < entries.Count && list.Count < MaxEntries; i++)
                 {
                     var e = entries[i];
@@ -284,7 +384,6 @@ namespace BigAmbitionsMP
                         for (int j = 0; j < dem.Count; j++)
                             if (!string.IsNullOrEmpty(dem[j])) dto.Demands.Add(dem[j]);
                     list.Add(dto);
-                    try { if (!string.IsNullOrEmpty(dto.EntryId) && !_devUnsent.Contains(dto.EntryId)) sentRec?.Add(dto.EntryId); } catch { }
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] capture: {ex.Message}"); }
@@ -369,6 +468,7 @@ namespace BigAmbitionsMP
                     fresh.Add(ce);
                 }
                 table[reg.Address] = fresh;
+                try { _lastSeed[GameStateReader.AddressKey(reg)] = new KeyValuePair<BuildingRegistration, List<CustomerEntryInfo>>(reg, entries); } catch { }   // K1 fold
 
                 // DIAG:FIELD (promoted from INVESTIGATION 2026-08-26, user ruling: these ship) — presence
                 // visibility: one line per seed whose entry
@@ -418,7 +518,7 @@ namespace BigAmbitionsMP
         internal static bool ForwardBooked(string entryId)
             => !string.IsNullOrEmpty(entryId) && _bookedForwards.Contains(entryId);
         /// <summary>Fold L (2026-09-27): per session, like the book-once registry (BookOnce.Reset).</summary>
-        internal static void ClearBookedForwards() { try { _bookedForwards.Clear(); } catch { } }
+        internal static void ClearBookedForwards() { try { _bookedForwards.Clear(); _lastSeed.Clear(); } catch { } }   // K1 fold: the stored seeds are per session too
 
         /// <summary>Fold M4: the schedule id this machine already gave an entry (never mints one).</summary>
         internal static string? KnownIdOf(CustomerEntry? e)
@@ -993,6 +1093,19 @@ namespace BigAmbitionsMP
                 CustomerEntryOrigin.Note("GenerateAiEntries", null, address, n);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] origin probe (ai entries): {ex.Message}"); }
+        }
+    }
+
+    /// <summary>K1 fold (re-check of ef9cf41, 2026-09-28): this machine's OWN midnight (BusinessHelper.cs:173 ->
+    /// UpdateCustomerEntriesForAllPlayerBusinesses, CustomerEntriesHelper.cs:28) clears the whole entry table, the owner's
+    /// schedule seeded for a partner's shop included. See CustomerEntrySync.ReseedAfterLocalMidnight.</summary>
+    [HarmonyPatch(typeof(CustomerEntriesHelper), nameof(CustomerEntriesHelper.UpdateCustomerEntriesForAllPlayerBusinesses))]
+    public static class Patch_CustomerEntries_AllPlayerBusinesses_KeepOwnerSchedule
+    {
+        static void Postfix()
+        {
+            try { CustomerEntrySync.ReseedAfterLocalMidnight(); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Customers] keep owner schedule: {ex.Message}"); }
         }
     }
 }

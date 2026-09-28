@@ -43,7 +43,9 @@
     "\\[Stock\\] unsold walk-out \\S+ from \\S+ @.+: no line reported",
     "\\[BookOnce\\] ending marks over the cap",
     "\\[Stock\\] unsold hold cap",
-    "adopted helper-served order"
+    "adopted helper-served order",
+    "\\[Customers\\] schedule '",
+    "\\[Customers\\] re-seeded "
   ],
   "steps": [
     {
@@ -792,7 +794,6 @@
       },
       "abort_on_fail": false,
       "capture": {
-        "f1cAside2": "boPartnerAside=(\\d+)",
         "f1cFwdIn": "forwardsIn=(\\d+)"
       },
       "note": "F1C ORACLES (HARD) after the mark: no 220 for a pass-booked visit (passAfterLeave=0), no forward pre-empted by a pass (passPreempt=0), no new 'was sold ... skipped' (soldSkipped unchanged), no new 'already consumed on the owner's machine' (fwdConsumed unchanged), no new '[BookOnce] <id> booked by (native|skip) hourly pass' (boPassBooked unchanged); the roll set entries aside (boPartnerAside rose - an hour with no entry at all would read equal: see the run log's set-aside line count)"
@@ -898,13 +899,23 @@
     {
       "seq": 87,
       "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "abort_on_fail": false,
+      "capture": {
+        "f1cAside2": "boPartnerAside=(\\d+)"
+      },
+      "note": "CONTROL baseline (rig fold 2026-09-28): boPartnerAside captured here, at its own step right before the control roll - it used to ride the F1C oracle step, and a failed F1C step left the control's HARD oracle unresolved (run T-HANDOFF3-20260928-065147)"
+    },
+    {
+      "seq": 88,
+      "role": "h",
       "cmd": "clock next",
       "expect_result": "^OK clock ",
       "abort_on_fail": false,
       "note": "CONTROL: nobody runs the store's live customers - the owner's pass bills that hour natively (parity line report: '[BookOnce] hourly pass (native)')"
     },
     {
-      "seq": 88,
+      "seq": 89,
       "role": "h",
       "cmd": "handoffbook ${shop}",
       "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok .*passAfterLeave=${postPal} passPreempt=${postPre} .*boPartnerAside=${f1cAside2} ",
@@ -915,13 +926,13 @@
       "note": "CONTROL (HARD): no set-aside at this roll (boPartnerAside unchanged) - the hour is billed natively"
     },
     {
-      "seq": 89,
+      "seq": 90,
       "role": "both",
       "cmd": "mark TEST T-HANDOFF3 GYM PARTNER-INSIDE-SERVICE-SHOP",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 90,
+      "seq": 91,
       "role": "c",
       "cmd": "handoffbook ${gym}",
       "expect_result": "^OK handoffbook .* books=True ",
@@ -932,20 +943,20 @@
       "note": "the client OWNS the gym (fx-hq1) and stays outside; its set-aside counter before the leg"
     },
     {
-      "seq": 91,
+      "seq": 92,
       "role": "h",
       "cmd": "enterbuilding ${gym}",
       "expect_result": "^OK enterbuilding",
       "abort_on_fail": false
     },
     {
-      "seq": 92,
+      "seq": 93,
       "role": "h",
       "sleep_s": 15,
       "note": "the host (partner) becomes the gym's simulator"
     },
     {
-      "seq": 93,
+      "seq": 94,
       "role": "h",
       "cmd": "custstate",
       "expect_result": "^OK custstate bldg='${gym}' sim='${hostPid}'",
@@ -953,7 +964,7 @@
       "note": "PREMISE: the partner runs the gym's live customers"
     },
     {
-      "seq": 94,
+      "seq": 95,
       "role": "h",
       "cmd": "clock next",
       "expect_result": "^OK clock ",
@@ -961,13 +972,13 @@
       "note": "GYM ACT: an hour roll while the partner runs the owner's gym"
     },
     {
-      "seq": 95,
+      "seq": 96,
       "role": "c",
       "sleep_s": 10,
       "note": "the client's clock follows the host across the roll"
     },
     {
-      "seq": 96,
+      "seq": 97,
       "role": "c",
       "cmd": "handoffbook ${gym}",
       "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok .*boPartnerAside=${gymAside0} ",
@@ -975,20 +986,186 @@
       "note": "GYM (HARD, user ruling 2026-09-27): a partner-run SERVICE shop (gym: sales never forwarded) is still billed by the OWNER's paper pass - nothing set aside (boPartnerAside unchanged; oracles_absent: no 'set aside - melaus's machine runs' line on any machine)"
     },
     {
-      "seq": 97,
+      "seq": 98,
       "role": "c",
       "cmd": "shopday ${gym}",
       "abort_on_fail": false,
       "note": "REPORT: the owner's gym day identity (idUnbilled; the floor is read locally, so bodies on the partner do not count)"
     },
     {
-      "seq": 98,
+      "seq": 99,
       "role": "h",
       "cmd": "exitbuilding",
       "abort_on_fail": false
     },
     {
-      "seq": 99,
+      "seq": 100,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 MIDNIGHT PARTNER-INSIDE-ACROSS-OWNER-MIDNIGHT",
+      "expect_result": "OK MARK",
+      "note": "K1 fold (re-check of ef9cf41, 2026-09-28): the HOST owns the store and stays outside; the client is inside across the host's midnight. Before the fold the host's 2 s check RECORDED the new day's ids as sent without sending them (the schedule was not in its change detection) while the partner's own midnight had cleared its copy: nothing spawned there, every hour set aside, billed by nobody."
+    },
+    {
+      "seq": 101,
+      "role": "c",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK enterbuilding"
+    },
+    {
+      "seq": 102,
+      "role": "h",
+      "sleep_s": 15,
+      "note": "the client (alone inside) becomes the store's simulator"
+    },
+    {
+      "seq": 103,
+      "role": "c",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${shop}' sim='${clientPid}'",
+      "abort_on_fail": false,
+      "note": "PREMISE: the partner runs the store's live customers"
+    },
+    {
+      "seq": 104,
+      "role": "c",
+      "cmd": "hourroll state ${shop}",
+      "abort_on_fail": false,
+      "note": "REPORT: the partner's schedule copy before the midnight (seeded / schedToday)"
+    },
+    {
+      "seq": 105,
+      "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "expect_result": "^OK handoffbook .* books=True ",
+      "abort_on_fail": false,
+      "note": "baseline before the midnight"
+    },
+    {
+      "seq": 106,
+      "role": "h",
+      "cmd": "clock 23:58",
+      "expect_result": "^OK clock ",
+      "abort_on_fail": false,
+      "note": "straight into the midnight: natural time runs ~0.5 game-min per real second (rig run T-HANDOFF3-20260928-063549 crossed it by itself between steps)"
+    },
+    {
+      "seq": 107,
+      "role": "h",
+      "cmd": "clock next",
+      "expect_result": "^OK clock ",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Customers\\] schedule '${shop}' handed to the transport \\((host tick|immediate push|direct send|entry serve)\\): [1-9][0-9]* entr(y|ies) of day [0-9]+, [1-9][0-9]* id\\(s\\) newly recorded as sent",
+          "within_s": 40,
+          "since_prev_step": true
+        },
+        {
+          "role": "c",
+          "regex": "\\[Customers\\] (seeded [1-9][0-9]* shopper entr\\(ies\\) for '${shop}'|re-seeded the owner's day-[0-9]+ schedule for '${shop}')",
+          "within_s": 40,
+          "since_prev_step": true
+        }
+      ],
+      "note": "K1 ACT + ORACLE (HARD): the host crosses midnight (clock next from hour 23 now lands on 00:01 tomorrow); its change gate sees the new-day schedule and SENDS it (the send site logs the ids it records - recorded only where sent), and the partner seeds it (or re-seeds it after its own midnight clear) - searched from the 'clock 23:58' step, since the midnight may cross on its own"
+    },
+    {
+      "seq": 108,
+      "role": "h",
+      "sleep_s": 10,
+      "note": "the client's clock follows across the midnight"
+    },
+    {
+      "seq": 109,
+      "role": "c",
+      "cmd": "hourroll state ${shop}",
+      "expect_result": "^OK hourroll state .* schedToday=[1-9][0-9]* ",
+      "abort_on_fail": false,
+      "note": "K1 ORACLE (HARD, DEV readout): the partner's machine holds the owner's NEW-DAY schedule (seeded entries of today)"
+    },
+    {
+      "seq": 110,
+      "role": "h",
+      "cmd": "stockdelta ${shop} mark",
+      "expect_result": "^OK stockdelta .* marked ",
+      "abort_on_fail": false,
+      "note": "STOCK ORACLE mark before the trading hours of the new day"
+    },
+    {
+      "seq": 111,
+      "role": "h",
+      "cmd": "clock 10:01",
+      "expect_result": "^OK clock ",
+      "abort_on_fail": false,
+      "note": "into the new day's trading hours"
+    },
+    {
+      "seq": 112,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "the partner's spawner produces the owner's shoppers"
+    },
+    {
+      "seq": 113,
+      "role": "c",
+      "cmd": "custstate",
+      "expect_result": "^OK custstate bldg='${shop}' sim='${clientPid}' mode=native natives=[1-9][0-9]* ",
+      "abort_on_fail": false,
+      "note": "K1 ORACLE (HARD): the partner's live customers of the owner's new-day schedule spawn"
+    },
+    {
+      "seq": 114,
+      "role": "h",
+      "cmd": "hourroll state ${shop}",
+      "abort_on_fail": false,
+      "note": "REPORT: the owner's sent record for the new day"
+    },
+    {
+      "seq": 115,
+      "role": "h",
+      "cmd": "clock next",
+      "expect_result": "^OK clock ",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BookOnce\\] ${shop} h[0-9]+: [0-9]+ entr(y|ies) set aside - ${clientPid}'s machine runs this shop's live customers .*; [0-9]+ billed by this pass because never sent to a partner",
+          "within_s": 20
+        }
+      ],
+      "note": "K1 ORACLE (HARD): the owner's next hour-end sets aside only ids actually sent ('N entries set aside ... M billed by this pass because never sent')"
+    },
+    {
+      "seq": 116,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "time for a partner sale / walk-out of that hour to reach the owner"
+    },
+    {
+      "seq": 117,
+      "role": "h",
+      "cmd": "handoffbook ${shop}",
+      "expect_result": "^OK handoffbook .* books=True .*dupIds=0 ",
+      "abort_on_fail": false,
+      "note": "K1 ORACLE (HARD): no customer booked twice across the owner's midnight (dupIds=0). identity/lostIds are REPORT here: the day-end payout empties the till, so visits booked on the previous day read 'lost' (run T-HANDOFF3-20260928-063549: lostIds=3 already at 23:55, before the midnight act)"
+    },
+    {
+      "seq": 118,
+      "role": "h",
+      "cmd": "stockdelta ${shop}",
+      "expect_result": "^OK stockdelta .* settledAndSold=0 .*lostUnexplained=0 .*stockOk=True ",
+      "abort_on_fail": false,
+      "note": "STOCK ORACLE (HARD) for the MIDNIGHT leg"
+    },
+    {
+      "seq": 119,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 120,
       "role": "both",
       "cmd": "mark TEST T-HANDOFF3 END",
       "expect_result": "OK MARK"

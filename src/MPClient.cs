@@ -777,7 +777,8 @@ namespace BigAmbitionsMP
                     if (pwReceipt != null && pwReceipt.StableId == PaperworkSync.ReceiptTag)
                     {
                         int pwReceiptDay = pwReceipt.Day;
-                        GameStatePatcher.EnqueueOnMainThread(() => PaperworkSync.OnHostReceipt(pwReceiptDay));
+                        int pwReceiptSeq = pwReceipt.Seq;   // K3 fold: the bundle number it answers (0 = an older host)
+                        GameStatePatcher.EnqueueOnMainThread(() => PaperworkSync.OnHostReceipt(pwReceiptDay, pwReceiptSeq));
                         break;
                     }
                     // Otherwise merger phase 3-A is client -> HOST only: nothing here sends paperwork the other

@@ -120,16 +120,30 @@ namespace BigAmbitionsMP
 
         private static void ResetReceipts() { _unreceipted.Clear(); _bundleSeq = 0; _leaveSeq = -1; }
 
-        /// <summary>H5, CLIENT, MAIN THREAD: the host's receipt for the oldest bundle not yet receipted.</summary>
-        internal static void OnHostReceipt(int day)
+        /// <summary>H5, CLIENT, MAIN THREAD: the host's receipt. K3 fold (2026-09-28): matched by the bundle NUMBER it echoes -
+        /// that bundle and every older one still waiting leave the queue (the channel is reliable-ordered and the host handles
+        /// bundles in order, so an older one without its own receipt was handled, or refused, before it). seq 0 = an older
+        /// host without the number: the oldest waiting bundle, as before.</summary>
+        internal static void OnHostReceipt(int day, int seq = 0)
         {
             try
             {
                 ReceiptsIn++;
                 if (_unreceipted.Count == 0) return;
-                var k = _unreceipted.Dequeue();
-                if (_leaveSeq > 0 && k.Key == _leaveSeq)
-                    Plugin.Logger.LogInfo($"[Paperwork] host receipt for the leave publish (bundle #{k.Key}, day {day}) - {(UnityEngine.Time.unscaledTime - k.Value) * 1000f:0} ms after it was sent.");
+                if (seq <= 0)
+                {
+                    var k = _unreceipted.Dequeue();
+                    if (_leaveSeq > 0 && k.Key == _leaveSeq)
+                        Plugin.Logger.LogInfo($"[Paperwork] host receipt for the leave publish (bundle #{k.Key}, day {day}, by queue order - host sent no number) - {(UnityEngine.Time.unscaledTime - k.Value) * 1000f:0} ms after it was sent.");
+                    return;
+                }
+                if (seq > _bundleSeq) { Plugin.Logger.LogWarning($"[Paperwork] host receipt for bundle #{seq}, but only {_bundleSeq} were sent on this connection - ignored."); return; }
+                while (_unreceipted.Count > 0 && _unreceipted.Peek().Key <= seq)
+                {
+                    var k = _unreceipted.Dequeue();
+                    if (_leaveSeq > 0 && k.Key == _leaveSeq)
+                        Plugin.Logger.LogInfo($"[Paperwork] host receipt for the leave publish (bundle #{k.Key}{(seq == k.Key ? "" : $", via the receipt of #{seq}")}, day {day}) - {(UnityEngine.Time.unscaledTime - k.Value) * 1000f:0} ms after it was sent.");
+                }
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] host receipt: {ex.Message}"); }
         }
@@ -145,7 +159,7 @@ namespace BigAmbitionsMP
                 {
                     if (p == null || string.IsNullOrEmpty(senderPid) || senderPid == MPConfig.PlayerId || !MPServer.IsRunning) return;
                     MPServer.SendToPlayer(senderPid, MessageEnvelope.Create(MessageType.BusinessPaperwork, MPConfig.PlayerId,
-                        new BusinessPaperworkPayload { PlayerId = MPConfig.PlayerId, StableId = ReceiptTag, Day = p.Day }));
+                        new BusinessPaperworkPayload { PlayerId = MPConfig.PlayerId, StableId = ReceiptTag, Day = p.Day, Seq = p.Seq }));   // K3: echo the number
                     ReceiptsSent++;
                 }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] receipt to '{senderPid}': {ex.Message}"); }
@@ -243,10 +257,13 @@ namespace BigAmbitionsMP
                     MPServer.StorePaperwork(p, MPConfig.PlayerId);   // the host is a member too — applied locally
                 else if (MPClient.IsConnected)
                 {
+                    int seqOut = _bundleSeq + 1;
+                    try { p.Seq = seqOut; } catch { }   // K3: the number the host's receipt echoes
                     MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BusinessPaperwork, MPConfig.PlayerId, p));
                     try
                     {   // H5: awaiting the host's receipt (bounded: a host that never answers cannot grow this)
-                        _unreceipted.Enqueue(new System.Collections.Generic.KeyValuePair<int, float>(++_bundleSeq, UnityEngine.Time.unscaledTime));
+                        _bundleSeq = seqOut;
+                        _unreceipted.Enqueue(new System.Collections.Generic.KeyValuePair<int, float>(_bundleSeq, UnityEngine.Time.unscaledTime));
                         while (_unreceipted.Count > 64) _unreceipted.Dequeue();
                     }
                     catch { }

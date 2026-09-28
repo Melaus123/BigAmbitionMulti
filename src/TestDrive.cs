@@ -595,13 +595,15 @@ namespace BigAmbitionsMP
                     // HOST ONLY: the host's clock is the world's; clients follow through the ordinary time sync.
                     if (!MPServer.IsRunning) return "ERR host only";
                     // `clock next` (H-HOURROLL rig, 2026-09-28): one minute past the next full hour - crosses exactly one roll.
+                    // K1 fold rig (2026-09-28): from hour 23 it crosses midnight to 00:01 tomorrow (NewDay runs in the tick).
                     string clkArg = arg.Trim();
+                    bool clkPastMidnight = false;
                     if (clkArg == "next")
                     {
                         var (_, clkH) = GameStateReader.GetGameTime();
                         int clkNext = (int)clkH + 1;
-                        if (clkNext > 23) return "ERR clock next: the next hour is past midnight (clock only moves within today)";
-                        clkArg = $"{clkNext}:01";
+                        if (clkNext > 23) { clkPastMidnight = true; clkArg = "0:01"; }
+                        else clkArg = $"{clkNext}:01";
                     }
                     int colon = clkArg.IndexOf(':');
                     if (colon <= 0 || !int.TryParse(clkArg.Substring(0, colon).Trim(), out var wantH)
@@ -610,7 +612,7 @@ namespace BigAmbitionsMP
                     if (wantH < 0 || wantH > 23 || wantM < 0 || wantM > 59) return "ERR usage: clock HH:MM (00:00-23:59)";
                     var (curDay, curHour) = GameStateReader.GetGameTime();
                     double nowMin  = curHour * 60.0;
-                    double wantMin = wantH * 60.0 + wantM;
+                    double wantMin = wantH * 60.0 + wantM + (clkPastMidnight ? 1440.0 : 0.0);
                     double delta   = wantMin - nowMin;
                     if (delta <= 0.001)
                         return $"ERR the clock only moves forward — it is already day {curDay} {(int)curHour:00}:{(int)((curHour % 1f) * 60f):00}, and {wantH:00}:{wantM:00} is not later today";
@@ -1276,7 +1278,7 @@ namespace BigAmbitionsMP
                     string hrSim = CustomerPuppets.SimulatorFor(hrKey);
                     string hrRule = "";
                     bool hrLife = hrSim.Length > 0 && CustomerHandoff.SignOfLife(hrSim, hrKey, out hrRule);
-                    return $"OK hourroll state {hrKey} hour={hrHour} sent={CustomerEntrySync.SentCountFor(hrKey)} sim='{hrSim}' life={hrLife} rule='{hrRule}' muted=[{string.Join(",", CustomerHandoff.DevLifeMuted)}]";
+                    return $"OK hourroll state {hrKey} hour={hrHour} sent={CustomerEntrySync.SentCountFor(hrKey)} seeded={CustomerEntrySync.SeededIdCountFor(hrReg.Address)} schedToday={CustomerEntrySync.SeededTodayCountFor(hrReg.Address)} sim='{hrSim}' life={hrLife} rule='{hrRule}' muted=[{string.Join(",", CustomerHandoff.DevLifeMuted)}]";
                 }
 
                 // ── H-HANDOFF-1 folds: the till oracle on the machine that keeps the books ──

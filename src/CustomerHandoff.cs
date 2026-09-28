@@ -200,7 +200,13 @@ namespace BigAmbitionsMP
                 if (_lifeShop.TryGetValue((pid ?? "") + "|" + addr, out var ls))
                 {
                     float agoMin = TimeHelper.NowInMinutes() - ls.Key;
-                    if (agoMin >= -1f && agoMin <= LifeShopWindowGameMin) { rule = $"sign of life: a {ls.Value} for this shop {agoMin:0} game min ago"; return true; }
+                    if (agoMin >= -1f && agoMin <= LifeShopWindowGameMin)
+                    {   // K2 fold (2026-09-28): a shop-level sign counts only while the partner's last position report is recent too
+                        float posAgo = _lifePos.TryGetValue(pid ?? "", out var lp3) ? Time.unscaledTime - lp3.Key : -1f;
+                        if (posAgo >= 0f && posAgo <= LifePositionWindowS) { rule = $"sign of life: a {ls.Value} for this shop {agoMin:0} game min ago, position report {posAgo:0.0} s ago"; return true; }
+                        rule = $"silent: a {ls.Value} for this shop {agoMin:0} game min ago, but {(posAgo < 0f ? "no position report" : $"the last position report is {posAgo:0.0} s old")} (> {LifePositionWindowS:0} s)";
+                        return false;
+                    }
                 }
                 string posTxt = _lifePos.TryGetValue(pid ?? "", out var lp2) ? $"last position report {Time.unscaledTime - lp2.Key:0.0} s ago from '{lp2.Value}'" : "no position report";
                 rule = $"silent: {posTxt}, no customer stream / sale / walk-out report for this shop in the last {LifeShopWindowGameMin:0} game min";
