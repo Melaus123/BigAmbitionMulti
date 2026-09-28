@@ -357,6 +357,40 @@
     {
       "seq": 52,
       "role": "both",
+      "cmd": "mark TEST RIVALSELLERS2 STALE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "cmd": "rivalsellers stalelist 56 ba:street_fifthavenue beer,energydrink",
+      "expect_result": "^OK rivalsellers stalelist .* replaced=\\d+ ",
+      "note": "FOLD E1: the host overwrites the client liquor store's host copy with a STALE non-empty list (beer + energy drinks; whisky left out) and recounts with the game's own call - the self-report still REPLACES the game's count for that shop"
+    },
+    {
+      "seq": 54,
+      "role": "h",
+      "cmd": "providers beer ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers item=ba:itemname_beer nb=ba:neighborhood_murrayhill cached=${cBeer} ",
+      "note": "FOLD E1: still the client's own count (no double count of beer)"
+    },
+    {
+      "seq": 55,
+      "role": "h",
+      "cmd": "providers whisky ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers item=ba:itemname_whisky nb=ba:neighborhood_murrayhill cached=${cWhisky} ",
+      "note": "FOLD E1: still the client's own count (whisky, missing from the stale list, still counted from the self-report)"
+    },
+    {
+      "seq": 56,
+      "role": "h",
+      "cmd": "providers energydrink ba:neighborhood_murrayhill",
+      "expect_result": "^OK providers item=ba:itemname_energydrink nb=ba:neighborhood_murrayhill cached=${cEnergy} ",
+      "note": "FOLD E1: still the client's own count (the stale energy-drink entry is not a seller)"
+    },
+    {
+      "seq": 57,
+      "role": "both",
       "cmd": "mark TEST RIVALSELLERS2 END",
       "expect_result": "OK MARK"
     }

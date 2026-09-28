@@ -3384,6 +3384,62 @@ namespace BigAmbitionsMP
                 case "rivalmonodev":
                     return CompanyMessages.DevMonoLever(arg);
 
+                // Fold E9 (2026-09-27): what the rival's contact holds on THIS phone (read-only): the queue length and how
+                // many messages carry <messageKey>. 'rivalcontactq <rivalId> [messageKey]'.
+                case "rivalcontactq":
+                {
+                    try
+                    {
+                        var rqGi = SaveGameManager.Current;
+                        if (rqGi?.Contacts == null) return "ERR no world loaded";
+                        var rqTk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (rqTk.Length < 1) return "ERR usage: rivalcontactq <rivalId> [messageKey]";
+                        var rqRival = BigAmbitions.Rivals.RivalsHelper.GetSpecialRival(rqTk[0]);
+                        string rqName = rqRival?.rivalData?.rivalName ?? "";
+                        if (rqName.Length == 0) return $"ERR rivalcontactq: no special rival '{rqTk[0]}'";
+                        string rqKey = rqTk.Length > 1 ? rqTk[1] : "";
+                        int rqContacts = 0, rqQueue = 0, rqWithKey = 0;
+                        foreach (var rqC in rqGi.Contacts)
+                        {
+                            if (rqC == null || rqC.id != rqName || rqC.description != "rival") continue;
+                            rqContacts++;
+                            if (rqC.messagesQueue == null) continue;
+                            foreach (var rqM in rqC.messagesQueue)
+                            {
+                                rqQueue++;
+                                if (rqKey.Length > 0 && rqM != null && rqM.messageKey == rqKey) rqWithKey++;
+                            }
+                        }
+                        return $"OK rivalcontactq contact='{rqName}' contacts={rqContacts} queue={rqQueue} key={rqWithKey} copies={CompanyMessages.CopyCount}";
+                    }
+                    catch (Exception rqEx) { return $"ERR rivalcontactq: {rqEx.GetType().Name}: {rqEx.Message}"; }
+                }
+
+                // Fold E1 (2026-09-27), HOST: 'rivalsellers stalelist <number> <street> <item,item,...>' overwrites the host
+                // copy's product list of a shop with a STALE list (as the helper Pricing / Deliveries tabs can) and recounts
+                // the seller table with the game's own call; 'rivalsellers' alone reads the last recount's corrections.
+                case "rivalsellers":
+                {
+                    try
+                    {
+                        var rsTk = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        string rsLast() => $"added={RivalClientSellers.LastAdded} replaced={RivalClientSellers.LastReplaced} shops={RivalClientSellers.LastShops} noReport={RivalClientSellers.LastNoReport}";
+                        if (rsTk.Length == 0) return $"OK rivalsellers {rsLast()}";
+                        if (rsTk[0] != "stalelist" || rsTk.Length != 4) return "ERR usage: rivalsellers [stalelist <number> <street> <item,item,...>]";
+                        if (!MPServer.IsRunning) return "ERR rivalsellers stalelist: host only";
+                        if (SaveGameManager.Current == null) return "ERR no world loaded";
+                        string rsAddr = rsTk[1] + " " + rsTk[2];
+                        var rsReg = GameStatePatcher.FindRegistration(rsAddr);
+                        if (rsReg == null) return $"ERR no registration for '{rsAddr}'";
+                        var rsList = new System.Collections.Generic.List<string>();
+                        foreach (var rsIt in rsTk[3].Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)) rsList.Add(MktItem(rsIt));
+                        rsReg.cachedAvailableProducts = rsList;
+                        Helpers.ProductMarketHelper.FillProvidersDictionary();
+                        return $"OK rivalsellers stalelist addr='{rsAddr}' list=[{string.Join(",", rsList)}] {rsLast()}";
+                    }
+                    catch (Exception rsEx) { return $"ERR rivalsellers: {rsEx.GetType().Name}: {rsEx.Message}"; }
+                }
+
                 // P-MIDNIGHT (2026-09-27): 'stalltest <s>' blocks the main thread; 'stalltest' alone reads the watchdog state.
                 case "stalltest":
                     return StallWatch.DevLever(arg);

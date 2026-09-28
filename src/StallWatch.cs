@@ -177,7 +177,8 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[Stall] main thread stuck {age / 1000.0:0.0} s at step '{step}' ({det})");
                         if (FlushRing(true)) StallFlushes++;
                         lastFlush = Environment.TickCount;
-                        try { MPBugReport.WriteStallMarker($"STALLED at step '{step}' ({det})"); } catch { }
+                        // M1: once the session closed cleanly the marker is never written again (log lines continue)
+                        try { if (!MPBugReport.MarkerClosed) MPBugReport.WriteStallMarker($"STALLED at step '{step}' ({det})"); } catch { }
                     }
                     else if (_stalled && age < 1000)
                     {
@@ -205,6 +206,10 @@ namespace BigAmbitionsMP
 
         private static FieldInfo? _fLock, _fRing, _fHead, _fCount;
         private static bool _ringResolved, _ringMissingLogged;
+        // M3: a failing ring write warns once and the live ring file is given up after 3 failures in a row
+        private const int MaxFlushFailures = 3;
+        private static int _flushFailures;
+        private static bool _flushWarned, _flushOff;
 
         private static bool ResolveRing()
         {
@@ -218,6 +223,7 @@ namespace BigAmbitionsMP
 
         private static bool FlushRing(bool force)
         {
+            if (_flushOff) return false;
             try
             {
                 if (!ResolveRing())
@@ -228,28 +234,31 @@ namespace BigAmbitionsMP
                 var lk = _fLock!.GetValue(null);
                 var ring = _fRing!.GetValue(null) as string[];
                 if (lk == null || ring == null || ring.Length == 0) return false;
-                var sb = new StringBuilder(64 * 1024);
-                int count;
+                // M2: only the line REFERENCES are copied inside MPLog's lock; the text is built outside it
+                string?[] lines;
                 lock (lk)
                 {
                     int head = (int)_fHead!.GetValue(null);
-                    count = (int)_fCount!.GetValue(null);
+                    int count = (int)_fCount!.GetValue(null);
                     if (count <= 0) return false;
                     object last = ring[(head - 1 + ring.Length) % ring.Length];
                     if (!force && ReferenceEquals(last, _ringLastRef)) return false;
                     _ringLastRef = last;
+                    if (count > ring.Length) count = ring.Length;
                     int start = count < ring.Length ? 0 : head;
-                    sb.Append("# BAMP live ring - written ").Append(DateTime.Now.ToString("O"))
-                      .Append(" role=").Append(MPServer.IsRunning ? "host" : (MPClient.IsConnected ? "client" : "offline"))
-                      .Append(" player='").Append(MPConfig.PlayerId).Append("' session=").Append(MPLog.SessionId)
-                      .Append(force ? " (stall flush)" : "").Append("\r\n");
-                    for (int i = 0; i < count; i++)
-                    {
-                        string? l = ring[(start + i) % ring.Length];
-                        if (l == null) continue;
-                        if (l.Length > MaxLineChars) sb.Append(l, 0, MaxLineChars).Append(" ...[cut]"); else sb.Append(l);
-                        sb.Append("\r\n");
-                    }
+                    lines = new string?[count];
+                    for (int i = 0; i < count; i++) lines[i] = ring[(start + i) % ring.Length];
+                }
+                var sb = new StringBuilder(64 * 1024);
+                sb.Append("# BAMP live ring - written ").Append(DateTime.Now.ToString("O"))
+                  .Append(" role=").Append(MPServer.IsRunning ? "host" : (MPClient.IsConnected ? "client" : "offline"))
+                  .Append(" player='").Append(MPConfig.PlayerId).Append("' session=").Append(MPLog.SessionId)
+                  .Append(force ? " (stall flush)" : "").Append("\r\n");
+                foreach (var l in lines)
+                {
+                    if (l == null) continue;
+                    if (l.Length > MaxLineChars) sb.Append(l, 0, MaxLineChars).Append(" ...[cut]"); else sb.Append(l);
+                    sb.Append("\r\n");
                 }
                 string path = LivePath();
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
@@ -258,11 +267,22 @@ namespace BigAmbitionsMP
                 try { if (File.Exists(path)) File.Delete(path); File.Move(tmp, path); }
                 catch { File.Copy(tmp, path, true); try { File.Delete(tmp); } catch { } }
                 RingWrites++;
+                _flushFailures = 0;
                 return true;
             }
             catch (Exception ex)
             {
-                try { Plugin.Logger.LogWarning($"[Stall] ring flush: {ex.GetType().Name}: {ex.Message}"); } catch { }
+                _flushFailures++;
+                if (!_flushWarned)
+                {
+                    _flushWarned = true;
+                    try { Plugin.Logger.LogWarning($"[Stall] ring flush: {ex.GetType().Name}: {ex.Message} (warned once; the live ring file stops after {MaxFlushFailures} failures in a row)"); } catch { }
+                }
+                if (_flushFailures >= MaxFlushFailures)
+                {
+                    _flushOff = true;
+                    try { Plugin.Logger.LogWarning($"[Stall] ring flush failed {_flushFailures} times in a row - the live ring file is off for this session."); } catch { }
+                }
                 return false;
             }
         }
@@ -300,7 +320,12 @@ namespace BigAmbitionsMP
             try
             {
                 string live = LivePath(), prev = PrevPath();
-                if (!File.Exists(live)) return;
+                if (!File.Exists(live))
+                {
+                    // M4: no live ring from the previous session - an older '-prev' is stale and must not be attached as its ring
+                    if (File.Exists(prev)) { File.Delete(prev); Plugin.Logger.LogInfo($"[Stall] no live ring from the previous session - the stale '{prev}' was removed."); }
+                    return;
+                }
                 if (File.Exists(prev)) File.Delete(prev);
                 File.Move(live, prev);
                 Plugin.Logger.LogInfo($"[Stall] previous session's live ring kept as '{prev}'.");
@@ -313,6 +338,9 @@ namespace BigAmbitionsMP
         internal static string DevLever(string arg)
         {
             arg = (arg ?? "").Trim();
+            // M1 (DEV): 'stalltest close' runs the clean-shutdown marker delete; 'stalltest marker' reads whether the marker exists
+            if (arg == "close") { MPBugReport.MarkCleanShutdown(); return $"OK stalltest close marker={(MPBugReport.MarkerFileExists() ? "present" : "absent")} closed={MPBugReport.MarkerClosed}"; }
+            if (arg == "marker") return $"OK stalltest marker={(MPBugReport.MarkerFileExists() ? "present" : "absent")} closed={MPBugReport.MarkerClosed} stalls={Stalls}";
             if (arg.Length > 0)
             {
                 if (!int.TryParse(arg, out var s) || s < 1 || s > 30) return "ERR usage: stalltest <1-30 seconds>";

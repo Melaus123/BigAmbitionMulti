@@ -1109,6 +1109,8 @@ namespace BigAmbitionsMP
                             foreach (var a in _attacks) if (a.Key == oldK) a.Key = heir;
                             foreach (var q in _warQ.Values) foreach (var x in q) if (x.Key == oldK) x.Key = heir;
                         }
+                        // Not folded (manager 2026-09-27): a company SPLIT leaves the old key with no single heir, so its
+                        // queue places are dropped here - the split partners queue again from the back.
                         else
                             foreach (var q in _warQ.Values) q.RemoveAll(x => x.Key == oldK);   // fold B2: nobody holds the key any more
                         if (heir == hostAfter) heir = "";   // the native timeline plans for the host key itself
@@ -1130,8 +1132,12 @@ namespace BigAmbitionsMP
                 lock (_lock)
                     foreach (var q in _warQ.Values)
                     {
+                        // fold B2: one place per key after the renames - the earliest POSITION kept; fold E6: with the LATEST retry time
+                        var latestTry = new Dictionary<string, int>(System.StringComparer.Ordinal);
+                        foreach (var x in q) if (!latestTry.TryGetValue(x.Key, out int lt) || x.LastTryMin > lt) latestTry[x.Key] = x.LastTryMin;
                         var seenQ = new HashSet<string>(System.StringComparer.Ordinal);
-                        q.RemoveAll(x => !seenQ.Add(x.Key));   // fold B2: one place per key after the renames (the earliest kept)
+                        q.RemoveAll(x => !seenQ.Add(x.Key));
+                        foreach (var x in q) x.LastTryMin = latestTry[x.Key];
                     }
                 MPServer.PublishRivalStateIfChanged("rivalattn-" + why);
             }
@@ -1558,7 +1564,8 @@ namespace BigAmbitionsMP
                 {
                     var x = q[qi];
                     if (x.Key == me) break;
-                    if (offline.Contains(x.Key)) { if (!skipped.Contains(x.Key)) skipped.Add(x.Key); qi++; continue; }
+                    // fold E2: a skipped offline row is stamped now - only ONLINE time counts toward the 48 game-hour idle drop
+                    if (offline.Contains(x.Key)) { x.LastTryMin = now; if (!skipped.Contains(x.Key)) skipped.Add(x.Key); qi++; continue; }
                     if (now - x.LastTryMin > StaleQueueMin)
                     {
                         Plugin.Logger.LogInfo($"[RivalWar] queued war for {x.Key} on {rid} dropped from the queue: not retried for {(now - x.LastTryMin) / 60} game hour(s).");
@@ -2313,10 +2320,16 @@ namespace BigAmbitionsMP
                     {
                         // Fold B7: no timeline entry completes a forced attack, so nothing would dequeue its special message
                         // (native CompleteEntry does) - it is taken off the shared queue as the mod path (FireFor) does.
+                        // Fold E8: EVERY special message the call added (all past the count taken before it) goes.
                         var arr = fq.ToArray();
                         fq.Clear();
-                        for (int i = 0; i < arr.Length - 1; i++) fq.Enqueue(arr[i]);
-                        Plugin.Logger.LogInfo($"[RivalAttn] DEV: rivalforce for the host key: special message '{arr[arr.Length - 1]?.messageKey ?? "-"}' taken off the shared queue (no entry completes a forced attack).");
+                        var taken = new List<string>();
+                        for (int i = 0; i < arr.Length; i++)
+                        {
+                            if (i < fqBefore) fq.Enqueue(arr[i]);
+                            else taken.Add(arr[i]?.messageKey ?? "-");
+                        }
+                        Plugin.Logger.LogInfo($"[RivalAttn] DEV: rivalforce for the host key: {taken.Count} special message(s) [{string.Join(", ", taken)}] taken off the shared queue (no entry completes a forced attack).");
                     }
                 }
                 else

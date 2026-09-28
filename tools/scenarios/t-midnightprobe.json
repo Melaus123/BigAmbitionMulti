@@ -153,6 +153,53 @@
     {
       "seq": 16,
       "role": "both",
+      "cmd": "mark TEST MIDNIGHT CLOSED",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 17,
+      "role": "both",
+      "cmd": "stalltest marker",
+      "expect_result": "^OK stalltest marker=present closed=False ",
+      "note": "PREMISE: the open session marker (session-open.json) exists while the session runs"
+    },
+    {
+      "seq": 18,
+      "role": "both",
+      "cmd": "stalltest close",
+      "expect_result": "^OK stalltest close marker=absent closed=True",
+      "note": "FOLD M1 (DEV): the clean-shutdown path (MarkCleanShutdown, as OnApplicationQuit runs it) deletes the marker - on BOTH instances, which share the data folder and so the marker file"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "stalltest 8",
+      "expect_result": "^OK stalltest blocked the main thread 8 s",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Stall\\] main thread stuck \\d+\\.\\d s at step 'dev stalltest' \\(#8 'stalltest'\\)",
+          "within_s": 30
+        }
+      ],
+      "note": "FOLD M1: a stall AFTER the clean shutdown - the watchdog still logs it, but must not write the marker back"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "sleep_s": 35,
+      "note": "FOLD M1: past one heartbeat interval (~30 s) - the heartbeat must not write it back either"
+    },
+    {
+      "seq": 21,
+      "role": "both",
+      "cmd": "stalltest marker",
+      "expect_result": "^OK stalltest marker=absent closed=True stalls=",
+      "note": "FOLD M1: session-open.json is still absent after the stall (the next launch shows no false crash popup)"
+    },
+    {
+      "seq": 22,
+      "role": "both",
       "cmd": "mark TEST MIDNIGHT END",
       "expect_result": "OK MARK"
     }

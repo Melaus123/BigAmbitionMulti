@@ -440,8 +440,15 @@ namespace BigAmbitionsMP
 
                     // What does it sell?  Native cache UNION the synced price table.
                     var sells = new HashSet<string>(StringComparer.Ordinal);
-                    try { if (reg.cachedAvailableProducts != null) foreach (var p in reg.cachedAvailableProducts) if (!string.IsNullOrEmpty(p)) sells.Add(p); } catch { }
-                    try { if (reg.retailPrices != null) foreach (var rp in reg.retailPrices) if (!string.IsNullOrEmpty(rp?.itemName)) sells.Add(rp.itemName); } catch { }
+                    // Fold E7 (2026-09-27): ANOTHER player's shop with a self-report row sells what its owner reports
+                    // (row.Selling) - the host copy's list and price table can be stale.
+                    var selfSelling = isAi ? null : RivalClientSellers.SelfReportedSellingOf(ownerPid, GameStateReader.AddressKey(reg));
+                    if (selfSelling != null) foreach (var p in selfSelling) sells.Add(p);
+                    else
+                    {
+                        try { if (reg.cachedAvailableProducts != null) foreach (var p in reg.cachedAvailableProducts) if (!string.IsNullOrEmpty(p)) sells.Add(p); } catch { }
+                        try { if (reg.retailPrices != null) foreach (var rp in reg.retailPrices) if (!string.IsNullOrEmpty(rp?.itemName)) sells.Add(rp.itemName); } catch { }
+                    }
                     if (sells.Count == 0) continue;
 
                     foreach (var item in sells)

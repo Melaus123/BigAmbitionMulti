@@ -250,12 +250,13 @@ namespace BigAmbitionsMP
             try
             {
                 if (string.IsNullOrWhiteSpace(_markerPath)) return;
+                if (MarkerClosed) return;   // M1: a clean shutdown already removed the marker - never write it back
                 if (_sessionStartedAt < 0f) _sessionStartedAt = Time.unscaledTime;
                 var marker = BuildMarker("normal start", false);
                 marker["LastAlive"] = DateTime.Now.ToString("O");
                 marker["Phase"] = StallWatch.PhaseText(phase ?? "");   // P-MIDNIGHT: names the running step, if any
-                _lastHeartbeatMarker = marker;   // read-only from here on (the stall watchdog copies it)
                 marker["UptimeSeconds"] = ((int)(Time.unscaledTime - _sessionStartedAt + 0.5f)).ToString(CultureInfo.InvariantCulture);
+                _lastHeartbeatMarker = marker;   // M5: published COMPLETE - read-only from here on (the stall watchdog copies it)
                 // Round-207g: serialize on the main thread (small object), WRITE on the
                 // pool — the synchronous 30s disk write was the occasional ~70ms Pre.A
                 // hitch. A lost heartbeat on crash costs ≤30s of "last alive" precision;
@@ -264,7 +265,7 @@ namespace BigAmbitionsMP
                 string path = _markerPath;
                 System.Threading.ThreadPool.QueueUserWorkItem(_ =>
                 {
-                    try { File.WriteAllText(path, json); } catch { }
+                    try { lock (_markerCloseLock) { if (!_markerClosed) File.WriteAllText(path, json); } } catch { }   // M1
                 });
             }
             catch { }
@@ -273,6 +274,21 @@ namespace BigAmbitionsMP
         // P-MIDNIGHT (2026-09-27): the stall watchdog's marker write (BACKGROUND THREAD) - the last heartbeat's fields with
         // Phase naming the step the main thread is stuck in, so the next launch's crash hint names it.
         private static volatile Dictionary<string, string>? _lastHeartbeatMarker;
+
+        // M1 (review of 47d8521, 2026-09-27): after a clean quit MarkCleanShutdown deletes the marker, but quit saves /
+        // teardown stop frames, and the watchdog's stall write put it back ('open') -> a false crash popup at the next
+        // launch. The CLOSED flag is set under this lock BEFORE the delete; every marker write after it checks the flag
+        // under the same lock, so no write can land after the delete.
+        private static readonly object _markerCloseLock = new object();
+        private static bool _markerClosed;
+
+        internal static bool MarkerClosed { get { lock (_markerCloseLock) return _markerClosed; } }
+
+        /// <summary>DEV readout: does the session marker file exist right now.</summary>
+        internal static bool MarkerFileExists()
+        {
+            try { string path = _markerPath; return !string.IsNullOrWhiteSpace(path) && File.Exists(path); } catch { return false; }
+        }
 
         internal static void WriteStallMarker(string stallText)
         {
@@ -285,7 +301,12 @@ namespace BigAmbitionsMP
                 c["LastAlive"] = DateTime.Now.ToString("O");
                 c.TryGetValue("Phase", out var ph);
                 c["Phase"] = (ph ?? "") + "; " + stallText;
-                File.WriteAllText(path, JsonConvert.SerializeObject(c, Formatting.Indented));
+                string json = JsonConvert.SerializeObject(c, Formatting.Indented);
+                lock (_markerCloseLock)
+                {
+                    if (_markerClosed) return;   // M1: the session closed cleanly - the marker stays deleted
+                    File.WriteAllText(path, json);
+                }
             }
             catch { }
         }
@@ -294,8 +315,12 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!string.IsNullOrWhiteSpace(_markerPath) && File.Exists(_markerPath))
-                    File.Delete(_markerPath);
+                lock (_markerCloseLock)
+                {
+                    _markerClosed = true;   // M1: BEFORE the delete - no marker write lands after it
+                    if (!string.IsNullOrWhiteSpace(_markerPath) && File.Exists(_markerPath))
+                        File.Delete(_markerPath);
+                }
             }
             catch { }
         }

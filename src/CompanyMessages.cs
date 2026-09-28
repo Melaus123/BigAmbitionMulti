@@ -204,13 +204,27 @@ namespace BigAmbitionsMP
             {
                 if (!MergerSync.IAmMember)
                 {
-                    if (_copies.Count > 0 || _mine.Count > 0) ClearAll("this player is not in a company");
+                    // E9 (2026-09-27): rival copies (rivalnews / rivalmono and its trailing messages) are ordinary game
+                    // messages once raised - they never call for the membership clear (ClearAll keeps them anyway).
+                    if (NonRivalCopyCount() > 0 || _mine.Count > 0) ClearAll("this player is not in a company");
                     return;
                 }
                 PruneVanishedCopies();      // r2 MINOR-6
                 RetryPendingPresses();      // r2 MAJOR-3
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} tick: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>E9: a relayed RIVAL message (the host's rivalnews, a rivalmono and its trailing subs - ids made at
+        /// :1270 / :1485 / :1630). Not company traffic: it is not removed for membership reasons.</summary>
+        private static bool IsRivalCopyId(string id) =>
+            id != null && (id.StartsWith("bamp-rivalnews-", StringComparison.Ordinal) || id.StartsWith("bamp-rivalmono-", StringComparison.Ordinal));
+
+        private static int NonRivalCopyCount()
+        {
+            int n = 0;
+            foreach (var id in _copies.Keys) if (!IsRivalCopyId(id)) n++;
+            return n;
         }
 
         // -- C1 SENDER --
@@ -1382,6 +1396,9 @@ namespace BigAmbitionsMP
         /// loading). NOT marked seen; TickParkedMono raises them once the world is live. Bounded.</summary>
         private static readonly Dictionary<string, ParkedMono> _monoParked = new Dictionary<string, ParkedMono>(StringComparer.Ordinal);
         private const int MonoParkCap = 32;
+        /// <summary>M6: past MonoParkCap a payload is still parked, as PLAIN text (no monologue queue of dozens); this
+        /// outer bound only guards memory.</summary>
+        private const int MonoParkHardCap = 256;
 
         /// <summary>HOST, on EnqueueMonologue of the host key's own rival message: with at least one online co-member
         /// (a merged host company) the game's own finished-callback is wrapped, so everything the rival's contact raises
@@ -1522,10 +1539,12 @@ namespace BigAmbitionsMP
                 if (SaveGameManager.Current == null)
                 {
                     // C1 review fold: still loading - ApplyRelayed would return in silence. Park it, NOT marked seen.
-                    if (_monoParked.Count >= MonoParkCap)
-                    { Plugin.Logger.LogWarning($"[RivalMono] '{p.MessageKey}' from rival '{p.RivalId}' arrived before the world was live and {MonoParkCap} are already parked - dropped."); return; }
-                    _monoParked[p.MessageId] = new ParkedMono { P = p, Plain = false };
-                    Plugin.Logger.LogInfo($"[RivalMono] '{p.MessageKey}' from rival '{p.RivalId}' arrived before the world was live - parked ({_monoParked.Count} parked).");
+                    if (_monoParked.Count >= MonoParkHardCap)
+                    { Plugin.Logger.LogWarning($"[RivalMono] '{p.MessageKey}' from rival '{p.RivalId}' arrived before the world was live and {MonoParkHardCap} are already parked - dropped."); return; }
+                    // M6: the park is full of monologues - this one is kept, raised as plain text once the world is live
+                    bool plain = _monoParked.Count >= MonoParkCap;
+                    _monoParked[p.MessageId] = new ParkedMono { P = p, Plain = plain };
+                    Plugin.Logger.LogInfo($"[RivalMono] '{p.MessageKey}' from rival '{p.RivalId}' arrived before the world was live - parked{(plain ? $" as plain text ({MonoParkCap} monologues already parked)" : "")} ({_monoParked.Count} parked).");
                     return;
                 }
                 _monoSeen.Add(p.MessageId);
@@ -1580,11 +1599,15 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (SaveGameManager.Current == null)
+                    // M7: a city scene being unloaded counts as no live world (park, raise when the next world is live)
+                    if (NoLiveWorld())
                     {
-                        if (_monoParked.Count < MonoParkCap && !_monoParked.ContainsKey(p.MessageId))
-                            _monoParked[p.MessageId] = new ParkedMono { P = p, Plain = true };
-                        Plugin.Logger.LogInfo($"[RivalMono] monologue for '{p.MessageKey}' cut short ({n} pending) while no world is live - parked ({_monoParked.Count} parked).");
+                        if (_monoParked.ContainsKey(p.MessageId))
+                        { Plugin.Logger.LogInfo($"[RivalMono] monologue for '{p.MessageKey}' cut short ({n} pending) while no world is live - already parked."); continue; }
+                        if (_monoParked.Count >= MonoParkHardCap)   // M6: only the memory bound drops
+                        { Plugin.Logger.LogWarning($"[RivalMono] monologue for '{p.MessageKey}' cut short ({n} pending) while no world is live and {MonoParkHardCap} are already parked - dropped."); continue; }
+                        _monoParked[p.MessageId] = new ParkedMono { P = p, Plain = true };
+                        Plugin.Logger.LogInfo($"[RivalMono] monologue for '{p.MessageKey}' cut short ({n} pending) while no world is live - parked, raised as plain text once the next world is live ({_monoParked.Count} parked).");
                         continue;
                     }
                     Plugin.Logger.LogInfo($"[RivalMono] monologue for '{p.MessageKey}' cut short ({n} pending) - raised as plain text.");
@@ -1594,12 +1617,19 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>M7: no save is live, or the city scene is being unloaded (GameManager.isCitySceneBeingUnloaded).</summary>
+        private static bool NoLiveWorld()
+        {
+            if (SaveGameManager.Current == null) return true;
+            try { return global::GameManager.isCitySceneBeingUnloaded; } catch { return false; }
+        }
+
         /// <summary>C1 review fold: MAIN THREAD, per frame (Tick). Cheap when nothing is parked; raises the parked payloads
         /// once SaveGameManager.Current is set (recurrence-covered: it runs every frame until the park is empty).</summary>
         private static void TickParkedMono()
         {
             if (_monoParked.Count == 0) return;
-            if (SaveGameManager.Current == null) return;
+            if (NoLiveWorld()) return;   // M7: not while a city scene is being unloaded either
             if (MPServer.IsRunning) { _monoParked.Clear(); return; }
             var list = new List<ParkedMono>(_monoParked.Values);
             _monoParked.Clear();
@@ -1823,15 +1853,30 @@ namespace BigAmbitionsMP
         {
             try
             {
-                int n = _copies.Count;
+                // E9 (2026-09-27): a relayed RIVAL copy stays on the phone - it is an ordinary game message once raised.
+                // It stays tracked (the resend de-dup by MessageId, the save strip) but no membership clear removes it.
+                var keep = new List<KeyValuePair<string, (string owner, Contact contact, TextMessage msg)>>();
+                int n = 0;
                 var gi = SaveGameManager.Current;
-                foreach (var kv in _copies) RemoveFromQueue(kv.Value.contact, kv.Value.msg);
+                foreach (var kv in _copies)
+                {
+                    if (IsRivalCopyId(kv.Key)) { keep.Add(kv); continue; }
+                    n++;
+                    RemoveFromQueue(kv.Value.contact, kv.Value.msg);
+                }
+                var keepContacts = new HashSet<Contact>();
+                foreach (var kv in keep) if (kv.Value.contact != null) keepContacts.Add(kv.Value.contact);
                 if (gi?.Contacts != null)
                     foreach (var c in _createdHere)
-                        if (c != null && (c.messagesQueue == null || c.messagesQueue.Count == 0)) gi.Contacts.Remove(c);
+                        if (c != null && !keepContacts.Contains(c) && (c.messagesQueue == null || c.messagesQueue.Count == 0)) gi.Contacts.Remove(c);
+                var keepCreated = new List<Contact>();
+                foreach (var c in _createdHere) if (c != null && keepContacts.Contains(c)) keepCreated.Add(c);
                 _copies.Clear(); _createdHere.Clear(); _relayOwner.Clear(); _mine.Clear(); _handled.Clear(); _order.Clear(); _pending.Clear();
                 _insurance.Clear(); _insuranceByOffer.Clear(); _relayedOffers.Clear();   // r2 MINOR-9: D23's three tables die with the copies
-                if (n > 0) Plugin.Logger.LogInfo($"{Tag} dropped {n} relayed message copy(ies) ({why}).");
+                foreach (var kv in keep) { _copies[kv.Key] = kv.Value; _order.Add(kv.Key); }
+                foreach (var c in keepCreated) _createdHere.Add(c);
+                if (n > 0 || keep.Count > 0)
+                    Plugin.Logger.LogInfo($"{Tag} dropped {n} relayed message copy(ies) ({why}); kept {keep.Count} rival message copy(ies) (ordinary game messages once raised).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} ClearAll: {ex.GetType().Name}: {ex.Message}"); }
         }
@@ -2168,8 +2213,6 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>RIVAL-FAIR-2 M4: the swallow itself (see the pair above).  Off a session, and for every key this
-    /// machine was not told to skip, the monologue plays exactly as the game enqueued it.</summary>
     /// <summary>C1 review fold (2026-09-27): InstantClose (LoadScene.cs:32, FuneralHelper.cs:138, MonologueUI.Awake) stops the
     /// monologue coroutines and with them the running entry's finished-callback - a rivalmono waiting on that callback
     /// is raised as plain text here instead.</summary>
@@ -2183,6 +2226,8 @@ namespace BigAmbitionsMP
         }
     }
 
+    /// <summary>RIVAL-FAIR-2 M4: the swallow itself (see the pair above).  Off a session, and for every key this
+    /// machine was not told to skip, the monologue plays exactly as the game enqueued it.</summary>
     [HarmonyPatch(typeof(UI.Monologues.MonologueUI), nameof(UI.Monologues.MonologueUI.EnqueueMonologue), new[] { typeof(string), typeof(AudioClip), typeof(Sprite), typeof(Action<string>) })]
     public static class Patch_MonologueUI_EnqueueMonologue_SkipWhenNotRecipient
     {

@@ -2702,6 +2702,7 @@ namespace BigAmbitionsMP
                     if (req != null && !string.IsNullOrEmpty(req.PlayerId)
                         && SenderIs(req.PlayerId, senderPid, env.Type))
                     {
+                        RivalClientSellers.OnSelfReport(req.PlayerId);   // fold E3: the first report of the session recounts the seller table
                         _clientSelfStats[req.PlayerId] = req;
                         _clientSelfStatsAt[req.PlayerId] = DateTime.UtcNow;   // H-RIVALPARITY-1 D F8
                         string nameForClient = _characterNamesByPlayerId.TryGetValue(req.PlayerId, out var nm) && !string.IsNullOrWhiteSpace(nm) ? nm : req.PlayerId;
