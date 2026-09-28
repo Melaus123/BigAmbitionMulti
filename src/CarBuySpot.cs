@@ -133,18 +133,23 @@ namespace BigAmbitionsMP
                 if (own != null)
                     foreach (var vi in own)
                     {
-                        if (vi == null || (vi.id != null && vi.id.StartsWith("BAMP_"))) continue;
+                        if (vi == null) continue;   // review LOW: BAMP_ entries stay obstacles (the game's own check counts them too)
+                        if (Vector3.Distance((Vector3)vi.position, t.position) > NearObstacle) continue;   // review LOW: size only what can matter
                         var (w, l) = SizeOf(vi.vehicleTypeName, W, L);
                         obst.Add(((Vector3)vi.position, w, l));
                     }
             }
             catch { }
-            foreach (var g in ghosts) { var (w, l) = SizeOf(g.type, W, L); obst.Add((g.pos, w, l)); }
+            foreach (var g in ghosts) { if (Vector3.Distance(g.pos, t.position) > NearObstacle) continue; var (w, l) = SizeOf(g.type, W, L); obst.Add((g.pos, w, l)); }
 
             // Ground at the spot itself: the reference height every candidate must match.
             bool haveGround = Physics.Raycast(t.position + Vector3.up * 2f, Vector3.down, out var gHit, 4f, Helpers.LayerHelper.groundLayerMask, QueryTriggerInteraction.Ignore);
             float spotLift = haveGround ? t.position.y - gHit.point.y : 0f;
-            List<(Vector3 a, Vector3 b)> lanes = LaneSegmentsNear(t.position, 30f, out bool laneTable);
+            List<(Vector3 a, Vector3 b)> lanes = LaneSegmentsNear(t.position, 60f, out bool laneTable);
+            // review MED: a Tier A spot may never sit closer to a traffic lane than half a lane + half a car, nor closer than the
+            // delivery spot itself does (the game's own spot is the reference for 'at the kerb').
+            float laneMin = W * 0.5f + 2.0f;
+            if (laneTable) { float spotLane = LaneDist(t.position, lanes); if (spotLane < laneMin) laneMin = Mathf.Max(0f, spotLane - 0.3f); }
 
             var cands = new List<(Vector3 c, Quaternion r, string label, bool side)>();
             Vector3 fwd = t.rotation * Vector3.forward, right = t.rotation * Vector3.right;
@@ -183,7 +188,7 @@ namespace BigAmbitionsMP
                 if (Vector3.Distance(cd.c, t.position) > HardCap) continue;
                 if (cd.side && !laneTable) { sideSkipped++; continue; }
                 tried++;
-                if (cd.side && InLane(cd.c, lanes, W)) continue;
+                if (laneTable && cd.label.StartsWith("tierA") && LaneDist(cd.c, lanes) < laneMin) continue;
                 if (Occupied(cd.c, cd.r, W, L, obst)) continue;
                 Vector3 c = cd.c;
                 if (haveGround)
@@ -193,7 +198,7 @@ namespace BigAmbitionsMP
                     c.y = h.point.y + spotLift;
                 }
                 int statics = Physics.OverlapBox(c + cd.r * center + Vector3.up * 0.3f, size * 0.5f, cd.r,
-                                                 Helpers.LayerHelper.buildingsLayerMask | Helpers.LayerHelper.wallsLayerMask,
+                                                 Helpers.LayerHelper.buildingsLayerMask | Helpers.LayerHelper.wallsLayerMask | Helpers.LayerHelper.vehicleAndHumanConflictMask,
                                                  QueryTriggerInteraction.Ignore).Length;
                 if (statics > 0) continue;
                 if (Vector3.Distance(c, t.position) > HardCap) continue;
@@ -267,17 +272,22 @@ namespace BigAmbitionsMP
             return segs;
         }
 
-        private static bool InLane(Vector3 c, List<(Vector3 a, Vector3 b)> segs, float W)
+        private const float NearObstacle = 25f;
+
+        /// <summary>Distance (x/z) from c to the nearest traffic lane piece; +inf with none.</summary>
+        private static float LaneDist(Vector3 c, List<(Vector3 a, Vector3 b)> segs)
         {
+            float best = float.PositiveInfinity;
             foreach (var s in segs)
             {
                 Vector2 a = new Vector2(s.a.x, s.a.z), b = new Vector2(s.b.x, s.b.z), q = new Vector2(c.x, c.z);
                 Vector2 ab = b - a;
                 float len2 = ab.sqrMagnitude;
                 float u = len2 < 1e-4f ? 0f : Mathf.Clamp01(Vector2.Dot(q - a, ab) / len2);
-                if ((a + ab * u - q).magnitude < W) return true;
+                float d = (a + ab * u - q).magnitude;
+                if (d < best) best = d;
             }
-            return false;
+            return best;
         }
     }
 
