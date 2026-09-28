@@ -578,7 +578,61 @@ namespace BigAmbitionsMP
         internal static bool ForwardBooked(string entryId)
             => !string.IsNullOrEmpty(entryId) && _bookedForwards.Contains(entryId);
         /// <summary>Fold L (2026-09-27): per session, like the book-once registry (BookOnce.Reset).</summary>
-        internal static void ClearBookedForwards() { try { _bookedForwards.Clear(); _lastSeed.Clear(); } catch { } }   // K1 fold: the stored seeds are per session too
+        internal static void ClearBookedForwards()
+        {
+            try
+            {
+                int retired = RetireForwardKept();
+                if (retired > 0) Plugin.Logger.LogInfo($"[Business] session wipe: {retired} forward-settled entr{(retired == 1 ? "y" : "ies")} taken out of the schedule lists (their hourly set-aside ends with this session's ledgers).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] retire kept forwards: {ex.Message}"); }
+            try { _bookedForwards.Clear(); _lastSeed.Clear(); } catch { }   // K1 fold: the stored seeds are per session too
+        }
+
+        // Rotation fix B (2026-09-28): an entry a partner's sale forward claimed STAYS in the owner's table, completed -
+        // single-player keeps a served entry (CustomerEntriesHelper.cs:42/59 counts it against its hour's quota, so a later
+        // legit rebuild mints no replacement), as BookOnce U5 does for walk-outs. The owner's hourly pass never bills it
+        // (BookOnce.HourlyBegin sets it aside by this mark). The set-aside runs only while MP runs and lives as long as this
+        // session's ledgers, so the session wipe (ClearBookedForwards) takes the kept entries out of the table (fold H1's
+        // reason for retiring them at the forward itself).
+        private static System.Runtime.CompilerServices.ConditionalWeakTable<CustomerEntry, object> _forwardKept = new();
+        private static readonly List<WeakReference<CustomerEntry>> _forwardKeptList = new();
+        internal static bool AnyForwardKept => _forwardKeptList.Count > 0;
+        internal static bool ForwardKept(CustomerEntry? e) => e != null && _forwardKept.TryGetValue(e, out _);
+        private static void KeepForwarded(CustomerEntry e)
+        {
+            try
+            {
+                if (e == null || _forwardKept.TryGetValue(e, out _)) return;
+                _forwardKept.Add(e, e);
+                if (_forwardKeptList.Count >= 4000) _forwardKeptList.RemoveAll(w => !w.TryGetTarget(out _));
+                _forwardKeptList.Add(new WeakReference<CustomerEntry>(e));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] keep forwarded entry: {ex.Message}"); }
+        }
+        private static int RetireForwardKept()
+        {
+            int n = 0;
+            try
+            {
+                if (_forwardKeptList.Count == 0) return 0;
+                var table = Table();
+                if (table != null)
+                    foreach (var kv in table)
+                        if (kv.Value != null) n += kv.Value.RemoveAll(x => x != null && _forwardKept.TryGetValue(x, out _));
+            }
+            finally
+            {
+                _forwardKept = new System.Runtime.CompilerServices.ConditionalWeakTable<CustomerEntry, object>();
+                _forwardKeptList.Clear();
+            }
+            return n;
+        }
+
+        // Rotation readout: per shop, forwards adopted whose entry id this owner no longer held ('schedule rotated').
+        private static readonly Dictionary<string, int> _fwdUnknown = new();
+        internal static int FwdUnknownFor(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _fwdUnknown.TryGetValue(addressKey, out var n) ? n : 0;
 
         /// <summary>Fold M4: the schedule id this machine already gave an entry (never mints one).</summary>
         internal static string? KnownIdOf(CustomerEntry? e)
@@ -614,6 +668,35 @@ namespace BigAmbitionsMP
                 return $"fwdPairs={n} fwdInTill={fwdIn} fwdDouble={dbl} fwdDoubleIds={(bad.Count == 0 ? "-" : string.Join(";", bad))}";
             }
             catch (Exception ex) { return "fwdERR " + ex.Message; }
+        }
+
+        /// <summary>Rotation readout (t-handoff3): this machine's schedule list for a shop - entries, completed, kept after a
+        /// forward, per-hour counts (hour:total/completed), forwards adopted and those with an unknown id.</summary>
+        internal static string RotationReport(BuildingRegistration reg)
+        {
+            try
+            {
+                string key = GameStateReader.AddressKey(reg);
+                var entries = EntriesOf(reg);
+                int total = 0, done = 0, kept = 0;
+                var byHour = new SortedDictionary<int, (int t, int d)>();
+                if (entries != null)
+                    foreach (var e in entries)
+                    {
+                        if (e == null) continue;
+                        total++;
+                        if (e.completed) done++;
+                        if (ForwardKept(e)) kept++;
+                        int h = e.spawnTime != null ? e.spawnTime.Hour : -1;
+                        byHour.TryGetValue(h, out var c);
+                        byHour[h] = (c.t + 1, c.d + (e.completed ? 1 : 0));
+                    }
+                var hs = new List<string>();
+                foreach (var kv in byHour) hs.Add($"{kv.Key}:{kv.Value.t}/{kv.Value.d}");
+                int hour = -1, day = -1; try { hour = SaveGameManager.Current.Hour; day = TimeHelper.CurrentDay; } catch { }
+                return $"day={day} hour={hour} entries={total} completed={done} fwdKept={kept} hours=[{string.Join(",", hs)}] fwdAdopted={AdoptedCountFor(key)} fwdUnknown={FwdUnknownFor(key)}";
+            }
+            catch (Exception ex) { return "rotERR " + ex.Message; }
         }
 #endif
 
@@ -726,18 +809,21 @@ namespace BigAmbitionsMP
                 // CustomerHandoff.Reset -> BookOnce.Reset): the next native pass then booked the entry's own Order a
                 // second time. A later take-back of the visit adopts from a stand-alone entry built from the row
                 // (CustomerPuppets.AdoptPuppetAsNative, 'registered visit whose entry left this machine's table').
+                // Rotation fix B (2026-09-28): the claimed entry STAYS listed, completed (single-player parity - a served entry
+                // counts against its hour's quota); BookOnce.HourlyBegin sets it aside (ForwardKept), and the session wipe
+                // takes it out of the table (ClearBookedForwards), which answers fold H1.
                 if (claimedEntry?.order != null) BookOnce.MapOrder(claimedEntry.order, p.EntryId);   // fold M4 (and H2(a): its live body)
                 int leftThisHour = -1;
                 if (claimedEntry != null && entries != null)
                 {
                     try
                     {
-                        entries.Remove(claimedEntry);
+                        KeepForwarded(claimedEntry);   // rotation fix B: stays in the list, completed; never billed by a pass
                         int hourNow = SaveGameManager.Current.Hour;
                         leftThisHour = 0;
                         foreach (var e in entries) if (e != null && e.spawnTime != null && e.spawnTime.Hour == hourNow && !e.completed) leftThisHour++;
                     }
-                    catch (Exception rx) { Plugin.Logger.LogWarning($"[Business] retire claimed entry: {rx.Message}"); }
+                    catch (Exception rx) { Plugin.Logger.LogWarning($"[Business] keep claimed entry: {rx.Message}"); }
                 }
                 // Unknown id = the schedule rotated since the helper's copy; adopt anyway (the order
                 // still displaces the sim quota) — logged for the audit trail.
@@ -888,10 +974,11 @@ namespace BigAmbitionsMP
                 _adoptedTally[p.AddressKey] = (tally.orders + 1, tally.revenue + orderRevenue);
                 _adoptedSession.TryGetValue(p.AddressKey, out var adoptedSoFar);   // H-SALEHOLE-1 rig counter (never drained)
                 _adoptedSession[p.AddressKey] = adoptedSoFar + 1;
-                BuildingStorageSync.OwnerBusinessTail(reg);
+                if (!known) { _fwdUnknown.TryGetValue(p.AddressKey, out var unk); _fwdUnknown[p.AddressKey] = unk + 1; }   // rotation readout
+                BuildingStorageSync.OwnerBusinessTail(reg, reschedule: false);   // rotation fix A: a sale never rebuilds the schedule (single-player parity)
                 InteriorSync.PushOwnedBuildingNow(p.AddressKey);
                 Plugin.Logger.LogInfo($"[Business] adopted helper-served order {p.EntryId} from '{p.PlayerId}' @'{p.AddressKey}': {sold} item(s) ${repricedTotal:F2} (forwarded at ${forwardedTotal:F2}){(bagged ? " +bag" : "")}{(bagCredited ? " (its bag was already handed out here)" : "")}{(credited > 0 ? $" ({credited} unit(s) already taken off this machine's shelves for this visit - not deducted again)" : "")}{(feeLines > 0 ? $" (incl. {feeLines} entrance-fee line(s), no stock)" : "")}{(refused > 0 ? $" ({refused} refused on price)" : "")}{(dropped > 0 ? $" ({dropped} out-of-stock dropped)" : "")}{(known ? "" : " (entry unknown — schedule rotated)")}."
-                    + (claimedEntry != null ? $" [PROBE:P-HELPER-DOUBLEBOOK] entry retired from the live table{(registered ? " (book once)" : "")}; {leftThisHour} unserved left this hour."  : (known ? "" : " [PROBE:P-HELPER-DOUBLEBOOK] entry unknown — nothing to retire; quota relies on the adopted order's timestamp.")));
+                    + (claimedEntry != null ? $" [PROBE:P-HELPER-DOUBLEBOOK] entry kept in the live table, completed (set aside by the hourly pass){(registered ? " (book once)" : "")}; {leftThisHour} unserved left this hour."  : (known ? "" : " [PROBE:P-HELPER-DOUBLEBOOK] entry unknown — nothing to retire; quota relies on the adopted order's timestamp.")));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] adopt forwarded order: {ex.Message}"); }
         }
@@ -1092,11 +1179,11 @@ namespace BigAmbitionsMP
             try
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
-                if (_lines >= Budget) return;
                 if (reg == null && address != null)
                     try { reg = Helpers.BuildingHelper.GetBuildingRegistration(address); } catch { }
                 if (reg == null) return;
-                if (MergerFlip.TrulyMine(reg)) return;   // my own shop generating my own shoppers — nothing to say
+                if (MergerFlip.TrulyMine(reg)) return;   // own shops: NoteOwn (probe A only)
+                if (_lines >= Budget) return;
                 string ak = ""; try { ak = GameStateReader.AddressKey(reg); } catch { }
                 string type = ""; try { type = reg.businessTypeName ?? ""; } catch { }
                 bool flipped = false; try { flipped = MergerFlip.IsFlipped(ak); } catch { }
@@ -1104,6 +1191,66 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Customers] ORIGIN {generator} '{ak}': generated={generated} type={type} veilDepth={MergerFlip.VeilDepth} flipped={flipped} trulyMine=False");
             }
             catch { }
+        }
+
+        // Rotation probe (2026-09-28, log-only): a rebuild of MY OWN shop's schedule - entries after, entries it created
+        // (every unfinished entry is dropped and re-minted: CustomerEntriesHelper.cs:42/74-75), and who called it.
+        private const int OwnBudget = 60;
+        private static int _ownLines;
+        private sealed class OwnStat { public int Regens, New, Dropped; public readonly Dictionary<string, int> Callers = new(); }
+        private static readonly Dictionary<string, OwnStat> _own = new();
+
+        internal static void NoteOwn(BuildingRegistration? reg, int before, int doneBefore, int after)
+        {
+            try
+            {
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return;
+                if (reg == null || !MergerFlip.TrulyMine(reg)) return;
+                string ak = ""; try { ak = GameStateReader.AddressKey(reg); } catch { }
+                if (!_own.TryGetValue(ak, out var st)) { st = new OwnStat(); _own[ak] = st; }
+                int created = after - doneBefore; if (created < 0) created = 0;
+                int dropped = before - doneBefore; if (dropped < 0) dropped = 0;
+                string caller = Caller();
+                st.Regens++; st.New += created; st.Dropped += dropped;
+                st.Callers.TryGetValue(caller, out var cn); st.Callers[caller] = cn + 1;
+                if (_ownLines >= OwnBudget) return;
+                _ownLines++;
+                int hour = -1; try { hour = SaveGameManager.Current.Hour; } catch { }
+                Plugin.Logger.LogInfo($"[Customers] ORIGIN own shop UpdateCustomerEntriesForPlayerBusiness '{ak}' h{hour}: entries {before} -> {after}, {dropped} unfinished dropped, {created} created; caller={caller}.");
+            }
+            catch { }
+        }
+
+        internal static string OwnReport(string ak)
+        {
+            try
+            {
+                if (!_own.TryGetValue(ak ?? "", out var st)) return "regens=0 regenNew=0 regenDropped=0 regenCallers=[]";
+                var cs = new List<string>();
+                foreach (var kv in st.Callers) cs.Add($"{kv.Key}:{kv.Value}");
+                return $"regens={st.Regens} regenNew={st.New} regenDropped={st.Dropped} regenCallers=[{string.Join(",", cs)}]";
+            }
+            catch (Exception ex) { return "ownERR " + ex.Message; }
+        }
+
+        private static string Caller()
+        {
+            try
+            {
+                var st = new System.Diagnostics.StackTrace(1, false);
+                var names = new List<string>();
+                for (int i = 0; i < st.FrameCount && names.Count < 2; i++)
+                {
+                    var m = st.GetFrame(i)?.GetMethod();
+                    if (m == null) continue;
+                    string t = m.DeclaringType?.Name ?? "";
+                    if (m.Name.Contains("UpdateCustomerEntriesFor") || t.StartsWith("Probe_", StringComparison.Ordinal)
+                        || t == nameof(CustomerEntryOrigin) || t.StartsWith("Harmony", StringComparison.Ordinal)) continue;
+                    names.Add(t + "." + m.Name);
+                }
+                return names.Count == 0 ? "?" : string.Join("<", names);
+            }
+            catch { return "?"; }
         }
     }
 
@@ -1119,12 +1266,25 @@ namespace BigAmbitionsMP
             else yield return m;
         }
 
-        static void Postfix(BuildingRegistration registration)
+        static void Prefix(BuildingRegistration registration, out (int total, int done) __state)
+        {
+            __state = (0, 0);
+            try
+            {
+                if (registration == null) return;
+                var (t, d) = CustomerEntrySync.EntryStatsFor(registration.Address);
+                __state = (t < 0 ? 0 : t, d < 0 ? 0 : d);
+            }
+            catch { }
+        }
+
+        static void Postfix(BuildingRegistration registration, (int total, int done) __state)
         {
             try
             {
                 if (registration == null) return;
                 var (total, _) = CustomerEntrySync.EntryStatsFor(registration.Address);
+                if (MergerFlip.TrulyMine(registration)) { CustomerEntryOrigin.NoteOwn(registration, __state.total, __state.done, total < 0 ? 0 : total); return; }
                 if (total <= 0) return;
                 CustomerEntryOrigin.Note("UpdateCustomerEntriesForPlayerBusiness", registration, null, total);
             }

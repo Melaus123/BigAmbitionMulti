@@ -785,6 +785,7 @@ namespace BigAmbitionsMP
             public readonly List<KeyValuePair<int, CustomerEntry>> Aside = new();
             public readonly List<KeyValuePair<CustomerEntry, string>> Open = new();
             public int PartnerAside;   // H-HOURROLL: of Aside, the entries set aside for a partner's live customers
+            public int ForwardAside;   // rotation fix B: of Aside, entries a partner's sale forward already settled
         }
 
         /// <summary>Before an hourly pass of <paramref name="reg"/> for <paramref name="hour"/>: a Booked registered entry
@@ -799,7 +800,7 @@ namespace BigAmbitionsMP
                 string simPid = "", liveRule = "";
                 bool live = false;
                 try { live = HourEndSaysPartner(reg, hour, out simPid, out liveRule); } catch { live = false; }
-                if (!live && _recs.Count == 0 && _ended.Count == 0 && _ending.Count == 0) return null;
+                if (!live && _recs.Count == 0 && _ended.Count == 0 && _ending.Count == 0 && !CustomerEntrySync.AnyForwardKept) return null;
                 string fn = $"{pass} hourly pass h{hour}";
                 ExpireEnding(reg, hour, fn);   // R2: an 'ending' mark lives through one hour boundary after the one it was marked in
                 var entries = CustomerEntrySync.EntriesOf(reg);
@@ -831,6 +832,15 @@ namespace BigAmbitionsMP
                         }
                         notSent++;   // falls through: stays in the pass's list and is billed by it
                     }
+                    // Rotation fix B (2026-09-28): an entry a partner's sale forward claimed stays in the list, completed
+                    // (single-player keeps a served entry); that forward settled the visit, so no pass bills it.
+                    if (CustomerEntrySync.ForwardKept(e))
+                    {
+                        p.Aside.Add(new KeyValuePair<int, CustomerEntry>(i, e));
+                        entries.RemoveAt(i);
+                        p.ForwardAside++;
+                        continue;
+                    }
                     string? id = IdOfOrder(e.order);
                     if (id == null)
                     {
@@ -842,7 +852,16 @@ namespace BigAmbitionsMP
                     _recs.TryGetValue(id, out var r);
                     bool isEnded = _ended.ContainsKey(id), isEnding = !isEnded && _ending.ContainsKey(id);
                     bool ended = (isEnded || isEnding) && (r == null || !r.Booked);   // H2 / R2: a visit that left (or is leaving) unsold
-                    if (r == null && !ended) continue;
+                    if (r == null && !ended)
+                    {
+                        if (CustomerEntrySync.ForwardBooked(id))
+                        {
+                            p.Aside.Add(new KeyValuePair<int, CustomerEntry>(i, e));   // rotation fix B: forward-booked, never billed here
+                            entries.RemoveAt(i);
+                            p.ForwardAside++;
+                        }
+                        continue;
+                    }
                     if (ended || (r != null && r.Booked))
                     {
                         if (ended) Plugin.Logger.LogInfo(isEnding
@@ -894,8 +913,8 @@ namespace BigAmbitionsMP
                     if (HasPaid(o)) { MarkBooked(kv.Value, r, $"{p.Name} hourly pass h{p.Hour}", o); booked++; }
                     else KeepInTill(p.Reg, o, kv.Value, r, $"{p.Name} hourly pass h{p.Hour}", false);
                 }
-                int regN = p.Open.Count + p.Aside.Count - p.PartnerAside;
-                Plugin.Logger.LogInfo($"[BookOnce] hourly pass ({p.Name}) @{GameStateReader.AddressKey(p.Reg)} h{p.Hour}: {regN} registered entr{(regN == 1 ? "y" : "ies")} of this hour, {booked} booked here, {p.Aside.Count - p.PartnerAside} already booked (set aside){(p.PartnerAside > 0 ? $", {p.PartnerAside} set aside for a partner's live customers" : "")}.");
+                int regN = p.Open.Count + p.Aside.Count - p.PartnerAside - p.ForwardAside;
+                Plugin.Logger.LogInfo($"[BookOnce] hourly pass ({p.Name}) @{GameStateReader.AddressKey(p.Reg)} h{p.Hour}: {regN} registered entr{(regN == 1 ? "y" : "ies")} of this hour, {booked} booked here, {p.Aside.Count - p.PartnerAside - p.ForwardAside} already booked (set aside){(p.PartnerAside > 0 ? $", {p.PartnerAside} set aside for a partner's live customers" : "")}{(p.ForwardAside > 0 ? $", {p.ForwardAside} settled by a partner's sale forward (set aside)" : "")}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[BookOnce] hourly end: {ex.Message}"); }
         }

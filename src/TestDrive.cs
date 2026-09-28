@@ -1296,6 +1296,20 @@ namespace BigAmbitionsMP
                          + " " + CustomerEntrySync.ForwardDoubleReport(hbReg) + " ";
                 }
 
+                // ── Rotation fix (2026-09-28): the shop's schedule list on this machine and its rebuilds ──
+                case "rotation":
+                {
+                    // `rotation <num> <ba:street_x>` - entries / completed / kept after a forward, per-hour counts
+                    // (hour:total/completed), forwards adopted and those whose id this owner no longer held, and (own shop)
+                    // every rebuild of the list with the entries it dropped / created and its callers.
+                    if (arg.Length == 0) return "ERR usage: rotation <num> <ba:street_x>";
+                    var rtReg = GameStatePatcher.FindRegistration(arg);
+                    if (rtReg == null) return $"ERR no registration at '{arg}'";
+                    string rtKey = arg; try { rtKey = GameStateReader.AddressKey(rtReg); } catch { }
+                    bool rtMine = false; try { rtMine = MergerFlip.TrulyMine(rtReg); } catch { }
+                    return $"OK rotation {rtKey} mine={rtMine} " + CustomerEntrySync.RotationReport(rtReg) + " " + CustomerEntryOrigin.OwnReport(rtKey) + " ";
+                }
+
                 case "stockdelta":
                 {
                     // `stockdelta <num> <ba:street_x> [mark]` - H-HANDOFF-1 fold H2 STOCK oracle (CustomerHandoff.StockDelta):

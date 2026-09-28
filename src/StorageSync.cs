@@ -1148,7 +1148,7 @@ namespace BigAmbitionsMP
         /// <summary>Round-39c — make the business RECOGNIZE a routed cargo change. Moved verbatim;
         /// stays internal with its second consumer (CustomerEntrySync) served via the
         /// BuildingStorageSync delegate.</summary>
-        internal static void OwnerBusinessTail(BuildingRegistration reg)
+        internal static void OwnerBusinessTail(BuildingRegistration reg, bool reschedule = true)
         {
             try
             {
@@ -1156,7 +1156,12 @@ namespace BigAmbitionsMP
                 // Round-39d: the shopper schedule keys off products/schedule — refresh it with every
                 // routed stock change (the native owner-stock flow calls this too, Producer.Interact
                 // :154). Data-level, works owner-anywhere. Feeds the CustomerEntries snapshot ship-out.
-                try { AI.Customers.CustomerEntries.CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness(reg, TimeHelper.GetDayOfWeek()); } catch { }
+                // Rotation fix A (2026-09-28): only a routed STOCK change rebuilds the schedule (restock parity:
+                // ItemController :1479, Producer :160). A forwarded SALE passes reschedule=false - single-player never
+                // rebuilds the list on a sale (none of the 13 native callers is a checkout), and the rebuild dropped every
+                // unfinished entry and minted new ones after every partner sale (more shoppers than the day list).
+                if (reschedule)
+                    try { AI.Customers.CustomerEntries.CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness(reg, TimeHelper.GetDayOfWeek()); } catch { }
                 var bm = InstanceBehavior<BuildingManager>.Instance;
                 if (bm != null && bm.buildingRegistration == reg)
                 {

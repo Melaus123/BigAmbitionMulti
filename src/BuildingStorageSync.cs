@@ -33,7 +33,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Round-39c recognition tail — second consumer CustomerEntrySync calls through
         /// this name; the body lives in the engine.</summary>
-        internal static void OwnerBusinessTail(BuildingRegistration reg) => StorageSync.OwnerBusinessTail(reg);
+        internal static void OwnerBusinessTail(BuildingRegistration reg, bool reschedule = true) => StorageSync.OwnerBusinessTail(reg, reschedule);
 
         // ── Guest side: start a take / put (unchanged) ───────────────────────────
         public static void RequestTake(string addressKey, string itemId, string itemName, int amount, bool paid, float price, string ctx = "")
