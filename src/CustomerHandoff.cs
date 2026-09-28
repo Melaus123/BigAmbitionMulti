@@ -557,7 +557,9 @@ namespace BigAmbitionsMP
             try
             {
                 if (string.IsNullOrEmpty(id)) return;
-                try { if (booked == null && !BookOnce.IsRegistered(id)) FwdConsumed++; } catch { }   // H-HOURROLL rig counter
+                // H-HOURROLL rig counter. Fold (review of f31b633): an id the DEV unsend lever billed by the owner's pass is counted
+                // apart - its late partner sale is refused as consumed by design, which the F1C oracle must not read as new.
+                try { if (booked == null && !BookOnce.IsRegistered(id)) { if (CustomerEntrySync.DevUnsent(id)) FwdConsumedUnsent++; else FwdConsumed++; } } catch { }
                 if (_fwdSeen.Count > 4000) return;
                 _fwdSeen.Add(id);
                 BookOnce.ClearEnding(id, "its sale was forwarded");   // R2: a forward wins over 'ending'
@@ -616,7 +618,7 @@ namespace BigAmbitionsMP
                 bool ok = booked == paid && dup == 0 && lost == 0;
                 return $"ledger={ids} booked={booked} paid={paid} dupIds={dup} lostIds={lost} identity={(ok ? "ok" : "BAD")} forwardsIn={fwdIn} "
                      + $"feeRecharged={FeeRecharged} bad={string.Join(";", bad)} passAfterLeave={PassAfterLeave} passPreempt={BookOnce.PassPreempt} "
-                     + $"soldSkipped={SoldSkipped} fwdConsumed={FwdConsumed} " + BookOnce.Readout(key);
+                     + $"soldSkipped={SoldSkipped} fwdConsumed={FwdConsumed} fwdConsumedUnsent={FwdConsumedUnsent} " + BookOnce.Readout(key);
             }
             catch (Exception ex) { return "ERR ledger " + ex.Message; }
         }
@@ -1064,7 +1066,7 @@ namespace BigAmbitionsMP
         internal static int UnsoldLeavesSent, UnsoldLeavesIn;
         // H-HOURROLL rig counters (handoffbook): a 220 (either kind) for a visit an hourly pass booked; a release 220 skipped
         // as sold; a forward rejected as 'already consumed' on this machine (an unregistered visit).
-        internal static int PassAfterLeave, SoldSkipped, FwdConsumed;
+        internal static int PassAfterLeave, SoldSkipped, FwdConsumed, FwdConsumedUnsent;
         private static void NotePassAfterLeave(string id)
         {
             try { if (BookOnce.IsPassSource(BookOnce.SourceOf(id))) PassAfterLeave++; } catch { }

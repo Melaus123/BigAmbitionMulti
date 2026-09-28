@@ -162,6 +162,9 @@ namespace BigAmbitionsMP
         // DEV lever hourroll unsend: ids kept OUT of the record for good - a later re-push (NoteSent on the next send of the
         // schedule) would otherwise record them again (rig run T-HANDOFF3-20260928-052416: 4 dropped, all 7 set aside).
         private static readonly HashSet<string> _devUnsent = new();
+        /// <summary>Fold (review of f31b633, 2026-09-28): an id the DEV hourroll-unsend lever took out of the sent record (the
+        /// owner's pass billed it, so a late partner sale of it is refused as consumed by design - the F1C rig counter skips it).</summary>
+        internal static bool DevUnsent(string id) => !string.IsNullOrEmpty(id) && _devUnsent.Contains(id);
 
         private static SentRecord? SentRecordFor(string addr)
         {
@@ -597,7 +600,29 @@ namespace BigAmbitionsMP
         // reason for retiring them at the forward itself).
         private static System.Runtime.CompilerServices.ConditionalWeakTable<CustomerEntry, object> _forwardKept = new();
         private static readonly List<WeakReference<CustomerEntry>> _forwardKeptList = new();
-        internal static bool AnyForwardKept => _forwardKeptList.Count > 0;
+        // Fold Q3 (review of f31b633, 2026-09-28): true only while a kept entry is still in a live schedule list. The day roll
+        // rebuilds the whole table (CustomerEntriesHelper.cs:28), so yesterday's marks are forgotten here instead of keeping
+        // this true all session (it gates BookOnce.HourlyBegin's early out).
+        internal static bool AnyForwardKept
+        {
+            get
+            {
+                if (_forwardKeptList.Count == 0) return false;
+                try
+                {
+                    var table = Table();
+                    if (table == null) return true;
+                    foreach (var kv in table)
+                        if (kv.Value != null)
+                            foreach (var x in kv.Value)
+                                if (x != null && _forwardKept.TryGetValue(x, out _)) return true;
+                    _forwardKept = new System.Runtime.CompilerServices.ConditionalWeakTable<CustomerEntry, object>();
+                    _forwardKeptList.Clear();
+                    return false;
+                }
+                catch { return true; }
+            }
+        }
         internal static bool ForwardKept(CustomerEntry? e) => e != null && _forwardKept.TryGetValue(e, out _);
         private static void KeepForwarded(CustomerEntry e)
         {
@@ -805,7 +830,7 @@ namespace BigAmbitionsMP
                 // hour-end tick whenever the owner stood outside. Retire the claimed entry from the live
                 // list: the adopted Order below (timestamp now) still feeds the daily quota subtraction.
                 // Fold H1 (2026-09-27): a REGISTERED entry is retired too. Kept in the table it relied on the registry's
-                // hourly set-aside, and the registry is wiped on MP stop / scene-ready (CustomerPuppets.Reset ->
+                // hourly set-aside, and the registry is wiped at scene-ready only (a host that stops hosting and plays on alone keeps it - out of scope by user ruling 2026-09-28) (CustomerPuppets.Reset ->
                 // CustomerHandoff.Reset -> BookOnce.Reset): the next native pass then booked the entry's own Order a
                 // second time. A later take-back of the visit adopts from a stand-alone entry built from the row
                 // (CustomerPuppets.AdoptPuppetAsNative, 'registered visit whose entry left this machine's table').
@@ -830,7 +855,12 @@ namespace BigAmbitionsMP
 
                 // Deduct real stock: one display-slot unit per paid item; items with no stock left are
                 // dropped from the sale (the shop can't sell what it doesn't have).
-                var o = new Order { completed = true, timestamp = TimeHelper.Now() };
+                // Fold Q5 (review of f31b633, 2026-09-28): a known entry stamps the adopted order with the entry's own spawn time
+                // (a copy - native reassigns spawnTime on a late spawn), so the order sits in the visit's hour, not the hour the
+                // forward arrived; an unknown id keeps the arrival time.
+                Timestamp oTs = TimeHelper.Now();
+                try { var st = claimedEntry?.spawnTime; if (st != null) oTs = new Timestamp(st.Day, st.Hour, st.Minute); } catch { }
+                var o = new Order { completed = true, timestamp = oTs };
                 try { o.cleanliness = Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanlinessHelper.GetCleanliness(reg); } catch { }
                 // Field 20260831-224923 (approved 2026-09-01): the helper's copy of the order carries
                 // NO prices — native FullServiceEmployee.CheckConditions (:175-185) writes

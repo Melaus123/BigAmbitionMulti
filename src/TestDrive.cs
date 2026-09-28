@@ -1310,6 +1310,32 @@ namespace BigAmbitionsMP
                     return $"OK rotation {rtKey} mine={rtMine} " + CustomerEntrySync.RotationReport(rtReg) + " " + CustomerEntryOrigin.OwnReport(rtKey) + " ";
                 }
 
+                case "shelftake":
+                {
+                    // `shelftake <num> <ba:street_x>` - fold Q2 rig lever (2026-09-28): a routed TAKE of one unit from the first
+                    // stocked shelf of a shop (ctx consume: a mirror - nothing is delivered here); the owner applies it
+                    // ('[BStore] owner applied TAKE') and must not rebuild the schedule list.
+                    if (arg.Length == 0) return "ERR usage: shelftake <num> <ba:street_x>";
+                    var stReg = GameStatePatcher.FindRegistration(arg);
+                    if (stReg == null) return $"ERR no registration at '{arg}'";
+                    string stKey = arg; try { stKey = GameStateReader.AddressKey(stReg); } catch { }
+                    if (stReg.itemInstances == null) return "ERR shelftake: no items";
+                    foreach (var kv in stReg.itemInstances)
+                    {
+                        var it = kv.Value;
+                        if (it == null) continue;
+                        try
+                        {
+                            var sci = it.GetStockInstance();
+                            if (sci == null || sci.amount < 1 || string.IsNullOrEmpty(sci.itemName)) continue;
+                            BuildingStorageSync.RequestTake(stKey, it.id?.ToString() ?? "", sci.itemName, 1, sci.paid, sci.pricePerUnit, "consume");
+                            return $"OK shelftake {stKey} item={it.id} name={sci.itemName} had={sci.amount}";
+                        }
+                        catch { }
+                    }
+                    return "ERR shelftake: no stocked shelf";
+                }
+
                 case "stockdelta":
                 {
                     // `stockdelta <num> <ba:street_x> [mark]` - H-HANDOFF-1 fold H2 STOCK oracle (CustomerHandoff.StockDelta):

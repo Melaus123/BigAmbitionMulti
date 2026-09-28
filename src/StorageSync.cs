@@ -676,7 +676,11 @@ namespace BigAmbitionsMP
             if (res.Ok)
             {
                 InteriorSync.PushOwnedBuildingNow(req.AddressKey);   // re-sync the interior to everyone inside, now
-                OwnerBusinessTail(reg);   // round-39c: the business must RECOGNIZE the change (see below)
+                // Fold Q2 (review of f31b633, 2026-09-28): the schedule list is rebuilt only for the ops native rebuilds on - a
+                // STOCKING put (Producer :160) and a stock-option pick (setstock, ItemController :1002). No native take, sell or
+                // discard path rebuilds it (none of the 13 native callers), and a put returning a refused take undoes a take.
+                bool resched = req.Op == OpSetStock || (req.Op == OpPut && req.Ctx != "return" && req.Ctx != "boxreturn");
+                OwnerBusinessTail(reg, resched);   // round-39c: the business must RECOGNIZE the change (see below)
                 // Round-38: setstock used to log as "PUT 1×<name>" (its wire Amount is a hardcoded 1) —
                 // which read as a landed 1-unit deposit and derailed a log read. Name the op truthfully.
                 string opName = (req.Ctx == "stacksell" || req.Ctx == "stackdiscard") ? req.Ctx.ToUpperInvariant()

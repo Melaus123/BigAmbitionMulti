@@ -50,7 +50,8 @@
     "entry unknown",
     "\\[InteriorSync\\] .*full snapshot",
     "\\[Business\\] session wipe: ",
-    "settled by a partner's sale forward"
+    "settled by a partner's sale forward",
+    "\\[BStore\\] owner applied TAKE"
   ],
   "steps": [
     {
@@ -1214,12 +1215,56 @@
     },
     {
       "seq": 126,
+      "role": "both",
+      "cmd": "mark TEST T-HANDOFF3 Q2 PARTNER-TAKE-NO-REBUILD",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 127,
+      "role": "h",
+      "cmd": "rotation ${shop}",
+      "abort_on_fail": false,
+      "capture": {
+        "q2Regens": "regens=(\\d+)"
+      },
+      "note": "Q2 baseline (review of f31b633): the owner's count of schedule-list rebuilds"
+    },
+    {
+      "seq": 128,
+      "role": "c",
+      "cmd": "shelftake ${shop}",
+      "expect_result": "^OK shelftake ",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BStore\\] owner applied TAKE 1×\\S+ on '${shop}'",
+          "within_s": 20
+        }
+      ],
+      "note": "Q2 ACT: the partner (inside) takes one unit from the owner's shelf through the routed op (DEV lever, ctx consume); the owner applies it"
+    },
+    {
+      "seq": 129,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 130,
+      "role": "h",
+      "cmd": "rotation ${shop}",
+      "expect_result": "^OK rotation .* regens=${q2Regens} ",
+      "abort_on_fail": false,
+      "note": "Q2 ORACLE (HARD): a routed take rebuilds no list (regens unchanged - single-player's take path never rebuilds; only stocking and a stock-option pick do)"
+    },
+    {
+      "seq": 131,
       "role": "c",
       "cmd": "exitbuilding",
       "abort_on_fail": false
     },
     {
-      "seq": 127,
+      "seq": 132,
       "role": "both",
       "cmd": "mark TEST T-HANDOFF3 END",
       "expect_result": "OK MARK"
