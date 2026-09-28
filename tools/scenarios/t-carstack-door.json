@@ -1,7 +1,7 @@
 {
   "id": "T-CARSTACK-DOOR",
-  "title": "H-CARSTACK-1 attempt 1 (2026-09-28): the host judged an INDOOR client by its avatar, which the mover snaps to the interior's coordinates (a detached island 700-800 m from the city), so every walk-in beside the host flipped the client to its OWN traffic and every walk-out flipped it back onto the host's ghosts - the stacked cars. Fixed: an indoor player is judged by its last OUTSIDE position, as the host judges itself. (a) The host stands inside his salon; the client walks in and out of that shop and the neighbouring gym 3 times: the host's flip counter for the client and the client's applied seq never move. (b) CONTROL: the client far away -> local; back at the door -> ghost. REPORT per leg: [CarStack] LIFTED / [CarHit] counts. NO save.",
-  "preconditions": "Reporter fixture session fx-hq1 (MERGED - vars.keepMerger true): '58 ba:street_fifthavenue' is the host's salon, '60 ba:street_fifthavenue' Client1's gym next door. Dev build with the `traffic` readout tail (host: peers=<pid>:<mode>:<flip seq>; client: mseq=<applied seq> near=<own reading>; both: at=x,y,z). enterbuilding teleports, so each player first enters and leaves its door once to make its last outside position the door. ORACLE NOTE: NullReferenceException carries the `(?<!swallowed )` lookbehind (fx-hq1's own Gley diagnostic).",
+  "title": "H-CARSTACK-1 attempt 1 (2026-09-28): the host judged an INDOOR client by its avatar, which the mover snaps to the interior's coordinates (a detached island 700-800 m from the city), so every walk-in beside the host flipped the client to its OWN traffic and every walk-out flipped it back onto the host's ghosts - the stacked cars. Fixed: an indoor player is judged by its last OUTSIDE position, as the host judges itself. (a) The host stands inside his salon; the client walks in and out of that shop and the neighbouring gym 3 times: the host's flip counter for the client and the client's applied seq never move. (b) CONTROL: the client far away -> local; back at the door -> ghost. REPORT per leg: [CarStack] LIFTED / [CarHit] counts. NO save. FOLD G1/G2 (2026-09-28): an UNDERGROUND GARAGE is not a building to the game (IsInsideBuilding stays false), so a garage player shipped an empty tag with garage coordinates and the host took them as its last street position. The sender now ships '<n> ba:street_parking' and the host judges a garage stay by the street position before it. (c) The client walks in and out of the garage nearest the neighbouring door x2 and from the garage up the elevator into its building: the host's flip counter and the client's applied seq never move; the garage player stays SHOWN on the host.",
+  "preconditions": "Reporter fixture session fx-hq1 (MERGED - vars.keepMerger true): '58 ba:street_fifthavenue' is the host's salon, '60 ba:street_fifthavenue' Client1's gym next door. Dev build with the `traffic` readout tail (host: peers=<pid>:<mode>:<flip seq>; client: mseq=<applied seq> near=<own reading>; both: at=x,y,z). enterbuilding teleports, so each player first enters and leaves its door once to make its last outside position the door. ORACLE NOTE: NullReferenceException carries the `(?<!swallowed )` lookbehind (fx-hq1's own Gley diagnostic). Garage leg: `parking list 200` from the client at the neighbouring door must find a garage entrance within 200 m (the mode band is 250/350 m), `parking goto/enter/exit/elevator` drive the game's own UndergroundParkingManager path and the elevator's EnterBuilding.",
   "instances": 2,
   "vars": {
     "clientPid": "Client1",
@@ -15,7 +15,8 @@
     "(?<!swallowed )NullReferenceException",
     "HarmonyException",
     "CarHitProbe\\.OnContact",
-    "\\[TrafficSync\\] .*(failed|exception|threw)"
+    "\\[TrafficSync\\] .*(failed|exception|threw)",
+    "\\[InteriorMask\\] '\\S+' hidden .*their bldg='\\d+ ba:street_parking'"
   ],
   "oracles_report": [
     "\\[TrafficSync\\] traffic mode for \\S+: ",
@@ -24,7 +25,8 @@
     "\\[CarStack\\] LIFT ",
     "\\[CarHit\\] (parked-player|traffic|traffic-replica|car-ghost|parked-ambient|parked-replica|ghost-other|other) ",
     "\\[InteriorMask\\] ",
-    "\\[TestDrive\\] enterbuilding "
+    "\\[TestDrive\\] enterbuilding ",
+    "\\[TestDrive\\] parking "
   ],
   "steps": [
     {
@@ -468,11 +470,236 @@
     {
       "seq": 62,
       "role": "both",
-      "cmd": "mark TEST T-CARSTACK-DOOR CONTROL",
+      "cmd": "mark TEST T-CARSTACK-DOOR GARAGE",
       "expect_result": "OK MARK"
     },
     {
       "seq": 63,
+      "role": "c",
+      "cmd": "parking list 200",
+      "expect_result": "^OK parking list nearest=\\d+ ",
+      "capture": {
+        "gN": "nearest=(\\d+)",
+        "gD": "nearest=\\d+ d=(\\d+)"
+      },
+      "note": "PREMISE (c): a garage entrance within 200 m of the neighbouring door (the host's judged position is his door beside it)"
+    },
+    {
+      "seq": 64,
+      "role": "c",
+      "cmd": "parking goto ${gN}",
+      "expect_result": "^OK parking goto ",
+      "note": "SET-UP: the client stands at the garage's street entrance - its last street position before going down"
+    },
+    {
+      "seq": 65,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 66,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:${hSeq0}(,|\\s|$)",
+      "note": "ASSERT GARAGE set-up (at the garage entrance, outdoors): the host never flipped the client (same mode, same flip counter)"
+    },
+    {
+      "seq": 67,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=ghost .*mseq=${cSeq0} ",
+      "note": "ASSERT GARAGE set-up (at the garage entrance, outdoors): the client applied no mode change"
+    },
+    {
+      "seq": 68,
+      "role": "c",
+      "cmd": "parking enter ${gN}",
+      "expect_result": "^OK parking enter ",
+      "note": "GARAGE 1: the client goes down into the garage (native EnterParking - layout loaded like an interior, IsInsideBuilding stays false)"
+    },
+    {
+      "seq": 69,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 70,
+      "role": "c",
+      "cmd": "parking where",
+      "expect_result": "^OK parking where inParking=True inBuilding=False cur='${gN} ba:street_parking'",
+      "note": "GARAGE 1: the client IS in the garage (report the garage coordinates)"
+    },
+    {
+      "seq": 71,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:${hSeq0}(,|\\s|$)",
+      "note": "ASSERT GARAGE 1 (inside): the host still judges the client by its street position at the entrance - no flip"
+    },
+    {
+      "seq": 72,
+      "role": "c",
+      "cmd": "parking exit",
+      "expect_result": "^OK parking exit ",
+      "note": "GARAGE 1: back up to the street (native ExitParking)"
+    },
+    {
+      "seq": 73,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 74,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:${hSeq0}(,|\\s|$)",
+      "note": "ASSERT GARAGE 1 (out again): the host never flipped the client (same mode, same flip counter)"
+    },
+    {
+      "seq": 75,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=ghost .*mseq=${cSeq0} ",
+      "note": "ASSERT GARAGE 1 (out again): the client applied no mode change"
+    },
+    {
+      "seq": 76,
+      "role": "c",
+      "cmd": "parking enter ${gN}",
+      "expect_result": "^OK parking enter ",
+      "note": "GARAGE 2: the client goes down into the garage (native EnterParking - layout loaded like an interior, IsInsideBuilding stays false)"
+    },
+    {
+      "seq": 77,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 78,
+      "role": "c",
+      "cmd": "parking where",
+      "expect_result": "^OK parking where inParking=True inBuilding=False cur='${gN} ba:street_parking'",
+      "note": "GARAGE 2: the client IS in the garage (report the garage coordinates)"
+    },
+    {
+      "seq": 79,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:${hSeq0}(,|\\s|$)",
+      "note": "ASSERT GARAGE 2 (inside): the host still judges the client by its street position at the entrance - no flip"
+    },
+    {
+      "seq": 80,
+      "role": "c",
+      "cmd": "parking exit",
+      "expect_result": "^OK parking exit ",
+      "note": "GARAGE 2: back up to the street (native ExitParking)"
+    },
+    {
+      "seq": 81,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 82,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:${hSeq0}(,|\\s|$)",
+      "note": "ASSERT GARAGE 2 (out again): the host never flipped the client (same mode, same flip counter)"
+    },
+    {
+      "seq": 83,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=ghost .*mseq=${cSeq0} ",
+      "note": "ASSERT GARAGE 2 (out again): the client applied no mode change"
+    },
+    {
+      "seq": 84,
+      "role": "c",
+      "cmd": "parking enter ${gN}",
+      "expect_result": "^OK parking enter ",
+      "note": "ELEVATOR: down into the garage once more"
+    },
+    {
+      "seq": 85,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 86,
+      "role": "c",
+      "cmd": "parking elevator",
+      "expect_result": "^OK parking elevator ",
+      "abort_on_fail": false,
+      "note": "ELEVATOR: garage -> its building by the elevator's own EnterBuilding (report-only: a building the game refuses to open ends the leg here)"
+    },
+    {
+      "seq": 87,
+      "role": "c",
+      "sleep_s": 12
+    },
+    {
+      "seq": 88,
+      "role": "c",
+      "cmd": "parking where",
+      "expect_result": "^OK parking where .*inBuilding=True",
+      "abort_on_fail": false,
+      "note": "ELEVATOR: the client is inside the garage's building (report-only)"
+    },
+    {
+      "seq": 89,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:${hSeq0}(,|\\s|$)",
+      "note": "ASSERT ELEVATOR (indoors after the garage): judged by the street position before the garage - no flip"
+    },
+    {
+      "seq": 90,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 91,
+      "role": "c",
+      "sleep_s": 3
+    },
+    {
+      "seq": 92,
+      "role": "c",
+      "cmd": "parking exit",
+      "expect_result": "^(OK parking exit |ERR parking exit: not in a garage )",
+      "abort_on_fail": false,
+      "note": "tidy-up: after a successful elevator ride the client is already on the street ('not in a garage'); if the elevator was refused it is still underground and walks out here"
+    },
+    {
+      "seq": 93,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 94,
+      "role": "h",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=h .* peers=\\S*${clientPid}:ghost:${hSeq0}(,|\\s|$)",
+      "note": "ASSERT ELEVATOR (out on the street): the host never flipped the client (same mode, same flip counter)"
+    },
+    {
+      "seq": 95,
+      "role": "c",
+      "cmd": "traffic",
+      "expect_result": "^OK traffic role=c .* mode=ghost .*mseq=${cSeq0} ",
+      "note": "ASSERT ELEVATOR (out on the street): the client applied no mode change"
+    },
+    {
+      "seq": 96,
+      "role": "both",
+      "cmd": "mark TEST T-CARSTACK-DOOR CONTROL",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 97,
       "role": "c",
       "cmd": "traffic",
       "expect_result": "^OK traffic role=c ",
@@ -484,7 +711,7 @@
       "note": "the client's door position, to walk it back to"
     },
     {
-      "seq": 64,
+      "seq": 98,
       "role": "c",
       "cmd": "tproad -500 -150",
       "expect_result": "^OK tproad ",
@@ -503,12 +730,12 @@
       "note": "CONTROL (b): the client far away (T-CARHIT's far road point, ~700 m from the fifth-avenue row) -> local mode still happens"
     },
     {
-      "seq": 65,
+      "seq": 99,
       "role": "c",
       "sleep_s": 20
     },
     {
-      "seq": 66,
+      "seq": 100,
       "role": "c",
       "cmd": "traffic",
       "expect_result": "^OK traffic role=c .* mode=local ",
@@ -518,7 +745,7 @@
       }
     },
     {
-      "seq": 67,
+      "seq": 101,
       "role": "c",
       "cmd": "tp ${ax} ${ay} ${az}",
       "expect_result": "^OK tp ",
@@ -537,26 +764,26 @@
       "note": "CONTROL (b): back at the door -> ghost (the approach handover still works)"
     },
     {
-      "seq": 68,
+      "seq": 102,
       "role": "c",
       "sleep_s": 20
     },
     {
-      "seq": 69,
+      "seq": 103,
       "role": "c",
       "cmd": "carhit",
       "expect_result": "^OK carhit ",
       "abort_on_fail": false
     },
     {
-      "seq": 70,
+      "seq": 104,
       "role": "h",
       "cmd": "carhit",
       "expect_result": "^OK carhit ",
       "abort_on_fail": false
     },
     {
-      "seq": 71,
+      "seq": 105,
       "role": "both",
       "cmd": "mark TEST T-CARSTACK-DOOR END",
       "expect_result": "OK MARK"

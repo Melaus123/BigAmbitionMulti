@@ -4205,6 +4205,26 @@ namespace BigAmbitionsMP
                         var breg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
                         if (breg != null) bldgTag = GameStateReader.AddressKey(breg);
                     }
+                    else
+                    {
+                        // H-CARSTACK-1 fold G1 (2026-09-28): an UNDERGROUND GARAGE is not a building to the game - its
+                        // layout loads like an interior and the player is teleported onto it, but IsInsideBuilding stays
+                        // false; the only mark is the current address (UndergroundParkingManager.IsInsideParking reads
+                        // CurrentStreetName == "ba:street_parking"). "" here shipped garage coordinates as "outdoors",
+                        // so the host recorded them as this player's last street position. The garage now ships its own
+                        // tag, "<number> ba:street_parking" - the form VehicleManager.IsStreetParking already reads.
+                        // Entry and exit set the address in the same frame as the teleport (UndergroundParkingManager
+                        // Enter/ExitParkingCoroutine), so the tag and the coordinates never disagree.
+                        try
+                        {
+                            if (Parking.UndergroundParking.UndergroundParkingManager.IsInsideParking)
+                            {
+                                var sgp = SaveGameManager.Current;
+                                if (sgp != null) bldgTag = $"{sgp.CurrentStreetNumber} {sgp.CurrentStreetName}";
+                            }
+                        }
+                        catch { }
+                    }
                 }
                 catch { }
 

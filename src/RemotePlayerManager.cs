@@ -518,6 +518,8 @@ namespace BigAmbitionsMP
             // indoor player by, exactly as it judges the host itself (TrafficSync.LocalAnchorPosition). An empty tag ships
             // with street coordinates only (the sender derives it from BuildingManager.IsInsideBuilding, MPCanvasUI), and a
             // Hamptons plot is street coordinates too (see the mask comment below); an interior tag is never recorded.
+            // Fold G1: neither is a GARAGE tag ("<n> ba:street_parking") - garage coordinates are the loaded layout's, not
+            // the street's, so an underground stay is judged by the street position recorded before it.
             try
             {
                 if (string.IsNullOrEmpty(p.Bldg) || HamptonsAccess.IsHamptonsAddress(p.Bldg))
@@ -548,9 +550,15 @@ namespace BigAmbitionsMP
             // right: a remote player who is outdoors (empty Bldg) stays visible by the second clause, and a
             // remote player in a genuine interior island keeps the mask that hides them. No mirror term is
             // needed; only this comment was wrong.
+            //
+            // H-CARSTACK-1 fold G1 (2026-09-28): a player in an UNDERGROUND GARAGE now ships a garage tag
+            // ("<n> ba:street_parking") instead of "". Before that tag existed a garage player read as outdoors
+            // and was shown to everyone - a partner in the same garage included - so a garage tag keeps exactly
+            // that: shown. (The tag exists for the traffic rule, which must not read garage coordinates as street.)
             bool visible = (p.Bldg ?? "") == (MPRegisterSync.CurrentShopAddress ?? "")
                         || string.IsNullOrEmpty(p.Bldg)
-                        || HamptonsAccess.IsHamptonsAddress(p.Bldg);
+                        || HamptonsAccess.IsHamptonsAddress(p.Bldg)
+                        || VehicleManager.IsStreetParking(p.Bldg ?? "");
             if (go.activeSelf != visible)
             {
                 go.SetActive(visible);
@@ -578,7 +586,8 @@ namespace BigAmbitionsMP
         /// Hamptons plot): the avatar itself. Inside a genuine interior: the last street position received from them - an
         /// interior sits on a detached coordinate island far from the city, and the avatar is NOT kept at the door while
         /// masked (RemotePlayerMover.SetTarget snaps it to the interior coordinates on the teleport-sized jump, hidden or
-        /// not). No street position yet (they loaded inside) = no position: the caller keeps its verdict.</summary>
+        /// not). No street position yet (they loaded inside) = no position: the caller keeps its verdict. Fold G1: an
+        /// underground GARAGE tag counts as inside here too (any non-empty, non-Hamptons tag does).</summary>
         internal static bool TryGetTrafficJudgePosition(string playerId, out Vector3 pos)
         {
             pos = default;

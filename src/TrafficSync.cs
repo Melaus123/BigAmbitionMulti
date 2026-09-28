@@ -735,9 +735,20 @@ namespace BigAmbitionsMP
                 if (ch == null) return false;
                 bool inside = LocalInBuilding;
                 try { inside = BuildingManager.IsInsideBuilding; } catch { }
+                if (!inside && LocalInParking()) inside = true;   // fold G1: a garage is not street either
                 pos = (inside && _hasOutsidePos) ? _lastOutsidePos : ch.transform.position;
                 return true;
             }
+            catch { return false; }
+        }
+
+        /// <summary>H-CARSTACK-1 fold G1 (2026-09-28): true while THIS machine's player stands in an underground garage.
+        /// The game never sets IsInsideBuilding there (UndergroundParkingManager teleports the player onto a layout
+        /// loaded like an interior); its only mark is the current address (IsInsideParking). Garage coordinates are the
+        /// layout's, not the street's, so the traffic anchor treats a garage stay like an indoor one.</summary>
+        private static bool LocalInParking()
+        {
+            try { return Parking.UndergroundParking.UndergroundParkingManager.IsInsideParking; }
             catch { return false; }
         }
 
@@ -862,7 +873,11 @@ namespace BigAmbitionsMP
                 // IS the pop-out. A flip back to GHOST re-opens stream and anchor IMMEDIATELY, no ack needed: in that
                 // direction the client has nothing to lose, it is only gaining cars back.
                 if (_peerTraffic.TryGetValue(pid, out var pmode) && pmode.Mode == ModeLocal && pmode.Acked) continue;
-                bool havePos = posByPid.TryGetValue(pid, out var anchor);
+                // H-CARSTACK-1 fold G2 (2026-09-28): the send radius is centred on the SAME position the mode verdict
+                // judged this peer by (an indoor or garage peer = its last street position), not on its figure here,
+                // which sits on the interior's coordinates - an indoor client got nothing within the radius and every
+                // car popped in at once on the way out. No judge position yet -> the figure, as before.
+                bool havePos = judgeByPid.TryGetValue(pid, out var anchor) || posByPid.TryGetValue(pid, out anchor);
                 if (!_peerSentIdentity.TryGetValue(pid, out var sent))
                     _peerSentIdentity[pid] = sent = new Dictionary<int, object>();
                 var snap = new TrafficSnapshotPayload { T = now, Seq = ++_trafficSeq };
@@ -2183,6 +2198,9 @@ namespace BigAmbitionsMP
                     bool inside = LocalInBuilding;
                     try { inside = BuildingManager.IsInsideBuilding; } catch { }
                     LocalInBuilding = inside;   // resync the event flag
+                    // H-CARSTACK-1 fold G1: an underground garage keeps the anchor at the last street position as a
+                    // building does (the event flag above stays the building's own - the garage never fires it).
+                    if (!inside && LocalInParking()) inside = true;
                     if (!inside)
                     {
                         // Outside — use the live transform AND remember it so
@@ -3740,9 +3758,6 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[TrafficCensus] {ex.Message}"); }
         }
 
-        /// <summary>T4: what THIS machine measures to the nearest other player, printed on the flip lines beside the
-        /// host's own number - a divergence between the two is what a wrong flip would look like. Every other player
-        /// is remote from a client, so the same anchor rules apply (a rider is judged by the car it rides).</summary>
         /// <summary>H-CARSTACK-1 rig readout (read-only): host = every peer's mode:seq (a seq that did not move = no flip
         /// happened); client = the last mode seq applied here and this machine's own nearest-player reading.</summary>
         internal static string ModeReadout()
@@ -3766,6 +3781,9 @@ namespace BigAmbitionsMP
             catch (Exception ex) { return "modeReadoutErr=" + ex.GetType().Name; }
         }
 
+        /// <summary>T4: what THIS machine measures to the nearest other player, printed on the flip lines beside the
+        /// host's own number - a divergence between the two is what a wrong flip would look like. Every other player
+        /// is remote from a client, so the same anchor rules apply (a rider is judged by the car it rides).</summary>
         private static string MeasuredNearestOtherPlayer()
         {
             try

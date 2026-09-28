@@ -545,6 +545,24 @@ namespace BigAmbitionsMP
             followAvatar = false;
             if (p.Bldg == bldg && p.Door != null) return p.Door;
 
+            // H-CARSTACK-1 fold G1 (2026-09-28): a GARAGE tag ("<n> ba:street_parking", MPCanvasUI's sender) names no
+            // building, so FindBuilding cannot resolve it: the pin sits on that garage's street entrance (the point the
+            // game walks the player out to, UndergroundParkingEntrance.playerExitPoint). Unresolvable -> follow the
+            // avatar, as the pin did while a garage player shipped "".
+            try
+            {
+                int gnum = VehicleManager.GarageNumberOfTag(bldg);
+                if (gnum >= 0)
+                {
+                    var pe = InstanceBehavior<CityManager>.Instance?.GetParkingCbc(gnum)?.undergroundParkingEntrance;
+                    Transform? gt = pe != null ? pe.playerExitPoint : null;
+                    if (gt != null) { p.Bldg = bldg; p.Door = gt; return gt; }
+                    p.Bldg = ""; p.Door = null; followAvatar = true;
+                    return null;
+                }
+            }
+            catch { }
+
             var cbc = FindBuilding(bldg);
             if (cbc != null && cbc.building != null && cbc.building.IsHamptonsHouse())
             {

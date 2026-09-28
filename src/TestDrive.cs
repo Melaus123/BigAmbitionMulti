@@ -2159,6 +2159,91 @@ namespace BigAmbitionsMP
                     });
                     return "OK exitbuilding queued — result in log";
                 }
+                case "parking":
+                {
+                    // H-CARSTACK-1 fold G1 (2026-09-28) DEV lever: the GAME's own underground-garage path for the
+                    // t-carstack-door garage leg - UndergroundParkingManager.EnterParking / ExitParking (the native
+                    // coroutines the entrance trigger and the exit zone run) and, for the elevator, the same
+                    // BuildingManager.EnterBuilding(parentCbc.building) ElevatorOverlay.BuildingFloor ends in.
+                    // parking [where] | list [maxMetres] | goto <n|near> | enter <n|near> | exit | elevator
+                    try
+                    {
+                        var pa = arg.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        string sub = pa.Length > 0 ? pa[0].ToLowerInvariant() : "where";
+                        var pic = System.Globalization.CultureInfo.InvariantCulture;
+                        bool inPark = false; try { inPark = Parking.UndergroundParking.UndergroundParkingManager.IsInsideParking; } catch { }
+                        bool inBldg = false; try { inBldg = BuildingManager.IsInsideBuilding; } catch { }
+                        var psg = SaveGameManager.Current;
+                        UnityEngine.Vector3 pme = default;
+                        try { pme = Helpers.PlayerHelper.GetPosition(); } catch { }
+                        string pwhere = $"inParking={inPark} inBuilding={inBldg} cur='{(psg != null ? psg.CurrentStreetNumber + " " + psg.CurrentStreetName : "?")}' at={pme.x.ToString("F1", pic)},{pme.y.ToString("F1", pic)},{pme.z.ToString("F1", pic)}";
+                        if (sub == "where") return "OK parking where " + pwhere;
+                        if (sub == "exit")
+                        {
+                            if (!inPark) return "ERR parking exit: not in a garage (" + pwhere + ")";
+                            Parking.UndergroundParking.UndergroundParkingManager.ExitParking();
+                            Plugin.Logger.LogInfo("[TestDrive] parking exit invoked (native ExitParking).");
+                            return "OK parking exit queued (native coroutine) " + pwhere;
+                        }
+                        if (sub == "elevator")
+                        {
+                            if (!inPark || inBldg) return "ERR parking elevator: not in a garage (" + pwhere + ")";
+                            var cur = Parking.UndergroundParking.UndergroundParkingManager.currentParkingEntrance;
+                            var pbld = cur != null && cur.parentCbc != null ? cur.parentCbc.building : null;
+                            if (pbld == null) return "ERR parking elevator: the garage has no parent building";
+                            bool pok = InstanceBehavior<BuildingManager>.Instance.EnterBuilding(pbld, false, false, 0, -1);
+                            Plugin.Logger.LogInfo($"[TestDrive] parking elevator -> '{GameStateReader.AddressKey(pbld)}' {(pok ? "OK" : "REFUSED by native")}.");
+                            return $"{(pok ? "OK" : "ERR")} parking elevator '{GameStateReader.AddressKey(pbld)}' {(pok ? "entering" : "REFUSED by native")}";
+                        }
+                        // Every garage entrance, nearest to this player first.
+                        var prows = new System.Collections.Generic.List<(float d, int n, UnityEngine.Vector3 at, string b, Parking.UndergroundParking.UndergroundParkingEntrance e)>();
+                        var pcm = InstanceBehavior<CityManager>.Instance;
+                        if (pcm?.cityBuildingControllers != null)
+                            foreach (var pc in pcm.cityBuildingControllers)
+                            {
+                                if (pc == null) continue;
+                                var pe = pc.undergroundParkingEntrance;
+                                if (pe == null || pe.playerExitPoint == null) continue;
+                                var pat = pe.playerExitPoint.position;
+                                prows.Add((UnityEngine.Vector3.Distance(pme, pat), pe.parkingNumber, pat, pc.building != null ? GameStateReader.AddressKey(pc.building) : "?", pe));
+                            }
+                        prows.Sort((a, b) => a.d.CompareTo(b.d));
+                        if (sub == "list")
+                        {
+                            if (prows.Count == 0) return "ERR parking list: no garage entrance in the city";
+                            float pmax = float.PositiveInfinity;
+                            if (pa.Length > 1 && !float.TryParse(pa[1], System.Globalization.NumberStyles.Float, pic, out pmax)) return "ERR usage: parking list [maxMetres]";
+                            var psb = new StringBuilder();
+                            for (int i = 0; i < prows.Count && i < 3; i++)
+                                psb.Append($" [n={prows[i].n} d={prows[i].d.ToString("F0", pic)} at={prows[i].at.x.ToString("F1", pic)},{prows[i].at.y.ToString("F1", pic)},{prows[i].at.z.ToString("F1", pic)} bldg='{prows[i].b}']");
+                            string plist = $"nearest={prows[0].n} d={prows[0].d.ToString("F0", pic)} garages={prows.Count}{psb} {pwhere}";
+                            if (prows[0].d > pmax) return "ERR parking list: no garage within " + pmax.ToString("F0", pic) + " m: " + plist;
+                            return "OK parking list " + plist;
+                        }
+                        if (sub != "goto" && sub != "enter") return "ERR usage: parking [where] | list [maxMetres] | goto <n|near> | enter <n|near> | exit | elevator";
+                        if (pa.Length < 2) return $"ERR usage: parking {sub} <n|near>";
+                        int pidx = -1;
+                        if (pa[1] == "near") pidx = prows.Count > 0 ? 0 : -1;
+                        else if (int.TryParse(pa[1], out int pwant)) pidx = prows.FindIndex(r => r.n == pwant);
+                        if (pidx < 0) return $"ERR parking {sub}: no garage '{pa[1]}'";
+                        var prow = prows[pidx];
+                        if (inPark || inBldg) return $"ERR parking {sub}: not outdoors ({pwhere})";
+                        try { if (Helpers.VehicleHelper.IsInsideVehicle()) return $"ERR parking {sub}: in a vehicle"; } catch { }
+                        if (sub == "goto")
+                        {
+                            // The game's own warp onto the entrance's street exit point - the spot ExitParking returns the player to.
+                            Helpers.PlayerHelper.Teleport(prow.e.playerExitPoint);
+                            UnityEngine.Vector3 pnow = default;
+                            try { pnow = Helpers.PlayerHelper.GetPosition(); } catch { }
+                            Plugin.Logger.LogInfo($"[TestDrive] parking goto n={prow.n} ('{prow.b}').");
+                            return $"OK parking goto n={prow.n} bldg='{prow.b}' at={pnow.x.ToString("F1", pic)},{pnow.y.ToString("F1", pic)},{pnow.z.ToString("F1", pic)}";
+                        }
+                        Parking.UndergroundParking.UndergroundParkingManager.EnterParking(prow.e, 0, true);
+                        Plugin.Logger.LogInfo($"[TestDrive] parking enter n={prow.n} ('{prow.b}') invoked (native EnterParking) from d={prow.d.ToString("F1", pic)}.");
+                        return $"OK parking enter n={prow.n} bldg='{prow.b}' queued (native coroutine) from d={prow.d.ToString("F1", pic)}";
+                    }
+                    catch (Exception ex) { return $"ERR parking: {ex.GetType().Name}: {ex.Message}"; }
+                }
                 case "rain":
                 {
                     bool on  = arg.Trim().Equals("on",  StringComparison.OrdinalIgnoreCase);
