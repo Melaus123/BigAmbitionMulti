@@ -584,9 +584,9 @@
     },
     {
       "role": "h",
-      "cmd": "chatview scroll 15",
+      "cmd": "chatview scroll 300",
       "expect_result": "^OK chatview scroll: visible=True ",
-      "note": "15 lines back from the newest, as the wheel does",
+      "note": "300 px back from the bottom (the list scrolls by rendered height, as the wheel does)",
       "seq": 74
     },
     {

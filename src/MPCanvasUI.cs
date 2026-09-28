@@ -24,7 +24,7 @@ namespace BigAmbitionsMP
     /// CanvasScaler = ConstantPixelSize/scaleFactor 1 → 1 canvas unit = 1 screen pixel.
     /// All layout dimensions are therefore plain pixels.
     /// </summary>
-    public class MPCanvasUI : MonoBehaviour
+    public partial class MPCanvasUI : MonoBehaviour
     {
         // ── colours ──────────────────────────────────────────────────────────
         private static readonly Color C_BG       = new Color(0.12f, 0.12f, 0.14f, 0.97f);
@@ -112,37 +112,18 @@ namespace BigAmbitionsMP
         private GameObject?   _mpWin;
         private RectTransform? _mpWinRT;
         private RectTransform? _mpTitleRT;          // drag handle
-        private TextMeshProUGUI?  _mpRosterLabel;   private RectTransform? _mpRosterRT;  // single multi-line roster
-        private TextMeshProUGUI?  _mpPlayersHdr;     // "Players (N)" (always active)
-        private TextMeshProUGUI?  _mpCollapseLbl;   private RectTransform? _mpCollapseRT;  // ▾/▸ toggle
-        private bool          _mpPlayersCollapsed;
-        private TextMeshProUGUI?  _mpChatLog;        private RectTransform? _mpChatPanelRT;
         private TMP_InputField?   _mpChatInputField; private RectTransform? _mpChatInputRT;
         private string        _mpChatInput = "";    private bool _mpChatFocus;
         private RectTransform? _mpSendRT;
         private RectTransform? _mpGripRT;            // bottom-left corner resize handle
         private bool          _mpResizing;           private Vector2 _mpResizeStartMouse; private Vector2 _mpResizeStartSize;
-        private RectTransform? _mpOpacityTrackRT; private RectTransform? _mpOpacityFillRT; private RectTransform? _mpOpacityKnobRT;
+        private RectTransform? _mpOpacityTrackRT; private RectTransform? _mpOpacityKnobRT;
         private bool          _mpDragging;          private Vector2 _mpDragLast;
         private bool          _mpOpacityDragging;
-        private int           _mpChatVersionSeen = -1;
-        private string        _mpRosterSig = "\0";    // signature of the roster+target, to rebuild chips only on change
 
-        // Chat redesign: recipient chips, close button, To-prefix.
-        private RectTransform?    _mpCloseRT;
-        private GameObject?       _mpChipsRow;     private RectTransform? _mpChipsRowRT;
-        private GameObject?       _mpChipsContent;
-        private float             _chipsTotalW;
-        private float             _chipScroll;
-        private TextMeshProUGUI?  _mpToLbl;  private RectTransform? _mpToRT;
-        private readonly List<(RectTransform rt, Image img, string who)> _mpChips = new();
-        private string            _chatTarget = "";   // "" = everyone
-        private const float CHIP_H  = 24f;
-        private const float MP_TO_W = 86f;
         private bool          _mpChatNavBlocked;           // true while chat focus is suppressing player movement
-        private float         _mpOpacity = 0.88f;   // current window opacity [0.1..1]
+        private float         _mpOpacity = 1f;      // current window opacity [0.15..1]; default fully solid (manager 2026-09-28)
         private bool          _mpStyled;            // rounded-corner sprite applied (lazy, once assets captured)
-        private int           _mpChatScroll;          // lines scrolled back from newest (0 = newest)
         // Images whose alpha follows the opacity slider (background + chrome ONLY).
         // Text, the slider itself, the roster and chat stay fully opaque so they're
         // readable even at opacity 0.
@@ -925,14 +906,14 @@ namespace BigAmbitionsMP
             {
                 _mpWinVisible = false;
                 if (_mpWin.activeSelf) _mpWin.SetActive(false);
-                _mpChatFocus = false; _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false;
+                _mpChatFocus = false; _chatSuppress = false; _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false;
                 SyncChatNavBlock(false); MPChat.SuppressGameInput = false;
             }
             if (mpInGame && !_mpWasInGame)
             {
                 // Default CLOSED on entering a game (user 2026-06-10) — the
                 // phone Chat button opens it; the badge/pulse signal unread.
-                _mpWinVisible = false;
+                _mpWinVisible = false; _chatSuppress = false;
                 StyleMpWindow();        // round corners + native font once assets are captured
                 _mpWin!.SetActive(false);
             }
@@ -940,7 +921,7 @@ namespace BigAmbitionsMP
             {
                 _mpWinVisible = false;  // leaving the game → always hide
                 if (_mpWin != null) _mpWin.SetActive(false);
-                _mpChatFocus = false; _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false;
+                _mpChatFocus = false; _chatSuppress = false; _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false;
                 SyncChatNavBlock(false); MPChat.SuppressGameInput = false;
             }
             _mpWasInGame = mpInGame;
@@ -957,6 +938,7 @@ namespace BigAmbitionsMP
             // its click requests an MP-window toggle (same as F9).  The icon
             // pulses while chat lines are unread (window closed).
             MPPhoneButton.Tick(IsInGame(), MPServer.IsRunning || MPClient.IsConnected);
+            CwTickClock();   // chat time lines: the game's own day + clock, stamped on each new line (MPChat)
             MPPhoneButton.TickPulse(_mpWinVisible);
             MPPhoneButton.TickHubPulse(_hubVisible);
             if (MPPhoneButton.OpenRequested)
@@ -3604,9 +3586,11 @@ namespace BigAmbitionsMP
         {
             _mpWinVisible = !_mpWinVisible;
             StyleMpWindow();
+            if (_mpWinVisible) CwPlaceWindow();            // the remembered place (U2) or the default next to the phone (U1)
             _mpWin!.SetActive(_mpWinVisible);
+            CwCloseDrop();
             if (_mpWinVisible) SetMpOpacity(_mpOpacity);   // re-assert opacity on show
-            else { _mpChatFocus = false; _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false; SyncChatNavBlock(false); MPChat.SuppressGameInput = false; }
+            else { _mpChatFocus = false; _chatSuppress = false; _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false; SyncChatNavBlock(false); MPChat.SuppressGameInput = false; }
         }
 
 #if BAMP_DEV
@@ -3632,35 +3616,6 @@ namespace BigAmbitionsMP
             catch (Exception ex) { return "stateErr=" + ex.Message; }
         }
 
-        internal string DevChatState()
-        {
-            try
-            {
-                var sz = _mpWinRT != null ? _mpWinRT.sizeDelta : Vector2.zero;
-                float ph = _mpChatPanelRT != null ? _mpChatPanelRT.rect.height : -1f;
-                int vis = Mathf.Max(1, Mathf.FloorToInt((ph - 12f) / 15f));   // RefreshMpWindow's own line count
-                return $"visible={_mpWinVisible} active={(_mpWin != null && _mpWin.activeSelf)} size={sz.x:F0}x{sz.y:F0} " +
-                       $"chatPanelH={ph:F0} visibleLines={vis} scroll={_mpChatScroll} lines={MPChat.Snapshot(500).Count}";
-            }
-            catch (Exception ex) { return "stateErr=" + ex.Message; }
-        }
-
-        internal string DevChatSize(float w, float h)
-        {
-            try
-            {
-                if (_mpWinRT == null) return "noWindow";
-                _mpWinRT.sizeDelta = new Vector2(Mathf.Clamp(w, 240f, 1100f), Mathf.Clamp(h, 150f, 1000f));   // the corner grip's own clamp
-                return DevChatState();
-            }
-            catch (Exception ex) { return "sizeErr=" + ex.Message; }
-        }
-
-        internal string DevChatScroll(int lines)
-        {
-            try { _mpChatScroll = Mathf.Max(0, lines); return DevChatState(); }   // RefreshMpWindow clamps it as it does a wheel scroll
-            catch (Exception ex) { return "scrollErr=" + ex.Message; }
-        }
 #endif
 
         // ── Camera audit (highlight wrong-target investigation) ───────────────
@@ -7822,14 +7777,8 @@ namespace BigAmbitionsMP
         // players list and chat text stay fully readable even at opacity 0.  Manual
         // hit-testing throughout (RectHit + Input.mousePosition), like the lobby.
 
-        private const float MPW_W   = 340f;   // default width  (freely resizable)
-        private const float MPW_H   = 430f;   // default height (freely resizable)
-        private const float MP_TITLE_H = 26f;
-        private const float MP_ROW  = 20f;    // roster line height (matches font 13 line spacing)
-        private const float MP_PAD  = 8f;
-        private const float MP_INPUT_H = 26f;
-        private const float MP_SEND_W  = 58f;
-        private const float MP_ROSTER_TOP = 34f;   // chips row sits right under the title bar (opacity lives IN the bar)
+        private const float MPW_W   = 345f;   // default width  (freely resizable; chat restyle 2026-09-28 mock-up)
+        private const float MPW_H   = 304f;   // default height (freely resizable; chat restyle 2026-09-28 mock-up)
 
         private Image AddFade(Image img) { _mpFade.Add((img, img.color.a)); return img; }
 
@@ -7851,429 +7800,6 @@ namespace BigAmbitionsMP
                 rt.offsetMin = new Vector2(left, bottom);
                 rt.offsetMax = new Vector2(-right, -topY);
             }
-        }
-
-        private void BuildMpWindow(Transform canvasRoot)
-        {
-            _mpFade.Clear();
-            _mpWin   = MakeGO("BAMP_MpWindow", canvasRoot);
-            _mpWinRT = _mpWin.GetComponent<RectTransform>();
-            _mpWinRT.anchorMin = _mpWinRT.anchorMax = _mpWinRT.pivot = new Vector2(1f, 1f); // top-right
-            _mpWinRT.sizeDelta        = new Vector2(MPW_W, MPW_H);
-            _mpWinRT.anchoredPosition = new Vector2(-12f, -12f);
-
-            var bg = _mpWin.AddComponent<Image>();
-            bg.color = new Color(0.07f, 0.08f, 0.11f, 0.96f);
-            if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
-            AddFade(bg);
-
-            var grey = C_LBLGREY;
-
-            // Title bar — drag handle.
-            var titleGO = MakeGO("Title", _mpWin.transform);
-            _mpTitleRT = titleGO.GetComponent<RectTransform>();
-            Stretch(_mpTitleRT, 0f, 0f, 0f, MP_TITLE_H, top: true);   // full-width bar pinned to the top
-            var titleImg = titleGO.AddComponent<Image>();
-            titleImg.color = new Color(0.15f, 0.18f, 0.27f, 1f);
-            if (_panelSprite != null) { try { titleImg.sprite = _panelSprite; titleImg.type = Image.Type.Sliced; } catch { } }
-            AddFade(titleImg);
-            ApplyFont(MakeLabel(titleGO.transform, "Chat", 14, C_WHITE, 10f, 0f, 120f, MP_TITLE_H, TextAlignmentOptions.Left));
-            // Close [X] — right edge of the title bar (phone button re-opens).
-            var closeGO = MakeGO("Close", titleGO.transform);
-            _mpCloseRT = closeGO.GetComponent<RectTransform>();
-            _mpCloseRT.anchorMin = _mpCloseRT.anchorMax = _mpCloseRT.pivot = new Vector2(1f, 0.5f);
-            _mpCloseRT.anchoredPosition = new Vector2(-8f, 0f);
-            _mpCloseRT.sizeDelta = new Vector2(26f, 20f);
-            var closeLbl = closeGO.AddComponent<TextMeshProUGUI>();
-            closeLbl.text = "X"; closeLbl.fontSize = 13; closeLbl.alignment = TextAlignmentOptions.Center;
-            closeLbl.color = new Color(0.85f, 0.58f, 0.58f, 1f);
-            ApplyFont(closeLbl);
-
-            // (Chat-bar "Report" button REMOVED 2026-07-08 — too hidden; the native top-bar bug-report
-            //  button, which the game disables on modded saves, is recycled as the entry point instead:
-            //  Patch_ReportBugButton_ModTakeover in MPBugReport.cs.)
-
-            // Opacity slider — lives IN the title bar (right side, before [X])
-            // so no vertical space is spent on it.  Slim track + fill + knob.
-            const float TRK_W = 110f, TRK_H = 6f;
-            var trackGO = MakeGO("OpacityTrack", titleGO.transform);
-            _mpOpacityTrackRT = trackGO.GetComponent<RectTransform>();
-            _mpOpacityTrackRT.anchorMin = _mpOpacityTrackRT.anchorMax = _mpOpacityTrackRT.pivot = new Vector2(1f, 0.5f);
-            _mpOpacityTrackRT.anchoredPosition = new Vector2(-44f, 0f);
-            _mpOpacityTrackRT.sizeDelta = new Vector2(TRK_W, TRK_H);
-            var trackImg = trackGO.AddComponent<Image>();
-            trackImg.color = new Color(0.26f, 0.26f, 0.32f, 1f);
-            if (_panelSprite != null) { try { trackImg.sprite = _panelSprite; trackImg.type = Image.Type.Sliced; } catch { } }
-            var fillGO = MakeGO("OpacityFill", trackGO.transform);
-            _mpOpacityFillRT = fillGO.GetComponent<RectTransform>();
-            SetAnchored(_mpOpacityFillRT, 0f, 0f, TRK_W * _mpOpacity, TRK_H);
-            var fillImg = fillGO.AddComponent<Image>();
-            fillImg.color = MpPurple;
-            if (_panelSprite != null) { try { fillImg.sprite = _panelSprite; fillImg.type = Image.Type.Sliced; } catch { } }
-            var knobGO = MakeGO("OpacityKnob", trackGO.transform);
-            _mpOpacityKnobRT = knobGO.GetComponent<RectTransform>();
-            SetAnchored(_mpOpacityKnobRT, TRK_W * _mpOpacity - 6f, 4f, 12f, 14f);  // straddles the track
-            var knobImg = knobGO.AddComponent<Image>();
-            knobImg.color = C_WHITE;
-            if (_panelSprite != null) { try { knobImg.sprite = _panelSprite; knobImg.type = Image.Type.Sliced; } catch { } }
-
-            // Recipient chips row — "All" + one chip per player.  The selected
-            // chip is WHERE your next message goes; chips double as the roster.
-            ApplyFont(MakeLabel(_mpWin.transform, "To:", 11, grey, 10f, -(MP_ROSTER_TOP + 3f), 24f, CHIP_H, TextAlignmentOptions.Left));
-            _mpChipsRow = MakeGO("Chips", _mpWin.transform);
-            _mpChipsRowRT = _mpChipsRow.GetComponent<RectTransform>();
-            Stretch(_mpChipsRowRT, MP_PAD + 26f, MP_ROSTER_TOP, MP_PAD, CHIP_H, top: true);
-            // Clip + horizontally scroll (mouse wheel) when many/long player
-            // names overflow the row — chips live on an inner content rect.
-            try { _mpChipsRow.AddComponent<RectMask2D>(); } catch { }
-            _mpChipsContent = MakeGO("Content", _mpChipsRow.transform);
-            var ccrt = _mpChipsContent.GetComponent<RectTransform>();
-            ccrt.anchorMin = new Vector2(0f, 0f); ccrt.anchorMax = new Vector2(0f, 1f);
-            ccrt.pivot = new Vector2(0f, 0.5f);
-            ccrt.anchoredPosition = Vector2.zero;
-            ccrt.sizeDelta = new Vector2(2000f, 0f);
-
-            // Chat log — background (fades) + text (stays opaque, fills the bg).
-            var logGO = MakeGO("ChatPanel", _mpWin.transform);
-            _mpChatPanelRT = logGO.GetComponent<RectTransform>();
-            // Stretch-fill the flexible middle; top inset is set per roster size in LayoutMpWindow.
-            Stretch(_mpChatPanelRT, MP_PAD, MP_ROSTER_TOP, MP_PAD, MP_INPUT_H + MP_PAD * 2f);
-            var logBg = logGO.AddComponent<Image>();
-            logBg.color = new Color(0.03f, 0.03f, 0.05f, 0.55f);
-            if (_panelSprite != null) { try { logBg.sprite = _panelSprite; logBg.type = Image.Type.Sliced; } catch { } }
-            AddFade(logBg);
-            var chatTextGO = MakeGO("ChatText", logGO.transform);
-            var ctrt = chatTextGO.GetComponent<RectTransform>();
-            ctrt.anchorMin = Vector2.zero; ctrt.anchorMax = Vector2.one;
-            ctrt.offsetMin = new Vector2(8f, 6f); ctrt.offsetMax = new Vector2(-8f, -4f);
-            _mpChatLog = chatTextGO.AddComponent<TextMeshProUGUI>();
-            _mpChatLog.fontSize = 12; _mpChatLog.color = new Color(0.88f, 0.91f, 0.97f, 1f);
-            _mpChatLog.alignment = TextAlignmentOptions.BottomLeft;
-            _mpChatLog.enableWordWrapping = true;
-            _mpChatLog.overflowMode = TextOverflowModes.Truncate;
-            ApplyFont(_mpChatLog);
-
-            // "To X >" prefix — always states where the message will go.
-            var toGO = MakeGO("ToLbl", _mpWin.transform);
-            _mpToRT = toGO.GetComponent<RectTransform>();
-            _mpToRT.anchorMin = _mpToRT.anchorMax = _mpToRT.pivot = new Vector2(0f, 0f);
-            _mpToRT.anchoredPosition = new Vector2(MP_PAD, MP_PAD);
-            _mpToRT.sizeDelta = new Vector2(MP_TO_W, MP_INPUT_H);
-            _mpToLbl = toGO.AddComponent<TextMeshProUGUI>();
-            _mpToLbl.fontSize = 11; _mpToLbl.alignment = TextAlignmentOptions.Left;
-            _mpToLbl.color = grey; _mpToLbl.enableWordWrapping = false;
-            _mpToLbl.overflowMode = TextOverflowModes.Ellipsis;
-            ApplyFont(_mpToLbl);
-
-            // Chat input — anchored bottom, stretches horizontally (leaves room
-            // for the To-prefix on the left and Send on the right).
-            var inGO = MakeGO("ChatInput", _mpWin.transform);
-            _mpChatInputRT = inGO.GetComponent<RectTransform>();
-            _mpChatInputRT.anchorMin = new Vector2(0f, 0f); _mpChatInputRT.anchorMax = new Vector2(1f, 0f); _mpChatInputRT.pivot = new Vector2(0f, 0f);
-            _mpChatInputRT.offsetMin = new Vector2(MP_PAD + MP_TO_W + 4f, MP_PAD);
-            _mpChatInputRT.offsetMax = new Vector2(-(MP_SEND_W + MP_PAD * 2f), MP_PAD + MP_INPUT_H);
-            var inImg = inGO.AddComponent<Image>(); inImg.color = C_FIELD;
-            if (_panelSprite != null) { try { inImg.sprite = _panelSprite; inImg.type = Image.Type.Sliced; } catch { } }
-            var inputViewport = MakeGO("TextArea", inGO.transform);
-            var ivrt = inputViewport.GetComponent<RectTransform>();
-            ivrt.anchorMin = Vector2.zero; ivrt.anchorMax = Vector2.one;
-            ivrt.offsetMin = new Vector2(7f, 0f); ivrt.offsetMax = new Vector2(-7f, 0f);
-            inputViewport.AddComponent<RectMask2D>();
-            var inTextGO = MakeGO("Text", inputViewport.transform);
-            var itrt = inTextGO.GetComponent<RectTransform>();
-            itrt.anchorMin = Vector2.zero; itrt.anchorMax = Vector2.one; itrt.offsetMin = Vector2.zero; itrt.offsetMax = Vector2.zero;
-            var chatText = inTextGO.AddComponent<TextMeshProUGUI>();
-            chatText.fontSize = SZ_FLD; chatText.color = C_WHITE; chatText.alignment = TextAlignmentOptions.Left;
-            chatText.enableWordWrapping = false; chatText.overflowMode = TextOverflowModes.ScrollRect;
-            ApplyFont(chatText);
-
-            _mpChatInputField = inGO.AddComponent<TMP_InputField>();
-            _mpChatInputField.textViewport = ivrt;
-            _mpChatInputField.textComponent = chatText;
-            _mpChatInputField.targetGraphic = inImg;
-            _mpChatInputField.lineType = TMP_InputField.LineType.SingleLine;
-            _mpChatInputField.characterLimit = 120;
-            _mpChatInputField.caretWidth = 2;
-            _mpChatInputField.customCaretColor = true;
-            _mpChatInputField.caretColor = C_WHITE;
-            _mpChatInputField.selectionColor = new Color(0.30f, 0.50f, 0.85f, 0.55f);
-            _mpChatInputField.onValueChanged.AddListener(v => _mpChatInput = v ?? "");
-            _mpChatInputField.onSelect.AddListener(_ => _mpChatFocus = true);
-            _mpChatInputField.onDeselect.AddListener(_ => _mpChatFocus = false);
-            _mpChatInputField.onSubmit.AddListener(_ => SubmitMpChat());
-
-            // Send — anchored bottom-right.
-            var sGO = MakeGO("Send", _mpWin.transform);
-            _mpSendRT = sGO.GetComponent<RectTransform>();
-            _mpSendRT.anchorMin = _mpSendRT.anchorMax = new Vector2(1f, 0f); _mpSendRT.pivot = new Vector2(1f, 0f);
-            _mpSendRT.anchoredPosition = new Vector2(-MP_PAD, MP_PAD); _mpSendRT.sizeDelta = new Vector2(MP_SEND_W, MP_INPUT_H);
-            var sImg = sGO.AddComponent<Image>(); sImg.color = new Color(0.20f, 0.36f, 0.60f, 1f);
-            if (_panelSprite != null) { try { sImg.sprite = _panelSprite; sImg.type = Image.Type.Sliced; } catch { } }
-            var sTextGO = MakeGO("t", sGO.transform);
-            var strt = sTextGO.GetComponent<RectTransform>(); strt.anchorMin = Vector2.zero; strt.anchorMax = Vector2.one; strt.offsetMin = Vector2.zero; strt.offsetMax = Vector2.zero;
-            var sTmp = sTextGO.AddComponent<TextMeshProUGUI>(); sTmp.text = "Send"; sTmp.fontSize = SZ_BTN; sTmp.color = C_WHITE; sTmp.alignment = TextAlignmentOptions.Center; ApplyFont(sTmp);
-
-            // Resize grip — bottom-left corner, drawn as the standard three
-            // diagonal stripes (was a plain circle, which reads as a button).
-            var gripGO = MakeGO("ResizeGrip", _mpWin.transform);
-            _mpGripRT = gripGO.GetComponent<RectTransform>();
-            _mpGripRT.anchorMin = _mpGripRT.anchorMax = _mpGripRT.pivot = new Vector2(0f, 0f);
-            _mpGripRT.anchoredPosition = new Vector2(2f, 2f); _mpGripRT.sizeDelta = new Vector2(16f, 16f);
-            var gripBg = gripGO.AddComponent<Image>();          // invisible hit area
-            gripBg.color = new Color(0f, 0f, 0f, 0f);
-            // Three PARALLEL stripes: oriented -45° (running upper-left to
-            // lower-right), centers stepped along the corner diagonal, shorter
-            // toward the corner.  (v1 offset the stripes ALONG their own
-            // direction — collinear, so they rendered as one line.)
-            var stripeCol = new Color(0.55f, 0.55f, 0.66f, 0.9f);
-            for (int i = 0; i < 3; i++)
-            {
-                var sgo = MakeGO("g" + i, gripGO.transform);
-                var sgr = sgo.GetComponent<RectTransform>();
-                sgr.anchorMin = sgr.anchorMax = new Vector2(0f, 0f);
-                sgr.pivot = new Vector2(0.5f, 0.5f);
-                float c = 2.5f + i * 2.6f;                       // center distance from the corner
-                sgr.anchoredPosition = new Vector2(c, c);
-                sgr.sizeDelta = new Vector2(5f + i * 4.6f, 1.8f); // longer away from the corner
-                sgr.localRotation = Quaternion.Euler(0f, 0f, -45f);
-                AddFade(sgo.AddComponent<Image>()).color = stripeCol;
-            }
-
-            SetMpOpacity(_mpOpacity);
-            LayoutMpWindow(1);         // initial roster + chat sizing
-            _mpWin.SetActive(false);   // hidden until F9
-        }
-
-        /// <summary>Positions the chat area below the fixed chips row.</summary>
-        private void LayoutMpWindow(int count)
-        {
-            if (_mpChatPanelRT != null)
-                _mpChatPanelRT.offsetMax = new Vector2(-MP_PAD, -(MP_ROSTER_TOP + CHIP_H + 6f));
-        }
-
-        /// <summary>Rebuild the recipient chips ("All" + each other player).</summary>
-        private void RebuildChips(IReadOnlyList<string>? players)
-        {
-            foreach (var c in _mpChips) { try { UnityEngine.Object.Destroy(c.rt.gameObject); } catch { } }
-            _mpChips.Clear();
-            if (_mpChipsRow == null) return;
-
-            // Target sanity — if the selected player left, fall back to All.
-            if (_chatTarget != "" && (players == null || !players.Contains(_chatTarget)))
-                _chatTarget = "";
-
-            float x = 0f;
-            AddChip("All", "", ref x);
-            if (players != null)
-                foreach (var p in players)
-                    if (!string.IsNullOrEmpty(p) && p != MPConfig.PlayerId)
-                        AddChip(MPNames.Resolve(p), p, ref x);
-            _chipsTotalW = x;
-            _chipScroll  = 0f;
-            if (_mpChipsContent != null)
-                _mpChipsContent.GetComponent<RectTransform>().anchoredPosition = Vector2.zero;
-        }
-
-        private void AddChip(string label, string who, ref float x)
-        {
-            var go = MakeGO("Chip_" + label, (_mpChipsContent != null ? _mpChipsContent : _mpChipsRow!).transform);
-            var rt = go.GetComponent<RectTransform>();
-            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 0.5f);
-            float w = Mathf.Max(42f, 18f + label.Length * 7f);
-            rt.anchoredPosition = new Vector2(x, 0f);
-            rt.sizeDelta = new Vector2(w, CHIP_H - 4f);
-            x += w + 6f;
-
-            bool sel = _chatTarget == who;
-            var img = go.AddComponent<Image>();
-            img.color = sel ? MpPurple : new Color(0.18f, 0.20f, 0.27f, 1f);
-            if (_panelSprite != null) { try { img.sprite = _panelSprite; img.type = Image.Type.Sliced; } catch { } }
-
-            var lbl = MakeLabel(go.transform, label, 11, sel ? C_WHITE : new Color(0.75f, 0.78f, 0.85f, 1f),
-                                0f, 0f, w, CHIP_H - 4f, TextAlignmentOptions.Center);
-            ApplyFont(lbl);
-            var lrt = lbl.rectTransform;
-            lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one;
-            lrt.offsetMin = Vector2.zero; lrt.offsetMax = Vector2.zero;
-
-            _mpChips.Add((rt, img, who));
-        }
-
-        // Stable per-player chat colours (self is always green).
-        private static readonly string[] ChatPalette = { "#6FB1FF", "#FFB46F", "#FF6F9C", "#6FFFE0", "#D8A6FF", "#FFE66F" };
-        private const string PrivateColor = "#E08CFF";
-
-        private string RenderChatLine(ChatLine l)
-        {
-            // Neutralize any rich-text tags typed into chat ("<b>" → "< b>").
-            static string Esc(string s) => s.Replace("<", "< ");
-            if (l.Notice) return $"<color=#9AA3B2><i>— {Esc(l.Text)}</i></color>";
-            // Resolve sender/recipient ids to in-character names for display; the
-            // ids themselves remain the routing/colour key.
-            string fromName = Esc(MPNames.Resolve(l.From));
-            if (!string.IsNullOrEmpty(l.To))
-            {
-                bool mine = l.From == MPConfig.PlayerId;
-                string tag = mine ? $"[To {Esc(MPNames.Resolve(l.To))}]" : $"[From {fromName}]";
-                return $"<color={PrivateColor}>{tag}</color>  {Esc(l.Text)}";
-            }
-            string col = l.From == MPConfig.PlayerId
-                ? "#5BFF5B"
-                : ChatPalette[Mathf.Abs(l.From.GetHashCode()) % ChatPalette.Length];
-            return $"<color={col}>{fromName}:</color>  {Esc(l.Text)}";
-        }
-
-        private void RefreshMpWindow()
-        {
-            if (_mpWin == null) return;
-            StyleMpWindow();   // self-gated: styles once captured, restyles if a better sprite lands
-
-            // Roster source = the connected-players list (persists in-game + is kept
-            // fresh by the host re-broadcasting LobbyUpdate on connect/disconnect).
-            IReadOnlyList<string>? players = MPServer.IsRunning ? MPServer.LobbyPlayers
-                                  : MPClient.IsConnected ? MPClient.LobbyPlayers : null;
-            int count = players?.Count ?? 0;
-
-            // Rebuild the recipient chips when the player set or target changes
-            // (not every frame).
-            string sig = (players == null ? "" : string.Join("", players)) + "|" + _chatTarget;
-            if (sig != _mpRosterSig)
-            {
-                _mpRosterSig = sig;
-                LayoutMpWindow(count);
-                RebuildChips(players);
-            }
-
-            // Chat log - newest lines that fit (auto-scroll), wheel scrollback.
-            if (_mpChatLog != null && _mpChatPanelRT != null)
-            {
-                var all = MPChat.Snapshot(500);
-                int total = all.Count;
-                int visible = Mathf.Max(1, Mathf.FloorToInt((_mpChatPanelRT.rect.height - 12f) / 15f));
-                _mpChatScroll = Mathf.Clamp(_mpChatScroll, 0, Mathf.Max(0, total - visible));
-                int end   = total - _mpChatScroll;
-                int start = Mathf.Max(0, end - visible);
-                try
-                {
-                    if (total == 0)
-                        _mpChatLog.text = "<i>No messages yet.  Type below and press Enter.</i>";
-                    else
-                    {
-                        var sb = new System.Text.StringBuilder();
-                        for (int i = start; i < end; i++)
-                        {
-                            sb.Append(RenderChatLine(all[i]));
-                            if (i < end - 1) sb.Append('\n');
-                        }
-                        _mpChatLog.text = sb.ToString();
-                    }
-                }
-                catch { }
-            }
-
-            // Input prefix ("To X >") + chat input (+ blinking caret while focused).
-            if (_mpToLbl != null)
-            {
-                try
-                {
-                    _mpToLbl.text = _chatTarget == ""
-                        ? "To All  >"
-                        : $"<color={PrivateColor}>To {_chatTarget}  ></color>";
-                }
-                catch { }
-            }
-            if (_mpChatInputField != null && _mpChatInputField.text != _mpChatInput)
-                _mpChatInputField.SetTextWithoutNotify(_mpChatInput);
-        }
-
-        private void TickMpWindow()
-        {
-            if (_mpWin == null || !_mpWin.activeSelf) { _chatSuppress = false; return; }
-            var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-
-            // Chat's contribution to the input-suppression flag.  FOCUS-ONLY: we
-            // force the game's keyboard/shortcut gate ONLY while the chat box is
-            // actually focused for typing.  Clicks that land ON the window are
-            // already blocked by the game itself (MouseController gates every world
-            // click on EventSystem.IsPointerOverGameObject, and the window's
-            // background Image is a raycast target), so hovering/dragging the window
-            // must NOT freeze movement — the old hover hit-test did, and also broke
-            // GameManager.HandleEscapeClick (forced HasInputSelected with nothing
-            // selected → NRE on car exit).  The FLAG is still computed fresh every
-            // frame in Update (no latching — that once locked the keyboard, 2026-06-10).
-            _mpChatFocus = _mpChatInputField != null && _mpChatInputField.isFocused;
-            _chatSuppress = _mpChatFocus;
-
-            if (Input.GetMouseButtonDown(0))
-            {
-                bool chipHit = false;
-                foreach (var chip in _mpChips)
-                    if (RectHit(chip.rt, mp))
-                    { _chatTarget = chip.who; _mpRosterSig = "\0"; chipHit = true; break; }   // sig reset retints chips
-
-                if      (chipHit)                         { }
-                else if (RectHit(_mpCloseRT, mp))         { ToggleMpWindow(); return; }
-                else if (RectHit(_mpGripRT, mp))          { _mpResizing = true; _mpResizeStartMouse = mp; _mpResizeStartSize = _mpWinRT != null ? _mpWinRT.sizeDelta : new Vector2(MPW_W, MPW_H); }
-                else if (RectHit(_mpOpacityTrackRT, mp))  { _mpOpacityDragging = true; ApplyOpacityFromMouse(mp); }   // before title: the track lives IN the bar
-                else if (RectHit(_mpTitleRT, mp))         { _mpDragging = true; _mpDragLast = mp; }
-                else if (RectHit(_mpSendRT, mp))          SubmitMpChat();
-            }
-            if (Input.GetMouseButtonUp(0)) { _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false; }
-
-            // Drag the window by the title bar.
-            if (_mpDragging && _mpWinRT != null)
-            {
-                Vector2 d = mp - _mpDragLast;
-                _mpDragLast = mp;
-                var p = _mpWinRT.anchoredPosition + d;
-                p.x = Mathf.Clamp(p.x, -(Screen.width  / UiScale - 60f), 0f);
-                p.y = Mathf.Clamp(p.y, -(Screen.height / UiScale - 40f), 0f);
-                _mpWinRT.anchoredPosition = p;
-            }
-
-            // Corner-grip resize — free width AND height (drag the bottom-left corner
-            // out).  Changes the window's actual size (sizeDelta), NOT its scale, so
-            // text stays the same size and the content reflows via its anchors.
-            if (_mpResizing && _mpWinRT != null)
-            {
-                float w = _mpResizeStartSize.x + (_mpResizeStartMouse.x - mp.x);   // drag left  -> wider
-                float h = _mpResizeStartSize.y + (_mpResizeStartMouse.y - mp.y);   // drag down  -> taller
-                _mpWinRT.sizeDelta = new Vector2(Mathf.Clamp(w, 240f, 1100f), Mathf.Clamp(h, 150f, 1000f));
-            }
-
-            // Opacity slider drag.
-            if (_mpOpacityDragging) ApplyOpacityFromMouse(mp);
-
-            // Mouse-wheel scrollback over the chat area.
-            if (RectHit(_mpChatPanelRT, mp))
-            {
-                float sw = Input.mouseScrollDelta.y;
-                if (sw > 0f) _mpChatScroll += 3;
-                else if (sw < 0f) _mpChatScroll -= 3;
-            }
-
-            // Mouse-wheel over the chips row scrolls it horizontally when many
-            // (or long-named) players overflow the visible width.
-            if (_mpChipsRowRT != null && RectHit(_mpChipsRowRT, mp))
-            {
-                float sw = Input.mouseScrollDelta.y;
-                if (sw != 0f)
-                {
-                    float max = Mathf.Max(0f, _chipsTotalW - _mpChipsRowRT.rect.width);
-                    _chipScroll = Mathf.Clamp(_chipScroll - sw * 40f, 0f, max);
-                    if (_mpChipsContent != null)
-                        _mpChipsContent.GetComponent<RectTransform>().anchoredPosition = new Vector2(-_chipScroll, 0f);
-                }
-            }
-
-            if (_mpChatFocus && Input.GetKeyDown(KeyCode.Escape))
-            {
-                _mpChatInputField?.DeactivateInputField();
-                _mpChatFocus = false;
-            }
-
-            // Player-movement block (typing WASD shouldn't walk the character) is owned by
-            // LateUpdate now — it folds in both chat focus and the bug-report/crash popup.
         }
 
         /// <summary>Toggles the game's own navigation blocker so typing in chat
@@ -8303,7 +7829,7 @@ namespace BigAmbitionsMP
             if (_mpOpacityTrackRT == null) return;
             RectTransformUtility.ScreenPointToLocalPointInRectangle(_mpOpacityTrackRT, mp, null, out var local);
             float w = _mpOpacityTrackRT.rect.width;
-            float t = w > 0f ? Mathf.Clamp01(local.x / w) : _mpOpacity;
+            float t = w > 0f ? Mathf.Clamp01((local.x - _mpOpacityTrackRT.rect.xMin) / w) : _mpOpacity;   // from the left edge (the track's pivot is its right edge)
             SetMpOpacity(Mathf.Clamp(t, 0f, 1f));
         }
 
@@ -8321,9 +7847,8 @@ namespace BigAmbitionsMP
                 if (img == null) continue;
                 var c = img.color; c.a = baseA * o; try { img.color = c; } catch { }
             }
+            if (_cwTitleTxt != null) { var tc = _cwTitleTxt.color; tc.a = o; try { _cwTitleTxt.color = tc; } catch { } }   // the title fades with its bar
             float w = _mpOpacityTrackRT != null ? _mpOpacityTrackRT.rect.width : 196f;
-            if (_mpOpacityFillRT != null)
-                _mpOpacityFillRT.sizeDelta = new Vector2(w * o, _mpOpacityFillRT.sizeDelta.y);
             if (_mpOpacityKnobRT != null)
                 _mpOpacityKnobRT.anchoredPosition = new Vector2(w * o - 6f, _mpOpacityKnobRT.anchoredPosition.y);
         }
@@ -8331,6 +7856,7 @@ namespace BigAmbitionsMP
         private void SubmitMpChat()
         {
             if (_mpChatInputField != null) _mpChatInput = _mpChatInputField.text ?? "";
+            string raw = _mpChatInput;
             string t = _mpChatInput.Trim();
             _mpChatInput = "";
             if (_mpChatInputField != null)
@@ -8339,6 +7865,7 @@ namespace BigAmbitionsMP
                 _mpChatInputField.ActivateInputField();
             }
             if (t.Length == 0) return;
+            _cwScroll = 0f; _cwUnseen = false;   // sending jumps the list to the newest line
 
             if (t.Equals("/bug", StringComparison.OrdinalIgnoreCase) ||
                 t.StartsWith("/bug ", StringComparison.OrdinalIgnoreCase))
@@ -8416,6 +7943,16 @@ namespace BigAmbitionsMP
                     return;
                 }
             }
+            // R3: the private recipient left while this was typed - never send it anywhere: keep the draft and show TO =
+            // Everyone, so a second Enter is a deliberate public send.
+            if (_chatTarget != "" && !CwTargetOnline(_chatTarget))
+            {
+                _chatTarget = "";
+                _mpChatInput = raw;
+                try { _mpChatInputField?.SetTextWithoutNotify(raw); } catch { }
+                Plugin.Logger.LogInfo("[Chat] private line not sent: the recipient left - draft kept, TO switched to Everyone.");
+                return;
+            }
             try { MPChat.SendFromLocal(t, _chatTarget); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Chat] submit: {ex.Message}"); }
         }
@@ -8484,24 +8021,20 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPWin] EnsureRoundedSprite: {ex.Message}"); return null; }
         }
 
-        private Sprite? _mpStyledWith;   // sprite the window was last styled with — restyle if a better capture lands
+        private float _mpStyleNext;
         private void StyleMpWindow()
         {
             if (_mpWin == null) return;
-            // Native menu sprite when it's still alive, else our own immortal one.
-            var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
-            if (sprite == null) return;
-            if (_mpStyled && ReferenceEquals(_mpStyledWith, sprite)) return;
+            if (_mpStyled && ReferenceEquals(_mpStyledFont, _gameFont)) return;
+            float now = Time.unscaledTime;
+            if (now < _mpStyleNext) return;   // the alive-probe reads a name: at most once a second while waiting
+            _mpStyleNext = now + 1f;
             try
             {
-                foreach (var img in _mpWin.GetComponentsInChildren<Image>(true))
-                { try { img.sprite = sprite; img.type = Image.Type.Sliced; } catch { } }
-                bool fontAlive = IsAlive(_gameFont);
-                if (fontAlive)
-                    foreach (var t in _mpWin.GetComponentsInChildren<TMP_Text>(true)) ApplyFont(t);
-                _mpStyled = true;
-                _mpStyledWith = sprite;
-                Plugin.Logger.LogInfo($"[MPWin] styled (sprite={(ReferenceEquals(sprite, _panelSprite) ? "native" : "owned-fallback")}, font={(fontAlive ? "game" : "default")}).");
+                if (!IsAlive(_gameFont)) return;
+                foreach (var tx in _mpWin.GetComponentsInChildren<TMP_Text>(true)) ApplyFont(tx);
+                _mpStyled = true; _mpStyledFont = _gameFont; _cwLaidW = -1f;   // new glyph metrics: re-measure the rows
+                Plugin.Logger.LogInfo("[MPWin] styled (font=game; shapes are the mod's own rounded kit).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPWin] style: {ex.Message}"); }
         }

@@ -3181,6 +3181,14 @@ namespace BigAmbitionsMP
                     // the recipient ONLY (the sender already echoed locally).
                     // Pure C# — safe on the poll thread.
                     var cp = env.GetPayload<ChatPayload>();
+                    // MPChat.HubSender (the Business Hub notes' sender id) holds a line break no honest id can; Hello accepts
+                    // any string, though, so a hand-made connection claiming it could pass notes off as Hub pop-ups on the
+                    // other clients - its chat is dropped. No real player is ever affected.
+                    if (cp != null && string.Equals(senderPid, MPChat.HubSender, StringComparison.Ordinal))
+                    {
+                        Plugin.Logger.LogWarning("[Server] Chat: a connection claims the reserved Business Hub sender id - chat dropped.");
+                        break;
+                    }
                     if (cp != null && !string.IsNullOrWhiteSpace(cp.Text)
                         && SenderIs(cp.PlayerId, senderPid, env.Type))
                     {

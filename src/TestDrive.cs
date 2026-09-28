@@ -489,11 +489,24 @@ namespace BigAmbitionsMP
                         if (tk.Length < 3 || !float.TryParse(tk[1], fs, inv, out float w) || !float.TryParse(tk[2], fs, inv, out float h))
                             return "ERR usage: chatview size W H";
                         return "OK chatview size: " + ui.DevChatSize(w, h);
-                    case "scroll":
-                        if (tk.Length < 2 || !int.TryParse(tk[1], out int n)) return "ERR usage: chatview scroll N";
-                        return "OK chatview scroll: " + ui.DevChatScroll(n);
+                    case "scroll":   // px back from the bottom (the wheel's own unit)
+                        if (tk.Length < 2 || !float.TryParse(tk[1], fs, inv, out float px)) return "ERR usage: chatview scroll PX";
+                        return "OK chatview scroll: " + ui.DevChatScroll(px);
+                    case "drop":     // the TO dropdown, as a click on the box / outside it
+                        if (tk.Length < 2 || (tk[1] != "open" && tk[1] != "close")) return "ERR usage: chatview drop <open|close>";
+                        return $"OK chatview drop {tk[1]}: " + ui.DevChatDrop(tk[1] == "open");
+                    case "reset":    // default size + place (the remembered place is forgotten), scrolled to the newest line
+                        return "OK chatview reset: " + ui.DevChatReset();
+                    case "place":    // = a drag + grip release: placed AND remembered (the next open restores it)
+                        if (tk.Length < 5 || !float.TryParse(tk[1], fs, inv, out float px2) || !float.TryParse(tk[2], fs, inv, out float py2)
+                            || !float.TryParse(tk[3], fs, inv, out float pw2) || !float.TryParse(tk[4], fs, inv, out float ph2))
+                            return "ERR usage: chatview place X Y W H";
+                        return "OK chatview place: " + ui.DevChatPlace(px2, py2, pw2, ph2);
+                    case "gamenotice":   // the game's own pop-up notification card (its ShowError gateway, as HelperCleaning uses)
+                        UI.Notification.Notifications.ShowError("notification_need_empty_hands_to_interact");
+                        return "OK chatview gamenotice: shown";
                 }
-                return "ERR usage: chatview <open|close|size W H|scroll N|state>";
+                return "ERR usage: chatview <open|close|size W H|scroll PX|drop open|close|reset|place X Y W H|gamenotice|state>";
             }
             catch (Exception ex) { return "ERR chatview: " + ex.Message; }
         }
@@ -546,12 +559,30 @@ namespace BigAmbitionsMP
         {
             "hey, anyone near Midtown?", "I just opened my second shop!", "can you lend me 20k until Friday?",
             "sure, sending an offer now", "the wholesaler on 5th is out of coffee again", "brb, driving to the warehouse",
-            "lol my cashier quit", "who wants to merge companies?", "ok", "thanks!", "see you at the bank",
+            "lol my cashier quit", "who wants to merge companies?", "ok", "thanks! <3 <b>not bold</b>", "see you at the bank",
             "prices at the market are crazy today",
         };
         private const string HubShotsLong =
             "This is a deliberately long chat message so the screenshot shows how the window wraps a line that is far wider " +
             "than the chat panel: rent is due tomorrow, stock the shelves first, and do not forget the parking permit!";
+
+        /// <summary>DEV `hubnote <playerId> <text>` (host): send a Business Hub note the way MPHub.NotifyParty does, so a
+        /// test can check the client turns it into a pop-up notice, not a chat line.</summary>
+        private static string HubShotsHubNote(string arg)
+        {
+            try
+            {
+                if (!MPServer.IsRunning) return "ERR hubnote: host only";
+                string s = (arg ?? "").Trim();
+                int sp = s.IndexOf(' ');
+                if (sp <= 0) return "ERR usage: hubnote <playerId> <text>";
+                string pid = s.Substring(0, sp), text = s.Substring(sp + 1).Trim();
+                if (pid == MPConfig.PlayerId) return "ERR hubnote: pick another player (the host's own note is a local notice)";
+                MPHub.NotifyParty(pid, text);
+                return $"OK hubnote: sent to {pid} ({text.Length} chars)";
+            }
+            catch (Exception ex) { return "ERR hubnote: " + ex.Message; }
+        }
 
         private static string HubShotsUiFill(string arg)
         {
@@ -588,13 +619,21 @@ namespace BigAmbitionsMP
                 names.AddRange(HubShotsNames);
                 if (what == "chat")
                 {
+                    // In-game times spread 9 minutes apart ending now, so the window's hour lines show.
+                    int ck = MPChat.ClockPacked;
+                    int nowMin = ck > 0 ? (ck / 10000) * 1440 + (ck / 100 % 100) * 60 + ck % 100 : 0;
                     for (int i = 0; i < n; i++)
                     {
                         string other = names[i % names.Count];
                         var line = new ChatLine { From = i % 3 == 0 ? me : other, To = "", Text = HubShotsChat[i % HubShotsChat.Length] };
                         if (i == n / 2 || i == n - 2) line.Text = HubShotsLong;
-                        else if (i % 7 == 5) { line.From = other; line.To = me; line.Text = "(private) " + line.Text; }
-                        else if (i % 11 == 9) { line.From = me; line.To = other; line.Text = "(private) " + line.Text; }
+                        else if (i % 7 == 5) { line.From = other; line.To = me; }
+                        else if (i % 11 == 9) { line.From = me; line.To = other; }
+                        if (nowMin > 0)
+                        {
+                            int m = Math.Max(1440, nowMin - (n - 1 - i) * 9);
+                            line.Day = m / 1440; line.Hour = m % 1440 / 60; line.Minute = m % 60;
+                        }
                         MPChat.DevAppendLocal(line);
                         _hubShotsChat.Add(line);
                     }
@@ -2760,6 +2799,7 @@ namespace BigAmbitionsMP
                 case "chatview":    return HubShotsChatView(arg);
                 case "contactopen": return HubShotsContactOpen(arg);
                 case "uifill":      return HubShotsUiFill(arg);
+                case "hubnote":     return HubShotsHubNote(arg);   // host: a Business Hub note to <playerId> (MPHub.NotifyParty)
                 case "uiview":   // DEV (2026-09-28): open the game's OWN main-menu screens for palette screenshots
                     return UiView(arg);
                 case "screenshot":

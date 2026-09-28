@@ -129,6 +129,15 @@ namespace BigAmbitionsMP
         public static string DataRootPath { get; private set; } = ".";
         public static string ConfigPath => _cfgPath;
 
+        /// <summary>The chat window's place on THIS machine (user U2 2026-09-28): "x,y,w,h" in canvas units, anchored
+        /// bottom-right; "" = the default next to the phone. Written on a drag / resize release only.</summary>
+        public static string ChatWindowPlace { get { try { return Get("ChatWindowPlace"); } catch { return ""; } } }
+        public static void SetChatWindowPlace(string v)
+        {
+            try { Set("ChatWindowPlace", v ?? ""); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] chat place: {ex.Message}"); }
+        }
+
         public static string BugReportDiscordWebhookUrlLive()
         {
             try

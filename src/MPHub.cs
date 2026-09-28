@@ -438,7 +438,7 @@ namespace BigAmbitionsMP
         internal static void NotifyParty(string playerId, string text)
         {
             if (playerId == MPConfig.PlayerId) MPChat.AddNotice(text);
-            else MPServer.SendChatPrivate("Hub", playerId, text);
+            else MPServer.SendChatPrivate(MPChat.HubSender, playerId, text);   // reserved id no player can hold (review R1)
         }
 
         /// <summary>HOST tick (main thread): day rollover drafts loan payments.</summary>

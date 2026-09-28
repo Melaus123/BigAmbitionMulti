@@ -1,0 +1,127 @@
+{
+ "id": "T-HUDSHOT",
+ "title": "DEV screenshot capture (2026-09-28): the in-game HUD with no chat window open, then after chat open+close (phone state as left), as a clean background for the chat mock-up.",
+ "preconditions": "Dev build with the phoneapp / hubview / chatview / contactopen / uifill levers (TestDrive.cs). Fixture save1 (host melaus, client Client1). Keep the host window unfocused but NOT minimised (a minimised window does not render).",
+ "instances": 2,
+ "vars": {
+  "clientPid": "Client1",
+  "hostPid": "melaus",
+  "session": "save1"
+ },
+ "oracles_absent": [
+  "\\[TestDrive\\] screenshot: ",
+  "active loan\\(s\\) but none match my id",
+  "upload SKIPPED"
+ ],
+ "oracles_report": [
+  "\\[TestDrive\\] screenshot ",
+  "\\[Hub\\] ",
+  "NullReferenceException"
+ ],
+ "steps": [
+  {
+   "role": "h",
+   "cmd": "host",
+   "expect_result": "^OK",
+   "seq": 1
+  },
+  {
+   "role": "c",
+   "cmd": "join",
+   "expect_result": "^OK",
+   "seq": 2
+  },
+  {
+   "role": "h",
+   "cmd": "hostload ${session}",
+   "expect_result": "^OK",
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+     "within_s": 240
+    },
+    {
+     "role": "h",
+     "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+     "within_s": 60
+    }
+   ],
+   "seq": 3
+  },
+  {
+   "role": "both",
+   "cmd": "mark TEST HUBSHOTS START",
+   "expect_result": "OK MARK",
+   "seq": 4
+  },
+  {
+   "role": "h",
+   "sleep_s": 30,
+   "note": "the world settles; the Business page injects 4 s after the loading overlay goes",
+   "seq": 5
+  },
+  {
+   "role": "h",
+   "cmd": "chatview state",
+   "expect_result": "^OK chatview state: visible=False ",
+   "note": "PREMISE: the chat window starts closed",
+   "seq": 6
+  },
+  {
+   "role": "h",
+   "cmd": "screenshot hub-hud-plain",
+   "expect_result": "^OK screenshot queued",
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[TestDrive\\] screenshot .*shot-hub-hud-plain\\.png",
+     "within_s": 10
+    }
+   ],
+   "seq": 7
+  },
+  {
+   "role": "h",
+   "cmd": "chatview open",
+   "expect_result": "^OK chatview open: requested ",
+   "seq": 8
+  },
+  {
+   "role": "h",
+   "sleep_s": 2,
+   "seq": 9
+  },
+  {
+   "role": "h",
+   "cmd": "chatview close",
+   "expect_result": "^OK chatview close: requested ",
+   "seq": 10
+  },
+  {
+   "role": "h",
+   "sleep_s": 2,
+   "note": "the phone stays open after the chat closes (or not) - either way a HUD reference",
+   "seq": 11
+  },
+  {
+   "role": "h",
+   "cmd": "screenshot hub-hud-phone",
+   "expect_result": "^OK screenshot queued",
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[TestDrive\\] screenshot .*shot-hub-hud-phone\\.png",
+     "within_s": 10
+    }
+   ],
+   "seq": 12
+  },
+  {
+   "role": "both",
+   "cmd": "mark TEST HUDSHOT END",
+   "expect_result": "OK MARK",
+   "seq": 13
+  }
+ ]
+}

@@ -1100,15 +1100,20 @@ namespace BigAmbitionsMP
                 {
                     var cp = env.GetPayload<ChatPayload>();
                     if (cp == null) break;
-                    // Hub events ride the private-chat envelope with sender "Hub"
+                    // Hub events ride the private-chat envelope with sender MPChat.HubSender
                     // (NotifyParty) — but chat is a PLAYER channel (user 2026-07-20):
                     // route them to a toast + the Business Hub badge instead of the
                     // chat log, so the phone never blinks "message" for a loan event.
-                    if (cp.PlayerId == "Hub")
+                    // HubSender starts with a line break no honest player id can hold, and the host drops chat from a
+                    // (hand-made) connection claiming it - so such a line is always MPHub.NotifyParty's note: it becomes
+                    // the same pop-up notice the host gets (MPChat.AddNotice), never a chat line. A player's own chat
+                    // (public or private, the host's included) can never match it.
+                    if (cp.PlayerId == MPChat.HubSender)
                     {
                         string t = cp.Text ?? "";
                         MPHub.Version++;   // response-required events live on the Hub icon
-                        GameStatePatcher.EnqueueOnMainThread(() => PassengerHud.Toast(t, 3f));
+                        Plugin.Logger.LogInfo($"[Chat] Hub note -> notice (not a chat line), {t.Length} chars.");
+                        MPChat.AddNotice(t);
                         break;
                     }
                     MPChat.AddMessage(cp.PlayerId, cp.To ?? "", cp.Text);   // pure C# — safe on poll thread
