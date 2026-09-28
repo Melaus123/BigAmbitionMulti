@@ -4847,6 +4847,96 @@ namespace BigAmbitionsMP
                     return "OK cartstate " + VehicleManager.CartStateReadout(arg);
                 }
 
+                case "buycar":
+                {
+                    // H-CARBUYSTACK-1 rig lever (DEV). Stands in for the dealership dialog's Buy button: must be INSIDE the
+                    // store. 'auto' = the cheapest showroom car in the scene. Builds the same ContractVehicleForSale the
+                    // dialog lists (VehicleContractSettings :368) with the matching showroom controller (or none) and calls
+                    // its Purchase() - the only in-person buy path (VehicleStoreDialog :125). Main thread (Tick).
+                    try
+                    {
+                        var bq = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (bq.Length < 1 || bq.Length > 2) return "ERR usage: buycar <vehicleTypeId|auto> [color]";
+                        if (!BuildingManager.IsInsideBuilding) return "ERR buycar: not inside a building";
+                        var bgi = SaveGameManager.Current;
+                        if (bgi == null) return "ERR buycar: no game instance";
+                        var shows = UnityEngine.Object.FindObjectsOfType<Controllers.ShowcaseVehicleController>();
+                        Controllers.ShowcaseVehicleController? show = null;
+                        string vtId = bq[0];
+                        if (vtId.Equals("auto", StringComparison.OrdinalIgnoreCase))
+                        {
+                            float best = float.MaxValue;
+                            foreach (var sc in shows)
+                            {
+                                if (sc == null || string.IsNullOrEmpty(sc.vehicleName)) continue;
+                                float pr = float.MaxValue; try { pr = sc.GetPurchasePrice(); } catch { }
+                                if (show == null || pr < best) { show = sc; best = pr; }
+                            }
+                            if (show == null) return "ERR buycar: no showroom car here for 'auto'";
+                            vtId = show.vehicleName;
+                        }
+                        else
+                            foreach (var sc in shows) if (sc != null && sc.vehicleName == vtId) { show = sc; break; }
+                        var bvt = Vehicles.VehicleTypes.VehicleTypeHelper.GetVehicleType(vtId);
+                        if (bvt == null) return $"ERR buycar: unknown vehicle type '{vtId}'";
+                        var before = new HashSet<string>();
+                        foreach (var vi in bgi.VehicleInstances) if (vi?.id != null) before.Add(vi.id);
+                        float m0 = bgi.Money;
+                        var sale = new Buildings.ContractVehicleForSale(bvt, show);
+                        if (bq.Length == 2) sale.SetColor(bq[1]);
+                        bool bres = sale.Purchase();
+                        float m1 = bgi.Money;
+                        string nvid = "-"; UnityEngine.Vector3 npos = default;
+                        foreach (var vi in bgi.VehicleInstances)
+                            if (vi?.id != null && !before.Contains(vi.id) && !vi.id.StartsWith("BAMP_")) { nvid = vi.id; npos = vi.position; break; }
+                        string bspotd = "-";
+                        try
+                        {
+                            var bt = InstanceBehavior<BuildingManager>.Instance?.cityBuildingController?.customPositions?[0];
+                            if (bt != null && nvid != "-") bspotd = UnityEngine.Vector3.Distance(npos, bt.position).ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+                        }
+                        catch { }
+                        var ic = System.Globalization.CultureInfo.InvariantCulture;
+                        return $"OK buycar {vtId} result={bres} vid={nvid} pos={npos.x.ToString("F2", ic)},{npos.y.ToString("F2", ic)},{npos.z.ToString("F2", ic)} spotd={bspotd} money={m0.ToString("F2", ic)}->{m1.ToString("F2", ic)} showroom={(show != null)}";
+                    }
+                    catch (Exception ex) { return $"ERR buycar: {ex.GetType().Name}: {ex.Message}"; }
+                }
+
+                case "carspot":
+                {
+                    // H-CARBUYSTACK-1 rig readout (read-only): the delivery spot of the building I am in, every OWN car and
+                    // every partner ghost (registry footprint, hidden ones too) within 15 m, and the closest pair among them.
+                    try
+                    {
+                        var ct = InstanceBehavior<BuildingManager>.Instance?.cityBuildingController?.customPositions;
+                        if (ct == null || ct.Count == 0 || ct[0] == null) return "ERR carspot: no delivery spot (not inside a building?)";
+                        var sp0 = ct[0].position;
+                        var ic = System.Globalization.CultureInfo.InvariantCulture;
+                        var pts = new List<UnityEngine.Vector3>();
+                        var own = new List<string>(); var gh = new List<string>();
+                        var cgi = SaveGameManager.Current;
+                        if (cgi?.VehicleInstances != null)
+                            foreach (var vi in cgi.VehicleInstances)
+                            {
+                                if (vi?.id == null || vi.id.StartsWith("BAMP_")) continue;
+                                UnityEngine.Vector3 p = vi.position;
+                                float d = UnityEngine.Vector3.Distance(p, sp0);
+                                if (d <= 15f) { own.Add($"{vi.id}@{d.ToString("F2", ic)}"); pts.Add(p); }
+                            }
+                        foreach (var g in VehicleManager.GhostFootprints())
+                        {
+                            float d = UnityEngine.Vector3.Distance(g.pos, sp0);
+                            if (d <= 15f) { gh.Add($"{g.vid}@{d.ToString("F2", ic)}"); pts.Add(g.pos); }
+                        }
+                        float minPair = float.MaxValue;
+                        for (int i = 0; i < pts.Count; i++)
+                            for (int j = i + 1; j < pts.Count; j++)
+                                minPair = Math.Min(minPair, UnityEngine.Vector3.Distance(pts[i], pts[j]));
+                        return $"OK carspot spot={sp0.x.ToString("F2", ic)},{sp0.y.ToString("F2", ic)},{sp0.z.ToString("F2", ic)} own=[{string.Join(",", own)}] ghosts=[{string.Join(",", gh)}] minpair={(pts.Count < 2 ? "-" : minPair.ToString("F2", ic))}";
+                    }
+                    catch (Exception ex) { return $"ERR carspot: {ex.GetType().Name}: {ex.Message}"; }
+                }
+
                 case "cartstrand":
                 {
                     // H-CARTICON-1 rig lever (DEV). Stands in for 'push my hand vehicle into this shop and let go': moves

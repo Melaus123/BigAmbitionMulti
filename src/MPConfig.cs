@@ -222,6 +222,21 @@ namespace BigAmbitionsMP
             catch { return true; }
         }
 
+        /// <summary>H-CARBUYSTACK-1: settings-file key "CarBuyFreeSpot" (no UI), read live at each dealership purchase.
+        /// Default (absent) true = while a session is live, a purchase whose delivery spot holds a PARTNER's car is moved to
+        /// a free spot next to it (CarBuySpot.cs); false/0/no/off = the game's own spawn on the spot (the behaviour before).</summary>
+        public static bool CarBuyFreeSpotLive()
+        {
+            try
+            {
+                string v = GetLiveString("CarBuyFreeSpot").Trim();
+                if (v.Length == 0) return true;
+                return !(v.Equals("false", StringComparison.OrdinalIgnoreCase) || v == "0"
+                         || v.Equals("no", StringComparison.OrdinalIgnoreCase) || v.Equals("off", StringComparison.OrdinalIgnoreCase));
+            }
+            catch { return true; }
+        }
+
         /// <summary>H-RIVALPARITY-1 part E: settings-file key "RivalClientSellers" (no UI), read live at each seller recount on
         /// the HOST (ProductMarketHelper.FillProvidersDictionary: at load and daily). Default (absent) true = another player's
         /// shop whose host copy has an empty product list counts as a seller of the items on its own self-reported list

@@ -1786,6 +1786,26 @@ namespace BigAmbitionsMP
             return null;
         }
 
+        /// <summary>H-CARBUYSTACK-1: every partner ghost's footprint from the REGISTRY (never physics - a ghost can be
+        /// SetActive(false) by the interior mask): (vid, owner, vehicle type, position, rotation). Uses the ghost's own
+        /// transform even when inactive; a ghost not spawned yet falls back to its last synced TargetPos/TargetRot.</summary>
+        internal static System.Collections.Generic.IEnumerable<(string vid, string owner, string type, Vector3 pos, Quaternion rot)> GhostFootprints()
+        {
+            var list = new System.Collections.Generic.List<(string, string, string, Vector3, Quaternion)>();
+            try
+            {
+                foreach (var kv in _remoteVehicles)
+                {
+                    var rv = kv.Value;
+                    if (rv == null) continue;
+                    if (rv.Go != null) list.Add((kv.Key, rv.OwnerId ?? "", rv.TypeName ?? "", rv.Go.transform.position, rv.Go.transform.rotation));
+                    else if (rv.TargetPos != Vector3.zero) list.Add((kv.Key, rv.OwnerId ?? "", rv.TypeName ?? "", rv.TargetPos, rv.TargetRot));
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CarBuy] ghost footprint read error: {ex.Message}"); }
+            return list;
+        }
+
         /// <summary>Every spawned ghost vehicle as (vehicleId, transform).</summary>
         public static System.Collections.Generic.IEnumerable<(string, Transform)> AllGhosts()
         {

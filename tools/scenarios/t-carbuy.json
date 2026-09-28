@@ -1,0 +1,77 @@
+{
+  "id": "T-CARBUY",
+  "title": "H-CARBUYSTACK-1 (option B + amendments): a car bought at a dealership whose delivery spot holds a PARTNER's car (a ghost - not in the buyer's save list, so the native 6 m check never saw it) lands on a free spot next to it instead of inside it; the buyer's OWN car on the spot still gets the native refusal (single-player parity), no money taken. Host buys first (spot free -> native spawn on the spot), the client then buys the same model in the same store (host ghost on the spot -> chosen spot 2.5..12 m away, '[CarBuy] ... chose'), the host buys again (its own car on the spot -> native refusal, money unchanged), and the host sees the client's new car ghost at the chosen spot with no two cars within 2 m.",
+  "preconditions": "Fixture save1 (host melaus, Client1; both spawn outdoors near (65, -194)). Dev build with 'buycar <vehicleTypeId|auto> [color]' (auto = the cheapest showroom car in the scene; reply 'OK buycar <id> result=<bool> vid=<new|-> pos=<x,y,z> spotd=<m from the delivery spot> money=<before>-><after> showroom=<bool>') and 'carspot' ('OK carspot spot=<pos> own=[id@d,...] ghosts=[vid@d,...] minpair=<closest pair m>'). vars.store = City Cars (context log 2026-06-14: '76 ba:street_thirdstreet' = the 'City Cars' car dealership). 'spend -N' earns N through the game's own money path so both can afford the car. A side candidate (right/left 1) sits W+0.8 m (~2.8 m) from the spot, so the chosen-spot distance window is 2.5..12 m (the 12 m hard cap).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "store": "76 ba:street_thirdstreet",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "\\[CarBuy\\] .*(exception|error)"
+  ],
+  "oracles_report": [
+    "\\[CarBuy\\] ",
+    "\\[Vehicle\\] ghost .* deregistered",
+    "\\[TestDrive\\] (h|c) '(buycar|carspot)"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 4, "role": "h", "sleep_s": 75, "note": "both worlds load and settle" },
+    { "seq": 5, "role": "both", "cmd": "mark TEST CARBUY START", "expect_result": "OK MARK" },
+    { "seq": 6, "role": "c", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 7, "role": "h", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 8, "role": "h", "cmd": "spend -250000", "expect_result": "^OK" },
+    { "seq": 9, "role": "c", "cmd": "spend -250000", "expect_result": "^OK" },
+    {
+      "seq": 10, "role": "h", "cmd": "enterbuilding ${store}", "expect_result": "^OK enterbuilding",
+      "expect_log": [ { "role": "h", "regex": "\\[TestDrive\\] enterbuilding '${store}' . OK", "within_s": 30 } ]
+    },
+    { "seq": 11, "role": "h", "sleep_s": 8 },
+    { "seq": 12, "role": "h", "cmd": "carspot", "expect_result": "^OK carspot spot=", "note": "baseline: what is around the delivery spot before any purchase" },
+    {
+      "seq": 13, "role": "h", "cmd": "buycar auto",
+      "expect_result": "^OK buycar \\S+ result=True vid=\\S+ pos=\\S+ spotd=0\\.\\d\\d ",
+      "capture": { "carType": "^OK buycar (\\S+) ", "hostVid": " vid=(\\S+) " },
+      "note": "spot free for everyone -> the native spawn ON the delivery spot"
+    },
+    { "seq": 14, "role": "h", "sleep_s": 12, "note": "the host's fleet reaches the client; the client spawns the ghost" },
+    {
+      "seq": 15, "role": "c", "cmd": "enterbuilding ${store}", "expect_result": "^OK enterbuilding",
+      "expect_log": [ { "role": "c", "regex": "\\[TestDrive\\] enterbuilding '${store}' . OK", "within_s": 30 } ]
+    },
+    { "seq": 16, "role": "c", "sleep_s": 8 },
+    {
+      "seq": 17, "role": "c", "cmd": "carspot",
+      "expect_result": "^OK carspot spot=\\S+ own=\\[[^\\]]*\\] ghosts=\\[[^\\]]*${hostVid}@0\\.\\d\\d",
+      "note": "PREMISE: the host's new car is a ghost on the client, ON the delivery spot (registry read - it may be hidden indoors)"
+    },
+    {
+      "seq": 18, "role": "c", "cmd": "buycar ${carType}",
+      "expect_result": "^OK buycar \\S+ result=True vid=\\S+ pos=\\S+ spotd=(2\\.[5-9]\\d|[3-9]\\.\\d\\d|1[01]\\.\\d\\d|12\\.00) ",
+      "capture": { "clientVid": " vid=(\\S+) " },
+      "expect_log": [ { "role": "c", "regex": "\\[CarBuy\\] spot blocked by partner ghost \\S+ \\(${hostPid}\\) at .*; chose .* d=\\d+\\.\\d\\d tried=\\d+", "within_s": 5 } ],
+      "note": "THE FIX: the partner's car on the spot -> a free spot next to it (2.5..12 m), not inside the host's car"
+    },
+    { "seq": 19, "role": "h", "sleep_s": 12, "note": "the client's fleet reaches the host; the host spawns the new ghost" },
+    {
+      "seq": 20, "role": "h", "cmd": "buycar ${carType}",
+      "expect_result": "^OK buycar \\S+ result=False vid=- .* money=([\\d.]+)->\\1 ",
+      "expect_log": [ { "role": "h", "regex": "\\[CarBuy\\] own car \\S+ on the spot - native refusal \\(parity\\)", "within_s": 5 } ],
+      "note": "PARITY: the host's OWN car on the spot -> the native refusal, no money taken"
+    },
+    {
+      "seq": 21, "role": "h", "cmd": "carspot",
+      "expect_result": "^OK carspot spot=\\S+ own=\\[[^\\]]*${hostVid}@0\\.\\d\\d[^\\]]*\\] ghosts=\\[[^\\]]*${clientVid}@(2\\.[5-9]\\d|[3-9]\\.\\d\\d|1[01]\\.\\d\\d|12\\.00)[^\\]]*\\] minpair=([2-9]|\\d\\d)\\.\\d\\d",
+      "note": "the host sees the client's new car at the chosen spot; no two cars around the spot within 2 m"
+    },
+    { "seq": 22, "role": "c", "cmd": "carspot", "expect_result": "^OK carspot spot=", "note": "report only: the client's view after both purchases" },
+    { "seq": 23, "role": "both", "cmd": "mark TEST CARBUY END", "expect_result": "OK MARK" }
+  ]
+}
