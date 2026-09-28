@@ -944,6 +944,43 @@ namespace BigAmbitionsMP
                         CustomerHandoff.Arm(csN);
                         return $"OK custstate armed n={csN} bldg='{CustomerPuppets.MyBuilding}'";
                     }
+                    // `custstate hover <item id>` (fold F1): that item's live controller, its parent (the counter) or itself;
+                    //                    kids=/deadKids= that parent's childItemControllers (destroyed entries left there), and what
+                    //                    OverlayHelper.GetRelevantEntity (the hover overlay's pick) returns: hover=live|dead|none|err.
+                    if (csArg.StartsWith("hover", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            string[] hv = csArg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                            if (hv.Length < 2) return "ERR usage: custstate hover <item id>";
+                            var hvBm = InstanceBehavior<BuildingManager>.Instance;
+                            ItemController? hvIc = null;
+                            if (hvBm != null && hvBm.allItemControllers != null)
+                                foreach (var hx in hvBm.allItemControllers)
+                                    if (hx != null && hx.ItemInstance != null && hx.ItemInstance.id == hv[1]) { hvIc = hx; break; }
+                            if (hvIc == null) return $"OK custstate hover found=0 kids=0 deadKids=-1 hover=none ent=- bldg='{CustomerPuppets.MyBuilding}'";
+                            var hvPar = hvIc.parentItemController != null ? hvIc.parentItemController : hvIc;
+                            int hvKids = 0, hvDead = 0;
+                            if (hvPar.childItemControllers != null) foreach (var hk in hvPar.childItemControllers) { hvKids++; if (hk == null) hvDead++; }
+                            string hvRes, hvEnt = "-";
+                            try
+                            {
+                                var hr = Player.HUD.ItemInfoOverlays.OverlayHelper.GetRelevantEntity(hvPar);
+                                object? hEnt = hr.Item1;
+                                UnityEngine.Object? hUo = hr.Item1;
+                                if (hEnt == null) hvRes = "none";
+                                else if (hUo == null) hvRes = "dead";   // Unity null: destroyed
+                                else
+                                {
+                                    hvRes = "live";
+                                    hvEnt = ReferenceEquals(hEnt, hvIc) ? "item" : ReferenceEquals(hEnt, hvPar) ? "parent" : "other";
+                                }
+                            }
+                            catch (Exception exHv) { hvRes = "err:" + exHv.GetType().Name; }
+                            return $"OK custstate hover found=1 kids={hvKids} deadKids={hvDead} hover={hvRes} ent={hvEnt} bldg='{CustomerPuppets.MyBuilding}'";
+                        }
+                        catch (Exception exH) { return "ERR custstate hover: " + exH.Message; }
+                    }
                     // `custstate pick seat|queue <tag>` (H-REFRESHSEAT-1): the item of the first live native SEATED at a table
                     //                    (sat down, seat time known) / holding a queue place; sets premise <tag> met (found) or
                     //                    unmet (none) on this machine and prints pick=<full item id|-> holders=<n on that item>.

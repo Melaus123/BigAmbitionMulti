@@ -357,6 +357,10 @@ namespace BigAmbitionsMP
                                     int det2 = DetachCargoCallbacks(gone);
                                     if (det2 > 0 && _cargoDetachLines++ < 40)
                                         Plugin.Logger.LogInfo($"[Patcher] controller '{p.ItemInstanceId}' ('{p.ItemName}') destroyed with its instance kept: {det2} cargo callback(s) detached (SALE-DETACH-1).");
+                                    // Fold F1 (2026-09-27): off its parent's childItemControllers too, as the native removal
+                                    // does (ItemController.cs:1323; scene side only, stackedItems data untouched) - a destroyed
+                                    // child left there made OverlayHelper.GetRelevantEntity return it (hover NRE).
+                                    try { var par = gone.parentItemController; if (par != null) par.childItemControllers?.Remove(gone); } catch { }
                                     try { UnityEngine.Object.Destroy(gone.gameObject); } catch { }
                                 }
                             }
@@ -4142,6 +4146,9 @@ namespace BigAmbitionsMP
                     var existing = UnityEngine.Object.FindObjectsOfType(typeof(ItemController));
                     if (existing != null)
                     {
+                        // Fold F3 (2026-09-27): the kill SET is collected first and marked dying as a whole before the
+                        // first release, so a native line pick during a release never lands on a line this refresh kills later.
+                        var killList = new List<(ItemController ic, string id, string why)>();
                         for (int i = 0; i < existing.Length; i++)
                         {
                             var ic = existing[i] as ItemController;
@@ -4202,63 +4209,73 @@ namespace BigAmbitionsMP
                                         || isRemoved;
                             if (kill)
                             {
-                                // H-REFRESHSEAT-1 (2026-09-27): customers seated at / walking to / queuing at this item
-                                // leave (or change line) the game's own way BEFORE the destroy - else ResetItemsInTable
-                                // NREs on the dead seat transform and the diner hangs. Must precede the
-                                // allItemControllers removal below (the seat -> table lookup walks that list).
-                                CustomerSeatPins.ReleaseHoldersOf(ic, id, fullRebuild ? "full" : isRemoved ? "removed" : string.IsNullOrEmpty(id) ? "no-id" : "changed");
-                                // Round-278/F1 (field 20260818-222130): attached children are Unity
-                                // transform children — Destroy(parent) takes them down at frame end,
-                                // AFTER the spawn pass already recorded them as live survivors, so
-                                // they died with no respawn (the invisible-till bug; the stranded
-                                // EmployeeStationController NRE was its aftershock).  Detach them
-                                // SCENE-side only: the native RemoveFromParentPlaceableItem also
-                                // erases the parent's stackedItems DATA record (ItemController:
-                                // 1290-1293) which the apply just wrote authoritatively — so this
-                                // is a manual detach that leaves all data untouched.  The re-link
-                                // pass below re-attaches them to the respawned parent.
-                                try
-                                {
-                                    if (ic.childItemControllers != null && ic.childItemControllers.Count > 0)
-                                    {
-                                        var rescue = new List<ItemController>(ic.childItemControllers);
-                                        int rescued = 0;
-                                        foreach (var kid in rescue)
-                                        {
-                                            if (kid == null) continue;
-                                            try
-                                            {
-                                                kid.parentItemController = null;
-                                                kid.parentAttachmentPoint = null;
-                                                kid.transform.SetParent(bm.IndoorItemContainer, true);   // 1.0 port: property — Hamptons redirect
-                                                rescued++;
-                                            }
-                                            catch { }
-                                        }
-                                        ic.childItemControllers.Clear();
-                                        if (rescued > 0)
-                                            Plugin.Logger.LogInfo($"[Patcher] destroy of '{id}' would take {rescued} attached child(ren) with it — detached to the container first; the re-link pass re-attaches them (round-278).");
-                                    }
-                                }
-                                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] child rescue for '{id}': {ex.Message}"); }
-                                killedControllers.Add(ic);
-                                // Sweep-3 crash fix (2026-08-29): same reason as the conveyed-grab site —
-                                // a destroyed controller left in allItemControllers feeds 1.0's unguarded
-                                // sweeps. (This loop iterates a FindObjectsOfType array, so removing from
-                                // the manager's list here is safe.)
-                                try { InstanceBehavior<BuildingManager>.Instance?.allItemControllers?.Remove(ic); } catch { }
-                                // SALE-DETACH-1: the in-place policy KEEPS this controller's
-                                // ItemInstance alive — detach its subscriptions first.
-                                int det1 = DetachCargoCallbacks(ic);
-                                if (det1 > 0 && _cargoDetachLines++ < 40)
-                                    Plugin.Logger.LogInfo($"[Patcher] controller '{id}' ('{ic.ItemInstance?.itemName}') destroyed with its instance kept: {det1} cargo callback(s) detached (SALE-DETACH-1).");
-                                UnityEngine.Object.Destroy(ic.gameObject);
-                                destroyed++;
+                                killList.Add((ic, id, fullRebuild ? "full" : isRemoved ? "removed" : string.IsNullOrEmpty(id) ? "no-id" : "changed"));
                             }
                             else if (!string.IsNullOrEmpty(id) && !liveById.ContainsKey(id))
                             {
                                 liveById[id] = ic;
                             }
+                        }
+                        CustomerSeatPins.MarkKillSet(killList.ConvertAll(k => k.ic));
+                        foreach (var kRow in killList)
+                        {
+                            var ic = kRow.ic; string id = kRow.id; string kWhy = kRow.why;
+                            // H-REFRESHSEAT-1 (2026-09-27): customers seated at / walking to / queuing at this item
+                            // leave (or change line) the game's own way BEFORE the destroy - else ResetItemsInTable
+                            // NREs on the dead seat transform and the diner hangs. Must precede the
+                            // allItemControllers removal below (the seat -> table lookup walks that list).
+                            CustomerSeatPins.ReleaseHoldersOf(ic, id, kWhy);
+                            // Round-278/F1 (field 20260818-222130): attached children are Unity
+                            // transform children — Destroy(parent) takes them down at frame end,
+                            // AFTER the spawn pass already recorded them as live survivors, so
+                            // they died with no respawn (the invisible-till bug; the stranded
+                            // EmployeeStationController NRE was its aftershock).  Detach them
+                            // SCENE-side only: the native RemoveFromParentPlaceableItem also
+                            // erases the parent's stackedItems DATA record (ItemController:
+                            // 1290-1293) which the apply just wrote authoritatively — so this
+                            // is a manual detach that leaves all data untouched.  The re-link
+                            // pass below re-attaches them to the respawned parent.
+                            try
+                            {
+                                if (ic.childItemControllers != null && ic.childItemControllers.Count > 0)
+                                {
+                                    var rescue = new List<ItemController>(ic.childItemControllers);
+                                    int rescued = 0;
+                                    foreach (var kid in rescue)
+                                    {
+                                        if (kid == null) continue;
+                                        try
+                                        {
+                                            kid.parentItemController = null;
+                                            kid.parentAttachmentPoint = null;
+                                            kid.transform.SetParent(bm.IndoorItemContainer, true);   // 1.0 port: property — Hamptons redirect
+                                            rescued++;
+                                        }
+                                        catch { }
+                                    }
+                                    ic.childItemControllers.Clear();
+                                    if (rescued > 0)
+                                        Plugin.Logger.LogInfo($"[Patcher] destroy of '{id}' would take {rescued} attached child(ren) with it — detached to the container first; the re-link pass re-attaches them (round-278).");
+                                }
+                            }
+                            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] child rescue for '{id}': {ex.Message}"); }
+                            killedControllers.Add(ic);
+                            // Sweep-3 crash fix (2026-08-29): same reason as the conveyed-grab site —
+                            // a destroyed controller left in allItemControllers feeds 1.0's unguarded
+                            // sweeps. (This loop iterates a FindObjectsOfType array, so removing from
+                            // the manager's list here is safe.)
+                            try { InstanceBehavior<BuildingManager>.Instance?.allItemControllers?.Remove(ic); } catch { }
+                            // SALE-DETACH-1: the in-place policy KEEPS this controller's
+                            // ItemInstance alive — detach its subscriptions first.
+                            int det1 = DetachCargoCallbacks(ic);
+                            if (det1 > 0 && _cargoDetachLines++ < 40)
+                                Plugin.Logger.LogInfo($"[Patcher] controller '{id}' ('{ic.ItemInstance?.itemName}') destroyed with its instance kept: {det1} cargo callback(s) detached (SALE-DETACH-1).");
+                            // Fold F1 (2026-09-27): off its parent's childItemControllers too, as the native removal does
+                            // (ItemController.cs:1323; scene side only, stackedItems data untouched) - a destroyed child left
+                            // there made OverlayHelper.GetRelevantEntity return it and every hover NRE'd.
+                            try { var par = ic.parentItemController; if (par != null) par.childItemControllers?.Remove(ic); } catch { }
+                            UnityEngine.Object.Destroy(ic.gameObject);
+                            destroyed++;
                         }
                     }
                 }

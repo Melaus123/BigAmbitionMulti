@@ -428,7 +428,7 @@ namespace BigAmbitionsMP
                     {
                         var emp = esc.employee;
                         var cu = emp.customer;
-                        if (cu != null && !cu.isPlayer && emp.isActiveAndEnabled) { emp.StartCoroutine(emp.CancelCurrentOrder()); _bCancelled++; }
+                        if (cu != null && !cu.isPlayer && emp.isActiveAndEnabled) { emp.StartCoroutine(emp.CancelCurrentOrder()); if (OverridesCancel(emp)) _bCancelled++; }
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: '{id}' ({why}) cancel order: {ex.GetType().Name}: {ex.Message}"); }
@@ -496,6 +496,8 @@ namespace BigAmbitionsMP
                     var xi = x.ItemController;
                     if (xi == null || _relKilled.Contains(IdOf(xi))) continue;
                     if (x.data.GetAmountOfSpotsAvailable() <= 0) continue;
+                    // Fold F2: walkers to the line count too (GetAmountOfSpotsAvailable counts only the arrived).
+                    if (x.data.spots == null || x.data.spots.Count - x.data.GetCustomersInWaitingLine(true) <= 0) continue;
                     int k1 = x.data.GetCustomersInWaitingLine(true), k2 = x.data.customers != null ? x.data.customers.Count : 0;
                     if (best == null || k1 < b1 || (k1 == b1 && k2 < b2)) { best = x; b1 = k1; b2 = k2; }
                 }
@@ -510,9 +512,37 @@ namespace BigAmbitionsMP
         internal static void FlushRelease()
         {
             if (_relMap == null) return;
-            int qMoved = 0, qLeft = 0;
+            int qMoved = 0, qLeft = 0, swept = 0;
             try
             {
+                // Fold F3 (2026-09-27): a native AdvanceWaitingLine during the kill loop can place a live customer in a
+                // killed item's line after the holder map was built - every such customer still listed there moves too.
+                try
+                {
+                    var all = IndoorCustomerSpawner.Customers;
+                    if (all != null && _relKilled.Count > 0)
+                    {
+                        var queued = new HashSet<Customer>();
+                        foreach (var qm in _relQueue) if (qm != null && qm.C != null) queued.Add(qm.C);
+                        foreach (var c in all.ToArray())
+                        {
+                            try
+                            {
+                                if (c == null || c.isPlayer || _relDone.Contains(c) || queued.Contains(c) || CustomerHandoff.IsLeavingBody(c)) continue;
+                                var wl = c.assignedWaitingLine;
+                                if (wl == null || wl.data == null || wl.customersManagement == null || wl.data.customers == null) continue;
+                                if (!_relKilled.Contains(IdOf(wl.ItemController))) continue;
+                                int idx = wl.data.customers.IndexOf(c);
+                                if (idx < 0) continue;
+                                _relQueue.Add(new QueueMove { C = c, Line = wl, Index = idx });
+                                queued.Add(c);
+                                swept++;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: late-joiner sweep ({_bWhy}): {ex.GetType().Name}: {ex.Message}"); }
                 var moves = new List<QueueMove>(_relQueue);
                 var movedTo = new List<(Customer c, WaitingLine line)>();
                 moves.Sort((a, b) => a.Index.CompareTo(b.Index));
@@ -548,7 +578,7 @@ namespace BigAmbitionsMP
                 if (n + q + _bCancelled > 0)
                 {
                     LastRelease = $"{qMoved}/{qLeft}/{_bCancelled}";
-                    Plugin.Logger.LogInfo($"[SeatRelease] '{CustomerPuppets.MyBuilding}' {_bWhy}: {_relKilled.Count} item(s) killed, holders on {(_relItems.Count > 0 ? string.Join(", ", _relItems) : "-")}: {n} customer(s) sent out the game's own way (seated={_bSeated} walking={_bWalking} other={_bOther}), {q} moved off its line (other line={qMoved}, left={qLeft}), checkout(s) cancelled={_bCancelled}.");
+                    Plugin.Logger.LogInfo($"[SeatRelease] '{CustomerPuppets.MyBuilding}' {_bWhy}: {_relKilled.Count} item(s) killed, holders on {(_relItems.Count > 0 ? string.Join(", ", _relItems) : "-")}: {n} customer(s) sent out the game's own way (seated={_bSeated} walking={_bWalking} other={_bOther}), {q} moved off its line (other line={qMoved}, left={qLeft}, late joiners swept={swept}), checkout(s) cancelled={_bCancelled}.");
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: flush ({_bWhy}): {ex.GetType().Name}: {ex.Message}"); }
@@ -574,6 +604,31 @@ namespace BigAmbitionsMP
         private static readonly List<(Customer c, WaitingLine line)> _lastMoved = new List<(Customer c, WaitingLine line)>();
 
         internal static bool IsDying(ItemController? ic) => ic != null && _dyingFrame == Time.frameCount && _dying.Contains(ic);
+
+        /// <summary>Fold F3 (2026-09-27): the refresh kill loop marks its WHOLE kill set dying before the first release.</summary>
+        internal static void MarkKillSet(List<ItemController>? ics)
+        {
+            try { if (ics == null) return; foreach (var x in ics) MarkDying(x); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SeatPins] release error: kill set: {ex.GetType().Name}: {ex.Message}"); }
+        }
+
+        /// <summary>Fold F4 (2026-09-27): only an employee type that overrides CancelCurrentOrder cancels anything (the base
+        /// Employee's does not) - the release batch counts a cancel only then.</summary>
+        private static readonly Dictionary<Type, bool> _cancelOverride = new Dictionary<Type, bool>();
+        private static bool OverridesCancel(Employee? emp)
+        {
+            try
+            {
+                if (emp == null) return false;
+                var ty = emp.GetType();
+                if (_cancelOverride.TryGetValue(ty, out var v)) return v;
+                var m = ty.GetMethod("CancelCurrentOrder", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public, null, Type.EmptyTypes, null);
+                v = m != null && m.DeclaringType != typeof(Employee);
+                _cancelOverride[ty] = v;
+                return v;
+            }
+            catch { return false; }
+        }
 
         private static void MarkDying(ItemController? ic)
         {
