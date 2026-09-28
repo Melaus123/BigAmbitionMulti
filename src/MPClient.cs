@@ -71,6 +71,9 @@ namespace BigAmbitionsMP
         /// Set in OnDisconnected, cleared on Connect — the lobby UI shows it so a
         /// failed join doesn't sit silently behind an alive-looking lobby window.</summary>
         public static string LastDisconnectReason = "";
+        /// <summary>Review item 2 (lobby): true when LastDisconnectReason is one of the mod's own sentences (a host tag:
+        /// rejected / kicked / banned / host left / identity / build / version), false for a raw transport reason.</summary>
+        public static bool LastDisconnectReasonIsOwn;
         /// <summary>CONNECT-MSG (bundle 20260906-110216): what the last join attempt was, for the lobby text and the log —
         /// "ip" or "steam"; the address CLASS only (loopback / private network / public / hostname / steam relay), never the
         /// address itself, so the redacted bug bundle still says what kind of target it was.</summary>
@@ -152,6 +155,7 @@ namespace BigAmbitionsMP
         public static void Connect(string hostIp, int port)
         {
             JoinStatus = "";   // JOIN-WAIT-1 (review L3): a fresh connect never inherits a stale parked token
+            LastDisconnectReason = ""; FriendlyDisconnectReason = null; LastDisconnectReasonIsOwn = false;   // lobby review item 5: before any early return
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): a new connection starts with an empty slot map
             MPNeedsTuning.SetPowerNapAllowed(true, "new connection");   // POWERNAP r2 (review r1 MINOR-4): the host's gate is re-learned from the DTO/heartbeat; never carry a previous host's OFF
             ModMismatchVsHost = "";   // fresh connection, fresh verdict (round-253f)
@@ -190,6 +194,7 @@ namespace BigAmbitionsMP
         public static bool ConnectSteam(ulong hostSteamId)
         {
             JoinStatus = "";   // JOIN-WAIT-1 (re-check R5): the Steam entry starts clean too, like Connect()
+            LastDisconnectReason = ""; FriendlyDisconnectReason = null; LastDisconnectReasonIsOwn = false;   // lobby review item 5: before any early return
             PlayerColours.ResetSession();   // colours r2 (MINOR-5): a new connection starts with an empty slot map
             MPNeedsTuning.SetPowerNapAllowed(true, "new connection");   // POWERNAP r2 (review r1 MINOR-4): the host's gate is re-learned from the DTO/heartbeat; never carry a previous host's OFF
             // Round-229: unreliable hooks — refuse to join (see MPServer.Start).
@@ -493,6 +498,7 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Client] disconnect-tag read: {ex.Message}"); }
             LastDisconnectReason = why;
+            LastDisconnectReasonIsOwn = !string.Equals(why, reason, StringComparison.Ordinal);   // a host tag was translated into our own sentence
             // CONNECT-MSG: a direct-IP join that nobody answered gets a sentence a player can act on (approved wording 2026-09-06).
             FriendlyDisconnectReason = (!wasConnected && LastConnectPath == "ip" && reason == "ConnectionFailed")
                 ? $"No host answered at that address. If your friend is on Steam, right-click their name and choose Join Game. Direct IP needs the host's public address and port {LastConnectPort} opened on their router."

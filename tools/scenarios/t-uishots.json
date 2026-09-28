@@ -1,13 +1,17 @@
 {
   "id": "T-UISHOTS",
-  "title": "DEV palette capture - the DEV lever 'uiview' opens the game's OWN main-menu screens (start column, Load Game, Options first tab, New Game sheet, the delete-save HudConfirm) through their own button onClick, plus our MP submenu and lobby window as a before-picture, and 'screenshot ui-<view>' captures each. Host only; the client idles at its main menu. NO save, no world load. Keep the host window unfocused but NOT minimised (a minimised window does not render).",
+  "title": "DEV palette capture - the DEV lever 'uiview' opens the game's OWN main-menu screens (start column, Load Game, Options first tab, New Game sheet, the delete-save HudConfirm) through their own button onClick, plus our MP submenu; then the lobby redesign (2026-09-28) screens: Join a Game (plain + bad-port error), the lobby as host (DEV fill of 8), saved game, joiner, the Hosting port popup with the busy-port line, Connecting, Couldn't join, and the real 1-player host lobby. 'screenshot ui-<view>' captures each. Host only; the client idles at its main menu. NO save, no world load. Keep the host window unfocused but NOT minimised (a minimised window does not render). Fold 2026-09-28: 12-player lobby (scrollbar, long name, notice in the right column), thumb drag, track page, Escape on every window. Run at two sizes: normal, and BAMP_RIG_WINDOW=1280x720.",
   "preconditions": "Dev build with the 'uiview' lever (TestDrive.cs). At least one save on disk so Load Game lists something (the lever opens the window either way).",
   "instances": 2,
   "vars": {},
   "oracles_absent": [
-    "\\[TestDrive\\] uiview: ",
+    "HudConfirm is already open",
+    "\\[MenuUI\\] BuildLobbyWindow: ",
+    "\\[MenuUI\\] join dialog tick: ",
+    "\\[MenuUI\\] lobby refresh: ",
+    "\\[MenuUI\\] lobby tick: ",
     "\\[TestDrive\\] screenshot: ",
-    "HudConfirm is already open"
+    "\\[TestDrive\\] uiview: "
   ],
   "oracles_report": [
     "\\[TestDrive\\] uiview ",
@@ -221,24 +225,105 @@
     {
       "seq": 21,
       "role": "h",
+      "cmd": "uiview join",
+      "expect_result": "^OK uiview join: join dialog open=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview join: ",
+          "within_s": 10
+        }
+      ],
+      "note": "Join a Game (mock-up Main), prefilled from this machine's config"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the join view settle"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "screenshot ui-join",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-join\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "role": "h",
+      "cmd": "uiview escape",
+      "expect_result": "^OK uiview escape: join back view=Submenu join=False",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview escape: ",
+          "within_s": 10
+        }
+      ],
+      "note": "Escape on Join a Game = Back",
+      "seq": 24
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "uiview joinerr",
+      "expect_result": "^OK uiview joinerr: err='That isn't a valid port\\. Use a number from 1024 to 65535\\.' open=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview joinerr: ",
+          "within_s": 10
+        }
+      ],
+      "note": "Join a Game after Connect with address 203.0.113.5 and port 77: the error stays inside the open dialog"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the joinerr view settle"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "screenshot ui-joinerr",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-joinerr\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 28,
+      "role": "h",
       "cmd": "uiview lobby",
-      "expect_result": "^OK uiview lobby: ShowView\\(Lobby\\) server=False",
+      "expect_result": "^OK uiview lobby: fake host lobby, 8 players",
       "expect_log": [
         {
           "role": "h",
           "regex": "\\[TestDrive\\] uiview lobby: ",
           "within_s": 10
         }
-      ]
+      ],
+      "note": "DEV fill: host, new game, 8 players (7 rows + scrollbar), IP hidden, Change port greyed"
     },
     {
-      "seq": 22,
+      "seq": 29,
       "role": "h",
       "sleep_s": 2,
-      "note": "let the lobby view animate in"
+      "note": "let the lobby view settle"
     },
     {
-      "seq": 23,
+      "seq": 30,
       "role": "h",
       "cmd": "screenshot ui-lobby",
       "expect_result": "^OK screenshot queued",
@@ -251,7 +336,310 @@
       ]
     },
     {
-      "seq": 24,
+      "role": "h",
+      "cmd": "uiview lobbymany",
+      "expect_result": "^OK uiview lobbymany: fake host lobby, 12 players",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview lobbymany: ",
+          "within_s": 10
+        }
+      ],
+      "note": "12 players: scrollbar from player 9, one over-long name, the notice line in the right column",
+      "seq": 31
+    },
+    {
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the lobbymany view settle",
+      "seq": 32
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ui-lobbymany",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-lobbymany\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 33
+    },
+    {
+      "role": "h",
+      "cmd": "uiview thumb 1",
+      "expect_result": "^OK uiview thumb: scroll=4/4",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview thumb: ",
+          "within_s": 10
+        }
+      ],
+      "note": "the thumb-drag path, dragged to the bottom",
+      "seq": 34
+    },
+    {
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the lobbythumb view settle",
+      "seq": 35
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ui-lobbythumb",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-lobbythumb\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 36
+    },
+    {
+      "role": "h",
+      "cmd": "uiview page -1",
+      "expect_result": "^OK uiview page: scroll=0/4",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview page: ",
+          "within_s": 10
+        }
+      ],
+      "note": "the track-click path: a click above the thumb pages up",
+      "seq": 37
+    },
+    {
+      "role": "h",
+      "cmd": "uiview escape",
+      "expect_result": "^OK uiview escape: lobby: ignored view=Lobby",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview escape: ",
+          "within_s": 10
+        }
+      ],
+      "note": "Escape in the lobby itself does nothing",
+      "seq": 38
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "uiview lobbysaved",
+      "expect_result": "^OK uiview lobbysaved: fake saved-game lobby, 3 players",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview lobbysaved: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the lobbysaved view settle"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "screenshot ui-lobbysaved",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-lobbysaved\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "uiview lobbyclient",
+      "expect_result": "^OK uiview lobbyclient: fake joiner lobby, 5 players",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview lobbyclient: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 43,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the lobbyclient view settle"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "screenshot ui-lobbyclient",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-lobbyclient\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 45,
+      "role": "h",
+      "cmd": "uiview portpopup",
+      "expect_result": "^OK uiview portpopup: .*popup open=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview portpopup: ",
+          "within_s": 10
+        }
+      ],
+      "note": "DEV fill: host alone + the busy-port line (7777 -> 7778) + the Hosting port popup"
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the portpopup view settle"
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "cmd": "screenshot ui-portpopup",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-portpopup\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "role": "h",
+      "cmd": "uiview escape",
+      "expect_result": "^OK uiview escape: port popup cancel view=Lobby join=False popup=False",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview escape: ",
+          "within_s": 10
+        }
+      ],
+      "note": "Escape on the Hosting port popup = Cancel",
+      "seq": 48
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "cmd": "uiview connecting",
+      "expect_result": "^OK uiview connecting: fake connecting",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview connecting: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 50,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the connecting view settle"
+    },
+    {
+      "seq": 51,
+      "role": "h",
+      "cmd": "screenshot ui-connecting",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-connecting\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "role": "h",
+      "cmd": "uiview escape",
+      "expect_result": "^OK uiview escape: connecting cancel view=Submenu",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview escape: ",
+          "within_s": 10
+        }
+      ],
+      "note": "Escape on Connecting = Cancel",
+      "seq": 52
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "cmd": "uiview failed",
+      "expect_result": "^OK uiview failed: fake couldn't join",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview failed: ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 54,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the failed view settle"
+    },
+    {
+      "seq": 55,
+      "role": "h",
+      "cmd": "screenshot ui-failed",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-failed\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "role": "h",
+      "cmd": "uiview escape",
+      "expect_result": "^OK uiview escape: couldn't join back view=Submenu",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview escape: ",
+          "within_s": 10
+        }
+      ],
+      "note": "Escape on Couldn't join = Back",
+      "seq": 56
+    },
+    {
+      "seq": 57,
+      "role": "h",
+      "cmd": "uiview close",
+      "expect_result": "^OK uiview close: closed:"
+    },
+    {
+      "seq": 58,
       "role": "h",
       "cmd": "host",
       "expect_result": "^OK server started",
@@ -264,38 +652,46 @@
       ]
     },
     {
-      "seq": 25,
+      "seq": 59,
       "role": "h",
-      "cmd": "uiview lobby",
-      "expect_result": "^OK uiview lobby: ShowView\\(Lobby\\) server=True"
+      "cmd": "uiview lobbyreal",
+      "expect_result": "^OK uiview lobbyreal: real lobby server=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] uiview lobbyreal: ",
+          "within_s": 10
+        }
+      ],
+      "note": "the REAL host lobby, 1 player"
     },
     {
-      "seq": 26,
+      "seq": 60,
       "role": "h",
       "sleep_s": 2,
-      "note": "let the lobby roster refresh"
+      "note": "let the lobbyreal view settle"
     },
     {
-      "seq": 27,
+      "seq": 61,
       "role": "h",
-      "cmd": "screenshot ui-lobbyhost",
+      "cmd": "screenshot ui-lobbyreal",
       "expect_result": "^OK screenshot queued",
       "expect_log": [
         {
           "role": "h",
-          "regex": "\\[TestDrive\\] screenshot .*shot-ui-lobbyhost\\.png",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui-lobbyreal\\.png",
           "within_s": 10
         }
       ]
     },
     {
-      "seq": 28,
+      "seq": 62,
       "role": "h",
       "cmd": "uiview close",
       "expect_result": "^OK uiview close: closed:"
     },
     {
-      "seq": 29,
+      "seq": 63,
       "role": "both",
       "cmd": "mark TEST UISHOTS END",
       "expect_result": "OK MARK"

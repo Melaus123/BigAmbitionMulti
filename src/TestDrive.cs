@@ -197,15 +197,21 @@ namespace BigAmbitionsMP
             return n;
         }
 
-        // DEV lever 'uiview <start|load|options|newgame|confirm|close|mp|lobby>' (2026-09-28): opens the game's
+        // DEV lever 'uiview <start|load|options|newgame|confirm|close|mp|...>' (2026-09-28): opens the game's
         // OWN main-menu screens the way a click would (the button's own onClick), so real screenshots can give the
-        // native palette. mp/lobby = our current submenu / lobby window (private ShowView) as a before-picture.
-        // Runs on the main thread (Execute is called from Tick). No player-facing change.
+        // native palette. mp = our submenu (private ShowView).
+        // Lobby redesign (2026-09-28): join | joinerr | lobby (fake host, 8 players) | lobbysaved | lobbyclient | portpopup |
+        // connecting | failed | lobbyreal (the real lobby) = screenshot views; host | port <n> | joinaddr <addr> | cfg | leave |
+        // occupy <port|off> = the t-lobbyport levers (the lobby's own code paths: OnMpHostNew, the Hosting port popup's
+        // Save, Join a Game's Connect). Runs on the main thread (Execute is called from Tick). No player-facing change.
         private static string UiView(string arg)
         {
             try
             {
-                string which = (arg ?? "").Trim().ToLowerInvariant();
+                string full = (arg ?? "").Trim();
+                int sp0 = full.IndexOf(' ');
+                string which = (sp0 < 0 ? full : full.Substring(0, sp0)).ToLowerInvariant();
+                string rest = sp0 < 0 ? "" : full.Substring(sp0 + 1).Trim();
                 var mmc = InstanceBehavior<MainMenuController>.Instance;
                 if (mmc == null) return "ERR uiview: not at the main menu (no MainMenuController)";
                 var bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
@@ -266,12 +272,25 @@ namespace BigAmbitionsMP
                         UiViewCloseAll(mmc, loadGame, options, newGameGO);
                         res = UiViewMp("Submenu");
                         break;
-                    case "lobby":
+                    case "join": case "joinerr": case "lobby": case "lobbysaved": case "lobbyclient":
+                    case "portpopup": case "connecting": case "failed": case "lobbyreal":
+                    {
                         UiViewCloseAll(mmc, loadGame, options, newGameGO);
-                        res = UiViewMp("Lobby") + " server=" + MPServer.IsRunning;
+                        var ui = MPCanvasUI.Instance;
+                        if (ui == null) return "ERR uiview " + which + ": no MPCanvasUI";
+                        res = ui.DevUi(which == "lobbyreal" ? "real" : which, rest) + " server=" + MPServer.IsRunning;
                         break;
+                    }
+                    case "host": case "port": case "joinaddr": case "cfg": case "leave": case "occupy":
+                    case "lobbymany": case "thumb": case "page": case "escape": case "rawpeer":
+                    {
+                        var ui = MPCanvasUI.Instance;
+                        if (ui == null) return "ERR uiview " + which + ": no MPCanvasUI";
+                        res = ui.DevUi(which, rest);
+                        break;
+                    }
                     default:
-                        return "ERR usage: uiview start|load|options|newgame|confirm|close|mp|lobby";
+                        return "ERR usage: uiview start|load|options|newgame|confirm|close|mp|join|joinerr|lobby|lobbysaved|lobbyclient|portpopup|connecting|failed|lobbyreal|host|port <n>|joinaddr <addr>|cfg|leave|occupy <port|a-b|off>|lobbymany|thumb <0..1>|page <-1|1>|escape|rawpeer <port|off>";
                 }
                 Plugin.Logger.LogInfo("[TestDrive] uiview " + which + ": " + res);
                 return "OK uiview " + which + ": " + res;
@@ -299,6 +318,7 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { sb.Append(" openedErr=" + ex.Message); }
             try { if (mmc.startView != null && !mmc.startView.activeSelf) mmc.startView.SetActive(true); } catch { }
+            try { MPCanvasUI.Instance?.DevUi("off", ""); } catch { }   // lobby redesign: fake lobby states + join dialog off
             sb.Append(" mp->" + UiViewMp("Main"));
             return sb.ToString();
         }

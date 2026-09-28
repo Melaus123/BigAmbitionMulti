@@ -4454,39 +4454,63 @@ namespace BigAmbitionsMP
         private Button? _menuTemplate;       // a real menu button, for cloning native-styled buttons into our windows
         private Sprite? _panelSprite;        // the menu button's rounded sprite, reused for rounded window backgrounds
 
-        // ── Connect (Join) dialog ───────────────────────────────────────────────
-        private GameObject? _joinDialog;
-        private TextMeshProUGUI? _joinIpLbl, _joinPortLbl;
-        private RectTransform? _joinIpRT, _joinPortRT;
-        private RectTransform? _joinConnectRT, _joinBackRT;
-        private int    _joinFocus;                       // 0=none, 1=ip, 2=port
+        // ── Join a Game dialog (redesign, user-approved 2026-09-28) ───────────────
+        private GameObject? _joinDialog;                 // full-screen transparent blocker holding the card
+        private LCard? _joinCard;
+        private LField? _joinIpF, _joinPortF;
+        private LBtn? _joinConnectB, _joinBackB;
+        private TextMeshProUGUI? _joinErrLbl;
+        private int    _joinFocus;                       // 0=none, 1=address, 2=port
         private string _joinIp   = "127.0.0.1";
         private string _joinPort = "7777";
+        private string _joinErr  = "";                   // validation error shown INSIDE the dialog (it stays open)
+        private int    _joinBad;                         // 0 none, 1 address box red, 2 port box red
+        private bool   _joinDirty, _joinCaretOn, _joinTickErrLogged;
 
-        // ── Lobby window ─────────────────────────────────────────────────────────
-        private GameObject? _lobbyWindow;
-        private TextMeshProUGUI? _lwConnInfo;
-        private TextMeshProUGUI[] _lwRoster = new TextMeshProUGUI[6];
-        private GameObject? _lwDiffEasy, _lwDiffNormal, _lwDiffHard, _lwCustomize, _lwStart;
-        private TMP_Text?   _lwStartLabel;   // sweep item 2: live start-state label ("Start Game"/"Starting...")
-        private RectTransform? _rtDiffEasy, _rtDiffNormal, _rtDiffHard, _rtCustomize, _rtLwStart, _rtLwLeave;
-        // Per-player roster columns.  Cash = host-dictated (host edits any row);
-        // Age = self-edited (each player edits only their own row).  This is the
-        // ONLY starting-cash UI now — the old base field + customize-page cash are
-        // gone (the difficulty preset still provides each row's default cash).
-        private TextMeshProUGUI[] _lwRowCashLbl = new TextMeshProUGUI[6];
-        private RectTransform?[]  _rtLwRowCash  = new RectTransform?[6];
-        private string[]          _lwRowCash    = new string[6];
-        private int               _lwRowCashFocus = -1;
-        private TextMeshProUGUI[] _lwRowAgeLbl  = new TextMeshProUGUI[6];
-        private RectTransform?[]  _rtLwRowAge   = new RectTransform?[6];
-        private RectTransform?[]  _rtLwKick     = new RectTransform?[6];   // host kick [X] per roster row
-        private string[]          _lwRowAge     = new string[6];
-        private int               _lwRowAgeFocus = -1;
-        private TextMeshProUGUI?  _lwRowCashHdr; private TextMeshProUGUI? _lwRowAgeHdr; private TextMeshProUGUI? _lwDiffHdr;
-        private GameObject? _lwShowIp; private RectTransform? _rtShowIp;
-        private GameObject? _lwInvite; private RectTransform? _rtInvite;
-        private bool _showIp;   // IP hidden by default (streamer-safe); toggle to reveal
+        // ── Lobby window (redesign, user-approved 2026-09-28: look v3, wording, port option A) ──
+        // Layout v4 (user-approved 2026-09-28): the player list runs from under the column header down to the footer
+        // divider; the row count is DERIVED from that space at the 56-unit row pitch -> 8 rows, the scrollbar from player 9.
+        // Fold 2 (manager's screenshot check 2026-09-28): the 8 rows FILL that space - row 8 ends one list margin (the gap
+        // between the column header and row 1) above the divider; the row HEIGHT grows, the 6-unit gap stays.
+        private const float LW_HDR_Y = 64f, LW_HDR_H = 15f, LW_LIST_Y = 87f, LW_DIVIDER_Y = 575f, LW_ROW_GAP = 6f;
+        private const int   LW_SLOTS = 8;                                                    // player rows visible without scrolling
+        private const float LW_LIST_MARGIN = LW_LIST_Y - (LW_HDR_Y + LW_HDR_H);              // 8: over row 1 = under row 8
+        private const float LW_LIST_H = LW_DIVIDER_Y - LW_LIST_MARGIN - LW_LIST_Y;           // 480: row 1 top .. row 8 bottom
+        private const float LW_ROW_PITCH = (LW_LIST_H + LW_ROW_GAP) / LW_SLOTS;              // 60.75
+        private const float LW_ROW_H = LW_ROW_PITCH - LW_ROW_GAP;                           // 54.75
+        private const float LW_ROW_CTL_Y = (LW_ROW_H - 30f) / 2f;                            // a 30-high box / button, centred in its row
+        // Couldn't join: shown for any disconnect reason that is not one of the mod's own sentences (raw transport names
+        // like "Timeout" are logged, never shown). ONE constant: the wording is awaiting the user.
+        private const string JoinLostText = "Lost connection to the host.";
+        private GameObject? _lobbyWindow;                // full-screen transparent blocker holding the cards below
+        private LCard? _lwMain, _lwConn, _lwFail, _lwPortCard;
+        private readonly LRow?[] _lwRows = new LRow?[LW_SLOTS];
+        private RectTransform? _rtLwList, _lwThumb, _rtLwSettings, _rtLwInvite, _rtLwWaiting, _rtLwSpin;
+        private GameObject? _lwTrack;
+        private TextMeshProUGUI? _lwHdrCash, _lwHdrAge, _lwNotice, _lwDiffLbl, _lwSavedLbl, _lwDirectLbl, _lwAddrLbl, _lwHintLbl, _lwWaitLbl, _lwConnLbl, _lwFailLbl, _ppErrLbl;
+        private LBtn? _lwMoreB, _lwSaveSetB, _lwDiffEasyB, _lwDiffNormalB, _lwDiffHardB, _lwInviteB, _lwShowIpB, _lwPortB, _lwLeaveB, _lwStartB;
+        private LBtn? _lwConnCancelB, _lwFailBackB, _lwFailRetryB, _ppCancelB, _ppSaveB;
+        private LField? _ppField;
+        private int    _lwScroll, _lwCard, _lwLayoutKey = -1, _lwThumbKey = -1;
+        // Starting cash = host-dictated (host edits any row); age = self-edited (own row only). These hold the
+        // PLAYER index (not the row slot) of the focused box, -1 = none; _lwEditBuf is that box's typed digits.
+        private int    _lwRowCashFocus = -1, _lwRowAgeFocus = -1;
+        private string _lwEditBuf = "";
+        private bool   _lwCaretOn, _lwCaretDirty, _lwPortOpen, _ppFocus, _lwHostFailed, _lwRefreshErrLogged, _lwTickErrLogged;
+        private string _ppText = "", _ppErr = "", _lwFailShown = "\u0001", _lwSteamAddrKey = "", _lwSteamAddrShown = "";
+        // Review item 14: the focused cash / age box follows the PLAYER (by id), not the row; "" = none.
+        private string _lwCashFocusId = "", _lwAgeFocusId = "", _lwRawReasonLogged = "\u0001";
+        // Review item 13: scrollbar track click pages, thumb drag scrolls. Review item 15: the size the lobby was fitted to.
+        private RectTransform? _rtLwTrackHit;
+        private bool  _lwThumbDrag;
+        private float _lwDragStartY, _lwFitScale;
+        // Fold 2: the right column's fitted layout (LwFitRightColumn) and the texts / layout it was measured for.
+        private float  _lwAddrY = 46f, _lwAddrFallbackH = 18f, _lwInviteTop = 184f;
+        private bool   _lwSteamOnly, _lwFitErrLogged;
+        private int    _lwRcLayout = -1;
+        private string _lwRcAddr = "", _lwRcHint = "", _lwRcWait = "";
+        private int   _lwDragStartScroll, _lwFitW, _lwFitH;
+        private bool _showIp;   // IP hidden by default (streamer-safe USER RULE): reset on every lobby open, never saved
 
         // ── "Host Saved Game" save picker — grouped by playthrough, scrollable ──
         private GameObject? _savePicker;
@@ -4510,7 +4534,6 @@ namespace BigAmbitionsMP
         private sealed class SpHit { public readonly RectTransform Rt; public readonly string Key; public readonly string Pid; public SpHit(RectTransform rt, string key, string pid = "") { Rt = rt; Key = key; Pid = pid; } }
         private readonly System.Collections.Generic.List<SpHit> _spHeaderHits = new();
         private readonly System.Collections.Generic.List<SpHit> _spVarHits   = new();
-        private TextMeshProUGUI? _lwLoadInfo;   // "Resuming save: …" line in the lobby (load mode)
 
         private static readonly Color MpPurple = new Color(0.64f, 0.36f, 0.95f, 1f);   // brighter, more saturated violet
 
@@ -4629,7 +4652,7 @@ namespace BigAmbitionsMP
             if (mmc == null)   // not on the menu → forget the (now-destroyed) UI so we re-inject next visit
             {
                 _mpMenuInjected = false; _mpButton = null; _lobbyText = null; _view = MpView.Main;
-                _origMenuButtons.Clear(); _mpSubmenu.Clear(); _mpLobby.Clear(); _lwRowCashFocus = -1; _lwRowAgeFocus = -1;
+                _origMenuButtons.Clear(); _mpSubmenu.Clear(); _mpLobby.Clear(); LwClearFocus();
                 if (_joinDialog != null)  { try { _joinDialog.SetActive(false);  } catch { } }
                 if (_lobbyWindow != null) { try { _lobbyWindow.SetActive(false); } catch { } }
                 if (_savePicker != null)  { try { _savePicker.SetActive(false);  } catch { } }
@@ -4805,6 +4828,7 @@ namespace BigAmbitionsMP
 
         private void ShowView(MpView v)
         {
+            var prevView = _view;
             _view = v;
             bool main = v == MpView.Main, sub = v == MpView.Submenu, lob = v == MpView.Lobby;
             foreach (var o in _origMenuButtons) { try { o.SetActive(main); } catch { } }
@@ -4824,6 +4848,17 @@ namespace BigAmbitionsMP
                 catch { }
             }
             if (lob && _lobbyWindow == null) BuildLobbyWindow();
+            if (lob && _lobbyWindow == null)
+            {   // Review item 3: the lobby window could not be built (logged there, blocker torn down). Never strand the player
+                // behind nothing: end the session this view belonged to and go back to the multiplayer submenu.
+                Plugin.Logger.LogWarning("[MenuUI] lobby window unavailable - leaving the session, back to the multiplayer submenu.");
+                try { if (MPServer.IsRunning) OnStop(); else if (MPClient.IsConnected || MPClient.IsConnecting) OnDisc(); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] lobby fallback leave: {ex.Message}"); }
+                ShowView(MpView.Submenu);
+                return;
+            }
+            if (lob && prevView != MpView.Lobby) OnLobbyOpening();   // lobby redesign 2026-09-28: IP hidden again every open
+            if (lob) ShowJoinDialog(false);
             if (_lobbyWindow != null) { try { _lobbyWindow.SetActive(lob); } catch { } }
             if (lob) RefreshLobbyWindow();
             // Round-91b (user-placed): the MP mod's version, screen bottom-left just ABOVE the game's
@@ -5478,108 +5513,549 @@ namespace BigAmbitionsMP
 
         private void OnSpBack() { ShowSavePicker(false); ShowView(MpView.Submenu); }
 
+        // ── Join a Game + lobby — REDESIGN (user-approved 2026-09-28: look v3, wording, port option A) ─────────
+        // Approved visual spec: the mock-up generator lobbyart/gen3.py (1280x720). Every size below is in MOCK-UP units;
+        // the kit multiplies by LS = 1.5 (mock-up -> 1080p canvas units), so the numbers read 1:1 against the mock-up.
+        // Style (from the game's own screens): cards with a light title bar, slate body, 4px corners, soft shadow.
+        // NO dimming behind (the game's own confirm popup does not dim), but every window sits on a full-screen
+        // TRANSPARENT blocker, so clicks never reach the menu behind. Clicks stay on the hand-rolled RectHit dispatch
+        // (the one and only click path: cloned buttons get a no-op onClick), and every control is hit-tested only
+        // while activeInHierarchy (LHit), so a hidden control can never swallow a click (the design-4b trap).
+
+        private const float LS = 1.5f;
+        private static Color LC(int rgb, float a = 1f) => new Color(((rgb >> 16) & 255) / 255f, ((rgb >> 8) & 255) / 255f, (rgb & 255) / 255f, a);
+        private static readonly Color L_BAR = LC(0xC6CFD6), L_BARTXT = LC(0x0D1616), L_BARSUB = LC(0x2B3438);
+        // Body alpha 1.0, not the mock-up's 0.97: the game renders in LINEAR colour space, where a 3% leak shows the menu (and,
+        // under the Hosting port popup, the lobby's own text) clearly through the card (screenshot check 2026-09-28).
+        private static readonly Color L_BODY = new Color(60f / 255f, 69f / 255f, 79f / 255f, 1f);
+        private static readonly Color L_SECT = new Color(35f / 255f, 41f / 255f, 48f / 255f, 0.55f), L_SECTLINE = new Color(1f, 1f, 1f, 0.14f);
+        private static readonly Color L_ROW = new Color(81f / 255f, 90f / 255f, 93f / 255f, 0.9f), L_ROWLINE = new Color(1f, 1f, 1f, 0.10f);
+        private static readonly Color L_HDR = LC(0xD7DDE2), L_MUTED = LC(0xCDD4DA), L_PARA = LC(0xE1E6EA);
+        private static readonly Color L_FIELD = LC(0x2F363D), L_FIELDLINE = new Color(0f, 0f, 0f, 0.35f), L_FIELDFOC = new Color(1f, 1f, 1f, 0.45f), L_BAD = LC(0xF38B89);
+        private static readonly Color L_TRACK = new Color(1f, 1f, 1f, 0.12f), L_THUMB = LC(0xA7A7A8), L_DIVIDER = new Color(1f, 1f, 1f, 0.18f);
+        private static readonly Color L_NOTICE = LC(0xF6C177), L_ERR = LC(0xFFB3AA), L_STAR = LC(0xF2C14E), L_DISTXT = LC(0x8D959C);
+        // Button kinds: 0 grey-blue (the game's menu button), 1 primary blue, 2 Steam blue, 3 negative red, 4 disabled.
+        private static readonly Color[] L_BTN = { LC(0x6F7D88), LC(0x3A5C8F), LC(0x3C8ED3), LC(0xE2615E), LC(0x4A525A) };
+        private const string L_PORT_ERR = "That isn't a valid port. Use a number from 1024 to 65535.";
+        private const string L_ONLY_ALONE = "Only possible before anyone joins.";
+
+        private sealed class LCard
+        {
+            public readonly GameObject go; public readonly RectTransform rt; public readonly TextMeshProUGUI title, sub;
+            public LCard(GameObject g, TextMeshProUGUI t, TextMeshProUGUI s) { go = g; rt = g.GetComponent<RectTransform>(); title = t; sub = s; }
+        }
+        private sealed class LBtn
+        {
+            public readonly GameObject go; public readonly RectTransform rt; public readonly Image? img, line; public readonly TMP_Text? lbl; public int kind = -1;
+            public LBtn(GameObject g, Image? i, Image? l, TMP_Text? t) { go = g; rt = g.GetComponent<RectTransform>(); img = i; line = l; lbl = t; }
+        }
+        private sealed class LField
+        {
+            public readonly RectTransform rt; public readonly Image line; public readonly TextMeshProUGUI lbl; public int state = -1;
+            public LField(RectTransform r, Image l, TextMeshProUGUI t) { rt = r; line = l; lbl = t; }
+        }
+        private sealed class LRow
+        {
+            public GameObject go = null!; public TextMeshProUGUI star = null!, name = null!, ageTxt = null!;
+            public LField cash = null!, age = null!; public LBtn kick = null!;
+        }
+
+        // ── kit: sprites (generated once, white, tinted by Image.color) ──
+        private static Sprite? _lFill, _lRing, _lShadow;
+        private static readonly Sprite?[] _lIcons = new Sprite?[4];
+
+        /// <summary>40px white rounded rect (radius 10, 9-slice border 10). Image.pixelsPerUnitMultiplier = 10/radius picks the
+        /// on-screen corner radius; ring = only a 2.5px outline (1 unit thick at the 4-unit window radius).</summary>
+        private static Sprite LRoundSprite(bool ring)
+        {
+            var cached = ring ? _lRing : _lFill;
+            if (cached != null && IsAlive(cached)) return cached;
+            const int S = 40; const float R = 10f, T = 2.5f, H = S / 2f;
+            var px = new Color32[S * S];
+            for (int y = 0; y < S; y++)
+                for (int x = 0; x < S; x++)
+                {
+                    float qx = Mathf.Abs(x + 0.5f - H) - (H - R), qy = Mathf.Abs(y + 0.5f - H) - (H - R);
+                    float sd = new Vector2(Mathf.Max(qx, 0f), Mathf.Max(qy, 0f)).magnitude + Mathf.Min(Mathf.Max(qx, qy), 0f) - R;
+                    float a = Mathf.Clamp01(0.5f - sd);
+                    if (ring) a -= Mathf.Clamp01(0.5f - (sd + T));
+                    px[y * S + x] = new Color32(255, 255, 255, (byte)(Mathf.Clamp01(a) * 255f));
+                }
+            var tex = new Texture2D(S, S, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp, hideFlags = HideFlags.HideAndDontSave };
+            tex.SetPixels32(px); tex.Apply();
+            var sp = Sprite.Create(tex, new Rect(0, 0, S, S), new Vector2(0.5f, 0.5f), 100f, 0, SpriteMeshType.FullRect, new Vector4(R, R, R, R));
+            sp.hideFlags = HideFlags.HideAndDontSave;
+            if (ring) _lRing = sp; else _lFill = sp;
+            return sp;
+        }
+
+        /// <summary>Soft window shadow: a 6px-rounded core with a 24px quadratic falloff (9-slice, drawn 1:1).</summary>
+        private static Sprite LShadowSprite()
+        {
+            if (_lShadow != null && IsAlive(_lShadow)) return _lShadow;
+            const int S = 96; const float F = 24f, R = 6f, H = S / 2f;
+            var px = new Color32[S * S];
+            for (int y = 0; y < S; y++)
+                for (int x = 0; x < S; x++)
+                {
+                    float qx = Mathf.Abs(x + 0.5f - H) - (H - F - R), qy = Mathf.Abs(y + 0.5f - H) - (H - F - R);
+                    float sd = new Vector2(Mathf.Max(qx, 0f), Mathf.Max(qy, 0f)).magnitude + Mathf.Min(Mathf.Max(qx, qy), 0f) - R;
+                    float k = sd <= 0f ? 1f : Mathf.Clamp01(1f - sd / F);
+                    px[y * S + x] = new Color32(255, 255, 255, (byte)(k * k * 255f));
+                }
+            var tex = new Texture2D(S, S, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp, hideFlags = HideFlags.HideAndDontSave };
+            tex.SetPixels32(px); tex.Apply();
+            _lShadow = Sprite.Create(tex, new Rect(0, 0, S, S), new Vector2(0.5f, 0.5f), 100f, 0, SpriteMeshType.FullRect, new Vector4(36f, 36f, 36f, 36f));
+            _lShadow.hideFlags = HideFlags.HideAndDontSave;
+            return _lShadow;
+        }
+
+        private static Vector2[] LArc(float cx, float cy, float r, float a0, float a1, int n)
+        {
+            var pts = new Vector2[n + 1];
+            for (int i = 0; i <= n; i++) { float t = a0 + (a1 - a0) * i / n; pts[i] = new Vector2(cx + r * Mathf.Cos(t), cy + r * Mathf.Sin(t)); }
+            return pts;
+        }
+
+        /// <summary>The mock-up's small white line icons (24-unit SVG viewBox), rasterised once: 0 people, 1 sliders, 2 mail,
+        /// 3 the connecting spinner arc.</summary>
+        private static Sprite LIconSprite(int which)
+        {
+            var c = _lIcons[which];
+            if (c != null && IsAlive(c)) return c;
+            var polys = new List<Vector2[]>();
+            float hw = 1f;
+            const float PI = Mathf.PI;
+            switch (which)
+            {
+                case 0:
+                    polys.Add(LArc(9f, 8f, 3.5f, 0f, 2f * PI, 24)); polys.Add(LArc(9f, 20f, 6.5f, PI, 2f * PI, 16));
+                    polys.Add(LArc(17f, 9f, 2.8f, 0f, 2f * PI, 20)); polys.Add(LArc(16f, 20f, 5.6f, 1.5f * PI, 2f * PI, 10));
+                    break;
+                case 1:
+                    polys.Add(new[] { new Vector2(4f, 6f), new Vector2(14f, 6f) });   polys.Add(new[] { new Vector2(18f, 6f), new Vector2(20f, 6f) });
+                    polys.Add(new[] { new Vector2(4f, 12f), new Vector2(8f, 12f) });  polys.Add(new[] { new Vector2(12f, 12f), new Vector2(20f, 12f) });
+                    polys.Add(new[] { new Vector2(4f, 18f), new Vector2(16f, 18f) });
+                    polys.Add(LArc(16f, 6f, 2f, 0f, 2f * PI, 16)); polys.Add(LArc(10f, 12f, 2f, 0f, 2f * PI, 16)); polys.Add(LArc(18f, 18f, 2f, 0f, 2f * PI, 16));
+                    break;
+                case 2:
+                    polys.Add(new[] { new Vector2(3f, 5f), new Vector2(21f, 5f), new Vector2(21f, 19f), new Vector2(3f, 19f), new Vector2(3f, 5f) });
+                    polys.Add(new[] { new Vector2(3f, 7f), new Vector2(12f, 13f), new Vector2(21f, 7f) });
+                    break;
+                default:
+                    polys.Add(LArc(12f, 12f, 9f, 0f, 1.5f * PI, 36)); hw = 1.25f;
+                    break;
+            }
+            const int S = 48; const float K = S / 24f;
+            var px = new Color32[S * S];
+            for (int y = 0; y < S; y++)
+                for (int x = 0; x < S; x++)
+                {
+                    var p = new Vector2((x + 0.5f) / K, 24f - (y + 0.5f) / K);
+                    float d = 99f;
+                    foreach (var poly in polys)
+                        for (int i = 0; i + 1 < poly.Length; i++) d = Mathf.Min(d, SegDist(p, poly[i], poly[i + 1]));
+                    px[y * S + x] = new Color32(255, 255, 255, (byte)(Mathf.Clamp01((hw - d) * K + 0.5f) * 255f));
+                }
+            var tex = new Texture2D(S, S, TextureFormat.RGBA32, false) { filterMode = FilterMode.Bilinear, wrapMode = TextureWrapMode.Clamp, hideFlags = HideFlags.HideAndDontSave };
+            tex.SetPixels32(px); tex.Apply();
+            var sp = Sprite.Create(tex, new Rect(0, 0, S, S), new Vector2(0.5f, 0.5f), 100f);
+            sp.hideFlags = HideFlags.HideAndDontSave;
+            _lIcons[which] = sp;
+            return sp;
+        }
+
+        // ── kit: building blocks (mock-up units in, canvas units out) ──
+        private static void LPos(RectTransform rt, float x, float y, float w, float h) => SetAnchored(rt, x * LS, -y * LS, w * LS, h * LS);
+
+        private static void LStretch(RectTransform rt, float l, float b, float r, float t)
+        {
+            rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one; rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.offsetMin = new Vector2(l, b); rt.offsetMax = new Vector2(-r, -t);
+        }
+
+        /// <summary>A non-raycasting image; radius (canvas units) picks the rounded sprite's corner size, 0 = as the sprite is.</summary>
+        private static Image LImg(Transform parent, string name, Color c, Sprite? sp, float radius)
+        {
+            var go = MakeGO(name, parent);
+            var img = go.AddComponent<Image>();
+            img.color = c; img.raycastTarget = false;
+            if (sp != null)
+            {
+                img.sprite = sp; img.type = Image.Type.Sliced;
+                if (radius > 0f) img.pixelsPerUnitMultiplier = 10f / radius;
+            }
+            return img;
+        }
+
+        private TextMeshProUGUI LText(Transform p, string text, float size, Color c, float x, float y, float w, float h,
+            TextAlignmentOptions al, bool bold = false, bool caps = false, float spacing = 0f, bool wrap = false)
+        {
+            var t = MakeLabel(p, text, 10, c, x * LS, -y * LS, w * LS, h * LS, al);
+            ApplyFont(t);
+            t.fontSize = size * LS;
+            t.fontStyle = (bold ? FontStyles.Bold : FontStyles.Normal) | (caps ? FontStyles.UpperCase : FontStyles.Normal);
+            t.characterSpacing = spacing;
+            t.textWrappingMode = wrap ? TextWrappingModes.Normal : TextWrappingModes.NoWrap;
+            if (wrap) t.overflowMode = TextOverflowModes.Overflow;   // never cut
+            t.raycastTarget = false;
+            return t;
+        }
+
+        /// <summary>The window root: a full-screen TRANSPARENT image. No dimming, but it swallows every click behind it.</summary>
+        private GameObject LMakeRoot(string name)
+        {
+            var go = MakeGO(name, _canvasGO.transform);
+            LStretch(go.GetComponent<RectTransform>(), 0f, 0f, 0f, 0f);
+            go.AddComponent<Image>().color = new Color(0f, 0f, 0f, 0f);
+            return go;
+        }
+
+        /// <summary>A card window like the game's own: soft shadow, slate body, light title bar with a dark bold UPPERCASE
+        /// letter-spaced title and a right-aligned subtitle. Centred; children are placed from its top-left.</summary>
+        private LCard LMakeCard(Transform root, string name, string title, float w, float h)
+        {
+            var go = MakeGO(name, root);
+            var rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.sizeDelta = new Vector2(w * LS, h * LS); rt.anchoredPosition = Vector2.zero;
+            var sh = LImg(go.transform, "Shadow", new Color(0f, 0f, 0f, 0.45f), LShadowSprite(), 0f);
+            sh.pixelsPerUnitMultiplier = 1f;
+            LStretch(sh.rectTransform, -24f, -30f, -24f, -18f);
+            LStretch(LImg(go.transform, "Body", L_BODY, LRoundSprite(false), 4f).rectTransform, 0f, 0f, 0f, 0f);
+            var bar = LImg(go.transform, "Bar", L_BAR, LRoundSprite(false), 4f).rectTransform;
+            bar.anchorMin = new Vector2(0f, 1f); bar.anchorMax = Vector2.one; bar.pivot = new Vector2(0.5f, 1f);
+            bar.sizeDelta = new Vector2(0f, 44f * LS); bar.anchoredPosition = Vector2.zero;
+            var low = LImg(bar, "Low", L_BAR, null, 0f).rectTransform;   // squares the bar's bottom corners
+            low.anchorMin = Vector2.zero; low.anchorMax = new Vector2(1f, 0f); low.pivot = new Vector2(0.5f, 0f);
+            low.sizeDelta = new Vector2(0f, 8f); low.anchoredPosition = Vector2.zero;
+            var t = LText(go.transform, title, 17f, L_BARTXT, 18f, 0f, w - 36f, 44f, TextAlignmentOptions.Left, true, true, 8f);
+            var s = LText(go.transform, "", 14f, L_BARSUB, 18f, 0f, w - 36f, 44f, TextAlignmentOptions.Right);
+            return new LCard(go, t, s);
+        }
+
+        /// <summary>A section box: dark translucent fill, 1px white-14% border, small white icon + UPPERCASE bold title.
+        /// The caller places it with LPos.</summary>
+        private RectTransform LSection(Transform p, string name, int icon, string title, float rowH)
+        {
+            var box = LImg(p, name, L_SECT, LRoundSprite(false), 4f);
+            LStretch(LImg(box.transform, "Line", L_SECTLINE, LRoundSprite(true), 4f).rectTransform, 0f, 0f, 0f, 0f);
+            var ic = LImg(box.transform, "Icon", Color.white, LIconSprite(icon), 0f);
+            ic.type = Image.Type.Simple;
+            LPos(ic.rectTransform, 16f, 14f + (rowH - 18f) / 2f, 18f, 18f);
+            LText(box.transform, title, 15f, C_WHITE, 44f, 14f, 250f, rowH, TextAlignmentOptions.Left, true, true, 7f);
+            return box.rectTransform;
+        }
+
+        private static void LNoClick() { }
+
+        /// <summary>A clone of the game's menu button (its font, its UPPERCASE label, its Button) recoloured to one of the
+        /// approved kinds. The clone's own onClick is a no-op: the window tick's RectHit is the one click path.</summary>
+        private LBtn LButton(Transform p, string name, string label, float x, float y, float w, float h, int kind, float font)
+        {
+            GameObject? go = null;
+            try { go = CloneButtonInto(p, name, label, LNoClick, x * LS, -y * LS, w * LS, h * LS); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] lobby button '{label}': {ex.Message}"); }
+            if (go == null)
+            {   // no menu template captured yet: a plain button of the same look (still RectHit-dispatched)
+                go = MakeGO(name, p);
+                SetAnchored(go.GetComponent<RectTransform>(), x * LS, -y * LS, w * LS, h * LS);
+                go.AddComponent<Image>();
+                MakeLabel(go.transform, label, 10, C_WHITE, 0f, 0f, w * LS, h * LS, TextAlignmentOptions.Center);
+            }
+            Image? img = null;
+            try
+            {
+                var btn = go.GetComponent<Button>();
+                if (btn != null)
+                {
+                    img = btn.targetGraphic as Image;
+                    btn.transition = Selectable.Transition.ColorTint;   // our colour is the Image colour; hover/press only darken it
+                    var cb = ColorBlock.defaultColorBlock;
+                    cb.normalColor = Color.white; cb.selectedColor = Color.white; cb.disabledColor = Color.white;
+                    cb.highlightedColor = new Color(0.90f, 0.90f, 0.90f, 1f); cb.pressedColor = new Color(0.78f, 0.78f, 0.78f, 1f);
+                    cb.colorMultiplier = 1f; cb.fadeDuration = 0.06f;
+                    btn.colors = cb;
+                }
+                if (img == null) img = go.GetComponent<Image>();
+                var an = go.GetComponent<Animator>(); if (an != null) an.enabled = false;
+                if (img != null) { img.sprite = LRoundSprite(false); img.type = Image.Type.Sliced; img.pixelsPerUnitMultiplier = 10f / 3f; }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] lobby button '{label}' style: {ex.Message}"); }
+            var line = LImg(go.transform, "Line", Color.white, LRoundSprite(true), 3f);
+            LStretch(line.rectTransform, 0f, 0f, 0f, 0f);
+            line.transform.SetAsFirstSibling();
+            var lbl = go.GetComponentInChildren<TMP_Text>(true);
+            if (lbl != null)
+            {
+                ApplyFont(lbl);
+                lbl.enableAutoSizing = false; lbl.fontSize = font * LS;
+                lbl.fontStyle = FontStyles.Bold | FontStyles.UpperCase; lbl.characterSpacing = 3f;
+                lbl.textWrappingMode = TextWrappingModes.NoWrap; lbl.alignment = TextAlignmentOptions.Center; lbl.color = Color.white;
+                var lrt = lbl.rectTransform;
+                lrt.anchorMin = Vector2.zero; lrt.anchorMax = Vector2.one; lrt.offsetMin = new Vector2(4f, 0f); lrt.offsetMax = new Vector2(-4f, 0f);
+            }
+            var b = new LBtn(go, img, line, lbl);
+            LSetKind(b, kind);
+            return b;
+        }
+
+        private static void LSetKind(LBtn? b, int kind)
+        {
+            if (b == null || b.kind == kind) return;
+            b.kind = kind;
+            try
+            {
+                if (b.img != null) b.img.color = L_BTN[Mathf.Clamp(kind, 0, 4)];
+                if (b.line != null) b.line.color = new Color(1f, 1f, 1f, kind == 4 ? 0.10f : kind == 0 ? 0.28f : 0.22f);
+                if (b.lbl != null) b.lbl.color = kind == 4 ? L_DISTXT : Color.white;
+            }
+            catch { }
+        }
+
+        private LField LMakeField(Transform p, string name, float x, float y, float w, float h)
+        {
+            var go = MakeGO(name, p);
+            var rt = go.GetComponent<RectTransform>();
+            LPos(rt, x, y, w, h);
+            var line = go.AddComponent<Image>();
+            line.sprite = LRoundSprite(false); line.type = Image.Type.Sliced; line.pixelsPerUnitMultiplier = 10f / 3f;
+            line.color = L_FIELDLINE; line.raycastTarget = false;
+            LStretch(LImg(go.transform, "Fill", L_FIELD, LRoundSprite(false), 3f).rectTransform, 1f, 1f, 1f, 1f);
+            var lbl = LText(go.transform, "", 15f, C_WHITE, 10f, 0f, w - 20f, h, TextAlignmentOptions.Left);
+            lbl.overflowMode = TextOverflowModes.Ellipsis;   // review item 12: never past the box
+            try { go.AddComponent<RectMask2D>(); } catch { }   // the box being typed in scrolls its text: the head is clipped here
+            return new LField(rt, line, lbl);
+        }
+
+        /// <summary>Review item 12: a box's text stays inside the box. Not typing: ellipsized. Typing: when the text is wider
+        /// than the box it is right-aligned so the end (and the caret) stays in view and the start is clipped by the box's
+        /// RectMask2D. Runs only when the text changes (typing / the 2 Hz caret), never per frame.</summary>
+        private static void LFieldText(LField? f, string s, bool typing)
+        {
+            if (f == null || f.lbl.text == s) return;
+            var t = f.lbl;
+            t.text = s;
+            try
+            {
+                var om = typing ? TextOverflowModes.Overflow : TextOverflowModes.Ellipsis;
+                var al = TextAlignmentOptions.Left;
+                if (typing && t.GetPreferredValues(s).x > t.rectTransform.rect.width) al = TextAlignmentOptions.Right;
+                if (t.overflowMode != om) t.overflowMode = om;
+                if (t.alignment != al) t.alignment = al;
+            }
+            catch { }
+        }
+
+        /// <summary>Review item 4: after our window used Escape, Unity's legacy input reads no keys for the rest of this frame.
+        /// The game reads Escape through its own PlayerAction.Cancel (new Input System), which this does NOT reset; that is
+        /// harmless today because MainMenuController.Update reads no Cancel and no vanilla window that does sits under ours.</summary>
+        private static void ConsumeEscape() { try { Input.ResetInputAxes(); } catch { } }
+
+        /// <summary>Border colour: red when invalid, light while focused, dark otherwise. Changes only on a state change.</summary>
+        private static void LFieldState(LField? f, bool bad, bool focus)
+        {
+            if (f == null) return;
+            int st = bad ? 2 : focus ? 1 : 0;
+            if (f.state == st) return;
+            f.state = st;
+            try { f.line.color = bad ? L_BAD : focus ? L_FIELDFOC : L_FIELDLINE; } catch { }
+        }
+
+        private static bool LHit(LBtn? b, Vector2 mp) => b != null && b.go.activeInHierarchy && RectHit(b.rt, mp);
+        private static bool LHitF(LField? f, Vector2 mp) => f != null && f.rt.gameObject.activeInHierarchy && RectHit(f.rt, mp);
+        private static void LShow(LBtn? b, bool on) { if (b != null && b.go.activeSelf != on) b.go.SetActive(on); }
+        private static void LShowGO(GameObject? g, bool on) { if (g != null && g.activeSelf != on) g.SetActive(on); }
+        private static void LSetText(TMP_Text? t, string s) { if (t != null && t.text != s) t.text = s; }
+
         private void OnMpJoin()
         {
             Plugin.Logger.LogInfo("[MenuUI] Join Game → connect dialog");
             ShowJoinDialog(true);
         }
 
-        // ── Connect (Join) dialog — a styled centered window for IP/port entry ────
-
         private void ApplyFont(TMP_Text? t) { if (t != null && IsAlive(_gameFont)) { try { t.font = _gameFont; } catch { } } }
         private void ApplyFontIn(GameObject go) { try { var t = go.GetComponentInChildren<TMP_Text>(true); ApplyFont(t); } catch { } }
 
+        // ── Join a Game (small card; errors stay inside it, the dialog stays open) ──
+
         private void ShowJoinDialog(bool show)
         {
-            if (show && _joinDialog == null) BuildJoinDialog();
-            if (_joinDialog != null) { try { _joinDialog.SetActive(show); } catch { } }
-            if (show) _joinFocus = 0;
+            try
+            {
+                if (show && _joinDialog == null) BuildJoinDialog();
+                if (_joinDialog != null && _joinDialog.activeSelf != show) _joinDialog.SetActive(show);
+                if (show) { _joinFocus = 0; _joinErr = ""; _joinBad = 0; _joinDirty = true; LayoutJoinCard(); }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[MenuUI] join dialog: {ex}");
+                if (show)
+                {   // Review item 3: a half-built dialog's full-screen blocker must not stay up - tear it down, submenu stays.
+                    try { if (_joinDialog != null) UnityEngine.Object.Destroy(_joinDialog); } catch { }
+                    _joinDialog = null; _joinCard = null;
+                    Plugin.Logger.LogWarning("[MenuUI] Join a Game unavailable - back to the multiplayer submenu.");
+                    try { ShowView(MpView.Submenu); } catch { }
+                }
+            }
         }
 
         private void BuildJoinDialog()
         {
             if (_joinDialog != null || _canvasGO == null) return;
-            _joinIp = MPConfig.HostIP; _joinPort = MPConfig.Port.ToString();
-
-            _joinDialog = MakeGO("BAMP_JoinDialog", _canvasGO.transform);
-            var prt = _joinDialog.GetComponent<RectTransform>();
-            prt.anchorMin = prt.anchorMax = prt.pivot = new Vector2(0.5f, 0.5f);
-            prt.sizeDelta = new Vector2(440f, 250f);
-            prt.anchoredPosition = Vector2.zero;
-            var bg = _joinDialog.AddComponent<Image>();
-            bg.color = new Color(0.10f, 0.10f, 0.13f, 0.97f);
-            if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }   // rounded corners
-
-            const float W = 440f;
-            ApplyFont(MakeLabel(_joinDialog.transform, "Join Multiplayer", 26, C_WHITE, 0f, -14f, W, 36f, TextAlignmentOptions.Center));
-
-            ApplyFont(MakeLabel(_joinDialog.transform, "Host IP", SZ_FLD, C_WHITE, 30f, -74f, 110f, 30f, TextAlignmentOptions.Left));
-            var (_, ipLbl, ipRT) = MakeField(_joinDialog.transform, _joinIp, 150f, -74f, 260f, 30f);
-            _joinIpLbl = ipLbl; _joinIpRT = ipRT; ApplyFont(ipLbl);
-
-            ApplyFont(MakeLabel(_joinDialog.transform, "Port", SZ_FLD, C_WHITE, 30f, -114f, 110f, 30f, TextAlignmentOptions.Left));
-            var (_, portLbl, portRT) = MakeField(_joinDialog.transform, _joinPort, 150f, -114f, 260f, 30f);
-            _joinPortLbl = portLbl; _joinPortRT = portRT; ApplyFont(portLbl);
-
-            // Native-styled buttons cloned from the menu (rounded + game font).
-            _joinConnectRT = CloneButtonInto(_joinDialog.transform, "BAMP_JoinConnect", "Connect", OnJoinConnect, 50f,  -182f, 160f, 44f)?.GetComponent<RectTransform>();
-            _joinBackRT    = CloneButtonInto(_joinDialog.transform, "BAMP_JoinBack",    "Back",    OnJoinBack,    230f, -182f, 160f, 44f)?.GetComponent<RectTransform>();
-
+            _joinIp = MPConfig.HostIP; _joinPort = MPConfig.Port.ToString();   // the JOIN side: last address joined
+            _joinDialog = LMakeRoot("BAMP_JoinDialog");
+            var card = LMakeCard(_joinDialog.transform, "Card", "Join a Game", 480f, 320f);
+            _joinCard = card;
+            var t = card.go.transform;
+            LText(t, "Playing with a Steam friend? Open your Steam friends list, right-click them, choose Join Game.", 14f, L_PARA,
+                  22f, 64f, 436f, 42f, TextAlignmentOptions.TopLeft, false, false, 0f, true).lineSpacing = 31f;
+            LText(t, "Host address", 15f, C_WHITE, 22f, 120f, 130f, 38f, TextAlignmentOptions.Left, true);
+            LText(t, "Port", 15f, C_WHITE, 22f, 170f, 130f, 38f, TextAlignmentOptions.Left, true);
+            _joinIpF   = LMakeField(t, "Address", 156f, 120f, 300f, 38f);
+            _joinPortF = LMakeField(t, "Port", 156f, 170f, 110f, 38f);
+            _joinErrLbl = LText(t, "", 14f, L_ERR, 22f, 222f, 436f, 20f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+            _joinBackB    = LButton(t, "BAMP_JoinBack",    "Back",    84f,  258f, 140f, 42f, 0, 15f);
+            _joinConnectB = LButton(t, "BAMP_JoinConnect", "Connect", 236f, 258f, 160f, 42f, 1, 15f);
             _joinDialog.SetActive(false);
         }
 
-        /// <summary>MAIN THREAD per frame while the dialog is open — click focus + typing.</summary>
+        /// <summary>Error row shown only while there is an error (the card is 34 mock-up units shorter without it).</summary>
+        private void LayoutJoinCard()
+        {
+            var card = _joinCard;
+            if (card == null) return;
+            bool err = _joinErr.Length > 0;
+            float by = err ? 258f : 224f;
+            card.rt.sizeDelta = new Vector2(480f * LS, (err ? 320f : 286f) * LS);
+            if (_joinErrLbl != null) { LShowGO(_joinErrLbl.gameObject, err); LSetText(_joinErrLbl, _joinErr); }
+            if (_joinBackB != null)    LPos(_joinBackB.rt, 84f, by, 140f, 42f);
+            if (_joinConnectB != null) LPos(_joinConnectB.rt, 236f, by, 160f, 42f);
+            LFieldState(_joinIpF,   _joinBad == 1, _joinFocus == 1);
+            LFieldState(_joinPortF, _joinBad == 2, _joinFocus == 2);
+        }
+
+        /// <summary>'host:port' in the address box fills the Port box (typed: on leaving the box or Connect; pasted: at once).
+        /// '[addr]:port' = address addr + that port ('[addr]' alone = just the address). A bare address with 2+ ':' (IPv6,
+        /// e.g. '::1') is the whole address and the Port box is kept. 'host:abc' moves 'abc' to the Port box, so Connect
+        /// shows the port error inside the dialog. The hidden 'steam:&lt;id&gt;' form is left alone.</summary>
+        private void SplitJoinAddress()
+        {
+            string a = (_joinIp ?? "").Trim();
+            if (a.StartsWith("steam:", StringComparison.OrdinalIgnoreCase)) return;
+            if (a.StartsWith("[", StringComparison.Ordinal))
+            {
+                int rb = a.IndexOf(']');
+                if (rb <= 1) return;
+                string rest = a.Substring(rb + 1).Trim();
+                if (rest.Length > 0 && rest[0] != ':') return;
+                _joinIp = a.Substring(1, rb - 1).Trim();
+                string pt = rest.Length > 0 ? rest.Substring(1).Trim() : "";
+                if (pt.Length > 0) _joinPort = pt;
+                _joinDirty = true;
+                return;
+            }
+            int c = a.IndexOf(':');
+            if (c <= 0 || a.LastIndexOf(':') != c) return;   // none, leading ':', or 2+ (IPv6): the whole text is the address
+            string tail = a.Substring(c + 1).Trim();
+            _joinIp = a.Substring(0, c).Trim();
+            if (tail.Length > 0) _joinPort = tail;
+            _joinDirty = true;
+        }
+
+        /// <summary>MAIN THREAD per frame while the dialog is open — click focus + typing. Labels repaint only when the text
+        /// or the caret phase changes (no per-frame string building).</summary>
         private void TickJoinDialog()
         {
             if (_joinDialog == null || !_joinDialog.activeSelf) return;
-            var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-
-            if (Input.GetMouseButtonDown(0))
+            try
             {
-                if (RectHit(_joinConnectRT, mp)) { OnJoinConnect(); return; }
-                if (RectHit(_joinBackRT,    mp)) { OnJoinBack();    return; }
-                _joinFocus = RectHit(_joinIpRT, mp) ? 1 : RectHit(_joinPortRT, mp) ? 2 : 0;
-            }
-
-            // Ctrl+V paste — Input.inputString does not carry clipboard pastes, so the
-            // box couldn't be pasted into.  Read the clipboard explicitly.
-            if (_joinFocus != 0 && (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) && Input.GetKeyDown(KeyCode.V))
-            {
-                try
+                // Review item 4: Escape = Back (consumed, so the game's own menu handling never sees it this frame).
+                if (Input.GetKeyDown(KeyCode.Escape)) { Plugin.Logger.LogInfo("[MenuUI] Join a Game → back (Escape)"); OnJoinBack(); ConsumeEscape(); return; }
+                var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
+                if (Input.GetMouseButtonDown(0))
                 {
-                    var sb = new System.Text.StringBuilder();
-                    foreach (char ch in GUIUtility.systemCopyBuffer ?? "") if (!char.IsControl(ch)) sb.Append(ch);
-                    if (_joinFocus == 1) _joinIp += sb.ToString(); else _joinPort += sb.ToString();
+                    if (LHit(_joinConnectB, mp)) { OnJoinConnect(); return; }
+                    if (LHit(_joinBackB, mp))    { OnJoinBack();    return; }
+                    int nf = LHitF(_joinIpF, mp) ? 1 : LHitF(_joinPortF, mp) ? 2 : 0;
+                    if (_joinFocus == 1 && nf != 1) SplitJoinAddress();
+                    if (nf != _joinFocus) { _joinFocus = nf; _joinDirty = true; LayoutJoinCard(); }
                 }
-                catch { }
-            }
 
-            if (_joinFocus != 0 && Input.inputString.Length > 0)
-            {
-                string s = _joinFocus == 1 ? _joinIp : _joinPort;
-                foreach (char c in Input.inputString)
+                // Ctrl+V paste — Input.inputString does not carry clipboard pastes, so read the clipboard explicitly.
+                if (_joinFocus != 0 && (Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) && Input.GetKeyDown(KeyCode.V))
                 {
-                    if (c == '\b') { if (s.Length > 0) s = s.Substring(0, s.Length - 1); }
-                    else if (c == '\n' || c == '\r') { OnJoinConnect(); return; }
-                    else if (!char.IsControl(c)) s += c;
+                    try
+                    {
+                        var sb = new System.Text.StringBuilder();
+                        foreach (char ch in GUIUtility.systemCopyBuffer ?? "") if (!char.IsControl(ch)) sb.Append(ch);
+                        if (_joinFocus == 1) { _joinIp += sb.ToString(); SplitJoinAddress(); } else _joinPort += sb.ToString();
+                        _joinDirty = true;
+                    }
+                    catch { }
                 }
-                if (_joinFocus == 1) _joinIp = s; else _joinPort = s;
-            }
 
-            // Blinking caret on the focused field — there was no cursor before, so it
-            // wasn't clear typing was going anywhere.
-            bool joinCaret = Mathf.FloorToInt(Time.unscaledTime * 2f) % 2 == 0;
-            if (_joinIpLbl   != null) _joinIpLbl.text   = _joinIp   + (_joinFocus == 1 && joinCaret ? "|" : "");
-            if (_joinPortLbl != null) _joinPortLbl.text = _joinPort + (_joinFocus == 2 && joinCaret ? "|" : "");
+                if (_joinFocus != 0 && Input.inputString.Length > 0)
+                {
+                    string s = _joinFocus == 1 ? _joinIp : _joinPort;
+                    foreach (char c in Input.inputString)
+                    {
+                        if (c == '\b') { if (s.Length > 0) s = s.Substring(0, s.Length - 1); }
+                        else if (c == '\n' || c == '\r') { if (_joinFocus == 1) _joinIp = s; else _joinPort = s; OnJoinConnect(); return; }
+                        else if (!char.IsControl(c)) s += c;
+                    }
+                    if (_joinFocus == 1) _joinIp = s; else _joinPort = s;
+                    _joinDirty = true;
+                }
+                else if (_joinFocus == 0 && (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))) { OnJoinConnect(); return; }
+
+                // Blinking caret on the focused box.
+                bool on = Mathf.FloorToInt(Time.unscaledTime * 2f) % 2 == 0;
+                if (on != _joinCaretOn || _joinDirty)
+                {
+                    _joinCaretOn = on; _joinDirty = false;
+                    LFieldText(_joinIpF,   _joinFocus == 1 && on ? _joinIp + "|" : _joinIp,     _joinFocus == 1);
+                    LFieldText(_joinPortF, _joinFocus == 2 && on ? _joinPort + "|" : _joinPort, _joinFocus == 2);
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!_joinTickErrLogged) { _joinTickErrLogged = true; Plugin.Logger.LogWarning($"[MenuUI] join dialog tick: {ex}"); }
+            }
+        }
+
+        private void SetJoinError(string msg, int bad)
+        {
+            _joinErr = msg; _joinBad = bad; _joinDirty = true;
+            LayoutJoinCard();
+            if (msg.Length > 0) Plugin.Logger.LogInfo($"[MenuUI] Join a Game refused: {msg}");
         }
 
         private void OnJoinConnect()
         {
-            _ip = _joinIp.Trim(); _port = _joinPort.Trim();
-            Plugin.Logger.LogInfo($"[MenuUI] Connect → {_ip}:{_port}");
-            ShowJoinDialog(false);
-            try { OnJoin(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] connect: {ex.Message}"); }
-            ShowView(MpView.Lobby);
+            try
+            {
+                SplitJoinAddress();
+                string addr = (_joinIp ?? "").Trim(), port = (_joinPort ?? "").Trim();
+                // Hidden form kept: 'steam:<SteamID64>' or a bare 17-digit id = Steam relay (no port).
+                bool steamForm = addr.StartsWith("steam:", StringComparison.OrdinalIgnoreCase);
+                if (steamForm)
+                {   // review item 11: 'steam:' / 'steam:abc' is not an address - the error stays inside the dialog
+                    string sid = addr.Substring(6).Trim();
+                    if (sid.Length != 17 || !ulong.TryParse(sid, out _)) { SetJoinError("Enter the host's address.", 1); return; }
+                }
+                bool steam = steamForm || (addr.Length == 17 && ulong.TryParse(addr, out _));
+                if (addr.Length == 0) { SetJoinError("Enter the host's address.", 1); return; }
+                if (!steam && (!int.TryParse(port, out int p) || p < 1024 || p > 65535)) { SetJoinError(L_PORT_ERR, 2); return; }
+                SetJoinError("", 0);
+                _ip = addr;
+                if (!steam) _port = port;
+                Plugin.Logger.LogInfo($"[MenuUI] Connect → {_ip}{(steam ? "" : ":" + _port)}");
+                ShowJoinDialog(false);
+                try { OnJoin(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] connect: {ex.Message}"); }
+                ShowView(MpView.Lobby);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] join connect: {ex.Message}"); }
         }
 
         private void OnJoinBack() { Plugin.Logger.LogInfo("[MenuUI] Join dialog → back"); ShowJoinDialog(false); ShowView(MpView.Submenu); }
@@ -5606,100 +6082,197 @@ namespace BigAmbitionsMP
         private void OnLobbyLeave()
         {
             Plugin.Logger.LogInfo("[MenuUI] Lobby Leave");
+            _lwHostFailed = false;   // review item 5: a later join never shows a stale host failure
             try { if (MPServer.IsRunning) OnStop(); else OnDisc(); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] leave: {ex.Message}"); }
             ShowView(MpView.Submenu);
         }
 
-        // ── Lobby window — native styled window (roster + difficulty + start/leave) ──
+        // ── Lobby window: one wide card (players left, Game settings + Invite right, footer) + the small
+        //    Connecting / Couldn't join / Hosting port cards, all under one transparent blocker ──
 
         private static void SetActiveSafe(GameObject? go, bool a) { if (go != null) { try { go.SetActive(a); } catch { } } }
 
         private void BuildLobbyWindow()
         {
             if (_lobbyWindow != null || _canvasGO == null) return;
-            _lobbyWindow = MakeGO("BAMP_LobbyWindow", _canvasGO.transform);
-            var prt = _lobbyWindow.GetComponent<RectTransform>();
-            prt.anchorMin = prt.anchorMax = prt.pivot = new Vector2(0.5f, 0.5f);
-            prt.sizeDelta = new Vector2(540f, 520f);
-            prt.anchoredPosition = Vector2.zero;
-            var bg = _lobbyWindow.AddComponent<Image>();
-            bg.color = new Color(0.10f, 0.10f, 0.13f, 0.97f);
-            if (_panelSprite != null) { try { bg.sprite = _panelSprite; bg.type = Image.Type.Sliced; } catch { } }
-
-            var grey = new Color(0.70f, 0.70f, 0.75f, 1f);
-            ApplyFont(MakeLabel(_lobbyWindow.transform, "Multiplayer Lobby", 26, C_WHITE, 0f, -16f, 540f, 36f, TextAlignmentOptions.Center));
-            // Wide + two-line + wrapping: the kick/reject reason was clipped
-            // by the old 350×28 single-line field (user, 2026-06-11).
-            _lwConnInfo = MakeLabel(_lobbyWindow.transform, "", SZ_FLD, C_WHITE, 28f, -50f, 350f, 44f, TextAlignmentOptions.TopLeft); ApplyFont(_lwConnInfo);
-            _lwConnInfo.enableWordWrapping = true;
-            _lwConnInfo.fontSize = SZ_FLD - 2;
-            _lwShowIp   = CloneButtonInto(_lobbyWindow.transform, "BAMP_ShowIp", "Show IP", OnToggleShowIp, 390f, -58f, 124f, 30f); _rtShowIp = _lwShowIp?.GetComponent<RectTransform>();
-            // Roster header — Players | Starting $ (host-set) | Age (self-set).
-            ApplyFont(MakeLabel(_lobbyWindow.transform, "Players", SZ_FLD, grey, 28f, -92f, 200f, 26f, TextAlignmentOptions.Left));
-            _lwRowCashHdr = MakeLabel(_lobbyWindow.transform, "Starting $", SZ_LBL, grey, 300f, -92f, 110f, 26f, TextAlignmentOptions.Left); ApplyFont(_lwRowCashHdr);
-            _lwRowAgeHdr  = MakeLabel(_lobbyWindow.transform, "Age",        SZ_LBL, grey, 430f, -92f, 80f,  26f, TextAlignmentOptions.Left); ApplyFont(_lwRowAgeHdr);
-            for (int i = 0; i < _lwRoster.Length; i++)
-            {
-                float ry = -118f - i * 26f;
-                ApplyFont(_lwRoster[i] = MakeLabel(_lobbyWindow.transform, "", SZ_FLD, C_WHITE, 44f, ry, 250f, 24f, TextAlignmentOptions.Left));
-                // Cash field (host-dictated) + Age field (self-edited). Hidden until the row is occupied.
-                var (_, rcLbl, rcRT) = MakeField(_lobbyWindow.transform, "", 300f, ry - 1f, 118f, 22f);
-                ApplyFont(rcLbl); rcLbl.fontSize = SZ_LBL;
-                _lwRowCashLbl[i] = rcLbl; _rtLwRowCash[i] = rcRT; _lwRowCash[i] = "";
-                SetActiveSafe(rcRT != null ? rcRT.gameObject : null, false);
-                var (_, raLbl, raRT) = MakeField(_lobbyWindow.transform, "", 430f, ry - 1f, 70f, 22f);
-                ApplyFont(raLbl); raLbl.fontSize = SZ_LBL;
-                _lwRowAgeLbl[i] = raLbl; _rtLwRowAge[i] = raRT; _lwRowAge[i] = "";
-                SetActiveSafe(raRT != null ? raRT.gameObject : null, false);
-            }
-
-            // Shown only in load mode (in place of the new-game controls).
-            _lwLoadInfo = MakeLabel(_lobbyWindow.transform, "", 18, C_YELLOW, 0f, -300f, 540f, 28f, TextAlignmentOptions.Center);
-            ApplyFont(_lwLoadInfo); _lwLoadInfo.gameObject.SetActive(false);
-
-            _lwDiffHdr = MakeLabel(_lobbyWindow.transform, "Difficulty", SZ_FLD, grey, 28f, -292f, 110f, 26f, TextAlignmentOptions.Left); ApplyFont(_lwDiffHdr);
-            _lwDiffEasy   = CloneButtonInto(_lobbyWindow.transform, "BAMP_DiffEasy",   "Easy",   () => SetDifficulty("Easy"),   150f, -320f, 120f, 36f); _rtDiffEasy   = _lwDiffEasy?.GetComponent<RectTransform>();
-            _lwDiffNormal = CloneButtonInto(_lobbyWindow.transform, "BAMP_DiffNormal", "Normal", () => SetDifficulty("Normal"), 278f, -320f, 120f, 36f); _rtDiffNormal = _lwDiffNormal?.GetComponent<RectTransform>();
-            _lwDiffHard   = CloneButtonInto(_lobbyWindow.transform, "BAMP_DiffHard",   "Hard",   () => SetDifficulty("Hard"),   406f, -320f, 110f, 36f); _rtDiffHard   = _lwDiffHard?.GetComponent<RectTransform>();
-
-            _lwCustomize = CloneButtonInto(_lobbyWindow.transform, "BAMP_Customize", "Customize", OnCustomize, 196f, -372f, 148f, 36f); _rtCustomize = _lwCustomize?.GetComponent<RectTransform>();
-            // Fresh-GO flat button (save-picker primitive), NOT a menu-template
-            // clone: the cloned version's hit rect swallowed every lobby click
-            // (2026-07-10 field report — overlay popped on any click, reopened on
-            // close).  Manual RectHit dispatch is the one and only click path.
-            _rtInvite = MakeFlatButton(_lobbyWindow.transform, "BAMP_InviteFriends", "Invite Friends", 352f, -372f, 148f, 36f, new Color(0.196f, 0.227f, 0.298f, 1f), C_LD_MUT, 13, false);
-            _lwInvite = _rtInvite != null ? _rtInvite.gameObject : null;
-            // Copy the NEIGHBOURING clone's visual onto the flat button (field
-            // report: the flat default read as a disabled button next to
-            // Start/Leave/Customize).  Visual only — geometry stays the flat
-            // button's own, which the [BtnDiag] run verified sane.
             try
             {
-                var srcImg = _lwCustomize != null ? _lwCustomize.GetComponentInChildren<Image>(true) : null;
-                var dstImg = _lwInvite    != null ? _lwInvite.GetComponentInChildren<Image>(true)    : null;
-                if (srcImg != null && dstImg != null)
+                _lobbyWindow = LMakeRoot("BAMP_LobbyWindow");
+                var root = _lobbyWindow.transform;
+
+                // ── main window (mock-up 1080x652) ──
+                var main = LMakeCard(root, "Main", "Multiplayer Lobby", 1080f, 652f);
+                _lwMain = main;
+                var m = main.go.transform;
+                LText(m, "Player", 12f, L_HDR, 34f, 64f, 200f, 15f, TextAlignmentOptions.Left, true, true, 7f);
+                _lwHdrCash = LText(m, "Starting money", 12f, L_HDR, 304f, 64f, 150f, 15f, TextAlignmentOptions.Left, true, true, 7f);
+                _lwHdrAge  = LText(m, "Age", 12f, L_HDR, 456f, 64f, 80f, 15f, TextAlignmentOptions.Left, true, true, 7f);
+                var list = MakeGO("List", m);
+                _rtLwList = list.GetComponent<RectTransform>();
+                LPos(_rtLwList, 22f, LW_LIST_Y, 636f, LW_LIST_H);
+                for (int s = 0; s < LW_SLOTS; s++)
                 {
-                    dstImg.sprite = srcImg.sprite; dstImg.color = srcImg.color;
-                    dstImg.type = srcImg.type; dstImg.pixelsPerUnitMultiplier = srcImg.pixelsPerUnitMultiplier;
+                    var r = new LRow();
+                    var bg = LImg(list.transform, "Row" + s, L_ROW, LRoundSprite(false), 3f);
+                    r.go = bg.gameObject;
+                    LPos(bg.rectTransform, 0f, s * LW_ROW_PITCH, 620f, LW_ROW_H);
+                    LStretch(LImg(bg.transform, "Line", L_ROWLINE, LRoundSprite(true), 3f).rectTransform, 0f, 0f, 0f, 0f);
+                    r.star   = LText(bg.transform, "★", 15f, L_STAR, 12f, 0f, 20f, LW_ROW_H, TextAlignmentOptions.Left);
+                    r.name   = LText(bg.transform, "", 16f, C_WHITE, 37f, 0f, 233f, LW_ROW_H, TextAlignmentOptions.Left, true);
+                    r.name.overflowMode = TextOverflowModes.Ellipsis;   // review item 12: a long name stops at its column
+                    r.cash   = LMakeField(bg.transform, "Cash", 282f, LW_ROW_CTL_Y, 130f, 30f);
+                    r.age    = LMakeField(bg.transform, "Age", 434f, LW_ROW_CTL_Y, 64f, 30f);
+                    r.ageTxt = LText(bg.transform, "", 15f, C_WHITE, 444f, 0f, 70f, LW_ROW_H, TextAlignmentOptions.Left);
+                    r.kick   = LButton(bg.transform, "BAMP_Kick" + s, "Kick", 526f, LW_ROW_CTL_Y, 72f, 30f, 3, 12f);
+                    _lwRows[s] = r;
                 }
-                var srcTxt = _lwCustomize != null ? _lwCustomize.GetComponentInChildren<TMP_Text>(true) : null;
-                var dstTxt = _lwInvite    != null ? _lwInvite.GetComponentInChildren<TMP_Text>(true)    : null;
-                if (srcTxt != null && dstTxt != null)
-                {
-                    dstTxt.color = srcTxt.color; dstTxt.fontSize = srcTxt.fontSize;
-                    dstTxt.fontStyle = srcTxt.fontStyle; dstTxt.font = srcTxt.font;
-                }
+                var track = LImg(m, "Track", L_TRACK, LRoundSprite(false), 3f);
+                _lwTrack = track.gameObject;
+                LPos(track.rectTransform, 652f, LW_LIST_Y, 6f, LW_LIST_H);
+                _lwThumb = LImg(track.transform, "Thumb", L_THUMB, LRoundSprite(false), 3f).rectTransform;
+                // Review item 13: a 22-wide invisible hit area over the 6-wide track (click = page, drag the thumb = scroll).
+                _rtLwTrackHit = MakeGO("Hit", track.transform).GetComponent<RectTransform>();
+                LPos(_rtLwTrackHit, -8f, 0f, 22f, LW_LIST_H);
+                // Notices (orange): transient lobby notices + the live mod-mismatch line. Layout v4 (user-approved 2026-09-28):
+                // the right column under Invite / Waiting (placed by LobbyLayout); wraps, and is ellipsized at its box so it
+                // can never reach the footer divider.
+                _lwNotice = LText(m, "", 14f, L_NOTICE, 678f, 470f, 380f, 90f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+                _lwNotice.overflowMode = TextOverflowModes.Ellipsis;
+
+                // Game settings (host)
+                _rtLwSettings = LSection(m, "Settings", 1, "Game settings", 30f);
+                var st = _rtLwSettings.transform;
+                _lwMoreB    = LButton(st, "BAMP_MoreSettings", "More settings", 214f, 14f, 150f, 30f, 0, 12f);
+                _lwSaveSetB = LButton(st, "BAMP_SaveSettings", "Save settings", 214f, 14f, 150f, 30f, 0, 12f);
+                _lwDiffLbl  = LText(st, "Difficulty", 13f, L_MUTED, 16f, 56f, 70f, 36f, TextAlignmentOptions.Left, true);
+                _lwDiffEasyB   = LButton(st, "BAMP_DiffEasy",   "Easy",   94f,  56f, 80f, 36f, 0, 13f);
+                _lwDiffNormalB = LButton(st, "BAMP_DiffNormal", "Normal", 182f, 56f, 92f, 36f, 0, 13f);
+                _lwDiffHardB   = LButton(st, "BAMP_DiffHard",   "Hard",   282f, 56f, 80f, 36f, 0, 13f);
+                _lwSavedLbl = LText(st, "", 15f, C_WHITE, 16f, 56f, 348f, 20f, TextAlignmentOptions.Left);
+                _lwSavedLbl.overflowMode = TextOverflowModes.Ellipsis;   // review item 12: a long save name stops at the box
+
+                // Invite (host)
+                _rtLwInvite = LSection(m, "Invite", 2, "Invite", 20f);
+                var iv = _rtLwInvite.transform;
+                _lwInviteB   = LButton(iv, "BAMP_InviteFriends", "Invite Steam Friends", 16f, 46f, 348f, 42f, 2, 15f);
+                _lwDirectLbl = LText(iv, "Direct connection:", 13f, L_MUTED, 16f, 100f, 348f, 16f, TextAlignmentOptions.Left, true);
+                _lwAddrLbl   = LText(iv, "", 15f, C_WHITE, 16f, 128f, 348f, 18f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+                _lwAddrLbl.lineSpacing = 41f;
+                _lwShowIpB = LButton(iv, "BAMP_ShowIp", "Show IP", 16f, 158f, 110f, 34f, 0, 13f);
+                _lwPortB   = LButton(iv, "BAMP_ChangePort", "Change port", 136f, 158f, 150f, 34f, 0, 13f);
+                _lwHintLbl = LText(iv, "", 13f, L_MUTED, 16f, 204f, 348f, 38f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+                _lwHintLbl.lineSpacing = 26f;
+
+                // Waiting (joiner)
+                _rtLwWaiting = LSection(m, "Waiting", 0, "Waiting", 20f);
+                LPos(_rtLwWaiting, 678f, 64f, 380f, 150f);
+                _lwWaitLbl = LText(_rtLwWaiting.transform, "", 15f, C_WHITE, 16f, 46f, 348f, 90f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+                _lwWaitLbl.lineSpacing = 31f;
+                _lwWaitLbl.overflowMode = TextOverflowModes.Ellipsis;   // review item 12: never past the Waiting box
+
+                // Footer: a full-width bar under both columns.
+                LPos(LImg(m, "Divider", L_DIVIDER, null, 0f).rectTransform, 22f, 575f, 1036f, 1f / LS);
+                _lwLeaveB = LButton(m, "BAMP_LwLeave", "Leave", 22f, 590f, 150f, 44f, 0, 16f);
+                _lwStartB = LButton(m, "BAMP_LwStart", "Start Game", 858f, 590f, 200f, 44f, 1, 16f);
+
+                // ── Connecting card ──
+                var conn = LMakeCard(root, "Connecting", "Multiplayer Lobby", 440f, 158f);
+                _lwConn = conn;
+                var spin = LImg(conn.go.transform, "Spin", Color.white, LIconSprite(3), 0f);
+                spin.type = Image.Type.Simple;
+                _rtLwSpin = spin.rectTransform;
+                _rtLwSpin.anchorMin = _rtLwSpin.anchorMax = new Vector2(0f, 1f); _rtLwSpin.pivot = new Vector2(0.5f, 0.5f);
+                _rtLwSpin.sizeDelta = new Vector2(20f * LS, 20f * LS); _rtLwSpin.anchoredPosition = new Vector2(32f * LS, -74f * LS);
+                _lwConnLbl = LText(conn.go.transform, "", 15f, C_WHITE, 54f, 64f, 364f, 20f, TextAlignmentOptions.Left);
+                _lwConnLbl.overflowMode = TextOverflowModes.Ellipsis;   // review item 12: a long address stops at the card edge
+                _lwConnCancelB = LButton(conn.go.transform, "BAMP_ConnCancel", "Cancel", 150f, 98f, 140f, 40f, 0, 15f);
+
+                // ── Couldn't join card (the reason in FULL: wraps, never cut; the card grows to fit) ──
+                var fail = LMakeCard(root, "Failed", "Couldn't join", 440f, 200f);
+                _lwFail = fail;
+                _lwFailLbl = LText(fail.go.transform, "", 15f, C_WHITE, 22f, 64f, 396f, 60f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+                _lwFailLbl.lineSpacing = 36f;
+                _lwFailBackB  = LButton(fail.go.transform, "BAMP_FailBack",  "Back",      84f,  140f, 140f, 42f, 0, 15f);
+                _lwFailRetryB = LButton(fail.go.transform, "BAMP_FailRetry", "Try Again", 236f, 140f, 160f, 42f, 1, 15f);
+
+                // ── Hosting port popup (over the lobby) ──
+                var pc = LMakeCard(root, "HostingPort", "Hosting port", 440f, 269f);
+                _lwPortCard = pc;
+                var pt = pc.go.transform;
+                LText(pt, "Port", 15f, C_WHITE, 22f, 64f, 50f, 36f, TextAlignmentOptions.Left, true);
+                _ppField = LMakeField(pt, "Port", 76f, 64f, 120f, 36f);
+                LText(pt, "Use a number from 1024 to 65535. Direct-IP friends type this after your address.", 14f, L_PARA,
+                      22f, 114f, 396f, 42f, TextAlignmentOptions.TopLeft, false, false, 0f, true).lineSpacing = 31f;
+                LText(pt, "Steam invites don't need a port.", 14f, L_PARA, 22f, 170f, 396f, 21f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+                _ppErrLbl  = LText(pt, "", 14f, L_ERR, 22f, 205f, 396f, 20f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+                _ppCancelB = LButton(pt, "BAMP_PortCancel", "Cancel", 84f,  209f, 130f, 40f, 0, 15f);
+                _ppSaveB   = LButton(pt, "BAMP_PortSave",   "Save",   226f, 209f, 130f, 40f, 1, 15f);
+
+                LShowGO(conn.go, false); LShowGO(fail.go, false); LShowGO(pc.go, false);
+                _lwLayoutKey = -1; _lwThumbKey = -1;
+                _lobbyWindow.SetActive(false);
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] invite visual match: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogError($"[MenuUI] BuildLobbyWindow: {ex}");
+                // Review item 3: a half-built window's transparent blocker would swallow every click with no way out.
+                try { if (_lobbyWindow != null) UnityEngine.Object.Destroy(_lobbyWindow); } catch { }
+                _lobbyWindow = null; _lwMain = null; _lwConn = null; _lwFail = null; _lwPortCard = null;
+                _lwPortOpen = false; _ppFocus = false; _lwThumbDrag = false;
+            }
+        }
 
-            _lwStart   = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwStart", "Start Game", OnLobbyStart, 110f, -456f, 160f, 42f); _rtLwStart = _lwStart?.GetComponent<RectTransform>();
-            _lwStartLabel = _lwStart != null ? _lwStart.GetComponentInChildren<TMP_Text>(true) : null;
-            var leave  = CloneButtonInto(_lobbyWindow.transform, "BAMP_LwLeave", "Leave",      OnLobbyLeave, 290f, -456f, 160f, 42f); _rtLwLeave = leave?.GetComponent<RectTransform>();
-            // (Round-54's lobby Report button REMOVED 2026-07-23 per user — redundant with the
-            // "Report a Bug" entry in the multiplayer submenu, one Leave-click away.)
+        /// <summary>Every time the lobby opens: the IP is hidden again (streamer safety, user rule; the shown state is never
+        /// saved), the list scrolls to the top, the port popup is closed, and the window fits a small screen / big UI zoom.</summary>
+        private void OnLobbyOpening()
+        {
+            _showIp = false;
+            _lwScroll = 0; LwClearFocus();
+            ClosePortPopup();
+            _lwFailShown = "\u0001";
+            _lwThumbDrag = false;
+            LwFit(true);
+        }
 
-            _lobbyWindow.SetActive(false);
+        /// <summary>Fits the main card to a small screen / big UI zoom. Review item 15: also re-fits when the screen size or
+        /// the UI scale changed while the lobby is open (checked on the 0.5 s refresh, not per frame).</summary>
+        private void LwFit(bool force)
+        {
+            try
+            {
+                var main = _lwMain;
+                if (main == null) return;
+                float sc = Mathf.Max(0.01f, UiScale);
+                int sw = Screen.width, shh = Screen.height;
+                if (!force && sw == _lwFitW && shh == _lwFitH && Mathf.Approximately(sc, _lwFitScale)) return;
+                _lwFitW = sw; _lwFitH = shh; _lwFitScale = sc;
+                float cw = sw / sc, ch = shh / sc;
+                float s = Mathf.Min(1f, Mathf.Min((cw - 24f) / (1080f * LS), (ch - 24f) / (652f * LS)));
+                s = Mathf.Clamp(s, 0.3f, 1f);
+                main.rt.localScale = new Vector3(s, s, 1f);
+                if (!force) Plugin.Logger.LogInfo($"[MenuUI] lobby re-fitted: screen {sw}x{shh}, UI scale {sc:0.##} -> card scale {s:0.##}");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] lobby fit: {ex.Message}"); }
+        }
+
+        private void LwClearFocus() { _lwRowCashFocus = -1; _lwRowAgeFocus = -1; _lwCashFocusId = ""; _lwAgeFocusId = ""; }
+
+        /// <summary>Review item 14: map the focused boxes' player ids to their current roster index; a player who left
+        /// clears the focus. No allocation (a linear scan of the roster).</summary>
+        private void LwSyncFocus(IReadOnlyList<string>? roster, int n)
+        {
+            int ci = -1, ai = -1;
+            if (roster != null)
+                for (int i = 0; i < n; i++)
+                {
+                    if (_lwCashFocusId.Length > 0 && roster[i] == _lwCashFocusId) ci = i;
+                    if (_lwAgeFocusId.Length > 0 && roster[i] == _lwAgeFocusId) ai = i;
+                }
+            if (_lwCashFocusId.Length > 0 && ci < 0) { _lwCashFocusId = ""; Plugin.Logger.LogInfo("[MenuUI] the focused starting-money box's player left - focus cleared."); }
+            if (_lwAgeFocusId.Length > 0 && ai < 0)  { _lwAgeFocusId = "";  Plugin.Logger.LogInfo("[MenuUI] the focused age box's player left - focus cleared."); }
+            if (ci != _lwRowCashFocus || ai != _lwRowAgeFocus) _lwCaretDirty = true;
+            _lwRowCashFocus = ci; _lwRowAgeFocus = ai;
         }
 
         private void SetDifficulty(string d)
@@ -5708,16 +6281,18 @@ namespace BigAmbitionsMP
             try { _hostSettings = MPServer.Preset(d); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] preset {d}: {ex.Message}"); }
             // Difficulty sets the base starting cash; the per-row fields default to it
             // (and any explicit per-player overrides are kept).  Force a roster refresh.
-            _lwRowCashFocus = -1;
+            _lwRowCashFocus = -1; _lwCashFocusId = "";
             Plugin.Logger.LogInfo($"[MenuUI] Difficulty → {d} (base cash {_hostSettings.StartingMoney})");
             HighlightDifficulty();
+            RefreshLobbyWindow();
         }
 
+        /// <summary>The selected difficulty is the primary (blue) button, the others the normal grey-blue.</summary>
         private void HighlightDifficulty()
         {
-            TintSel(_lwDiffEasy,   _selectedDifficulty == "Easy");
-            TintSel(_lwDiffNormal, _selectedDifficulty == "Normal");
-            TintSel(_lwDiffHard,   _selectedDifficulty == "Hard");
+            LSetKind(_lwDiffEasyB,   _selectedDifficulty == "Easy"   ? 1 : 0);
+            LSetKind(_lwDiffNormalB, _selectedDifficulty == "Normal" ? 1 : 0);
+            LSetKind(_lwDiffHardB,   _selectedDifficulty == "Hard"   ? 1 : 0);
         }
         private static void TintSel(GameObject? go, bool sel)
         {
@@ -5730,17 +6305,18 @@ namespace BigAmbitionsMP
             // Open the deep-settings panel (year length, tax, etc.), seeded from the
             // currently-selected difficulty (_hostSettings).  It edits the same
             // _hostSettings the lobby uses, so changes carry into the started game.
-            Plugin.Logger.LogInfo("[MenuUI] Customize → deep settings panel.");
+            // (Load mode: the save's own adjustable settings - round-53.)
+            Plugin.Logger.LogInfo("[MenuUI] More settings / Save settings → deep settings panel.");
             try { OnOpenSettings(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] customize: {ex.Message}"); }
         }
         private void OnToggleShowIp() { _showIp = !_showIp; Plugin.Logger.LogInfo($"[MenuUI] Show IP = {_showIp}"); RefreshLobbyWindow(); }
 
-        // Round-93: transient lobby notice (overlay-disabled etc.) — shown on the conn-info line for a beat.
+        // Round-93: transient lobby notice (overlay-disabled etc.) — shown on the lobby's notice line for a beat.
         private static string _lobbyNotice = "";
         private static float  _lobbyNoticeUntil;
 
         /// <summary>Round-215: let non-UI code (e.g. the server's version-mismatch
-        /// refusal) surface a transient notice on the lobby's info strip. Before
+        /// refusal) surface a transient notice on the lobby's notice line. Before
         /// this, a refused joiner was explained on the JOINER's screen only — the
         /// host saw nothing and filed "impossible to join" reports.</summary>
         internal static void PostLobbyNotice(string msg, float seconds = 12f)
@@ -5778,171 +6354,437 @@ namespace BigAmbitionsMP
             MPSteamPresence.OpenInviteDialog();
         }
 
+        // ── state reads (live; the DEV lever can substitute a fake state for screenshots) ──
+        private bool LwHost()
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return DevLobby == 1 || DevLobby == 2;
+#endif
+            return MPServer.IsRunning;
+        }
+        private bool LwClient()
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return DevLobby == 3;
+#endif
+            return MPClient.IsConnected;
+        }
+        private bool LwConnecting()
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return DevLobby == 4;
+#endif
+            return MPClient.IsConnecting;
+        }
+        private bool LwLoad(bool host)
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return DevLobby == 2;
+#endif
+            return host ? _lobbyLoadMode : MPClient.HostLoadMode;
+        }
+        private IReadOnlyList<string>? LwPlayers(bool host)
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return _devRoster;
+#endif
+            return host ? MPServer.LobbyPlayers : MPClient.LobbyPlayers;
+        }
+        private int LwBoundPort()
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return _devBusyB > 0 ? _devBusyB : 7777;
+#endif
+            return MPServer.BoundPort;
+        }
+        private int LwRequestedPort()
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return _devBusyA > 0 ? _devBusyA : 7777;
+#endif
+            return MPServer.RequestedPort > 0 ? MPServer.RequestedPort : MPConfig.HostPort;
+        }
+        /// <summary>The port the host asked for was busy and the +10 fallback landed elsewhere.</summary>
+        private bool LwBusy(out int asked, out int bound)
+        {
+            asked = LwRequestedPort(); bound = LwBoundPort();
+#if BAMP_DEV
+            if (DevLobby != 0) return _devBusyA > 0;
+#endif
+            return MPServer.IsRunning && bound > 0 && asked > 0 && bound != asked;
+        }
+        private bool LwAwaitingApproval()
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return DevLobby == 3;
+#endif
+            return MPClient.JoinStatus == "awaiting-approval";
+        }
+        private string LwSaveName()
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return "MP Jun 23, 4:14 PM";
+#endif
+            return MPServer.ChosenLoadSession ?? "";
+        }
+        /// <summary>Change port works only while the host is alone in the lobby (the UDP rebind never runs under a peer).</summary>
+        private bool LwPortChangeAllowed()
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return _devRoster == null || _devRoster.Count <= 1;
+#endif
+            try { return MPServer.IsRunning && MPServer.IsInLobby && MPServer.LobbyPlayers.Count <= 1 && MPServer.ConnectedCount == 0 && MPServer.TransportPeerCount == 0; }   // review item 6: a connection still saying hello counts
+            catch { return false; }
+        }
+        private string LwFailReason()
+        {
+#if BAMP_DEV
+            if (DevLobby == 5) return "No host answered at that address. If your friend is on Steam, right-click their name and choose Join Game. Direct IP needs the host's public address and port 7777 opened on their router.";
+#endif
+            string? f = MPClient.FriendlyDisconnectReason;
+            if (!string.IsNullOrEmpty(f)) return f ?? "";
+            // Review item 2: the mod's own complete sentences (rejected / kicked / banned / host left / identity / build /
+            // version) show as they are; a raw transport reason ("Timeout", "RemoteConnectionClose", Steam end-reason
+            // names) is logged and the player sees JoinLostText.
+            string raw = MPClient.LastDisconnectReason ?? "";
+            if (MPClient.LastDisconnectReasonIsOwn && raw.Length > 0) return raw;
+            if (raw != _lwRawReasonLogged)
+            {
+                _lwRawReasonLogged = raw;
+                Plugin.Logger.LogInfo($"[MenuUI] Couldn't join: transport reason '{raw}' (shown as the generic line).");
+            }
+            return JoinLostText;
+        }
+        /// <summary>'Connecting to {address}…': the direct address + port, or the Steam friend's name for a Steam join.</summary>
+        private string LwConnectAddress()
+        {
+#if BAMP_DEV
+            if (DevLobby != 0) return "203.0.113.5:7777";
+#endif
+            string a = MPConfig.HostIP ?? "";
+            if (MPClient.LastConnectPath != "steam") return $"{a}:{MPClient.LastConnectPort}";
+            if (a != _lwSteamAddrKey)
+            {
+                _lwSteamAddrKey = a; _lwSteamAddrShown = a;
+                try
+                {
+                    string idPart = a.StartsWith("steam:", StringComparison.OrdinalIgnoreCase) ? a.Substring(6).Trim() : a;
+                    if (ulong.TryParse(idPart, out ulong id))
+                    {
+                        string nm = new Steamworks.Friend(id).Name;
+                        if (!string.IsNullOrEmpty(nm) && nm != "[unknown]") _lwSteamAddrShown = nm;
+                    }
+                }
+                catch { }
+            }
+            return _lwSteamAddrShown;
+        }
+        private static string LwShownAddress(int port)
+        {
+            string pub = "", lan = "";
+            try { pub = MPNet.PublicIp ?? ""; lan = MPNet.LanIp ?? ""; } catch { }
+            if (pub.Length > 0 && lan.Length > 0) return $"Internet {pub}:{port}\nSame network {lan}:{port}";
+            if (pub.Length > 0) return $"Internet {pub}:{port}";
+            if (lan.Length > 0) return $"Same network {lan}:{port}";
+            return "";
+        }
+
+        /// <summary>Positions that depend on the mode (host/joiner, new/saved game, IP shown, Steam up, Steam-only). Runs only
+        /// when that key changes — the 0.5 s refresh never rebuilds layout.</summary>
+        private void LobbyLayout(bool host, bool client, bool load, bool showIp, bool steamOk, bool steamOnly)
+        {
+            int key = (host ? 1 : 0) | (client ? 2 : 0) | (load ? 4 : 0) | (showIp ? 8 : 0) | (steamOk ? 16 : 0) | (steamOnly ? 32 : 0);
+            if (key == _lwLayoutKey) return;
+            _lwLayoutKey = key;
+            bool newGame = !load;
+            // Player table columns (row-relative): name | Starting money 282 | Age 434 (joiner 526) | Kick 526.
+            LShowGO(_lwHdrCash != null ? _lwHdrCash.gameObject : null, host && newGame);
+            LShowGO(_lwHdrAge != null ? _lwHdrAge.gameObject : null, newGame);
+            if (_lwHdrAge != null) LPos(_lwHdrAge.rectTransform, host ? 456f : 548f, 64f, 80f, 15f);
+            float nameW = host && newGame ? 233f : 477f;
+            for (int s = 0; s < LW_SLOTS; s++)
+            {
+                var r = _lwRows[s];
+                if (r == null) continue;
+                LPos(r.name.rectTransform, 37f, 0f, nameW, LW_ROW_H);
+                LPos(r.age.rt, host ? 434f : 526f, LW_ROW_CTL_Y, 64f, 30f);
+            }
+            // Right column (380 wide at x 678).
+            LShowGO(_rtLwSettings != null ? _rtLwSettings.gameObject : null, host);
+            LShowGO(_rtLwInvite != null ? _rtLwInvite.gameObject : null, host);
+            LShowGO(_rtLwWaiting != null ? _rtLwWaiting.gameObject : null, client);
+            float sh = newGame ? 106f : 90f;
+            if (_rtLwSettings != null) LPos(_rtLwSettings, 678f, 64f, 380f, sh);
+            LShow(_lwMoreB, newGame); LShow(_lwSaveSetB, !newGame);
+            LShowGO(_lwDiffLbl != null ? _lwDiffLbl.gameObject : null, newGame);
+            LShow(_lwDiffEasyB, newGame); LShow(_lwDiffNormalB, newGame); LShow(_lwDiffHardB, newGame);
+            LShowGO(_lwSavedLbl != null ? _lwSavedLbl.gameObject : null, !newGame);
+            // Invite: Steam button, 'Direct connection:', the address (1 line hidden / 2 shown), Show IP + Change port, hint.
+            float y = 46f;
+            LShow(_lwInviteB, steamOk);
+            if (steamOk) y += 42f + 12f;
+            if (_lwDirectLbl != null) LPos(_lwDirectLbl.rectTransform, 16f, y, 348f, 16f);
+            y += 16f + 12f;
+            // Fold 2: from the address down, Invite (host) / Waiting (joiner) and the notice under them are placed by
+            // LwFitRightColumn on the MEASURED texts, after the refresh writes them; this records where the address starts.
+            _lwAddrY = y; _lwAddrFallbackH = showIp || steamOnly ? 48f : 18f; _lwSteamOnly = steamOnly;
+            _lwInviteTop = 64f + sh + 14f;
+            _lwRcLayout = -1;
+            // Footer: host = Leave left + Start Game right; joiner = Leave alone, right.
+            if (_lwLeaveB != null) LPos(_lwLeaveB.rt, host ? 22f : 908f, 590f, 150f, 44f);
+            LShow(_lwStartB, host);
+        }
+
         private void RefreshLobbyWindow()
         {
             if (_lobbyWindow == null) return;
-            bool host = MPServer.IsRunning;
-
-            if (_lwConnInfo != null)
+            try { RefreshLobbyCore(); }
+            catch (Exception ex)
             {
-                string info;
-                if (host)
-                {
-                    // H-HOSTPORT-1 (wording approved by the user 2026-09-26): Steam-only hosting - no UDP port bound.
-                    if (MPServer.IsRunning && MPServer.BoundPort <= 0)
-                        info = $"Others join at:   Steam invites only (ports {MPConfig.Port}–{Math.Min(MPConfig.Port + 10, 65535)} are in use)";
-                    else if (!_showIp) info = "Others join at:   ••••••••   (hidden)";
-                    else
-                    {
-                        // H-HOSTPORT-1: the port actually bound (a busy configured port falls back to the next free one).
-                        int port = MPServer.BoundPort > 0 ? MPServer.BoundPort : MPConfig.Port;
-                        string pub = MPNet.PublicIp;
-                        // LAN line (user request 2026-07-04): same-network players join with the LAN ip —
-                        // no port-forwarding needed for them. Shown alongside whatever internet line applies.
-                        string lan = MPNet.LanIp;
-                        string lanLine = string.IsNullOrEmpty(lan) ? "" : $"\nSame network (LAN):   {lan} : {port}";
-                        if (!string.IsNullOrEmpty(pub))
-                            info = $"Internet:   {pub} : {port}{lanLine}\n<size=15><color=#AAAAAA>(internet friends need UDP {port} forwarded on your router; LAN friends join the LAN line directly)</color></size>";
-                        else if (!MPNet.PublicIpTried)
-                            info = $"Internet:   (looking up your IP…){lanLine}";
-                        else
-                            info = $"Others join at:   {MPConfig.HostIP} : {port}{lanLine}";
-                    }
-                }
-                else if (MPClient.IsConnected)
-                {
-                    info = "Connected to host";
-                    // JOIN-WAIT-1 (C2): a mid-game join is PARKED until the host clicks accept, with no timeout.
-                    // Until now that looked identical to a healthy connection: "Connected to host" and an empty
-                    // player list, forever. The host sends a token; the wording is ours.
-                    if (MPClient.JoinStatus == "awaiting-approval")
-                        info += "\n<color=#FFB060>Waiting for the host to approve your join.</color>";
-                    // Round-270: the joiner's world download, as a status line in the spot
-                    // they are already watching. 4s freshness window so slow-relay gaps
-                    // between chunks do not blink the line. Direct-UDP joins never report
-                    // (internal fragmentation) — accepted; the line simply never appears.
-                    if (SteamXferProgress.ActiveWithin(4000) && SteamXferProgress.Tag == "SteamClient" && SteamXferProgress.Cnt > 0)
-                    {
-                        int dlPct = Mathf.Min(100, SteamXferProgress.Got * 100 / SteamXferProgress.Cnt);
-                        info += "\n" + ComposeDownloadLine(dlPct, SteamXferProgress.Got, SteamXferProgress.Cnt, SteamXferProgress.KBytes);
-                    }
-                }
-                else if (MPClient.IsConnecting)  info = "Connecting…";
-                else
-                {
-                    // Neither hosting nor connected — a failed host bind or a
-                    // failed/dropped join.  Say so instead of sitting on a stale
-                    // "Connecting…" that looks like a live lobby.
-                    string why = MPClient.LastDisconnectReason;
-                    string? friendly = MPClient.FriendlyDisconnectReason;
-                    info = friendly != null
-                        ? $"<color=#FF7070>{friendly}</color>"
-                        : $"<color=#FF7070>Not connected{(string.IsNullOrEmpty(why) ? "" : " — " + why)}.  Leave and retry.</color>";
-                }
-                // Round-93: a transient notice (e.g. overlay-disabled) briefly overrides the info line.
-                if (!string.IsNullOrEmpty(_lobbyNotice) && Time.unscaledTime < _lobbyNoticeUntil)
-                    info = $"<color=#FFB060>{_lobbyNotice}</color>";
+                if (!_lwRefreshErrLogged) { _lwRefreshErrLogged = true; Plugin.Logger.LogWarning($"[MenuUI] lobby refresh: {ex}"); }
+            }
+        }
+
+        /// <summary>Every 0.5 s while the lobby is open, and on events. Texts are written only when they change.</summary>
+        private void RefreshLobbyCore()
+        {
+            bool host = LwHost();
+            bool client = !host && LwClient();
+            bool connecting = !host && !client && LwConnecting();
+            if (client || connecting) _lwHostFailed = false;
+            int card = host || client ? 0 : connecting ? 1 : 2;
+            _lwCard = card;
+            if (card != 0) _lwThumbDrag = false;
+            LwFit(false);   // review item 15: screen size / UI scale changed while open
+            LShowGO(_lwMain != null ? _lwMain.go : null, card == 0);
+            LShowGO(_lwConn != null ? _lwConn.go : null, card == 1);
+            LShowGO(_lwFail != null ? _lwFail.go : null, card == 2);
+            if (card != 0 && _lwPortOpen) ClosePortPopup();
+            if (card == 1) { LSetText(_lwConnLbl, $"Connecting to {LwConnectAddress()}…"); return; }
+            if (card == 2) { RefreshFailCard(); return; }
+            var main = _lwMain;
+            if (main == null) return;
+
+            var players = LwPlayers(host);
+            int n = players != null ? players.Count : 0;
+            bool load = LwLoad(host);
+            bool steamOk = false;
+            try { steamOk = Steamworks.SteamClient.IsValid; } catch { }
 #if BAMP_DEV
-                // Round-270 /uipreview dl: dev preview slot — deliberately SEPARATE from
-                // _lobbyNotice, which session teardown rightly clears (round-253e) and which
-                // wiped the first preview attempt on the exact exit-to-menu path it needed.
-                // Rendered raw (no orange wrap) so it shows exactly what the live path shows.
-                if (!string.IsNullOrEmpty(_previewNotice) && Time.unscaledTime < _previewNoticeUntil)
-                    info = _previewNotice;
+            if (DevLobby != 0) steamOk = true;
 #endif
-                // Round-253f (user ruling: events over timers): the mod-mismatch line is a
-                // LIVE READ of current state — shown exactly while a mismatched player is
-                // present (host) / while connected to a mismatched host (client). No timer.
-                string standing = "";
-                try { standing = host ? MPServer.ModMismatchStripLine() : MPClient.ModMismatchVsHost; } catch { }
-                if (!string.IsNullOrEmpty(standing))
-                    info += $"\n<color=#FFB060>{standing}</color>";
-                try { _lwConnInfo.text = info; } catch { }
-            }
-            // Show/Hide IP toggle — host only; label reflects state.
-            SetActiveSafe(_lwShowIp, host);
-            bool steamOk = false; try { steamOk = Steamworks.SteamClient.IsValid; } catch { }
-            SetActiveSafe(_lwInvite, host && steamOk);
-            if (_lwShowIp != null) { try { var t = _lwShowIp.GetComponentInChildren<TMP_Text>(true); if (t != null) t.text = _showIp ? "Hide IP" : "Show IP"; } catch { } }
+            int port = host ? LwBoundPort() : 0;
+            bool steamOnly = host && port <= 0;
+            LobbyLayout(host, client, load, _showIp && !steamOnly, steamOk, steamOnly);
+            LSetText(main.sub, $"{(load ? "Saved game" : "New game")} · {n} {(n == 1 ? "player" : "players")}");
 
-            var players = host ? MPServer.LobbyPlayers : MPClient.LobbyPlayers;
-            for (int i = 0; i < _lwRoster.Length; i++)
-            {
-                if (_lwRoster[i] == null) continue;
-                string txt = (players != null && i < players.Count) ? (i == 0 ? "★  " : "    ") + players[i] : "";
-                try { _lwRoster[i].text = txt; } catch { }
-            }
-
-            // Load mode = resuming a saved game: the new-game settings (difficulty,
-            // cash, age) don't apply, so hide them and show which save we're resuming.
-            // The client learns the host's load mode + save name from LobbyUpdate, so
-            // a joining client also hides the age field for a loaded game.
-            bool loadMode = host ? _lobbyLoadMode : MPClient.HostLoadMode;
-            string loadName = host ? MPServer.ChosenLoadSession : MPClient.HostLoadSession;
-            SetActiveSafe(_lwLoadInfo != null ? _lwLoadInfo.gameObject : null, loadMode);
-            if (loadMode && _lwLoadInfo != null)
-                _lwLoadInfo.text = string.IsNullOrEmpty(loadName)
-                    ? "Resuming saved game" : $"Resuming save:  {loadName}";
-
+            // ── the player list: LW_SLOTS (8) row slots; from the 9th player the list scrolls ──
+            LwSyncFocus(players, n);
+            int maxScroll = Math.Max(0, n - LW_SLOTS);
+            if (_lwScroll > maxScroll) _lwScroll = maxScroll;
+            if (_lwScroll < 0) _lwScroll = 0;
             int baseCash = _hostSettings != null ? _hostSettings.StartingMoney : 0;
             int baseAge  = _hostSettings != null ? _hostSettings.StartingAge   : 18;
-            // Cash column = host-only + new-game only; age column = all players + new-game only.
-            SetActiveSafe(_lwRowCashHdr != null ? _lwRowCashHdr.gameObject : null, host && !loadMode);
-            SetActiveSafe(_lwRowAgeHdr  != null ? _lwRowAgeHdr.gameObject  : null, !loadMode);
-
-            for (int i = 0; i < _lwRoster.Length; i++)
+            for (int s = 0; s < LW_SLOTS; s++)
             {
-                bool occupied = players != null && i < players.Count && !string.IsNullOrEmpty(players[i]);
-                string nm = occupied ? players![i] : "";
-                bool isLocal = occupied && nm == MPConfig.PlayerId;
-
-                // CASH — host only, new-game only, editable by host on any row.
-                bool showCash = host && occupied && !loadMode;
-                SetActiveSafe(_rtLwRowCash[i] != null ? _rtLwRowCash[i]!.gameObject : null, showCash);
-                if (showCash && _lwRowCashFocus != i)
+                var r = _lwRows[s];
+                if (r == null) continue;
+                int pi = _lwScroll + s;
+                bool occupied = players != null && pi < n && !string.IsNullOrEmpty(players[pi]);
+                LShowGO(r.go, occupied);
+                if (!occupied || players == null) continue;
+                string nm = players[pi];
+                bool isLocal = nm == MPConfig.PlayerId;
+                LShowGO(r.star.gameObject, pi == 0);   // row 0 = the host
+                LSetText(r.name, isLocal ? $"<noparse>{nm}</noparse> <color=#CDD4DA>(you)</color>" : $"<noparse>{nm}</noparse>");
+                // Starting money: host only, new game only, editable by the host on any row.
+                bool showCash = host && !load;
+                LShowGO(r.cash.rt.gameObject, showCash);
+                if (showCash && _lwRowCashFocus != pi)
+                    LFieldText(r.cash, MPServer.StartingCashFor(nm, baseCash).ToString("N0", System.Globalization.CultureInfo.InvariantCulture), false);
+                // Age: new game only. Your own row = your editable box. The HOST also sees the others' ages (read-only
+                // text: it bakes everyone's settings); a JOINER sees only its own (user, 2026-06-11).
+                bool ageField = !load && isLocal;
+                bool ageText = !load && !isLocal && host;
+                LShowGO(r.age.rt.gameObject, ageField);
+                LShowGO(r.ageTxt.gameObject, ageText);
+                if (ageField && _lwRowAgeFocus != pi) LFieldText(r.age, DisplayAgeFor(nm, true, baseAge).ToString(), false);
+                if (ageText) LSetText(r.ageTxt, DisplayAgeFor(nm, false, baseAge).ToString());
+                LShow(r.kick, host && pi > 0);   // never on the host's own row
+                LFieldState(r.cash, false, _lwRowCashFocus == pi);
+                LFieldState(r.age, false, _lwRowAgeFocus == pi);
+            }
+            bool scroll = n > LW_SLOTS;
+            LShowGO(_lwTrack, scroll);
+            int tk = scroll ? n * 1000 + _lwScroll : -2;
+            if (tk != _lwThumbKey && _lwThumb != null)
+            {
+                _lwThumbKey = tk;
+                if (scroll)
                 {
-                    _lwRowCash[i] = MPServer.StartingCashFor(nm, baseCash).ToString();
-                    if (_lwRowCashLbl[i] != null) { try { _lwRowCashLbl[i].text = _lwRowCash[i]; } catch { } }
+                    float th = LW_LIST_H * LW_SLOTS / n;
+                    LPos(_lwThumb, 0f, maxScroll > 0 ? (LW_LIST_H - th) * _lwScroll / maxScroll : 0f, 6f, th);
                 }
-
-                // AGE — new-game only.  HOST sees all (it bakes everyone's
-                // settings); a CLIENT sees ONLY ITS OWN editable age — other
-                // players' ages are irrelevant noise to them (user, 2026-06-11).
-                bool showAge = occupied && !loadMode && (host || isLocal);
-                SetActiveSafe(_rtLwRowAge[i] != null ? _rtLwRowAge[i]!.gameObject : null, showAge);
-                if (showAge && _lwRowAgeFocus != i)
-                {
-                    _lwRowAge[i] = DisplayAgeFor(nm, isLocal, baseAge).ToString();
-                    if (_lwRowAgeLbl[i] != null)
-                    {
-                        try { _lwRowAgeLbl[i].text = _lwRowAge[i]; _lwRowAgeLbl[i].color = isLocal ? C_WHITE : new Color(0.6f,0.6f,0.65f,1f); } catch { }
-                    }
-                }
-
-                // KICK [X] — host only, never on its own row (row 0 = host).
-                bool showKick = host && occupied && i > 0;
-                if (showKick && _rtLwKick[i] == null && _lwRoster[i] != null)
-                {
-                    var sprite = IsAlive(_panelSprite) ? _panelSprite : EnsureRoundedSprite();
-                    var (xRT, xLbl) = MakeHubButton("X", Vector2.zero, 24f, new Color(0.45f, 0.24f, 0.22f, 1f), 20f, sprite, _lwRoster[i].transform);
-                    xRT.anchorMin = xRT.anchorMax = xRT.pivot = new Vector2(1f, 0.5f);
-                    xRT.anchoredPosition = new Vector2(-4f, 0f);
-                    xLbl.fontSize = 11;
-                    _rtLwKick[i] = xRT;
-                }
-                if (_rtLwKick[i] != null && _rtLwKick[i]!.gameObject.activeSelf != showKick)
-                    _rtLwKick[i]!.gameObject.SetActive(showKick);
             }
 
-            // New-game controls — host only, hidden in load mode.
-            bool newGame = host && !loadMode;
-            SetActiveSafe(_lwDiffHdr != null ? _lwDiffHdr.gameObject : null, newGame);
-            SetActiveSafe(_lwDiffEasy, newGame); SetActiveSafe(_lwDiffNormal, newGame); SetActiveSafe(_lwDiffHard, newGame);
-            // Round-53: Customize shows in LOAD mode too — there it edits the save's own
-            // adjustable settings (needs/rest/morale), which become the save's new authority.
-            SetActiveSafe(_lwCustomize, host);
-            SetActiveSafe(_lwStart, host);   // Start shown to host in both modes
-            if (newGame) HighlightDifficulty();
+            // ── right column ──
+            if (host)
+            {
+                if (load)
+                {
+                    string sn = LwSaveName();
+                    LSetText(_lwSavedLbl, sn.Length > 0 ? $"Saved game: {sn}" : "");
+                }
+                else HighlightDifficulty();
+
+                string addr;
+                bool dots = false;
+                if (steamOnly)
+                {   // H-HOSTPORT-1 (wording approved by the user 2026-09-26): Steam-only hosting - no UDP port bound.
+                    int rp = LwRequestedPort();
+                    addr = $"Others join at:   Steam invites only (ports {rp}–{Math.Min(rp + 10, 65535)} are in use)";
+                }
+                else if (!_showIp) { addr = $"•••••••••• : {port}"; dots = true; }
+                else addr = LwShownAddress(port);
+                LSetText(_lwAddrLbl, addr);
+                if (_lwAddrLbl != null)
+                {
+                    float sp = dots ? 14f : 0f;
+                    if (_lwAddrLbl.characterSpacing != sp) _lwAddrLbl.characterSpacing = sp;
+                    var ac = dots ? L_MUTED : C_WHITE;
+                    if (_lwAddrLbl.color != ac) _lwAddrLbl.color = ac;
+                }
+                LShow(_lwShowIpB, !steamOnly);
+                LSetText(_lwShowIpB != null ? _lwShowIpB.lbl : null, _showIp ? "Hide IP" : "Show IP");
+                bool canPort = LwPortChangeAllowed();
+                LSetKind(_lwPortB, canPort ? 0 : 4);
+                bool busy = LwBusy(out int asked, out int bound);
+                // Review item 10: Steam-only hosting has no UDP port, so no port hint at all.
+                string hint = steamOnly ? ""
+                            : busy ? $"Port {asked} is in use, so friends join on {bound} this time."
+                            : canPort ? "Friends joining over the internet need this port forwarded on your router."
+                            : L_ONLY_ALONE;
+                LSetText(_lwHintLbl, hint);
+                if (_lwHintLbl != null) { var hc = busy ? L_NOTICE : L_MUTED; if (_lwHintLbl.color != hc) _lwHintLbl.color = hc; }
+            }
+            else if (client)
+            {
+                string h0 = players != null && n > 0 ? players[0] : "";
+                var sb = new System.Text.StringBuilder();   // 0.5 s cadence, not per frame
+                if (h0.Length > 0) sb.Append("Connected to <noparse>").Append(h0).Append("</noparse> · waiting for the host to start");
+                // JOIN-WAIT-1 (C2): a mid-game join is PARKED until the host clicks accept, with no timeout.
+                if (LwAwaitingApproval())
+                    sb.Append(sb.Length > 0 ? "\n" : "").Append("<size=21><color=#F6C177>Waiting for the host to let you in.</color></size>");
+                // Round-270: the joiner's world download, in the spot they are already watching (4 s freshness window).
+                if (SteamXferProgress.ActiveWithin(4000) && SteamXferProgress.Tag == "SteamClient" && SteamXferProgress.Cnt > 0)
+                {
+                    int dlPct = Mathf.Min(100, SteamXferProgress.Got * 100 / SteamXferProgress.Cnt);
+                    sb.Append(sb.Length > 0 ? "\n" : "").Append(ComposeDownloadLine(dlPct, SteamXferProgress.Got, SteamXferProgress.Cnt, SteamXferProgress.KBytes));
+                }
+                LSetText(_lwWaitLbl, sb.ToString());
+            }
+
+            LwFitRightColumn(host);
+
+            // ── notice line: transient notices (overlay disabled, refusals, Steam-only ...) + the LIVE mod-mismatch read ──
+            string notice = "";
+            if (!string.IsNullOrEmpty(_lobbyNotice) && Time.unscaledTime < _lobbyNoticeUntil) notice = _lobbyNotice;
+#if BAMP_DEV
+            // Round-270 /uipreview dl: dev preview slot (separate from _lobbyNotice, which teardown clears).
+            if (!string.IsNullOrEmpty(_previewNotice) && Time.unscaledTime < _previewNoticeUntil) notice = _previewNotice;
+#endif
+            // Round-253f (user ruling: events over timers): shown exactly while a mismatched player is present.
+            string standing = "";
+            try { standing = host ? MPServer.ModMismatchStripLine() : MPClient.ModMismatchVsHost; } catch { }
+            if (!string.IsNullOrEmpty(standing)) notice = notice.Length > 0 ? notice + "\n" + standing : standing;
+            LSetText(_lwNotice, notice);
+        }
+
+        /// <summary>Fold 2 (manager's screenshot check 2026-09-28): each right-column section fits its content - the address,
+        /// hint and waiting texts are MEASURED, and the section ends 14 under its last line (the same as the title's top
+        /// padding); the notice follows 12 under it, down to the divider. Re-measured only when one of those texts or the
+        /// layout changed (a string compare on the 0.5 s refresh, no allocation otherwise).</summary>
+        private void LwFitRightColumn(bool host)
+        {
+            try
+            {
+                string addr = _lwAddrLbl != null ? _lwAddrLbl.text ?? "" : "";
+                string hint = _lwHintLbl != null ? _lwHintLbl.text ?? "" : "";
+                string wait = _lwWaitLbl != null ? _lwWaitLbl.text ?? "" : "";
+                if (_lwRcLayout == _lwLayoutKey && string.Equals(addr, _lwRcAddr, StringComparison.Ordinal)
+                    && string.Equals(hint, _lwRcHint, StringComparison.Ordinal) && string.Equals(wait, _lwRcWait, StringComparison.Ordinal)) return;
+                _lwRcLayout = _lwLayoutKey; _lwRcAddr = addr; _lwRcHint = hint; _lwRcWait = wait;
+                float ny;
+                if (host)
+                {
+                    float y = _lwAddrY;
+                    float ah = LwTextH(_lwAddrLbl, addr, 348f, _lwAddrFallbackH);
+                    if (ah <= 0f) ah = _lwAddrFallbackH;   // the address line is always shown; keep its place before the first write
+                    if (_lwAddrLbl != null) LPos(_lwAddrLbl.rectTransform, 16f, y, 348f, ah);
+                    y += ah + 12f;
+                    if (_lwShowIpB != null) LPos(_lwShowIpB.rt, 16f, y, 110f, 34f);
+                    if (_lwPortB != null) LPos(_lwPortB.rt, _lwSteamOnly ? 16f : 136f, y, 150f, 34f);
+                    y += 34f;
+                    float hh = LwTextH(_lwHintLbl, hint, 348f, 38f);
+                    if (hh > 0f)
+                    {
+                        y += 12f;
+                        if (_lwHintLbl != null) LPos(_lwHintLbl.rectTransform, 16f, y, 348f, hh);
+                        y += hh;
+                    }
+                    y += 14f;
+                    if (_rtLwInvite != null) LPos(_rtLwInvite, 678f, _lwInviteTop, 380f, y);
+                    ny = _lwInviteTop + y + 12f;
+                }
+                else
+                {
+                    float wh = Mathf.Min(LwTextH(_lwWaitLbl, wait, 348f, 90f), 200f);   // over 200 the label's own ellipsis cuts
+                    if (_lwWaitLbl != null) LPos(_lwWaitLbl.rectTransform, 16f, 46f, 348f, wh);
+                    float h = (wh > 0f ? 46f + wh : 34f) + 14f;
+                    if (_rtLwWaiting != null) LPos(_rtLwWaiting, 678f, 64f, 380f, h);
+                    ny = 64f + h + 12f;
+                }
+                if (_lwNotice != null) LPos(_lwNotice.rectTransform, 678f, ny, 380f, Mathf.Max(0f, LW_DIVIDER_Y - 12f - ny));
+            }
+            catch (Exception ex)
+            {
+                if (!_lwFitErrLogged) { _lwFitErrLogged = true; Plugin.Logger.LogWarning($"[MenuUI] lobby right-column fit: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>The height (layout units, rounded up) <paramref name="txt"/> takes in <paramref name="lbl"/> at
+        /// <paramref name="wU"/> units wide; 0 for no text, <paramref name="fallbackU"/> when TMP cannot measure.</summary>
+        private static float LwTextH(TextMeshProUGUI? lbl, string txt, float wU, float fallbackU)
+        {
+            if (lbl == null || string.IsNullOrEmpty(txt)) return 0f;
+            try { return Mathf.Ceil(lbl.GetPreferredValues(txt, wU * LS, 0f).y / LS); }
+            catch { return fallbackU; }
+        }
+
+        /// <summary>Couldn't join: the reason in FULL (wraps, never cut); the card grows to fit, re-measured only when the
+        /// reason changes. A failed HOST start (no port and no Steam) reuses the card under the lobby title.</summary>
+        private void RefreshFailCard()
+        {
+            var fail = _lwFail;
+            var lbl = _lwFailLbl;
+            if (fail == null || lbl == null) return;
+            bool hostFail = _lwHostFailed;
+#if BAMP_DEV
+            if (DevLobby != 0) hostFail = false;
+#endif
+            string reason = hostFail ? (_lobbyNotice ?? "") : LwFailReason();
+            LSetText(fail.title, hostFail ? "Multiplayer Lobby" : "Couldn't join");
+            if (reason == _lwFailShown) return;
+            _lwFailShown = reason;
+            lbl.text = reason;
+            float hU = 0f;
+            if (reason.Length > 0) { try { hU = lbl.GetPreferredValues(reason, 396f * LS, 0f).y; } catch { hU = 60f * LS; } }
+            float h = Mathf.Max(hU / LS, 1f);
+            float by = 64f + h + 16f;
+            LPos(lbl.rectTransform, 22f, 64f, 396f, h);
+            if (_lwFailBackB != null)  LPos(_lwFailBackB.rt, 84f, by, 140f, 42f);
+            if (_lwFailRetryB != null) LPos(_lwFailRetryB.rt, 236f, by, 160f, 42f);
+            fail.rt.sizeDelta = new Vector2(440f * LS, (by + 42f + 20f) * LS);
         }
 
         /// <summary>The age to display for a player in the lobby roster.  Local row =
@@ -5959,131 +6801,323 @@ namespace BigAmbitionsMP
             catch { return baseAge; }
         }
 
-        /// <summary>MAIN THREAD per frame while the lobby window is open — clicks + cash typing.</summary>
+        // ── Hosting port popup (option A: only while the host is alone; rebinds ONLY the UDP listener) ──
+
+        private bool OpenPortPopup()
+        {
+            if (!LwPortChangeAllowed())
+            {
+                int n = 0, pc0 = 0;
+                try { n = MPServer.LobbyPlayers.Count; pc0 = MPServer.TransportPeerCount; } catch { }
+                Plugin.Logger.LogInfo($"[MenuUI] Change port refused - {n} player(s) in the lobby, {pc0} connection(s) open (only possible before anyone joins).");
+                return false;
+            }
+            _lwPortOpen = true; _ppFocus = true; _ppErr = ""; _lwCaretDirty = true;
+            _ppText = MPConfig.HostPort.ToString();
+            var pc = _lwPortCard;
+            if (pc != null) { pc.go.transform.SetAsLastSibling(); LShowGO(pc.go, true); }
+            LayoutPortCard();
+            Plugin.Logger.LogInfo("[MenuUI] Change port → Hosting port popup.");
+            return true;
+        }
+
+        private void ClosePortPopup()
+        {
+            _lwPortOpen = false; _ppFocus = false;
+            LShowGO(_lwPortCard != null ? _lwPortCard.go : null, false);
+        }
+
+        private void LayoutPortCard()
+        {
+            var pc = _lwPortCard;
+            if (pc == null) return;
+            bool err = _ppErr.Length > 0;
+            if (_ppErrLbl != null) { LShowGO(_ppErrLbl.gameObject, err); LSetText(_ppErrLbl, _ppErr); }
+            float by = err ? 243f : 209f;
+            if (_ppCancelB != null) LPos(_ppCancelB.rt, 84f, by, 130f, 40f);
+            if (_ppSaveB != null)   LPos(_ppSaveB.rt, 226f, by, 130f, 40f);
+            pc.rt.sizeDelta = new Vector2(440f * LS, (by + 60f) * LS);
+            LFieldState(_ppField, _ppErr == L_PORT_ERR, _ppFocus);
+        }
+
+        private void TickPortPopup(Vector2 mp)
+        {
+            if (Input.GetMouseButtonDown(0))
+            {
+                if (LHit(_ppSaveB, mp)) { PortPopupSave(); return; }
+                if (LHit(_ppCancelB, mp)) { Plugin.Logger.LogInfo("[MenuUI] Hosting port popup → cancel"); ClosePortPopup(); return; }
+                bool f = LHitF(_ppField, mp);
+                if (f != _ppFocus) { _ppFocus = f; _lwCaretDirty = true; LayoutPortCard(); }
+            }
+            if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter)) { PortPopupSave(); return; }
+            if (_ppFocus && Input.inputString.Length > 0)
+            {
+                string s = TypeDigits(_ppText, 5);
+                if (s != _ppText) { _ppText = s; _lwCaretDirty = true; }
+            }
+        }
+
+        /// <summary>Save: validate 1024-65535, re-check "alone", rebind ONLY the UDP listener (Steam listener and lobby state
+        /// untouched; the busy-port fallback applies), then persist the CHOSEN port as HostPort (never a fallback, never 0).</summary>
+        private string PortPopupSave()
+        {
+            try
+            {
+                string t = (_ppText ?? "").Trim();
+                if (!int.TryParse(t, out int p) || p < 1024 || p > 65535)
+                {
+                    _ppErr = L_PORT_ERR; LayoutPortCard();
+                    Plugin.Logger.LogInfo($"[MenuUI] Hosting port '{t}' refused (not 1024-65535).");
+                    return "invalid";
+                }
+                if (!LwPortChangeAllowed())
+                {
+                    _ppErr = L_ONLY_ALONE; LayoutPortCard();
+                    Plugin.Logger.LogInfo($"[MenuUI] Hosting port {p} refused - someone joined.");
+                    return "refused";
+                }
+#if BAMP_DEV
+                if (DevLobby != 0) { ClosePortPopup(); return "dev"; }
+#endif
+                if (!MPServer.RebindUdp(p, out string why))
+                {
+                    Plugin.Logger.LogWarning($"[MenuUI] Hosting port {p}: rebind not done ({why}).");
+                    if (why == "players present") { _ppErr = L_ONLY_ALONE; LayoutPortCard(); return "refused"; }
+                    ClosePortPopup(); RefreshLobbyWindow();
+                    return "failed: " + why;
+                }
+                MPConfig.SetHostPort(p);
+                Plugin.Logger.LogInfo($"[MenuUI] Hosting port saved: asked {p}, listening on {MPServer.BoundPort}.");
+                // Review item 10: a UDP port is bound again - the 'Hosting through Steam only…' notice no longer holds.
+                if (MPServer.BoundPort > 0 && _lobbyNotice.StartsWith("Hosting through Steam only", StringComparison.Ordinal)) _lobbyNotice = "";
+                ClosePortPopup(); RefreshLobbyWindow();
+                return "saved";
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] hosting port save: {ex.Message}"); return "error"; }
+        }
+
+        // ── Couldn't join: Back / Try Again ──
+        private void OnFailBack()
+        {
+            bool reopen = !_lwHostFailed && MPClient.LastConnectPath == "ip";
+            Plugin.Logger.LogInfo($"[MenuUI] Couldn't join → back{(reopen ? " (Join a Game)" : "")}");
+            OnLobbyLeave();
+            if (reopen) ShowJoinDialog(true);
+        }
+
+        private void OnFailRetry()
+        {
+            try
+            {
+                if (_lwHostFailed) { Plugin.Logger.LogInfo("[MenuUI] Lobby → try again (host)"); OnHost(); }
+                else
+                {
+                    // The address OnJoin persisted for this attempt (a Steam join keeps 'steam:<id>'; its port is ignored).
+                    _ip = MPConfig.HostIP;
+                    if (MPClient.LastConnectPath == "ip" && MPClient.LastConnectPort > 0) _port = MPClient.LastConnectPort.ToString();
+                    Plugin.Logger.LogInfo("[MenuUI] Couldn't join → try again");
+                    OnJoin();
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] try again: {ex.Message}"); }
+            RefreshLobbyWindow();
+        }
+
+        /// <summary>MAIN THREAD per frame while the lobby window is open — clicks + typing. No per-frame allocation: the
+        /// carets repaint only on a caret-phase or text change.</summary>
         private bool _btnDiagLogged;
         private void TickLobbyWindow()
         {
             if (_lobbyWindow == null || !_lobbyWindow.activeSelf) { _btnDiagLogged = false; return; }
-            // Sweep item 2 UI honesty: while a start is in flight the button says so — the
-            // field's ×12/×36 click storms were players mashing a button that gave no feedback.
-            try
+            try { TickLobbyCore(); }
+            catch (Exception ex)
             {
-                if (_lwStartLabel != null)
-                {
-                    string want = (MPServer.IsRunning && !MPServer.IsInLobby) ? "Starting..." : "Start Game";
-                    if (_lwStartLabel.text != want) _lwStartLabel.text = want;
-                }
+                if (!_lwTickErrLogged) { _lwTickErrLogged = true; Plugin.Logger.LogWarning($"[MenuUI] lobby tick: {ex}"); }
             }
-            catch { }
-            // Round-226c (user): the cash/age boxes had NO visible caret. Typing in
-            // them only ever appends/backspaces at the end, so an end-of-text blinking
-            // bar is honest. Rendered per frame while focused; the normal refresh
-            // repaints the plain value on blur.
+        }
+
+        private void TickLobbyCore()
+        {
+            // Sweep item 2 UI honesty: while a start is in flight the button says so.
+            var sl = _lwStartB != null ? _lwStartB.lbl : null;
+            if (sl != null)
             {
-                bool caretOn = Time.unscaledTime % 1f < 0.5f;
-                int cf = _lwRowCashFocus, af = _lwRowAgeFocus;
-                if (cf >= 0 && cf < _lwRowCashLbl.Length && _lwRowCashLbl[cf] != null)
-                    { try { _lwRowCashLbl[cf].text = _lwRowCash[cf] + (caretOn ? "|" : ""); } catch { } }
-                if (af >= 0 && af < _lwRowAgeLbl.Length && _lwRowAgeLbl[af] != null)
-                    { try { _lwRowAgeLbl[af].text = _lwRowAge[af] + (caretOn ? "|" : ""); } catch { } }
+                string want = (MPServer.IsRunning && !MPServer.IsInLobby) ? "Starting..." : "Start Game";
+                if (sl.text != want) sl.text = want;
             }
-            // One-shot geometry diagnostic (2026-07-10 invite-button report): name
-            // the actual hit rects so a bad one is identified from the field log
-            // instead of anchor theory.  Logs once per lobby open, first frame
-            // after layout settles.
+            if (_lwCard == 1 && _rtLwSpin != null) _rtLwSpin.localEulerAngles = new Vector3(0f, 0f, -((Time.unscaledTime * 300f) % 360f));
+            bool on = Time.unscaledTime % 1f < 0.5f;
+            if (on != _lwCaretOn || _lwCaretDirty) { _lwCaretOn = on; _lwCaretDirty = false; PaintLobbyCarets(on); }
+            // One-shot geometry diagnostic (2026-07-10 invite-button report), once per lobby open.
             if (!_btnDiagLogged)
             {
                 _btnDiagLogged = true;
                 try
                 {
-                    string D(RectTransform? rt) => rt == null ? "null"
-                        : $"rect={rt.rect} aMin={rt.anchorMin} aMax={rt.anchorMax} pos={rt.anchoredPosition}";
-                    Plugin.Logger.LogInfo($"[BtnDiag] invite: {D(_rtInvite)} | showip: {D(_rtShowIp)} | customize: {D(_rtCustomize)}");
+                    string D(LBtn? b) => b == null ? "null" : $"rect={b.rt.rect} active={b.go.activeInHierarchy}";
+                    Plugin.Logger.LogInfo($"[BtnDiag] invite: {D(_lwInviteB)} | showip: {D(_lwShowIpB)} | changeport: {D(_lwPortB)} | start: {D(_lwStartB)} | leave: {D(_lwLeaveB)}");
                 }
                 catch { }
             }
-            bool host = MPServer.IsRunning;
             var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
-
-            var rosterPlayers = host ? MPServer.LobbyPlayers : MPClient.LobbyPlayers;
-
-            if (Input.GetMouseButtonDown(0))
+            if (Input.GetKeyDown(KeyCode.Escape)) { LwEscape(); return; }   // review item 4
+            if (_lwPortOpen) { TickPortPopup(mp); return; }   // the popup owns the mouse and keys while open
+            bool click = Input.GetMouseButtonDown(0);
+            if (_lwCard == 1) { if (click && LHit(_lwConnCancelB, mp)) OnLobbyLeave(); return; }
+            if (_lwCard == 2)
             {
-                if (RectHit(_rtLwLeave, mp)) { OnLobbyLeave(); return; }
-                if (host)
-                {
-                    // KICK [X] on a roster row.
-                    for (int i = 1; i < _rtLwKick.Length; i++)
-                        if (_rtLwKick[i] != null && _rtLwKick[i]!.gameObject.activeSelf && RectHit(_rtLwKick[i]!, mp))
-                        {
-                            if (rosterPlayers != null && i < rosterPlayers.Count)
-                            {
-                                Plugin.Logger.LogInfo($"[MenuUI] kick [X] → '{rosterPlayers[i]}'");
-                                MPServer.KickFromLobby(rosterPlayers[i]);
-                            }
-                            return;
-                        }
-                    if (RectHit(_rtShowIp, mp))     { OnToggleShowIp();   return; }
-                    if (_lwInvite != null && _lwInvite.activeSelf && RectHit(_rtInvite, mp)) { OnInviteFriends(); return; }
-                    if (RectHit(_rtLwStart, mp))    { OnLobbyStart();      return; }
-                    if (!_lobbyLoadMode)   // new-game controls are hidden in load mode
-                    {
-                        if (RectHit(_rtDiffEasy, mp))   { SetDifficulty("Easy");   return; }
-                        if (RectHit(_rtDiffNormal, mp)) { SetDifficulty("Normal"); return; }
-                        if (RectHit(_rtDiffHard, mp))   { SetDifficulty("Hard");   return; }
-                        if (RectHit(_rtCustomize, mp))  { OnCustomize();      return; }
-                    }
-                }
-                // Cash focus — host only, any occupied row.
-                _lwRowCashFocus = -1; _lwRowAgeFocus = -1;
-                if (host)
-                    for (int i = 0; i < _rtLwRowCash.Length; i++)
-                        if (_rtLwRowCash[i] != null && _rtLwRowCash[i]!.gameObject.activeSelf && RectHit(_rtLwRowCash[i], mp)) { _lwRowCashFocus = i; break; }
-                // Age focus — your OWN row only (host or client).
-                if (_lwRowCashFocus < 0)
-                    for (int i = 0; i < _rtLwRowAge.Length; i++)
-                        if (_rtLwRowAge[i] != null && _rtLwRowAge[i]!.gameObject.activeSelf && RectHit(_rtLwRowAge[i], mp))
-                        {
-                            if (rosterPlayers != null && i < rosterPlayers.Count && rosterPlayers[i] == MPConfig.PlayerId) _lwRowAgeFocus = i;
-                            break;
-                        }
-                // Highlight the focused field so it's obviously editable.
-                HighlightLobbyFocus();
+                if (click && LHit(_lwFailBackB, mp)) { OnFailBack(); return; }
+                if (click && LHit(_lwFailRetryB, mp)) { OnFailRetry(); return; }
+                return;
+            }
+            bool host = LwHost();
+            var roster = LwPlayers(host);
+            int rn = roster != null ? roster.Count : 0;
+            LwSyncFocus(roster, rn);
+
+            // Review item 13: drag the thumb / click the track to page (the wheel below still works).
+            if (_lwThumbDrag)
+            {
+                if (!Input.GetMouseButton(0)) _lwThumbDrag = false;
+                else { LwDragThumb(mp.y, rn); return; }
+            }
+            else if (click && _rtLwTrackHit != null && _lwTrack != null && _lwTrack.activeSelf && RectHit(_rtLwTrackHit, mp))
+            {
+                int where = LwThumbSide(mp);
+                if (where == 0) { _lwThumbDrag = true; _lwDragStartY = mp.y; _lwDragStartScroll = _lwScroll; }
+                else LwPage(where, rn);
+                return;
             }
 
-            // CASH typing (host).
-            if (host && _lwRowCashFocus >= 0 && Input.inputString.Length > 0)
+            float wheel = Input.mouseScrollDelta.y;
+            if (wheel != 0f && _rtLwList != null && RectHit(_rtLwList, mp))
+            {
+                int ns = Mathf.Clamp(_lwScroll + (wheel > 0f ? -1 : 1), 0, Math.Max(0, rn - LW_SLOTS));
+                if (ns != _lwScroll) { _lwScroll = ns; LwClearFocus(); RefreshLobbyWindow(); }
+            }
+
+            if (click)
+            {
+                if (LHit(_lwLeaveB, mp)) { OnLobbyLeave(); return; }
+                if (host)
+                {
+                    for (int s = 0; s < LW_SLOTS; s++)
+                    {
+                        var r = _lwRows[s];
+                        if (r == null || !LHit(r.kick, mp)) continue;
+                        int pi = _lwScroll + s;
+                        if (roster != null && pi < rn)
+                        {
+                            Plugin.Logger.LogInfo($"[MenuUI] Kick → '{roster[pi]}'");
+                            MPServer.KickFromLobby(roster[pi]);
+                        }
+                        return;
+                    }
+                    if (LHit(_lwShowIpB, mp))     { OnToggleShowIp();   return; }
+                    if (LHit(_lwInviteB, mp))     { OnInviteFriends();  return; }
+                    if (LHit(_lwPortB, mp))       { OpenPortPopup();    return; }   // greyed = refused + logged
+                    if (LHit(_lwStartB, mp))      { OnLobbyStart();     return; }
+                    if (LHit(_lwDiffEasyB, mp))   { SetDifficulty("Easy");   return; }
+                    if (LHit(_lwDiffNormalB, mp)) { SetDifficulty("Normal"); return; }
+                    if (LHit(_lwDiffHardB, mp))   { SetDifficulty("Hard");   return; }
+                    if (LHit(_lwMoreB, mp) || LHit(_lwSaveSetB, mp)) { OnCustomize(); return; }
+                }
+                // Box focus: cash = host on any row; age = your OWN row only (host or joiner).
+                LwClearFocus();
+                int baseCash = _hostSettings != null ? _hostSettings.StartingMoney : 0;
+                int baseAge  = _hostSettings != null ? _hostSettings.StartingAge   : 18;
+                for (int s = 0; s < LW_SLOTS && roster != null; s++)
+                {
+                    var r = _lwRows[s];
+                    int pi = _lwScroll + s;
+                    if (r == null || pi >= rn) break;
+                    if (host && LHitF(r.cash, mp)) { _lwRowCashFocus = pi; _lwCashFocusId = roster[pi]; _lwEditBuf = MPServer.StartingCashFor(roster[pi], baseCash).ToString(); break; }
+                    if (LHitF(r.age, mp) && roster[pi] == MPConfig.PlayerId) { _lwRowAgeFocus = pi; _lwAgeFocusId = roster[pi]; _lwEditBuf = DisplayAgeFor(roster[pi], true, baseAge).ToString(); break; }
+                }
+                _lwCaretDirty = true;
+                RefreshLobbyWindow();   // repaint the box that lost focus (an event, not per frame)
+            }
+
+            if (Input.inputString.Length == 0) return;
+            if (host && _lwRowCashFocus >= 0)
             {
                 int i = _lwRowCashFocus;
-                string s = TypeDigits(_lwRowCash[i], 9);
-                _lwRowCash[i] = s;
-                if (_lwRowCashLbl[i] != null) _lwRowCashLbl[i].text = s;
-                if (rosterPlayers != null && i < rosterPlayers.Count && !string.IsNullOrEmpty(rosterPlayers[i]))
+                _lwEditBuf = TypeDigits(_lwEditBuf, 9);
+                if (roster != null && i < rn && !string.IsNullOrEmpty(roster[i]))
                 {
-                    if (int.TryParse(s, out int v)) MPServer.StartingCashByPlayer[rosterPlayers[i]] = v;
-                    else                            MPServer.StartingCashByPlayer.Remove(rosterPlayers[i]);   // empty → base
+                    if (int.TryParse(_lwEditBuf, out int v)) MPServer.StartingCashByPlayer[roster[i]] = v;
+                    else                                    MPServer.StartingCashByPlayer.Remove(roster[i]);   // empty → base
                 }
+                _lwCaretDirty = true;
             }
-            // AGE typing (own row).
-            else if (_lwRowAgeFocus >= 0 && Input.inputString.Length > 0)
+            else if (_lwRowAgeFocus >= 0)
             {
-                int i = _lwRowAgeFocus;
-                // Round-226b (user design): the age field HOLDS two digits — a third
-                // keystroke simply never goes in ("189" stays "18"), so the box always
-                // shows what will apply. A complete 2-digit entry above 79 becomes 79
-                // on screen AND in effect (the game zombie-walks at 80, kills at 90).
-                string s = TypeDigits(_lwRowAge[i], 2);
-                _lwRowAge[i] = s;
+                // Round-226b (user design): the age box HOLDS two digits — a third keystroke never goes in; a complete
+                // 2-digit entry above 79 becomes 79 on screen AND in effect (the game zombie-walks at 80, kills at 90).
+                string s = TypeDigits(_lwEditBuf, 2);
                 if (int.TryParse(s, out int v))
                 {
-                    if (s.Length == 2 && v > 79) { v = 79; s = "79"; _lwRowAge[i] = s; }
-                    if (_lwRowAgeLbl[i] != null) _lwRowAgeLbl[i].text = s;
+                    if (s.Length == 2 && v > 79) { v = 79; s = "79"; }
                     v = Mathf.Clamp(v, 16, 79);
                     if (MPServer.IsRunning) MPServer.SetStartingAge(MPConfig.PlayerId, v);   // host's own age (+ broadcast)
                     else { MPClient.ChosenStartingAge = v; MPClient.SendLobbyPref(v); }       // client reports its age
                 }
-                else if (_lwRowAgeLbl[i] != null) _lwRowAgeLbl[i].text = s;   // backspaced empty — show it
+                _lwEditBuf = s;
+                _lwCaretDirty = true;
             }
+        }
+
+        /// <summary>Round-226c: an end-of-text blinking bar in the focused box (typing only appends/backspaces at the end).</summary>
+        private void PaintLobbyCarets(bool on)
+        {
+            int sc = _lwRowCashFocus - _lwScroll, sa = _lwRowAgeFocus - _lwScroll;
+            if (_lwRowCashFocus >= 0 && sc >= 0 && sc < LW_SLOTS) { var r = _lwRows[sc]; if (r != null) LFieldText(r.cash, on ? _lwEditBuf + "|" : _lwEditBuf, true); }
+            if (_lwRowAgeFocus >= 0 && sa >= 0 && sa < LW_SLOTS)  { var r = _lwRows[sa]; if (r != null) LFieldText(r.age,  on ? _lwEditBuf + "|" : _lwEditBuf, true); }
+            if (_lwPortOpen && _ppField != null) LFieldText(_ppField, on && _ppFocus ? _ppText + "|" : _ppText, _ppFocus);
+        }
+
+        /// <summary>Review item 4: Escape in the lobby window = that window's own back / cancel: Hosting port popup = Cancel,
+        /// Connecting = Cancel, Couldn't join = Back. The lobby itself ignores it (leaving is a deliberate click). The press
+        /// is consumed in every case.</summary>
+        private string LwEscape()
+        {
+            string r;
+            if (_lwPortOpen) { Plugin.Logger.LogInfo("[MenuUI] Hosting port popup → cancel (Escape)"); ClosePortPopup(); r = "port popup cancel"; }
+            else if (_lwCard == 1) { Plugin.Logger.LogInfo("[MenuUI] Connecting → cancel (Escape)"); OnLobbyLeave(); r = "connecting cancel"; }
+            else if (_lwCard == 2) { Plugin.Logger.LogInfo("[MenuUI] Couldn't join → back (Escape)"); OnFailBack(); r = "couldn't join back"; }
+            else r = "lobby: ignored";
+            ConsumeEscape();
+            return r;
+        }
+
+        /// <summary>Review item 13: where a track click landed against the thumb (vertical only): -1 above, 0 on, 1 below.</summary>
+        private int LwThumbSide(Vector2 mp)
+        {
+            var th = _lwThumb;
+            if (th == null) return 0;
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(th, mp, null, out var local);
+            var r = th.rect;
+            return local.y > r.yMax ? -1 : local.y < r.yMin ? 1 : 0;
+        }
+
+        private void LwSetScroll(int ns, int rn)
+        {
+            ns = Mathf.Clamp(ns, 0, Math.Max(0, rn - LW_SLOTS));
+            if (ns != _lwScroll) { _lwScroll = ns; _lwCaretDirty = true; RefreshLobbyWindow(); }
+        }
+
+        private void LwPage(int dir, int rn) => LwSetScroll(_lwScroll + dir * LW_SLOTS, rn);
+
+        /// <summary>Thumb drag: the mouse's travel over the track's free length maps onto the scroll range. No allocation;
+        /// the list repaints only when the scroll position changes.</summary>
+        private void LwDragThumb(float my, int rn)
+        {
+            int maxScroll = Math.Max(0, rn - LW_SLOTS);
+            if (maxScroll == 0 || _lwTrack == null || _lwThumb == null) return;
+            var tr = (RectTransform)_lwTrack.transform;
+            float travel = tr.rect.height * tr.lossyScale.y - _lwThumb.rect.height * _lwThumb.lossyScale.y;
+            if (travel <= 1f) return;
+            LwSetScroll(_lwDragStartScroll + Mathf.RoundToInt((_lwDragStartY - my) / travel * maxScroll), rn);
         }
 
         /// <summary>Applies Input.inputString (digits + backspace) to a numeric string buffer.</summary>
@@ -6097,17 +7131,144 @@ namespace BigAmbitionsMP
             return s;
         }
 
-        /// <summary>Tints the focused lobby field so the player can see it's active.</summary>
-        private void HighlightLobbyFocus()
+#if BAMP_DEV
+        // ── DEV levers for the lobby redesign (TestDrive 'uiview', 2026-09-28) ─────────────────────────────
+        // Fake states so every screen can be screenshotted on ONE machine, plus the popup / join lever paths that
+        // t-lobbyport drives through the real code. The fake roster uses the approved mock-up's sample names.
+        internal static int DevLobby;   // 0 real, 1 host new game, 2 host saved game, 3 joiner, 4 connecting, 5 couldn't join
+        private static List<string>? _devRoster;
+        private static int _devBusyA, _devBusyB;
+        private static readonly List<System.Net.Sockets.Socket> _devOccupy = new();
+        private static LiteNetLib.NetManager? _devRawPeer;
+        private static readonly string[] DevNames = { "HostName", "FriendName", "Player Three", "Player Four", "Player Five", "Player Six", "Player Seven", "Player Eight" };
+
+        private void DevUiOff()
         {
-            for (int i = 0; i < _rtLwRowCash.Length; i++)
-            {
-                var ci = _rtLwRowCash[i]?.GetComponent<Image>();
-                if (ci != null) ci.color = (i == _lwRowCashFocus) ? C_FIELDFOC : C_FIELD;
-                var ai = _rtLwRowAge[i]?.GetComponent<Image>();
-                if (ai != null) ai.color = (i == _lwRowAgeFocus) ? C_FIELDFOC : C_FIELD;
-            }
+            DevLobby = 0; _devRoster = null; _devBusyA = 0; _devBusyB = 0;
+            _lobbyNotice = "";   // a DEV-posted notice (lobbymany) must not leak into the next screen
+            ClosePortPopup();
+            ShowJoinDialog(false);
         }
+
+        private void DevFill(int mode, int n, int me)
+        {
+            DevUiOff();
+            var list = new List<string>();
+            for (int i = 0; i < n; i++) list.Add(i == me ? MPConfig.PlayerId : i < DevNames.Length ? DevNames[i] : "Player " + (i + 1));
+            DevLobby = mode; _devRoster = list;
+            ShowView(MpView.Submenu);   // leave + re-enter so the lobby opens fresh (IP hidden, popup closed)
+            ShowView(MpView.Lobby);
+        }
+
+        internal string DevUi(string verb, string arg)
+        {
+            try
+            {
+                switch (verb)
+                {
+                    case "off": DevUiOff(); return "dev off";
+                    case "join":
+                        DevUiOff(); ShowView(MpView.Submenu); ShowJoinDialog(true);
+                        return $"join dialog open={_joinDialog != null && _joinDialog.activeSelf}";
+                    case "joinerr":
+                        DevUiOff(); ShowView(MpView.Submenu); ShowJoinDialog(true);
+                        _joinIp = "203.0.113.5"; _joinPort = "77"; _joinDirty = true;
+                        OnJoinConnect();
+                        return $"err='{_joinErr}' open={_joinDialog != null && _joinDialog.activeSelf}";
+                    case "lobby":       DevFill(1, 8, 0); return "fake host lobby, 8 players";
+                    case "lobbymany":
+                        // 12 players (the scrollbar), one over-long name (ellipsis) and the notice line in its new place.
+                        DevFill(1, 12, 0);
+                        if (_devRoster != null && _devRoster.Count > 2) _devRoster[2] = "Player Three With A Much Longer Name Than The Column";
+                        PostLobbyNotice("Hosting through Steam only: ports 7777–7787 are already in use.", 60f);
+                        RefreshLobbyWindow();
+                        return "fake host lobby, 12 players";
+                    case "thumb":
+                    {   // the thumb-drag path: a drag to fraction <arg> of the track
+                        int rn = _devRoster != null ? _devRoster.Count : 0, mx = Math.Max(0, rn - LW_SLOTS);
+                        float fr = float.Parse(arg, System.Globalization.CultureInfo.InvariantCulture);
+                        _lwDragStartScroll = 0; LwSetScroll(Mathf.RoundToInt(fr * mx), rn);
+                        return $"scroll={_lwScroll}/{mx}";
+                    }
+                    case "page":
+                    {   // the track-click path: <arg> = -1 (above the thumb) or 1 (below)
+                        int rn = _devRoster != null ? _devRoster.Count : 0;
+                        LwPage(int.Parse(arg), rn);
+                        return $"scroll={_lwScroll}/{Math.Max(0, rn - LW_SLOTS)}";
+                    }
+                    case "escape":
+                    {   // the same handlers the Escape key runs
+                        string r;
+                        if (_joinDialog != null && _joinDialog.activeSelf) { OnJoinBack(); ConsumeEscape(); r = "join back"; }
+                        else if (_lobbyWindow != null && _lobbyWindow.activeSelf) r = LwEscape();
+                        else r = "nothing open";
+                        return $"{r} view={_view} join={(_joinDialog != null && _joinDialog.activeSelf)} popup={_lwPortOpen}";
+                    }
+                    case "rawpeer":
+                    {   // a transport connection that never says hello (review item 6); 'off' closes it
+                        try { _devRawPeer?.Stop(); } catch { }
+                        _devRawPeer = null;
+                        if (arg.Length == 0 || arg == "off") return $"raw peer closed transportPeers={MPServer.TransportPeerCount}";
+                        var nm = new LiteNetLib.NetManager(new LiteNetLib.EventBasedNetListener());
+                        nm.Start();
+                        nm.Connect("127.0.0.1", int.Parse(arg), "BAMP");
+                        _devRawPeer = nm;
+                        return $"raw peer connecting to 127.0.0.1:{arg} (no hello)";
+                    }
+                    case "lobbysaved":  DevFill(2, 3, 0); return "fake saved-game lobby, 3 players";
+                    case "lobbyclient": DevFill(3, 5, 4); return "fake joiner lobby, 5 players";
+                    case "portpopup":
+                        DevFill(1, 1, 0); _devBusyA = 7777; _devBusyB = 7778; RefreshLobbyWindow();
+                        return $"fake host lobby + busy line, Hosting port popup open={OpenPortPopup()}";
+                    case "connecting":  DevFill(4, 0, 0); return "fake connecting";
+                    case "failed":      DevFill(5, 0, 0); return "fake couldn't join";
+                    case "real":        DevUiOff(); ShowView(MpView.Lobby); return "real lobby";
+                    case "host":
+                        DevUiOff(); OnMpHostNew();
+                        return $"server={MPServer.IsRunning} bound={MPServer.BoundPort} asked={MPServer.RequestedPort} HostPort={MPConfig.HostPort}";
+                    case "port":
+                    {
+                        RefreshLobbyWindow();
+                        if (!OpenPortPopup())
+                            return $"refused allowed=False hint='{(_lwHintLbl != null ? _lwHintLbl.text : "")}' bound={MPServer.BoundPort} HostPort={MPConfig.HostPort}";
+                        _ppText = arg; _lwCaretDirty = true;
+                        string r = PortPopupSave();
+                        RefreshLobbyWindow();
+                        return $"{r} bound={MPServer.BoundPort} asked={MPServer.RequestedPort} HostPort={MPConfig.HostPort} popupOpen={_lwPortOpen} err='{_ppErr}' hint='{(_lwHintLbl != null ? _lwHintLbl.text : "")}'";
+                    }
+                    case "joinaddr":
+                        DevUiOff(); ShowView(MpView.Submenu); ShowJoinDialog(true);
+                        _joinIp = arg; _joinDirty = true;
+                        OnJoinConnect();
+                        return $"ip='{_ip}' port='{_port}' err='{_joinErr}' started={MPClient.IsConnecting || MPClient.IsConnected}";
+                    case "cfg":
+                        // 'cfg joinport <n>' puts the JOIN port back after a test (the lever's join persisted it).
+                        if (arg.StartsWith("joinport ", StringComparison.Ordinal)) MPConfig.SetRuntime(MPConfig.PlayerId, null, int.Parse(arg.Substring(9).Trim()));
+                        return $"HostPort={MPConfig.HostPort} Port={MPConfig.Port}";
+                    case "leave": DevUiOff(); OnLobbyLeave(); return $"left server={MPServer.IsRunning} client={MPClient.IsConnected}";
+                    case "occupy":
+                    {
+                        foreach (var o in _devOccupy) { try { o.Close(); } catch { } }
+                        _devOccupy.Clear();
+                        if (arg.Length == 0 || arg == "off") return "released";
+                        // '<port>' or '<first>-<last>' (review item 7: a whole fallback range held)
+                        int dash = arg.IndexOf('-');
+                        int op = int.Parse(dash > 0 ? arg.Substring(0, dash) : arg), ol = dash > 0 ? int.Parse(arg.Substring(dash + 1)) : op;
+                        for (int q = op; q <= ol; q++)
+                        {
+                            var s = new System.Net.Sockets.Socket(System.Net.Sockets.AddressFamily.InterNetwork, System.Net.Sockets.SocketType.Dgram, System.Net.Sockets.ProtocolType.Udp);
+                            s.ExclusiveAddressUse = true;
+                            s.Bind(new System.Net.IPEndPoint(System.Net.IPAddress.Any, q));
+                            _devOccupy.Add(s);
+                        }
+                        return dash > 0 ? $"holding UDP {op}-{ol} ({_devOccupy.Count})" : $"holding UDP {op}";
+                    }
+                }
+                return "ERR unknown lobby lever '" + verb + "'";
+            }
+            catch (Exception ex) { return "ERR " + ex.GetType().Name + ": " + ex.Message; }
+        }
+#endif
 
         // ── Player HUD ────────────────────────────────────────────────────────
 
@@ -7872,23 +9033,22 @@ namespace BigAmbitionsMP
 
         private void OnHost()
         {
-            // Round-59: HOSTS never type a port (only the join dialog has a field), so refusing
-            // here left a bricked host with NO in-game recovery (Tali/JP field case: 22 refused
-            // attempts). An invalid runtime port falls back to the config port, which the
-            // load-time self-heal guarantees valid.
-            if (!int.TryParse(_port, out int p) || p < 1024 || p > 65535)
+            _lwHostFailed = false;
+            // Lobby port option A (user-approved 2026-09-28): hosting reads its OWN config key, HostPort - never the
+            // join port (_port / config Port), so joining a friend on 8000 no longer makes you host on 8000. Round-59
+            // still holds: a host is never refused for its port (an invalid value falls back; the load self-heals it).
+            int p = MPConfig.HostPort;
+            if (p < 1024 || p > 65535)
             {
-                p = MPConfig.Port >= 1024 && MPConfig.Port <= 65535 ? MPConfig.Port : 7777;
-                _port = p.ToString();
-                Plugin.Logger.LogWarning($"[UI] host port fell back to {p} (runtime port string was invalid).");
+                p = 7777;
+                Plugin.Logger.LogWarning($"[UI] host port fell back to {p} (HostPort {MPConfig.HostPort} was invalid).");
             }
             if (string.IsNullOrWhiteSpace(_name))
             { SetStatus("Enter a player name.", true); return; }
-            MPConfig.SetRuntime(_name.Trim(), null, p);
-            // H-HOSTPORT-1: the failure text also goes to the lobby's info strip (the lobby opens right after this
-            // and the status line is not on it) - the strip showed the generic "Not connected ... Leave and retry."
+            MPConfig.SetRuntime(_name.Trim(), null, 0);   // the name only: port 0 never touches the JOIN port (round-59 rule)
+            // H-HOSTPORT-1: the failure text also goes to the lobby's notice line (the lobby opens right after this).
             if (!MPServer.Start(p))
-            { SetStatus($"Hosting FAILED on port {p} (port in use?).", true); PostLobbyNotice($"Hosting FAILED on port {p} (port in use?).", 60f); return; }
+            { _lwHostFailed = true; SetStatus($"Hosting FAILED on port {p} (port in use?).", true); PostLobbyNotice($"Hosting FAILED on port {p} (port in use?).", 60f); return; }
             // Needs/morale tuning applies for EVERY hosted session (a LOADED game
             // never runs BuildGameVariables) — the heartbeat then carries it to
             // all clients, so the whole session runs the host's percents.
@@ -7901,6 +9061,7 @@ namespace BigAmbitionsMP
 
         private void OnJoin()
         {
+            _lwHostFailed = false;   // review item 5: every new join starts without a stale host failure
             if (string.IsNullOrWhiteSpace(_name))
             { SetStatus("Enter a player name.", true); return; }
             // Slice 2: the address field also accepts "steam:<SteamID64>" (or a

@@ -1,0 +1,329 @@
+{
+  "id": "T-LOBBYPORT",
+  "title": "Lobby redesign port option A (user-approved 2026-09-28): the host sets HostPort 8123 through the Hosting port popup's own Save path -> ONLY the UDP listener rebinds on 8123 (Steam listener + lobby untouched); a client joins by typing '127.0.0.1:8123' in the one address box of Join a Game; the client's own HostPort stays 7777 (the join writes only Port); Change port is refused while the client is in the lobby; with 8125 held by a DEV socket, Save 8125 falls back to 8126, shows the orange busy line and saves the CHOSEN 8125. Restores both rig configs at the end.",
+  "preconditions": "Dev build with the uiview lobby levers (TestDrive.cs). Both instances at the main menu. UDP 7777, 8123, 8126 free on the rig machine. UDP 8130-8140 free (the item-7 leg holds them).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "\\[MenuUI\\] lobby tick: ",
+    "\\[MenuUI\\] lobby refresh: ",
+    "\\[MenuUI\\] join dialog tick: ",
+    "\\[MenuUI\\] BuildLobbyWindow: ",
+    "\\[Server\\] RebindUdp: ",
+    "\\[TestDrive\\] uiview: ",
+    "\\[Server\\] Failed to start on port",
+    "\\[MenuUI\\] lobby window unavailable"
+  ],
+  "oracles_report": [
+    "\\[Server\\] UDP listener rebound",
+    "\\[Config\\] HostPort",
+    "\\[MenuUI\\] Change port",
+    "\\[MenuUI\\] Hosting port",
+    "\\[MenuUI\\] Join a Game",
+    "\\[MenuUI\\] Connect ",
+    "\\[BtnDiag\\]"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "both",
+      "cmd": "mark TEST LOBBYPORT START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 2,
+      "role": "both",
+      "sleep_s": 20,
+      "note": "let the main menu finish building (menu injection, theme capture) before the first lever"
+    },
+    {
+      "role": "h",
+      "cmd": "uiview host",
+      "expect_result": "^OK uiview host: server=True",
+      "note": "RESTORE (idempotent): an aborted earlier run can leave HostPort changed",
+      "seq": 3
+    },
+    {
+      "role": "h",
+      "sleep_s": 2,
+      "seq": 4
+    },
+    {
+      "role": "h",
+      "cmd": "uiview port 7777",
+      "expect_result": "^OK uiview port: saved bound=7777 asked=7777 HostPort=7777 ",
+      "seq": 5
+    },
+    {
+      "role": "h",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave: left server=False",
+      "seq": 6
+    },
+    {
+      "role": "c",
+      "cmd": "uiview cfg joinport 7777",
+      "expect_result": "^OK uiview cfg: HostPort=7777 Port=7777$",
+      "note": "RESTORE the client's join port",
+      "seq": 7
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 8
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "uiview cfg",
+      "expect_result": "^OK uiview cfg: HostPort=7777 ",
+      "note": "PREMISE: the host's hosting port starts at 7777 (first run copies Port)"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "uiview cfg",
+      "expect_result": "^OK uiview cfg: HostPort=7777 ",
+      "note": "PREMISE: the client's hosting port starts at 7777"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "uiview host",
+      "expect_result": "^OK uiview host: server=True bound=7777 asked=7777 HostPort=7777$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Listening on port 7777$",
+          "within_s": 30
+        }
+      ],
+      "note": "Host New Game through the lobby's own path (OnHost now reads HostPort)"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "uiview port 8123",
+      "expect_result": "^OK uiview port: saved bound=8123 asked=8123 HostPort=8123 popupOpen=False err=''",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] UDP listener rebound: 7777 -> 8123 \\(asked 8123\\); Steam listener and lobby untouched\\.",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Listening on port 8123$",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[Config\\] HostPort saved: 8123\\.",
+          "within_s": 10
+        }
+      ],
+      "note": "Change port -> Hosting port popup -> 8123 -> Save: ONLY the UDP listener moves, HostPort saved"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "uiview joinaddr 127.0.0.1:8123",
+      "expect_result": "^OK uiview joinaddr: ip='127\\.0\\.0\\.1' port='8123' err='' started=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] connection request from 127\\.0\\.0\\.1:\\d+",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] '${clientPid}' joined lobby\\.",
+          "within_s": 60
+        }
+      ],
+      "note": "Join a Game with '127.0.0.1:8123' typed in the ONE address box: the port is split off and used"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "sleep_s": 3
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "uiview cfg",
+      "expect_result": "^OK uiview cfg: HostPort=7777 Port=8123$",
+      "note": "the join wrote the JOIN port only; the client's own hosting port is unchanged"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "uiview port 8200",
+      "expect_result": "^OK uiview port: refused allowed=False hint='Only possible before anyone joins\\.' bound=8123 HostPort=8123",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[MenuUI\\] Change port refused - 2 player\\(s\\) in the lobby",
+          "within_s": 10
+        }
+      ],
+      "note": "Change port refused while a client is in the lobby"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave: left"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 8,
+      "note": "let the host drop the leaver from the lobby"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "uiview occupy 8125",
+      "expect_result": "^OK uiview occupy: holding UDP 8125$",
+      "note": "DEV lever: an exclusive UDP socket occupies 8125"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "uiview port 8125",
+      "expect_result": "^OK uiview port: saved bound=8126 asked=8125 HostPort=8125 popupOpen=False err='' hint='Port 8125 is in use, so friends join on 8126 this time\\.'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] port 8125 in use - hosting on 8126",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Listening on port 8126$",
+          "within_s": 10
+        }
+      ],
+      "note": "busy port: the +10 fallback lands on 8126, the orange line says so, and the CHOSEN 8125 is what is saved"
+    },
+    {
+      "role": "h",
+      "cmd": "uiview rawpeer 8126",
+      "expect_result": "^OK uiview rawpeer: raw peer connecting to 127\\.0\\.0\\.1:8126 \\(no hello\\)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Peer connected: ",
+          "within_s": 10
+        }
+      ],
+      "note": "review item 6: a transport connection that never says hello (in neither _clients nor the lobby)",
+      "seq": 22
+    },
+    {
+      "role": "h",
+      "sleep_s": 2,
+      "seq": 23
+    },
+    {
+      "role": "h",
+      "cmd": "uiview port 8200",
+      "expect_result": "^OK uiview port: refused allowed=False hint='Port 8125 is in use, so friends join on 8126 this time\\.' bound=8126 HostPort=8125",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[MenuUI\\] Change port refused - 1 player\\(s\\) in the lobby, 1 connection\\(s\\) open",
+          "within_s": 10
+        }
+      ],
+      "note": "review item 6: the half-joined connection blocks Change port (the hint keeps the busy line: it outranks the 'only alone' line)",
+      "seq": 24
+    },
+    {
+      "role": "h",
+      "cmd": "uiview rawpeer off",
+      "expect_result": "^OK uiview rawpeer: raw peer closed",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Peer disconnected: ",
+          "within_s": 20
+        }
+      ],
+      "seq": 25
+    },
+    {
+      "role": "h",
+      "sleep_s": 2,
+      "seq": 26
+    },
+    {
+      "role": "h",
+      "cmd": "uiview occupy 8130-8140",
+      "expect_result": "^OK uiview occupy: holding UDP 8130-8140 \\(11\\)$",
+      "note": "review item 7: the whole +10 fallback range of 8130 is held (8125 is released)",
+      "seq": 27
+    },
+    {
+      "role": "h",
+      "cmd": "uiview port 8130",
+      "expect_result": "^OK uiview port: failed: no free port bound=8126 asked=8130 HostPort=8125 popupOpen=False err='' hint='Port 8130 is in use, so friends join on 8126 this time\\.'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] rebind: no UDP port could be bound \\(8130-8140 all in use\\) - the UDP listener stays on 8126; nothing changed\\.",
+          "within_s": 10
+        }
+      ],
+      "note": "review item 7: nothing binds -> the old listener is untouched, HostPort NOT saved, the approved busy line names the port still in use",
+      "seq": 28
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "uiview port 7777",
+      "expect_result": "^OK uiview port: saved bound=7777 asked=7777 HostPort=7777 ",
+      "note": "restore the rig host's hosting port"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "uiview occupy off",
+      "expect_result": "^OK uiview occupy: released"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave: left server=False"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "uiview cfg joinport 7777",
+      "expect_result": "^OK uiview cfg: HostPort=7777 Port=7777$",
+      "note": "restore the rig client's join port"
+    },
+    {
+      "seq": 33,
+      "role": "both",
+      "cmd": "uiview close",
+      "expect_result": "^OK uiview close: closed:"
+    },
+    {
+      "seq": 34,
+      "role": "both",
+      "cmd": "mark TEST LOBBYPORT END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

@@ -14,6 +14,12 @@ namespace BigAmbitionsMP
         // Transport seam (Steam-connect slice 1): the host listens through
         // IHostTransport — LiteNetLib UDP today, + a Steam relay in slice 2.
         private static LnlHostTransport?  _transport;        // UDP (direct IP / LAN) — always on
+        // Lobby review item 6: every transport-level connection (UDP or Steam), including ones that have not finished their
+        // hello yet (so they are in neither _clients nor _lobbyPlayers). Keyed "<link type>:<id>"; written on the poll threads.
+        // Re-check MEDIUM: a link the HOST closes (kick/refusal on Steam; a UDP listener stopped by a rebind) raises no disconnect
+        // event, so an entry counts only while its link is still alive; dead entries are pruned when counted.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, MPLink> _transportPeers = new();
+        private static string PeerKey(MPLink p) => p.GetType().Name + ":" + p.Id;
         private static SteamHostTransport? _steamTransport;   // Steam relay — best-effort beside UDP
 
         /// <summary>Address key → player ID who owns it. Empty = unowned.
@@ -1488,6 +1494,25 @@ namespace BigAmbitionsMP
 
         public static bool IsRunning      => _running;
         public static int  ConnectedCount => _clients.Count;
+        /// <summary>Transport connections open right now, hello finished or not (lobby "alone" checks).</summary>
+        public static int  TransportPeerCount
+        {
+            get
+            {
+                int n = 0;
+                try
+                {
+                    foreach (var kv in _transportPeers)
+                    {
+                        bool alive = false;
+                        try { alive = kv.Value != null && kv.Value.IsAlive; } catch { }
+                        if (alive) n++; else _transportPeers.TryRemove(kv.Key, out _);
+                    }
+                }
+                catch { }
+                return n;
+            }
+        }
 
         public static bool Start(int port)
         {
@@ -1538,6 +1563,7 @@ namespace BigAmbitionsMP
             PlayerColours.Learn(MPConfig.PlayerId, PlayerColours.HostAssign(MPConfig.StableId));   // 2026-09-05 colours: the host holds a permanent slot too
             MPLog.BeginSession(System.Guid.NewGuid().ToString("N").Substring(0, 8), "host");
             _clients.Clear();         // stale peers from a torn-down session
+            _transportPeers.Clear();  // lobby review item 6: same lifecycle
             BuildingOwners.Clear();   // per-session state — a new game must not inherit
             _sharedPoolByOwner.Clear();   // shared-shop slice 3: cached benches are per session too
             BuildingRealEstateOwners.Clear(); // bought-real-estate ledger — same per-session lifecycle (the load path re-seeds it from the manifest); was leaking across a new game and locking fresh-world buildings un-buyable
@@ -1548,22 +1574,8 @@ namespace BigAmbitionsMP
             // H-HOSTPORT-1 (bundle 20260924-001424): a busy UDP port used to end hosting right here - BEFORE the
             // Steam listener below, which needs no UDP port. Now: the configured port, then the next ten; the first
             // that binds hosts. If none binds, the session still hosts through Steam (invites / Steam joins).
-            BoundPort = 0;
-            LnlHostTransport? t = null, lastTried = null;
-            int lastPort = port;
-            for (int q = port; q <= port + HostPortFallbacks && q <= 65535; q++)
-            {
-                var cand = new LnlHostTransport();
-                cand.PeerConnected    += OnPeerConnected;
-                cand.PeerDisconnected += OnPeerDisconnected;
-                cand.Received         += OnReceive;
-                lastPort = q;
-                if (cand.Start(q)) { t = cand; BoundPort = q; break; }
-                try { cand.Stop(); } catch { }   // never started: releases nothing, keeps no thread
-                lastTried = cand;
-            }
-            if (t != null && BoundPort != port)
-                Plugin.Logger.LogWarning($"[Server] port {port} in use - hosting on {BoundPort}");
+            RequestedPort = port;
+            var t = BindUdpWithFallback(port, out var lastTried, out int lastPort);
             // Steam-only: _transport keeps the never-started UDP transport so the broadcast paths (which gate on
             // _transport != null as "a session is hosted") still reach the Steam peers; it has no UDP peers.
             _transport = t ?? lastTried;
@@ -1608,9 +1620,100 @@ namespace BigAmbitionsMP
 
         /// <summary>H-HOSTPORT-1: the UDP port this hosted session actually listens on - the configured one, or the
         /// first free one of the next <see cref="HostPortFallbacks"/>; 0 = Steam-only (no UDP port bound). Meaningful
-        /// while <see cref="IsRunning"/>; MPConfig.Port stays the configured port (never persisted from a fallback).</summary>
+        /// while <see cref="IsRunning"/>; MPConfig.HostPort stays the port the host chose (never persisted from a fallback).</summary>
         public static int BoundPort { get; private set; }
         internal const int HostPortFallbacks = 10;
+
+        /// <summary>Lobby port option A (2026-09-28): the port the host ASKED for (Start's argument, or the lobby's Change
+        /// port). BoundPort differs from it when that port was busy and a fallback won - the lobby says so.</summary>
+        public static int RequestedPort { get; private set; }
+
+        /// <summary>H-HOSTPORT-1: bind the first free UDP port of port..port+HostPortFallbacks (sets BoundPort; 0 = none bound).
+        /// lastTried = the last never-started candidate (Steam-only keeps it as _transport so broadcasts still gate open).</summary>
+        private static LnlHostTransport? BindUdpWithFallback(int port, out LnlHostTransport? lastTried, out int lastPort)
+        {
+            BoundPort = 0;
+            LnlHostTransport? t = null;
+            lastTried = null;
+            lastPort = port;
+            for (int q = port; q <= port + HostPortFallbacks && q <= 65535; q++)
+            {
+                var cand = new LnlHostTransport();
+                cand.PeerConnected    += OnPeerConnected;
+                cand.PeerDisconnected += OnPeerDisconnected;
+                cand.Received         += OnReceive;
+                lastPort = q;
+                if (cand.Start(q)) { t = cand; BoundPort = q; break; }
+                try { cand.Stop(); } catch { }   // never started: releases nothing, keeps no thread
+                lastTried = cand;
+            }
+            if (t != null && BoundPort != port)
+                Plugin.Logger.LogWarning($"[Server] port {port} in use - hosting on {BoundPort}");
+            return t;
+        }
+
+        /// <summary>Lobby "Change port" (option A, user-approved 2026-09-28): re-open ONLY the UDP listener on another port while
+        /// the host is alone in the lobby. Start() cannot be reused - it resets the whole lobby. The Steam listener, the roster,
+        /// the settings and the session stay exactly as they are. Same busy-port fallback as Start (+10 ports). Review item 7:
+        /// the NEW listener is bound first and swapped in only once bound; if nothing in the range binds, the old listener
+        /// stays untouched (false, why "no free port"). _transport is never null while hosting.
+        /// MAIN THREAD. False = nothing changed (not hosting, game started, someone else present, bad port, no free port).</summary>
+        public static bool RebindUdp(int port, out string why)
+        {
+            why = "";
+            try
+            {
+                if (!_running) { why = "not hosting"; return false; }
+                if (!IsInLobby) { why = "game already started"; return false; }
+                if (_clients.Count > 0 || _lobbyPlayers.Count > 1 || TransportPeerCount > 0)   // review item 6: a hello in flight counts
+                { why = "players present"; Plugin.Logger.LogInfo($"[Server] rebind refused: {_lobbyPlayers.Count} in the lobby, {_clients.Count} client(s), {TransportPeerCount} connection(s)."); return false; }
+                if (port < 1024 || port > 65535) { why = "invalid port"; return false; }
+                int oldBound = BoundPort;
+                var old = _transport;
+                if (oldBound > 0 && oldBound == port)
+                {
+                    RequestedPort = port;
+                    Plugin.Logger.LogInfo($"[Server] UDP listener already on {port} - nothing to rebind.");
+                    return true;
+                }
+                // Bind the NEW listener first; the old one keeps listening until the new one is bound.
+                LnlHostTransport? t = null;
+                int newPort = 0, lastPort = port;
+                bool keepOld = false;
+                for (int q = port; q <= port + HostPortFallbacks && q <= 65535; q++)
+                {
+                    lastPort = q;
+                    if (oldBound > 0 && q == oldBound) { keepOld = true; break; }   // our own listener holds it: the fallback lands there
+                    var cand = new LnlHostTransport();
+                    cand.PeerConnected    += OnPeerConnected;
+                    cand.PeerDisconnected += OnPeerDisconnected;
+                    cand.Received         += OnReceive;
+                    if (cand.Start(q)) { t = cand; newPort = q; break; }
+                    try { cand.Stop(); } catch { }   // never started: releases nothing, keeps no thread
+                }
+                if (keepOld)
+                {
+                    RequestedPort = port;
+                    Plugin.Logger.LogWarning($"[Server] port {port} in use - hosting on {oldBound} (the UDP listener stays there)");
+                    return true;
+                }
+                if (t == null)
+                {
+                    RequestedPort = port;   // the lobby's busy line names the asked port and the one still in use
+                    why = "no free port";
+                    Plugin.Logger.LogWarning($"[Server] rebind: no UDP port could be bound ({port}-{lastPort} all in use) - the UDP listener stays {(oldBound > 0 ? "on " + oldBound : "off (Steam-only)")}; nothing changed.");
+                    return false;
+                }
+                _transport = t; BoundPort = newPort; RequestedPort = port;
+                try { old?.Stop(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] rebind: stopping the old UDP listener: {ex.Message}"); }
+                if (newPort != port) Plugin.Logger.LogWarning($"[Server] port {port} in use - hosting on {newPort}");
+                Plugin.Logger.LogInfo($"[Server] UDP listener rebound: {oldBound} -> {BoundPort} (asked {port}); Steam listener and lobby untouched.");
+                Plugin.Logger.LogInfo($"[Server] Listening on port {BoundPort}");
+                MPNet.MoveMappingAsync(BoundPort, MPConfig.LocalLanIp());   // review item 8: drop the old port's router mapping, ask for the new one
+                return true;
+            }
+            catch (Exception ex) { why = ex.Message; Plugin.Logger.LogWarning($"[Server] RebindUdp: {ex}"); return false; }
+        }
 
         public static void Stop()
         {
@@ -1635,6 +1738,7 @@ namespace BigAmbitionsMP
             MPNet.RemoveMappingAsync();   // best-effort UPnP cleanup (harmless if it can't run)
             _transport?.Stop();
             _transport = null;
+            _transportPeers.Clear();   // lobby review item 6
             try { _steamTransport?.Stop(); } catch { }
             _steamTransport = null;
             MPSteamPresence.ClearAdvertise();
@@ -2025,6 +2129,7 @@ namespace BigAmbitionsMP
         private static void OnPeerConnected(MPLink peer)
         {
             Plugin.Logger.LogInfo($"[Server] Peer connected: {peer.Id}");
+            try { _transportPeers[PeerKey(peer)] = peer; } catch { }   // lobby review item 6: counts before its hello
             // Welcome message will be sent after we receive their Hello
             BillboardAdSync.NoteJoin();   // round-290: re-ship known campaign sets so the joiner converges
         }
@@ -2032,6 +2137,7 @@ namespace BigAmbitionsMP
         private static void OnPeerDisconnected(MPLink peer, string reason)
         {
             Plugin.Logger.LogInfo($"[Server] Peer disconnected: {peer.Id} — {reason}");
+            try { _transportPeers.TryRemove(PeerKey(peer), out _); } catch { }
             _clients.TryRemove(peer, out _);
             lock (_pendingJoins) _pendingJoins.Remove(peer.Id);   // abandoned join request
             lock (_pendingSince) { _pendingSince.Remove(peer.Id); _pendingHbLines.Remove(peer.Id); }   // JOIN-WAIT-1

@@ -103,43 +103,153 @@ namespace BigAmbitionsMP
 
         private static string _ctrlUrl = "", _svcType = "";
         private static int    _mappedPort;
+        // Fold 2 (recurrence-covered Change port): the state below changes under _upnpLock. _gen is bumped when hosting
+        // stops, so a forward still in flight then removes its own mapping instead of keeping it. _wantMove/_wantPort = a
+        // Change-port move asked for while a forward was in progress (only the latest counts), run when that forward
+        // completes. _tryPort = the port the in-flight forward asks for.
+        private static readonly object _upnpLock = new object();
+        private static int    _gen, _wantPort, _tryPort;
+        private static bool   _wantMove;
+        private static string _wantIp = "";
 
         /// <summary>Ask the router (UPnP IGD) to forward UDP <paramref name="port"/>
         /// to <paramref name="localIp"/>.  Background + timeouts + caught; sets
         /// Upnp=Unsupported when no IGD answers, Failed on a router error.</summary>
         public static void TryForwardAsync(int port, string localIp)
         {
-            if (_upnp == UpnpState.Trying || _upnp == UpnpState.Mapped) return;
-            if (port <= 0 || string.IsNullOrEmpty(localIp)) { _upnp = UpnpState.Failed; return; }
-            _upnp = UpnpState.Trying;
-            Task.Run(() =>
+            try
             {
-                try
+                int gen;
+                lock (_upnpLock)
                 {
-                    if (!Discover()) { _upnp = UpnpState.Unsupported; Plugin.Logger.LogInfo("[UPnP] No UPnP router found — manual port-forward needed."); return; }
-                    if (AddPortMapping(port, localIp))
-                    {
-                        _mappedPort = port; _upnp = UpnpState.Mapped;
-                        Plugin.Logger.LogInfo($"[UPnP] Forwarded UDP {port} -> {localIp} on the router.");
-                    }
-                    else { _upnp = UpnpState.Failed; Plugin.Logger.LogWarning("[UPnP] Router refused the port mapping."); }
+                    if (_upnp == UpnpState.Trying || _upnp == UpnpState.Mapped) return;
+                    if (port <= 0 || string.IsNullOrEmpty(localIp)) { _upnp = UpnpState.Failed; return; }
+                    _upnp = UpnpState.Trying; _tryPort = port; gen = _gen;
                 }
-                catch (Exception ex) { _upnp = UpnpState.Failed; Plugin.Logger.LogWarning($"[UPnP] forward failed: {ex.Message}"); }
-            });
+                Task.Run(() => ForwardWork(0, port, localIp, gen));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[UPnP] forward start failed: {ex.Message}"); }
         }
 
-        /// <summary>Remove our mapping (host stop).  Best-effort; a leftover mapping
-        /// is harmless if this can't run.</summary>
+        /// <summary>Hosting stopped: drop a deferred move and remove whatever mapping exists - now if one is in place, or
+        /// (for a forward still in flight) when that forward completes. Best-effort; a leftover mapping is harmless.</summary>
         public static void RemoveMappingAsync()
         {
-            if (_upnp != UpnpState.Mapped) { _upnp = UpnpState.Idle; return; }
-            int port = _mappedPort; string ctrl = _ctrlUrl, svc = _svcType;
-            _upnp = UpnpState.Idle;
-            Task.Run(() =>
+            try
             {
-                try { if (port > 0 && !string.IsNullOrEmpty(ctrl)) DeletePortMapping(ctrl, svc, port); }
-                catch { }
-            });
+                int port = 0, dropped = 0, inFlight = 0; string ctrl = "", svc = "";
+                lock (_upnpLock)
+                {
+                    _gen++;
+                    if (_wantMove) dropped = _wantPort;
+                    _wantMove = false; _wantPort = 0; _wantIp = "";
+                    if (_upnp == UpnpState.Trying) inFlight = _tryPort;
+                    if (_upnp == UpnpState.Mapped) { port = _mappedPort; ctrl = _ctrlUrl; svc = _svcType; }
+                    _mappedPort = 0; _upnp = UpnpState.Idle;
+                }
+                if (dropped != 0) Plugin.Logger.LogInfo($"[UPnP] hosting stopped - the deferred move to UDP {dropped} is dropped.");
+                if (inFlight != 0) Plugin.Logger.LogInfo($"[UPnP] hosting stopped while the UDP {inFlight} forward is in progress - that forward removes its mapping when it completes.");
+                if (port <= 0 || string.IsNullOrEmpty(ctrl)) return;
+                Task.Run(() =>
+                {
+                    try { DeletePortMapping(ctrl, svc, port); }
+                    catch { }
+                });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[UPnP] remove mapping failed: {ex.Message}"); }
+        }
+
+        /// <summary>Lobby review item 8 (Change port): remove the router mapping of the old port and ask for the new one, in
+        /// that order on one background task. Fold 2: asked while a forward is in progress, the move is REMEMBERED (only the
+        /// latest port counts) and runs when that forward completes. Best-effort like the rest.</summary>
+        public static void MoveMappingAsync(int newPort, string localIp) => StartMove(newPort, localIp, false);
+
+        private static void StartMove(int newPort, string localIp, bool deferred)
+        {
+            try
+            {
+                int oldPort = 0, gen = 0; bool defer = false, same = false, remove = false;
+                lock (_upnpLock)
+                {
+                    if (_upnp == UpnpState.Trying) { _wantMove = true; _wantPort = newPort; _wantIp = localIp ?? ""; defer = true; }
+                    else if (_upnp == UpnpState.Mapped && _mappedPort == newPort) same = true;
+                    else if (newPort <= 0 || string.IsNullOrEmpty(localIp)) remove = true;
+                    else
+                    {
+                        oldPort = _upnp == UpnpState.Mapped ? _mappedPort : 0;
+                        _upnp = UpnpState.Trying; _tryPort = newPort; gen = _gen;
+                    }
+                }
+                if (defer) { Plugin.Logger.LogInfo($"[UPnP] a forward is still in progress - the move to UDP {newPort} runs when it completes."); return; }
+                if (same) { if (deferred) Plugin.Logger.LogInfo($"[UPnP] deferred move: UDP {newPort} is already the mapped port - nothing to move."); return; }
+                if (remove) { RemoveMappingAsync(); return; }
+                Task.Run(() => ForwardWork(oldPort, newPort, localIp ?? "", gen));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[UPnP] move failed: {ex.Message}"); }
+        }
+
+        /// <summary>Background: remove <paramref name="oldPort"/>'s mapping (a move; 0 = none), then forward
+        /// <paramref name="port"/>, then settle the state (ForwardDone).</summary>
+        private static void ForwardWork(int oldPort, int port, string localIp, int gen)
+        {
+            bool mapped = false; UpnpState end = UpnpState.Failed;
+            try
+            {
+                if (oldPort > 0)
+                {
+                    try
+                    {
+                        string ctrl = _ctrlUrl, svc = _svcType;
+                        if (!string.IsNullOrEmpty(ctrl))
+                        {
+                            DeletePortMapping(ctrl, svc, oldPort);
+                            Plugin.Logger.LogInfo($"[UPnP] Removed the old UDP {oldPort} mapping.");
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[UPnP] removing the old mapping failed: {ex.Message}"); }
+                }
+                if (!Discover()) { end = UpnpState.Unsupported; Plugin.Logger.LogInfo("[UPnP] No UPnP router found — manual port-forward needed."); }
+                else if (AddPortMapping(port, localIp)) mapped = true;
+                else Plugin.Logger.LogWarning("[UPnP] Router refused the port mapping.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[UPnP] forward failed: {ex.Message}"); }
+            ForwardDone(mapped, end, port, localIp, gen);
+        }
+
+        /// <summary>A forward completed: settle the state; if hosting stopped meanwhile, remove the mapping just made (unless a
+        /// newer forward owns the same port); else run a move that was deferred while this forward ran.</summary>
+        private static void ForwardDone(bool mapped, UpnpState end, int port, string localIp, int gen)
+        {
+            try
+            {
+                bool stale, undo = false, move = false; int movePort = 0; string moveIp = "", ctrl = "", svc = "";
+                lock (_upnpLock)
+                {
+                    stale = gen != _gen;
+                    if (stale)
+                        undo = mapped && !((_upnp == UpnpState.Trying && _tryPort == port) || (_upnp == UpnpState.Mapped && _mappedPort == port));
+                    else
+                    {
+                        _mappedPort = mapped ? port : 0;
+                        _upnp = mapped ? UpnpState.Mapped : end;
+                        if (_wantMove) { move = true; movePort = _wantPort; moveIp = _wantIp; _wantMove = false; _wantPort = 0; _wantIp = ""; }
+                    }
+                    ctrl = _ctrlUrl; svc = _svcType;
+                }
+                if (mapped && !stale) Plugin.Logger.LogInfo($"[UPnP] Forwarded UDP {port} -> {localIp} on the router.");
+                if (undo)
+                {
+                    Plugin.Logger.LogInfo($"[UPnP] hosting stopped while the UDP {port} forward ran - removing that mapping.");
+                    try { if (!string.IsNullOrEmpty(ctrl)) DeletePortMapping(ctrl, svc, port); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[UPnP] removing the stale UDP {port} mapping failed: {ex.Message}"); }
+                }
+                if (move)
+                {
+                    Plugin.Logger.LogInfo($"[UPnP] the forward in progress completed ({(mapped ? "mapped UDP " + port : end.ToString())}) - running the deferred move to UDP {movePort}.");
+                    StartMove(movePort, moveIp, true);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[UPnP] forward completion failed: {ex.Message}"); }
         }
 
         // ── UPnP internals: SSDP discovery → device description → SOAP ─────────

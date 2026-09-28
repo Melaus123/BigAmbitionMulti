@@ -23,6 +23,11 @@ namespace BigAmbitionsMP
         public static string PlayerId { get; private set; } = "Player1";
         public static string HostIP   { get; private set; } = "127.0.0.1";
         public static int    Port     { get; private set; } = 7777;
+        /// <summary>Lobby port option A (user-approved 2026-09-28): the HOSTING port, its own key. Joins keep Port/HostIP
+        /// (the last address joined); hosting reads only this, so joining a friend on 8000 no longer makes you host on 8000.
+        /// First launch with this key missing copies Port (a hand-edited Port survives). Saved only by the lobby's Change
+        /// port (the port the player CHOSE - never a busy-port fallback, never a Steam 0).</summary>
+        public static int    HostPort { get; private set; } = 7777;
 
         private static string? _cachedLanIp;
         /// <summary>This machine's best-guess LAN IPv4 — the address other players on
@@ -361,6 +366,21 @@ namespace BigAmbitionsMP
                 Port = 7777;
                 try { Set("Port", "7777"); } catch { }
             }
+            // Lobby port option A: first run with this build copies Port into HostPort; an invalid saved HostPort resets.
+            string hpRaw = Get("HostPort", "").Trim();
+            if (hpRaw.Length == 0)
+            {
+                HostPort = Port;
+                try { Set("HostPort", HostPort.ToString()); } catch { }
+                Plugin.Logger.LogInfo($"[Config] HostPort not set yet - copied from Port ({HostPort}).");
+            }
+            else if (!int.TryParse(hpRaw, out var hpv) || hpv < 1024 || hpv > 65535)
+            {
+                Plugin.Logger.LogWarning($"[Config] persisted HostPort '{hpRaw}' is invalid - reset to {Port}.");
+                HostPort = Port;
+                try { Set("HostPort", HostPort.ToString()); } catch { }
+            }
+            else HostPort = hpv;
 
             StableId = ResolveStableId(true);
             Plugin.Logger.LogInfo($"[Config] Stable id: {StableId}");
@@ -423,6 +443,18 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogWarning($"[Config] Could not persist PlayerId: {ex.Message}");
             }
+        }
+
+        /// <summary>Lobby "Change port" Save (option A): persists the hosting port the player CHOSE. Refuses anything outside
+        /// 1024-65535, so a Steam 0 can never land here; the caller never passes a busy-port fallback.</summary>
+        public static bool SetHostPort(int port)
+        {
+            if (port < 1024 || port > 65535) return false;
+            HostPort = port;
+            try { Set("HostPort", port.ToString()); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] HostPort save: {ex.Message}"); }
+            Plugin.Logger.LogInfo($"[Config] HostPort saved: {port}.");
+            return true;
         }
 
         /// <summary>H-IDENT-1 r2: called once from the mod's Steam probe (MPCanvasUI), the first moment Steam is valid. If the stored

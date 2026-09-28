@@ -36,6 +36,7 @@ Rules this script encodes (from .modding/08-testdrive.md - the notes win over an
 """
 
 import argparse
+import atexit
 import ctypes
 import ctypes.wintypes as wt
 import datetime
@@ -47,6 +48,7 @@ import shutil
 import subprocess
 import sys
 import time
+import winreg
 
 ROOT = r"C:\code\BigAmbitionsMP"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -305,6 +307,87 @@ def close_instances(report):
         say("teardown: %s pid=%d survived WM_CLOSE - taskkill by PID (never by image name)" % (ROLE_NAME[role], pid))
         run(["taskkill", "/PID", str(pid), "/F"])
         report.append("teardown: %s pid=%d needed taskkill /PID after WM_CLOSE" % (ROLE_NAME[role], pid))
+
+
+# ---------------------------------------------------------------- host window prefs (the user's REAL install)
+# 2026-09-28: the host instance is the user's own Steam install, and Unity saves its window size in the registry, so a
+# run with a window size left the user's game opening at that size. A run WITH a window size saves every
+# 'Screenmanager*' value (with its type) at launch and puts them back exactly - values the run created are deleted - when
+# the run ends: normal end, failure, abort, Ctrl+C (try/finally in main + atexit). Runs without a window size touch nothing.
+UNITY_PREFS_KEY = r"Software\Hovgaard Games\Big Ambitions"
+UNITY_SCREEN_VALUES = ("Screenmanager Resolution Width_h182942802", "Screenmanager Resolution Height_h2627697771",
+                       "Screenmanager Resolution Window Width_h2524650974", "Screenmanager Resolution Window Height_h1684712807",
+                       "Screenmanager Fullscreen mode_h3630240806", "Screenmanager Resolution Use Native_h1405027254")
+
+
+class HostWindowPrefs:
+    def __init__(self):
+        self.saved = None          # {name: (value, type)}; a listed name missing here was absent
+        self.names = list(UNITY_SCREEN_VALUES)
+        self.done = False
+
+    @staticmethod
+    def _read():
+        vals = {}
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNITY_PREFS_KEY, 0, winreg.KEY_READ) as k:
+                i = 0
+                while True:
+                    try:
+                        name, value, typ = winreg.EnumValue(k, i)
+                    except OSError:
+                        break
+                    if name.startswith("Screenmanager"):
+                        vals[name] = (value, typ)
+                    i += 1
+        except FileNotFoundError:
+            pass
+        return vals
+
+    @staticmethod
+    def _fmt(vals, names):
+        out = []
+        for n in names:
+            v = vals.get(n)
+            short = n.split("_h")[0].replace("Screenmanager ", "")
+            out.append("%s=%s" % (short, "absent" if v is None else
+                                  (v[0].hex() if isinstance(v[0], bytes) else v[0])))
+        return ", ".join(out)
+
+    def save(self):
+        if self.saved is not None:
+            return
+        self.saved = self._read()
+        self.names = sorted(set(self.saved) | set(UNITY_SCREEN_VALUES))
+        atexit.register(self.restore)
+        say("host window prefs SAVED at launch (HKCU\\%s): %s" % (UNITY_PREFS_KEY, self._fmt(self.saved, self.names)))
+
+    def restore(self):
+        if self.saved is None or self.done:
+            return
+        self.done = True
+        try:
+            after = self._read()
+            names = sorted(set(self.saved) | set(after) | set(UNITY_SCREEN_VALUES))
+            with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, UNITY_PREFS_KEY, 0, winreg.KEY_SET_VALUE) as k:
+                for n in names:
+                    before = self.saved.get(n)
+                    if before is None:
+                        if n in after:
+                            winreg.DeleteValue(k, n)
+                    elif after.get(n) != before:
+                        winreg.SetValueEx(k, n, 0, before[1], before[0])
+            back = self._read()
+            exact = all(back.get(n) == self.saved.get(n) for n in names)
+            running = game_processes()
+            say("host window prefs RESTORED%s (HKCU\\%s): after the run %s -> now %s%s"
+                % ("" if exact else " - MISMATCH", UNITY_PREFS_KEY, self._fmt(after, names), self._fmt(back, names),
+                   " - WARNING: the game is still running and may write its size again when it quits" if running else ""))
+        except Exception as e:
+            say("host window prefs restore FAILED: %s - the values saved at launch were %s" % (e, self._fmt(self.saved, self.names)))
+
+
+_WINPREFS = HostWindowPrefs()
 
 
 # ---------------------------------------------------------------- scenario machinery
@@ -577,8 +660,19 @@ class Run:
     def launch(self):
         self.launch_t = now()
         say("launching %d instance(s) [%s] via %s" % (self.instances, ",".join(self.active), LAUNCHER))
+        # Per-scenario HOST window size (2026-09-28, screenshot checks at two sizes): scenario "window": "1280x720", or the
+        # BAMP_RIG_WINDOW environment variable (wins). Passed as Unity's own -screen-* switches through BAMP_SCREEN_ARGS,
+        # which local\_launch_host_internal.bat appends to the game's command line. Unset = the game's own size.
+        env = dict(os.environ)
+        win = (os.environ.get("BAMP_RIG_WINDOW") or str(self.sc.get("window") or "")).lower().strip()
+        env.pop("BAMP_SCREEN_ARGS", None)
+        if win:
+            ww, _, wh = win.partition("x")
+            env["BAMP_SCREEN_ARGS"] = "-screen-width %d -screen-height %d -screen-fullscreen 0" % (int(ww), int(wh))
+            self.notes.append("host window %sx%s (BAMP_SCREEN_ARGS=%s)" % (ww, wh, env["BAMP_SCREEN_ARGS"]))
+            _WINPREFS.save()   # the user's own window size goes back when the run ends (HostWindowPrefs)
         subprocess.Popen(["cmd", "/c", "start", "", "/D", os.path.dirname(LAUNCHER), "cmd", "/c", LAUNCHER,   # cmd /c: the launcher window closes when the batch ends (2026-09-11: `start x.bat` runs it under /K and left one console per run)
-                          str(self.instances)], creationflags=0x00000008)
+                          str(self.instances)], creationflags=0x00000008, env=env)
         self.notes.append("launch at %s via local\\launch-mp-test.bat %d" % (stamp(self.launch_t), self.instances))
 
     def relaunch_offset(self, role):
@@ -1058,6 +1152,13 @@ def selftest():
 # ---------------------------------------------------------------- main
 
 def main():
+    try:
+        return _main()
+    finally:
+        _WINPREFS.restore()   # no-op unless this run set a window size
+
+
+def _main():
     ap = argparse.ArgumentParser(description="two-instance rig scenario driver")
     ap.add_argument("scenario", nargs="?", help="path to a scenario .json")
     ap.add_argument("--session", help="value for ${session}")
