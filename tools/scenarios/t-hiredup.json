@@ -1,6 +1,6 @@
 {
   "id": "T-HIREDUP",
-  "title": "H-HIREDUP-1: the HOST hires one of its own candidates at its shop while the client still holds the company copy (the host's pool publish held) - the client's roster apply finds the leftover copy, logs the collision line 'owner's record wins' and injects the owner's record at that shop; no KeyNotFoundException, the schedule rows stay intact; ends dissolved",
+  "title": "H-HIREDUP-1: the HOST hires one of its own candidates at its shop while the client still holds the company copy (the host's pool publish held) - the client's roster apply finds the leftover copy, logs the collision line 'owner's record wins' and injects the owner's record at that shop; no KeyNotFoundException, the schedule rows stay intact; ends dissolved; S3 LEG (review of 56f2a72): a hired local record with the same id as a tagged copy (DEV `collidehired`) is KEPT when the partner roster names the id",
   "preconditions": "Fixture save1 + in-run merge as T-P4B-PEOPLE-A (host melaus owns '6 ba:street_seventhstreet'). Dev build with the levers `hire` and `candidates holdpub` (BAMP_DEV). PREMISE: the host has at least one unclaimed candidate that the client holds as a company copy - step 14 FAILING with 'OK 0 candidate(s)' means the pool is empty: report it as SKIP (premise not met), not as a defect. The hire is a mutation of the rig save root only. Candidate counts are reported, not asserted.",
   "instances": 2,
   "vars": {
@@ -28,7 +28,12 @@
     "\\[StaffRoster\\] '.*' employs '.*'; this save held a leftover",
     "\\[Staff\\] removed '.*' via candidate-drop",
     "\\[Candidates\\]",
-    "\\[Candidates\\] restore .* untagged leftover"
+    "\\[Candidates\\] restore .* untagged leftover",
+    "\\[Transfer\\] repeat adopt of",
+    "\\[MergerStaff\\] adopt of .* own untagged candidate record",
+    "\\[MergerStaff\\] adopt of .*: this save already employs that id",
+    "kept: this save's employee list holds a hired local record",
+    "open negotiation\\(s\\) on the forgotten copy closed"
   ],
   "steps": [
     {
@@ -92,7 +97,7 @@
     {
       "seq": 11,
       "role": "h",
-      "sleep_s": 30,
+      "sleep_s": 75,
       "note": "the client's world settles; the host's staff copies and both candidate pools land"
     },
     {
@@ -223,23 +228,98 @@
     {
       "seq": 27,
       "role": "c",
+      "cmd": "candidates ${hostPid}",
+      "expect_result": "^OK [1-9]\\d* candidate\\(s\\) from '${hostPid}': ",
+      "capture": {
+        "cand2": "(?:': |; )([^|]+)\\|[^|]*\\|wage=[^|]*\\|expires=[^|]*\\|origin=${hostPid}\\|claimed=(?= ;|$)"
+      },
+      "note": "S3 LEG PREMISE: a second unclaimed company copy of the host's pool (the first one was hired above)"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "candidates holdpub 120",
+      "expect_result": "^OK candidates holdpub 120s",
+      "note": "S3: the host's pool publish is held again, so the client keeps the tagged copy while the roster arrives"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "collidehired ${cand2}",
+      "expect_result": "^OK collidehired employee='${cand2}' tagged=True listed=True candidate=False dict=candidate",
+      "note": "S3 lever: a HIRED local record with the SAME id as the tagged copy, in the employee list; the lookup table still names the copy"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "hire ${cand2} ${hostShop}",
+      "expect_result": "^OK hire employee='${cand2}' companyCopy=False hired=True assigned='${hostShop}'",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[StaffRoster\\] '${hostPid}' employs '${cand2}' .*this save held a leftover .* - kept: this save's employee list holds a hired local record",
+          "within_s": 60
+        }
+      ],
+      "note": "S3: the host's roster names the id; the client's collision keeps the hired local record (no deletion)"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "sleep_s": 3
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "employees id=${cand2}",
+      "expect_result": "^OK 1 employee\\(s\\) .*(?:': |; )${cand2}\\|[^|]*\\|assigned=\\|injected=False",
+      "note": "S3: the hired local record is still in EmployeeInstances (one record, benched, not a copy)"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "candidates holdpub 0",
+      "expect_result": "^OK candidates holdpub 0s",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Candidates\\] published my candidate pool",
+          "within_s": 20
+        }
+      ]
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "employees id=${cand2}",
+      "expect_result": "^OK 1 employee\\(s\\) .*(?:': |; )${cand2}\\|[^|]*\\|assigned=\\|injected=False",
+      "note": "S3: the pool publish dropping the copy did not take the hired local record with it"
+    },
+    {
+      "seq": 36,
+      "role": "c",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
       "note": "FIXTURE HYGIENE: end dissolved"
     },
     {
-      "seq": 28,
+      "seq": 37,
       "role": "h",
       "sleep_s": 3
     },
     {
-      "seq": 29,
+      "seq": 38,
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "member=False.*flipped=0"
     },
     {
-      "seq": 30,
+      "seq": 39,
       "role": "both",
       "cmd": "mark TEST HIREDUP END",
       "expect_result": "OK MARK"

@@ -3246,6 +3246,67 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { return $"ERR hire: {ex.GetType().Name}: {ex.Message}"; }
                 }
 
+                case "collidehired":
+                {
+                    // S3 rig (review of 56f2a72): `collidehired <candidateId>` = a HIRED local record with the SAME id as this
+                    // machine's tagged company-candidate copy, added to gi.EmployeeInstances on the bench while the lookup
+                    // table keeps pointing at the copy - the collision the roster apply must never delete.
+                    try
+                    {
+                        string xid = arg.Trim();
+                        if (xid.Length == 0 || xid.Contains(" ")) return "ERR usage: collidehired <candidateId>";
+                        var xgi = SaveGameManager.Current;
+                        if (xgi?.EmployeeInstances == null) return "ERR no save loaded";
+                        bool xtag = CompanyCandidates.IsInjectedCandidate(xid);
+                        if (!xtag) return $"ERR '{xid}' is not a tagged company-candidate copy here";
+                        foreach (var e in xgi.EmployeeInstances) if (e != null && e.id == xid) return $"ERR '{xid}' is already in the employee list";
+                        var xi = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
+                        if (xi == null) return "ERR could not create a record";
+                        xi.id = xid;
+                        xi.assignedAddress = null;
+                        try { xi.candidateInfo = null; } catch { }
+                        try { xi.dayHired = xgi.Day; xi.nextSickDay = Helpers.EmployeeHelper.GetNextSickDay(xi); } catch { }
+                        xgi.EmployeeInstances.Add(xi);
+                        bool xcand = true; try { xcand = xi.IsCandidate; } catch { }
+                        string xdict = "none";
+                        try { if (Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(xid, out var xd)) xdict = ReferenceEquals(xd, xi) ? "this" : (xd != null && xd.IsCandidate ? "candidate" : "other"); } catch { }
+                        return $"OK collidehired employee='{xid}' tagged={xtag} listed=True candidate={xcand} dict={xdict}";
+                    }
+                    catch (Exception ex) { return $"ERR collidehired: {ex.GetType().Name}: {ex.Message}"; }
+                }
+
+                case "replayadopt":
+                {
+                    // S1 rig (review of 56f2a72): `replayadopt <employeeId>` = a REPEAT adopt (the host's resend after a lost
+                    // 'adopted' ack) of a person this machine already holds and has since BENCHED: the record is benched here
+                    // (the game's UnassignEmployeeFromAllWorkshifts + a cleared address, its shop republished), then the
+                    // transfer's re-adopt entry (MergerEmployeeSync.PromoteRecord) runs with the FORMER shop. Nothing is sent.
+                    try
+                    {
+                        string rid = arg.Trim();
+                        if (rid.Length == 0 || rid.Contains(" ")) return "ERR usage: replayadopt <employeeId>";
+                        var rgi = SaveGameManager.Current;
+                        if (rgi?.EmployeeInstances == null) return "ERR no save loaded";
+                        Entities.EmployeeInstance? re = null;
+                        foreach (var e in rgi.EmployeeInstances) if (e != null && e.id == rid) { re = e; break; }
+                        if (re == null || re.IsCandidate || MPRegisterSync.IsInjectedStaff(rid)) return $"ERR '{rid}' is not a real employee of this save";
+                        string rfrom = ""; try { if (re.assignedAddress != null) rfrom = GameStateReader.AddressKey(re.assignedAddress) ?? ""; } catch { }
+                        if (rfrom.Length == 0) return $"ERR '{rid}' is already on the bench";
+                        var roldAddr = re.assignedAddress;
+                        try { Helpers.EmployeeHelper.UnassignEmployeeFromAllWorkshifts(re); } catch { }
+                        re.assignedAddress = null;
+                        try { GlobalEvents.onBuildingRegistrationChange?.Invoke(roldAddr); } catch { }
+                        MPRegisterSync.ForceRosterRepublish(rfrom);
+                        var rrec = MergerEmployeeSync.RecordOf(re, rfrom, "stage");
+                        rrec.TransferId = "dev-replay-" + rid;
+                        bool rok = MergerEmployeeSync.PromoteRecord(rrec);
+                        int rn = 0; foreach (var e in rgi.EmployeeInstances) if (e != null && e.id == rid) rn++;
+                        string rat = ""; try { if (re.assignedAddress != null) rat = GameStateReader.AddressKey(re.assignedAddress) ?? ""; } catch { }
+                        return $"OK replayadopt employee='{rid}' benchedFrom='{rfrom}' promoted={rok} records={rn} assigned='{rat}'";
+                    }
+                    catch (Exception ex) { return $"ERR replayadopt: {ex.GetType().Name}: {ex.Message}"; }
+                }
+
                 case "claim":
                 {
                     // The same message MyEmployees.NegotiateWithCandidate sends before it opens a negotiation.

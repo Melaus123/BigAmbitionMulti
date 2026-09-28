@@ -1,6 +1,6 @@
 {
   "id": "T-XFERROSTER",
-  "title": "H-XFERROSTER-1: a pool owner (the host) hires one of its OWN candidates pointed at the partner's (the client's) shop and the move reaches the client before the host's next pool publish (holdpub) - the client replaces its company-candidate copy with the real record (ADOPTED into its shop), no candidate-drop for that id, the shop's roster republishes with the new hire, and the host ends up holding the client's copy at that shop; ends dissolved",
+  "title": "H-XFERROSTER-1: a pool owner (the host) hires one of its OWN candidates pointed at the partner's (the client's) shop and the move reaches the client before the host's next pool publish (holdpub) - the client replaces its company-candidate copy with the real record (ADOPTED into its shop), no candidate-drop for that id, the shop's roster republishes with the new hire, and the host ends up holding the client's copy at that shop; ends dissolved; S1 LEG (review of 56f2a72): a REPEAT adopt of the adopted, since-benched hire (DEV `replayadopt`) is accepted - one record across both machines",
   "preconditions": "Fixture save1 + in-run merge as T-P4B-PEOPLE-A. Dev build with the levers `hire` and `candidates holdpub` (BAMP_DEV). ROLES MIRRORED from the brief: save1's Client1 has no candidate pool (run T-XFERROSTER-20260927-200852, step 14 'OK 0 candidate(s) from Client1'), so the pool owner is the host and the copy holder / adopter is the client - the same adopt code path (ApplyOnOwner 'adopt' on the machine that holds the company copy). PREMISE: the host has at least one unclaimed candidate that the client holds as a company copy - step 14 FAILING with 'OK 0 candidate(s)' = SKIP (premise not met), not a defect. The hired candidate stays at the client's shop (a mutation of the rig save root only). Candidate counts are reported, not asserted.",
   "instances": 2,
   "vars": {
@@ -26,7 +26,12 @@
     "\\[StaffRoster\\] published",
     "\\[StaffRoster\\] '.*' employs '.*'; this save held a leftover",
     "\\[Staff\\] removed '.*' via candidate-drop",
-    "\\[Candidates\\]"
+    "\\[Candidates\\]",
+    "\\[Transfer\\] repeat adopt of",
+    "\\[MergerStaff\\] adopt of .* own untagged candidate record",
+    "\\[MergerStaff\\] adopt of .*: this save already employs that id",
+    "kept: this save's employee list holds a hired local record",
+    "open negotiation\\(s\\) on the forgotten copy closed"
   ],
   "steps": [
     {
@@ -94,7 +99,7 @@
     {
       "seq": 11,
       "role": "h",
-      "sleep_s": 30,
+      "sleep_s": 75,
       "note": "the client's world settles; the host's staff copies and both candidate pools land"
     },
     {
@@ -241,23 +246,57 @@
     {
       "seq": 27,
       "role": "c",
+      "cmd": "replayadopt ${cand}",
+      "expect_result": "^OK replayadopt employee='${cand}' benchedFrom='${clientShop}' promoted=True records=1 assigned=''",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Transfer\\] repeat adopt of '${cand}' - this save already holds that employee at 'the bench'.* - accepted",
+          "within_s": 10
+        }
+      ],
+      "note": "S1 lever: the client benches its adopted hire, then replays the adopt (a host resend after a lost ack) for the former shop - accepted, nothing rebuilt"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "sleep_s": 12,
+      "note": "roster publish + apply cadence"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "employees id=${cand}",
+      "expect_result": "^OK 1 employee\\(s\\) .*(?:': |; )${cand}\\|[^|]*\\|assigned=\\|injected=False",
+      "note": "S1: exactly one real record on the client, on the bench"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "employees id=${cand}",
+      "refute_result": "injected=False",
+      "note": "S1: the host holds no real record of the person (a display copy at most) - one record across both machines"
+    },
+    {
+      "seq": 31,
+      "role": "c",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
       "note": "FIXTURE HYGIENE: end dissolved"
     },
     {
-      "seq": 28,
+      "seq": 32,
       "role": "h",
       "sleep_s": 3
     },
     {
-      "seq": 29,
+      "seq": 33,
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "member=False.*flipped=0"
     },
     {
-      "seq": 30,
+      "seq": 34,
       "role": "both",
       "cmd": "mark TEST XFERROSTER END",
       "expect_result": "OK MARK"

@@ -2212,6 +2212,21 @@ namespace BigAmbitionsMP
             return list;
         }
 
+        /// <summary>S3 (review of 56f2a72, rig T-HIREDUP-20260927-221100): a record with this id is already in this save's
+        /// employee list. The lookup table alone can miss it (it may have named a company-candidate copy that has since
+        /// been dropped), and the inject below would then delete that record. MAIN THREAD.</summary>
+        private static bool ListedLocally(string id)
+        {
+            try
+            {
+                var l = SaveGameManager.Current?.EmployeeInstances;
+                if (l == null || string.IsNullOrEmpty(id)) return false;
+                foreach (var e in l) if (e != null && e.id == id) return true;
+            }
+            catch { }
+            return false;
+        }
+
         /// <summary>H-HIREDUP-1: the owner's roster names an id this save already holds and no adopt is pending.
         /// A leftover company-candidate copy (ForgetCopyForAdopt) or an untagged candidate (the game's own
         /// DiscardCandidate, which also ends a negotiation the local player has open, as declined) makes way:
@@ -2234,6 +2249,29 @@ namespace BigAmbitionsMP
                 string origin = CompanyCandidates.CopyOriginOf(s.Id);
                 string kind = tagged ? "copy" : isCand ? "candidate" : "hired";
                 string head = $"[StaffRoster] '{pid}' employs '{s.Id}' ('{s.Name}') at '{addr}'; this save held a leftover {kind} (tagged={tagged} copyOwner='{copyOwner}' inCandList={inCand} inEmpList={inEmp} localAddr='{localAddr}' dayHired={dayHired} origin={origin})";
+                // S3 (review of 56f2a72): the lookup entry and the tag are not the whole story - gi.EmployeeInstances can hold a
+                // HIRED record with this id while the entry is a candidate / the id is tagged, and the caller's removal loop takes
+                // EVERY employee-list entry with the id. Such a record is kept unless it is a partner's display copy.
+                bool hiredListed = false;
+                if (inEmp && !IsInjectedStaff(s.Id))
+                    try
+                    {
+                        var hel = gi.EmployeeInstances;
+                        if (hel != null)
+                        foreach (var e in hel)
+                        {
+                            if (e == null || e.id != s.Id) continue;
+                            bool ec = true; try { ec = e.IsCandidate; } catch { }
+                            if (!ec) { hiredListed = true; break; }
+                        }
+                    }
+                    catch { }
+                if (hiredListed)
+                {
+                    if (_localCollisionLogged.Add(s.Id))
+                        Plugin.Logger.LogWarning(head + " - kept: this save's employee list holds a hired local record with that id (never deleted).");
+                    return false;
+                }
                 if (!tagged && !isCand)
                 {
                     if (_localCollisionLogged.Add(s.Id))
@@ -2248,7 +2286,8 @@ namespace BigAmbitionsMP
                     {
                         Plugin.Logger.LogWarning($"[StaffRoster] discard of the leftover candidate '{s.Id}' threw {dx.GetType().Name}: {dx.Message} - removed by hand.");
                         try { gi.CandidateEmployeeInstances?.Remove(le); } catch { }
-                        try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.Id); } catch { }
+                        try { if (Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(s.Id, out var dd) && ReferenceEquals(dd, le)) Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.Id); } catch { }
+                        CompanyCandidates.CloseNegotiations(s.Id, le);   // S5 (review of 56f2a72): the hand removal also closes its negotiation, as declined
                     }
                 }
                 Plugin.Logger.LogWarning(head + " - owner's record wins, leftover discarded.");
@@ -2323,7 +2362,7 @@ namespace BigAmbitionsMP
                             continue;
                         }
                         bool existsLocally = false;
-                        try { existsLocally = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id); } catch { }
+                        try { existsLocally = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id) || ListedLocally(s.Id); } catch { }   // S3: the lookup table can miss a listed record
                         if (existsLocally)
                         {
                             // Slice 5 adopt-confirm: the owner's roster carrying an id we have PENDING-ADOPT
@@ -2473,7 +2512,7 @@ namespace BigAmbitionsMP
                         continue;
                     }
                     bool existsLocally = false;
-                    try { existsLocally = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id); } catch { }
+                    try { existsLocally = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id) || ListedLocally(s.Id); } catch { }   // S3: the lookup table can miss a listed record
                     if (existsLocally) continue;   // never shadow a real local record
                     var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
                     if (inst == null) continue;

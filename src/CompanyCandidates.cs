@@ -79,7 +79,6 @@ namespace BigAmbitionsMP
 
         // -- identity --
 
-        /// <summary>A display copy of a partner's candidate (never one of this save's own).</summary>
         /// <summary>H-HIREDUP-1 (diagnostic): where the local record carrying a candidate id last came from -
         /// (source, game day, hour, owner). Sources: pool-add / pool-readd (ApplyPool), purge-repair
         /// (RepairAfterMessagePurge), restore-untagged (RestoreInjected put back a record that is no longer
@@ -89,8 +88,54 @@ namespace BigAmbitionsMP
         private static float _devHoldPubUntil;   // DEV `candidates holdpub <s>`: my own pool publish is held until then (race rig)
 #endif
 
+        /// <summary>A display copy of a partner's candidate (never one of this save's own).</summary>
         public static bool IsInjectedCandidate(string id)
             => !string.IsNullOrEmpty(id) && _injected.ContainsKey(id);
+
+        /// <summary>S3 (review of 56f2a72): a record that is one of this save's HIRED employees - not a candidate and
+        /// listed in gi.EmployeeInstances. The copy bookkeeping never removes or overwrites its lookup-table entry.</summary>
+        internal static bool IsListedHired(EmployeeInstance? d)
+        {
+            try
+            {
+                if (d == null || d.IsCandidate) return false;
+                var gi = SaveGameManager.Current;
+                return gi?.EmployeeInstances != null && gi.EmployeeInstances.Contains(d);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>S3: the lookup table holds, under this id, a hired listed employee that is not `mine`.</summary>
+        private static bool DictHoldsOtherHired(string id, EmployeeInstance? mine)
+        {
+            try { return !string.IsNullOrEmpty(id) && EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(id, out var d) && d != null && !ReferenceEquals(d, mine) && IsListedHired(d); }
+            catch { return false; }
+        }
+
+        /// <summary>S2/S5 (review of 56f2a72): marks every OPEN salary negotiation on this candidate object (inst != null)
+        /// or naming this id (inst == null) completed + declined - what the game's FinishPendingNegotiation(accepted:false)
+        /// writes (decompile Helpers/EmployeeHelper.cs:559-567) - WITHOUT the game's DiscardCandidate, which also removes
+        /// the lookup-table entry BY ID (EmployeeHelper.cs:553). Returns how many were closed. MAIN THREAD.</summary>
+        internal static int CloseNegotiations(string id, EmployeeInstance? inst)
+        {
+            int n = 0;
+            try
+            {
+                var list = SaveGameManager.Current?.candidateSalaryNegotiations;
+                if (list == null) return 0;
+                foreach (var x in list)
+                {
+                    if (x == null || x.completed || x.employeeInstance == null) continue;
+                    bool hit = inst != null ? ReferenceEquals(x.employeeInstance, inst) : (!string.IsNullOrEmpty(id) && x.employeeInstance.id == id);
+                    if (!hit) continue;
+                    x.accepted = false;
+                    x.completed = true;
+                    n++;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} closing the negotiation(s) for '{id}': {ex.GetType().Name}: {ex.Message}"); }
+            return n;
+        }
 
         /// <summary>H-XFERROSTER-1 / H-HIREDUP-1 (user-approved 2026-09-27): a partner now EMPLOYS the person
         /// this machine holds only as a company-candidate copy (the origin's hire, or the adopt of that hire
@@ -107,6 +152,11 @@ namespace BigAmbitionsMP
                 _injected.Remove(id);
                 _claims.Remove(id); _keepalive.Remove(id); _pending.Remove(id);
                 _pendingAccept.Remove(id);   // a late GRANTED hire verdict must never re-run the native hire on the forgotten copy
+                // S2 (review of 56f2a72): an open negotiation on the copy would otherwise be closed by the 5 s stale sweep through
+                // the game's DiscardCandidate, which removes the lookup entry BY ID - the just-adopted real employee's entry.
+                _everCopied.Remove(id);
+                int fClosed = CloseNegotiations(id, null);
+                if (fClosed > 0) Plugin.Logger.LogInfo($"{Tag} '{id}': {fClosed} open negotiation(s) on the forgotten copy closed as declined (the person is employed now).");
                 foreach (var kv in _poolByOwner) kv.Value.Remove(id);
                 var gi = SaveGameManager.Current;
                 if (gi?.CandidateEmployeeInstances != null)
@@ -327,7 +377,13 @@ namespace BigAmbitionsMP
                     bool stillListed = false;
                     for (int k = 0; k < gi.CandidateEmployeeInstances.Count; k++)
                         if (gi.CandidateEmployeeInstances[k]?.id == id) { stillListed = true; break; }
-                    if (!stillListed)
+                    if (!stillListed && DictHoldsOtherHired(id, have.inst))
+                    {
+                        // S3 (review of 56f2a72): never overwrite the lookup entry of a hired listed employee with a copy.
+                        if (_logged.Add("readd-hired|" + id))
+                            Plugin.Logger.LogWarning($"{Tag} the copy of '{id}' was not put back: this save's lookup table holds a HIRED employee with that id (never overwritten).");
+                    }
+                    else if (!stillListed)
                     {
                         gi.CandidateEmployeeInstances.Add(have.inst);
                         try { EmployeeHelper.EmployeeInstancesDictionary[id] = have.inst; } catch { }
@@ -782,8 +838,21 @@ namespace BigAmbitionsMP
                 foreach (var inst in orphans)
                 {
                     string id = inst.id ?? "";
-                    try { EmployeeHelper.DiscardCandidate(inst); }
-                    catch (Exception dx) { Plugin.Logger.LogWarning($"{Tag} closing the stale negotiation for '{id}': {dx.GetType().Name}: {dx.Message}"); continue; }
+                    bool otherEntry = false;
+                    try { otherEntry = EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(id, out var od) && od != null && !ReferenceEquals(od, inst); } catch { }
+                    if (otherEntry)
+                    {
+                        // S2 (review of 56f2a72): the game's DiscardCandidate removes the lookup entry BY ID (decompile
+                        // Helpers/EmployeeHelper.cs:553), and here that entry is ANOTHER record (e.g. the just-adopted real
+                        // employee) - the negotiation is closed by hand and only this candidate object leaves the candidate list.
+                        CloseNegotiations(id, inst);
+                        try { SaveGameManager.Current?.CandidateEmployeeInstances?.Remove(inst); } catch { }
+                    }
+                    else
+                    {
+                        try { EmployeeHelper.DiscardCandidate(inst); }
+                        catch (Exception dx) { Plugin.Logger.LogWarning($"{Tag} closing the stale negotiation for '{id}': {dx.GetType().Name}: {dx.Message}"); continue; }
+                    }
                     SetClaim(id, "");
                     Plugin.Logger.LogWarning($"{Tag} closed a stale negotiation for '{id}' - that candidate is neither in my list nor in the company pool any more, so nobody can be hired twice.");
                 }
@@ -916,6 +985,13 @@ namespace BigAmbitionsMP
                     for (int i = 0; i < gi.CandidateEmployeeInstances.Count; i++)
                         if (gi.CandidateEmployeeInstances[i]?.id == id) { there = true; break; }
                     if (there) continue;
+                    if (DictHoldsOtherHired(id, kv.Value.inst))
+                    {
+                        // S3 (review of 56f2a72): never overwrite the lookup entry of a hired listed employee with a copy.
+                        if (_logged.Add("purge-hired|" + id))
+                            Plugin.Logger.LogWarning($"{Tag} the copy of '{id}' was not put back after a message purge: this save's lookup table holds a HIRED employee with that id.");
+                        continue;
+                    }
                     gi.CandidateEmployeeInstances.Add(kv.Value.inst);
                     try { EmployeeHelper.EmployeeInstancesDictionary[id] = kv.Value.inst; } catch { }
                     StampOrigin(id, "purge-repair", kv.Value.owner);   // H-HIREDUP-1 provenance
@@ -950,7 +1026,14 @@ namespace BigAmbitionsMP
                 try { var ev = MergerEmployeeSync.CountShiftsNaming(gi, id); MergerEmployeeSync.LogStaffRemoval("candidate-drop", id, MergerEmployeeSync.StaffNameOf(have.inst), ev.shifts, ev.regs); } catch { }   // STAFF-EVIDENCE-1
             }
             catch { }
-            try { EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
+            try
+            {
+                // S3 (review of 56f2a72): only the copy (or another candidate record) leaves the lookup table - never a hired listed employee.
+                if (!DictHoldsOtherHired(id, have.inst)) EmployeeHelper.EmployeeInstancesDictionary.Remove(id);
+                else if (_logged.Add("remove-hired|" + id))
+                    Plugin.Logger.LogWarning($"{Tag} dropping the copy of '{id}': the lookup entry is a HIRED employee of this save - left in place.");
+            }
+            catch { }
         }
 
         public static void ClearAll(string why)
@@ -984,8 +1067,8 @@ namespace BigAmbitionsMP
                     string id = list[i]?.id ?? "";
                     if (id.Length == 0 || !_injected.ContainsKey(id)) continue;
                     stripped.Add(list[i]);
+                    try { if (!DictHoldsOtherHired(id, list[i])) EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }   // S3: never a hired listed employee's entry
                     list.RemoveAt(i);
-                    try { EmployeeHelper.EmployeeInstancesDictionary.Remove(id); } catch { }
                 }
                 if (stripped.Count > 0 && _logged.Add("strip|" + context))
                     Plugin.Logger.LogInfo($"{Tag} {stripped.Count} company candidate copy(ies) sit out {context} (their expiry clock is the origin's).");
@@ -1028,7 +1111,7 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogInfo($"{Tag} restore ({context}) put back '{c.id}' which is no longer a company copy (dropped during the strip window) - untagged leftover.");
                     }
                     if (!there) list.Add(c);
-                    try { EmployeeHelper.EmployeeInstancesDictionary[c.id] = c; } catch { }
+                    try { if (!DictHoldsOtherHired(c.id, c)) EmployeeHelper.EmployeeInstancesDictionary[c.id] = c; } catch { }   // S3: never overwrite a hired listed employee's entry
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} restore ({context}): {ex.GetType().Name}: {ex.Message}"); }

@@ -198,6 +198,7 @@ namespace BigAmbitionsMP
         //    refuses, the source re-adopts its own record ("unrelease") - nobody is ever lost.
 
         private static readonly Dictionary<string, (string tid, float at, string target)> _pendingTransfer = new();   // employeeId -> in flight
+        private static EmployeeInstance? _adoptBuilt;   // S1 (review of 56f2a72): the record the LAST adopt reconstruction built (PromoteRecord's address test applies to it only)
         private static readonly HashSet<string> _transfersDone = new();                                               // transfer ids already applied here
 
         /// <summary>MAIN THREAD. The local copy of a partner's employee disagrees with the owner's published
@@ -1033,7 +1034,7 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[MergerStaff] adopt of '{p.EmployeeId}' @ '{p.AddressKey}' replaces this machine's injected copy (H-ADOPT-2).");
                         exists = false;
                     }
-                    if (exists && CompanyCandidates.IsInjectedCandidate(p.EmployeeId ?? ""))
+                    if (CompanyCandidates.IsInjectedCandidate(p.EmployeeId ?? ""))   // S3 (review of 56f2a72): whenever the id is TAGGED, in the lookup table or not
                     {
                         // H-XFERROSTER-1 (user-approved 2026-09-27): the record here is this machine's COMPANY-CANDIDATE
                         // COPY of the member's pool - they hired that person (pointed at my shop) and the move arrived
@@ -1046,6 +1047,54 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogInfo($"[MergerStaff] adopt of '{p.EmployeeId}' @ '{p.AddressKey}' replaces this machine's company-candidate copy of '{cOwner}'s pool (H-XFERROSTER-1: the hire outran the pool publish).");
                             exists = false;
                         }
+                    }
+                    if (exists)
+                    {
+                        // S4 (review of 56f2a72): the machine the candidate came from can still hold its OWN untagged candidate
+                        // record when the move arrives before the 'hired' message. Treated like a copy: the game's DiscardCandidate
+                        // (which also closes a negotiation the local player has open, as declined), then the rebuild below.
+                        try
+                        {
+                            EmployeeInstance? lc = null;
+                            try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(p.EmployeeId ?? "", out lc); } catch { }
+                            bool lcCand = false; try { lcCand = lc != null && lc.IsCandidate; } catch { }
+                            if (lcCand)
+                            {
+                                try { Helpers.EmployeeHelper.DiscardCandidate(lc); }
+                                catch (Exception dx) { Plugin.Logger.LogWarning($"[MergerStaff] adopt of '{p.EmployeeId}': discard of the local candidate threw {dx.GetType().Name}: {dx.Message} - removed by hand."); }
+                                // whatever the discard did (a guard prefix may skip it): this candidate object leaves both tables, its negotiation closes
+                                try { var lgi = SaveGameManager.Current; lgi?.CandidateEmployeeInstances?.Remove(lc); } catch { }
+                                try { if (Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(p.EmployeeId ?? "", out var still) && ReferenceEquals(still, lc)) Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(p.EmployeeId ?? ""); } catch { }
+                                CompanyCandidates.CloseNegotiations(p.EmployeeId ?? "", lc);
+                                Plugin.Logger.LogInfo($"[MergerStaff] adopt of '{p.EmployeeId}' @ '{p.AddressKey}' replaces this machine's own untagged candidate record (S4: the move outran the 'hired' message).");
+                                try { exists = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(p.EmployeeId ?? ""); } catch { }
+                            }
+                        }
+                        catch (Exception sx) { Plugin.Logger.LogWarning($"[MergerStaff] adopt of '{p.EmployeeId}': S4 candidate check threw {sx.GetType().Name}: {sx.Message}"); }
+                    }
+                    if (!exists)
+                    {
+                        // MUST HOLD (review of 56f2a72): a HIRED record with this id already in this save's employee list is
+                        // never replaced by the rebuild below (it removes every entry with the id) - the adopt is idempotent.
+                        try
+                        {
+                            EmployeeInstance? held = null;
+                            var hgi = SaveGameManager.Current;
+                            if (hgi?.EmployeeInstances != null)
+                                foreach (var he in hgi.EmployeeInstances)
+                                {
+                                    if (he == null || he.id != p.EmployeeId) continue;
+                                    bool hc = true; try { hc = he.IsCandidate; } catch { }
+                                    if (!hc) { held = he; break; }
+                                }
+                            if (held != null)
+                            {
+                                try { if (!Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(held.id)) Helpers.EmployeeHelper.EmployeeInstancesDictionary[held.id] = held; } catch { }
+                                Plugin.Logger.LogInfo($"[MergerStaff] adopt of '{p.EmployeeId}' @ '{p.AddressKey}': this save already employs that id - the hired local record is kept (idempotent, never replaced).");
+                                exists = true;
+                            }
+                        }
+                        catch (Exception hx) { Plugin.Logger.LogWarning($"[MergerStaff] adopt of '{p.EmployeeId}': hired-record check threw {hx.GetType().Name}: {hx.Message}"); }
                     }
                     if (exists) { MPRegisterSync.ForceRosterRepublish(p.AddressKey); return; }   // idempotent (retry after a lost confirm)
                     var gi = SaveGameManager.Current;
@@ -1112,6 +1161,7 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[MergerStaff] H-EMP-2 stamp failed for '{inst.id}': {ex.Message}"); }
                     gi.EmployeeInstances.Add(inst);
                     try { Helpers.EmployeeHelper.EmployeeInstancesDictionary[inst.id] = inst; } catch { }
+                    _adoptBuilt = inst;   // S1: built in THIS call
                     Plugin.Logger.LogInfo($"[MergerStaff] ADOPTED '{inst.characterData?.name}' ({inst.id}) into '{(toBench ? "the bench" : p.AddressKey)}' at ${p.Wage:F0}/h (from '{p.PlayerId}').");
                     if (!toBench)
                     {
@@ -1144,8 +1194,15 @@ namespace BigAmbitionsMP
             if (rec == null || string.IsNullOrEmpty(rec.EmployeeId)) return false;
             if (string.IsNullOrEmpty(rec.AddressKey) && string.IsNullOrEmpty(rec.TransferId)) return false;
             string was = rec.Action;
+            // S1 (review of 56f2a72): note the lookup entry BEFORE the adopt; a REPEAT adopt (host resend after a lost ack / a
+            // host restart) of a person already here takes the idempotent path and builds nothing.
+            EmployeeInstance? before = null;
+            try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(rec.EmployeeId, out before); } catch { }
+            _adoptBuilt = null;
             try { rec.Action = "adopt"; ApplyOnOwner(rec); }
             finally { rec.Action = was; }
+            EmployeeInstance? built = _adoptBuilt;
+            _adoptBuilt = null;
 
             EmployeeInstance? inst = null;
             try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(rec.EmployeeId, out inst); } catch { }
@@ -1159,11 +1216,25 @@ namespace BigAmbitionsMP
                 bool pCand = false; try { pCand = inst.IsCandidate; } catch { }
                 bool pListed = false; try { var pgi = SaveGameManager.Current; pListed = pgi?.EmployeeInstances != null && pgi.EmployeeInstances.Contains(inst); } catch { }
                 string pAt = ""; try { if (inst.assignedAddress != null) pAt = GameStateReader.AddressKey(inst.assignedAddress) ?? ""; } catch { }
-                if (pCand || !pListed || (!pBench && pAt != rec.AddressKey))
+                // S1: the address test applies only to a record BUILT in this call. A record that was already here (the
+                // idempotent path) is accepted when it is a real listed employee, wherever the player has since put it -
+                // refusing it would make the host give the record back and the person would be in two saves.
+                bool pBuilt = built != null && ReferenceEquals(inst, built);
+                if (pCand || !pListed || (pBuilt && !pBench && pAt != rec.AddressKey))
                 {
-                    Plugin.Logger.LogWarning($"[Transfer] promote of '{rec.EmployeeId}' did not produce a real employee at '{(pBench ? "the bench" : rec.AddressKey)}' (candidate={pCand} at='{pAt}') - refused, the host gives the record back.");
+                    // S6: once per game hour per transfer (a stuck resend cannot flood the field log)
+                    int rgd = 0, rgh = 0;
+                    try { rgd = SaveGameManager.Current?.Day ?? 0; rgh = SaveGameManager.Current?.Hour ?? 0; } catch { }
+                    string rtk = "promote|" + (string.IsNullOrEmpty(rec.TransferId) ? rec.EmployeeId : rec.TransferId);
+                    if (!_returnFailLog.TryGetValue(rtk, out var rLast) || rLast.day != rgd || rLast.hour != rgh)
+                    {
+                        _returnFailLog[rtk] = (rgd, rgh);
+                        Plugin.Logger.LogWarning($"[Transfer] promote of '{rec.EmployeeId}' did not produce a real employee at '{(pBench ? "the bench" : rec.AddressKey)}' (candidate={pCand} at='{pAt}') - refused, the host gives the record back.");
+                    }
                     return false;
                 }
+                if (!pBuilt && !pBench && pAt != rec.AddressKey)
+                    Plugin.Logger.LogInfo($"[Transfer] repeat adopt of '{rec.EmployeeId}' - this save already holds that employee at '{(pAt.Length > 0 ? pAt : "the bench")}' (moved or benched since; asked for '{rec.AddressKey}', same record={ReferenceEquals(inst, before)}) - accepted, nothing rebuilt.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Transfer] promote of '{rec.EmployeeId}': invariant check threw {ex.GetType().Name}: {ex.Message} - refused."); return false; }
             StampExtendedFields(inst, rec);
