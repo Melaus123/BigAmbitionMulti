@@ -3609,6 +3609,60 @@ namespace BigAmbitionsMP
             else { _mpChatFocus = false; _mpDragging = false; _mpOpacityDragging = false; _mpResizing = false; SyncChatNavBlock(false); MPChat.SuppressGameInput = false; }
         }
 
+#if BAMP_DEV
+        // DEV screenshot levers (2026-09-28, Business/Chat redesign reference): TestDrive `hubview` / `chatview`.
+        // Opening and closing go through the phone icons' own request flags (Update above); these only read state,
+        // pick the tab the way a tab click does, and size/scroll the chat window the way the grip / wheel do.
+        internal bool DevHubVisible => _hubVisible;
+        internal bool DevChatVisible => _mpWinVisible;
+
+        internal void DevSetHubTab(int tab)
+        {
+            try { _hubTab = Mathf.Clamp(tab, 0, 2); _hubSeenVersion = -1; _hubPermSig = ""; }   // = the tab click in TickHubWindow
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TestDrive] DevSetHubTab: {ex.Message}"); }
+        }
+
+        internal string DevHubState()
+        {
+            try
+            {
+                return $"ready={MPHubNativePage.Ready} visible={_hubVisible} native={_hubNative} pageActive={MPHubNativePage.PageActive} " +
+                       $"tab={_hubTab} in={MPHub.IncomingOffers.Count} out={MPHub.OutgoingOffers.Count} loans={MPHub.Loans.Count} menuOpen={UI.Smartphone.FullMenu.IsOpen}";
+            }
+            catch (Exception ex) { return "stateErr=" + ex.Message; }
+        }
+
+        internal string DevChatState()
+        {
+            try
+            {
+                var sz = _mpWinRT != null ? _mpWinRT.sizeDelta : Vector2.zero;
+                float ph = _mpChatPanelRT != null ? _mpChatPanelRT.rect.height : -1f;
+                int vis = Mathf.Max(1, Mathf.FloorToInt((ph - 12f) / 15f));   // RefreshMpWindow's own line count
+                return $"visible={_mpWinVisible} active={(_mpWin != null && _mpWin.activeSelf)} size={sz.x:F0}x{sz.y:F0} " +
+                       $"chatPanelH={ph:F0} visibleLines={vis} scroll={_mpChatScroll} lines={MPChat.Snapshot(500).Count}";
+            }
+            catch (Exception ex) { return "stateErr=" + ex.Message; }
+        }
+
+        internal string DevChatSize(float w, float h)
+        {
+            try
+            {
+                if (_mpWinRT == null) return "noWindow";
+                _mpWinRT.sizeDelta = new Vector2(Mathf.Clamp(w, 240f, 1100f), Mathf.Clamp(h, 150f, 1000f));   // the corner grip's own clamp
+                return DevChatState();
+            }
+            catch (Exception ex) { return "sizeErr=" + ex.Message; }
+        }
+
+        internal string DevChatScroll(int lines)
+        {
+            try { _mpChatScroll = Mathf.Max(0, lines); return DevChatState(); }   // RefreshMpWindow clamps it as it does a wheel scroll
+            catch (Exception ex) { return "scrollErr=" + ex.Message; }
+        }
+#endif
+
         // ── Camera audit (highlight wrong-target investigation) ───────────────
         // The hover pick ray is cast FROM A CAMERA; if a cloned ghost smuggled an
         // enabled camera into the scene, picking happens from the wrong eye and

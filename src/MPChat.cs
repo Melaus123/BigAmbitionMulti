@@ -112,5 +112,20 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Chat] SendFromLocal: {ex.Message}"); }
         }
+#if BAMP_DEV
+        /// <summary>DEV (TestDrive `uifill chat`): append a LOCAL display-only line. Never sent, never saved.</summary>
+        internal static void DevAppendLocal(ChatLine line)
+        {
+            try { if (line != null && !string.IsNullOrEmpty(line.Text)) Append(line); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TestDrive] DevAppendLocal: {ex.Message}"); }
+        }
+
+        /// <summary>DEV (TestDrive `uifill clear`): remove lines that `uifill chat` appended. Returns the count, -1 on error.</summary>
+        internal static int DevRemove(Predicate<ChatLine> match)
+        {
+            try { lock (_lock) { int n = _lines.RemoveAll(match); if (n > 0) Version++; return n; } }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TestDrive] DevRemove: {ex.Message}"); return -1; }
+        }
+#endif
     }
 }

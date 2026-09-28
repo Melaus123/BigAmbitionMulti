@@ -417,6 +417,212 @@ namespace BigAmbitionsMP
             catch (Exception ex) { return "ShowViewErr=" + (ex.InnerException ?? ex).Message; }
         }
 
+        // ── DEV (2026-09-28): Business / Chat redesign screenshot levers ─────────────────────────────
+        private static string HubShotsPhoneApp(string arg)
+        {
+            try
+            {
+                string a = (arg ?? "").Trim();
+                var uis = InstanceBehavior<UI.UIs>.Instance;
+                if (uis == null || uis.fullMenu == null) return "ERR phoneapp: no UIs/fullMenu (not in a game?)";
+                if (a.Equals("close", StringComparison.OrdinalIgnoreCase))
+                {
+                    uis.fullMenu.CloseFullMenu();
+                    return "OK phoneapp close: menuOpen=" + UI.Smartphone.FullMenu.IsOpen;
+                }
+                if (!Enum.TryParse<global::AppName>(a, true, out var app) || app == global::AppName.VoogleMaps || int.TryParse(a, out _))
+                    return "ERR usage: phoneapp <Persona|Contacts|MyEmployees|BizMan|EconoView|MarketInsider|Rivals|close>";
+                if (uis.smartphoneUI == null) return "ERR phoneapp: no smartphoneUI";
+                uis.smartphoneUI.OpenApp(app);   // exactly what the phone icon does (SmartphoneUI.OpenApp -> FullMenu.ShowApp)
+                return $"OK phoneapp {app}: menuOpen={UI.Smartphone.FullMenu.IsOpen}";
+            }
+            catch (Exception ex) { return "ERR phoneapp: " + ex.Message; }
+        }
+
+        private static string HubShotsHubView(string arg)
+        {
+            try
+            {
+                var ui = MPCanvasUI.Instance;
+                if (ui == null) return "ERR hubview: no MPCanvasUI";
+                string a = (arg ?? "").Trim().ToLowerInvariant();
+                if (a == "" || a == "state") return "OK hubview state: " + ui.DevHubState();
+                if (a == "close")
+                {
+                    if (!ui.DevHubVisible) return "OK hubview close: already closed " + ui.DevHubState();
+                    MPPhoneButton.HubOpenRequested = true;   // the Business icon's own toggle closes it (MPCanvasUI Update)
+                    return "OK hubview close: requested " + ui.DevHubState();
+                }
+                int tab = a == "transfers" ? 0 : a == "loans" ? 1 : a == "permissions" ? 2 : -1;
+                if (tab < 0) return "ERR usage: hubview <transfers|loans|permissions|close|state>";
+                if (!MPHubNativePage.Ready) return "ERR hubview: the Business page is not injected yet " + ui.DevHubState();
+                ui.DevSetHubTab(tab);
+                if (ui.DevHubVisible) return $"OK hubview {a}: tab set (already open) " + ui.DevHubState();
+                MPPhoneButton.HubOpenRequested = true;       // the Business icon's click (MPCanvasUI Update -> ShowHubNative)
+                return $"OK hubview {a}: open requested " + ui.DevHubState();
+            }
+            catch (Exception ex) { return "ERR hubview: " + ex.Message; }
+        }
+
+        private static string HubShotsChatView(string arg)
+        {
+            try
+            {
+                var ui = MPCanvasUI.Instance;
+                if (ui == null) return "ERR chatview: no MPCanvasUI";
+                var tk = (arg ?? "").Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                string a = tk.Length == 0 ? "state" : tk[0].ToLowerInvariant();
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                var fs  = System.Globalization.NumberStyles.Float;
+                switch (a)
+                {
+                    case "state": return "OK chatview state: " + ui.DevChatState();
+                    case "open":
+                    case "close":
+                    {
+                        bool want = a == "open";
+                        if (ui.DevChatVisible == want) return $"OK chatview {a}: already {(want ? "open" : "closed")} " + ui.DevChatState();
+                        MPPhoneButton.OpenRequested = true;   // the phone Chat icon's own toggle (MPCanvasUI Update -> ToggleMpWindow)
+                        return $"OK chatview {a}: requested " + ui.DevChatState();
+                    }
+                    case "size":
+                        if (tk.Length < 3 || !float.TryParse(tk[1], fs, inv, out float w) || !float.TryParse(tk[2], fs, inv, out float h))
+                            return "ERR usage: chatview size W H";
+                        return "OK chatview size: " + ui.DevChatSize(w, h);
+                    case "scroll":
+                        if (tk.Length < 2 || !int.TryParse(tk[1], out int n)) return "ERR usage: chatview scroll N";
+                        return "OK chatview scroll: " + ui.DevChatScroll(n);
+                }
+                return "ERR usage: chatview <open|close|size W H|scroll N|state>";
+            }
+            catch (Exception ex) { return "ERR chatview: " + ex.Message; }
+        }
+
+        private static string HubShotsContactOpen(string arg)
+        {
+            try
+            {
+                var uis = InstanceBehavior<UI.UIs>.Instance;
+                if (uis == null || uis.fullMenu == null || uis.fullMenu.contactsApp == null) return "ERR contactopen: no UIs/fullMenu/contactsApp";
+                var list = SaveGameManager.Current?.Contacts;
+                if (list == null || list.Count == 0) return "ERR contactopen: no contacts";
+                string a = (arg ?? "").Trim();
+                int idx;
+                if (a.Equals("busiest", StringComparison.OrdinalIgnoreCase))
+                {
+                    idx = 0; int best = -1;
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        int c = list[i]?.messagesQueue?.Count ?? 0;
+                        if (c > best) { best = c; idx = i; }
+                    }
+                }
+                else if (!int.TryParse(a, out idx) || idx < 0 || idx >= list.Count)
+                    return $"ERR usage: contactopen <0-{list.Count - 1}|busiest>";
+                var contact = list[idx];
+                if (contact == null) return $"ERR contactopen: contact {idx} is null";
+                // The game's own pair for "open this contact" (Contact.OnClickNotification): ShowApp(Contacts) then
+                // OpenAppWithContact = LoadContactsList(category) + the private ShowContactConversation.
+                uis.fullMenu.ShowApp(global::AppName.Contacts);
+                uis.fullMenu.contactsApp.OpenAppWithContact(contact);
+                return $"OK contactopen {idx}: id='{contact.id}' category={contact.category} messages={contact.messagesQueue?.Count ?? 0} contacts={list.Count} menuOpen={UI.Smartphone.FullMenu.IsOpen}";
+            }
+            catch (Exception ex) { return "ERR contactopen: " + ex.Message; }
+        }
+
+        private const string HubShotsFillId = "DEVFILL-";
+        private static readonly System.Collections.Generic.List<ChatLine> _hubShotsChat = new System.Collections.Generic.List<ChatLine>();
+        private static readonly string[] HubShotsNames =
+        {
+            "Margaret Okonkwo-Hale", "Dimitri Vasquez", "Priya Ramanathan", "Jonathan Abernathy",
+            "Sofia Lindqvist", "Kwame Mensah-Boateng", "Charlotte Beaumont", "Hiroshi Takahashi",
+        };
+        private static readonly string[] HubShotsBiz =
+        {
+            "Downtown Coffee & Bagels", "Crown Clothing", "Fifth Avenue Florist Boutique", "Lucky Dragon Noodle House",
+            "Midtown Office Supplies", "Harbor View Liquor Store",
+        };
+        private static readonly string[] HubShotsChat =
+        {
+            "hey, anyone near Midtown?", "I just opened my second shop!", "can you lend me 20k until Friday?",
+            "sure, sending an offer now", "the wholesaler on 5th is out of coffee again", "brb, driving to the warehouse",
+            "lol my cashier quit", "who wants to merge companies?", "ok", "thanks!", "see you at the bank",
+            "prices at the market are crazy today",
+        };
+        private const string HubShotsLong =
+            "This is a deliberately long chat message so the screenshot shows how the window wraps a line that is far wider " +
+            "than the chat panel: rent is due tomorrow, stock the shelves first, and do not forget the parking permit!";
+
+        private static string HubShotsUiFill(string arg)
+        {
+            try
+            {
+                var tk = (arg ?? "").Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                string what = tk.Length == 0 ? "" : tk[0].ToLowerInvariant();
+                if (what == "clear")
+                {
+                    int c = 0;
+                    if (_hubShotsChat.Count > 0)
+                    {
+                        var set = new System.Collections.Generic.HashSet<ChatLine>(_hubShotsChat);
+                        c = MPChat.DevRemove(l => set.Contains(l));
+                        _hubShotsChat.Clear();
+                    }
+                    int h = MPHub.IncomingOffers.RemoveAll(o => o.Id.StartsWith(HubShotsFillId))
+                          + MPHub.OutgoingOffers.RemoveAll(o => o.Id.StartsWith(HubShotsFillId))
+                          + MPHub.Loans.RemoveAll(l => l.Id.StartsWith(HubShotsFillId));
+                    MPHub.Version++;
+                    return $"OK uifill clear: chat={c} hub={h}";
+                }
+                if ((what != "hub" && what != "chat") || tk.Length < 2 || !int.TryParse(tk[1], out int n) || n < 1 || n > 200)
+                    return "ERR usage: uifill <hub|chat> <n 1-200> | uifill clear";
+                string me = MPConfig.PlayerId ?? "";
+                var names = new System.Collections.Generic.List<string>();   // the real other players first, then sample names
+                try
+                {
+                    var lp = MPServer.IsRunning ? MPServer.LobbyPlayers : MPClient.IsConnected ? MPClient.LobbyPlayers : null;
+                    if (lp != null) foreach (var pl in lp) if (!string.IsNullOrEmpty(pl) && pl != me) names.Add(pl);
+                }
+                catch { }
+                int real = names.Count;
+                names.AddRange(HubShotsNames);
+                if (what == "chat")
+                {
+                    for (int i = 0; i < n; i++)
+                    {
+                        string other = names[i % names.Count];
+                        var line = new ChatLine { From = i % 3 == 0 ? me : other, To = "", Text = HubShotsChat[i % HubShotsChat.Length] };
+                        if (i == n / 2 || i == n - 2) line.Text = HubShotsLong;
+                        else if (i % 7 == 5) { line.From = other; line.To = me; line.Text = "(private) " + line.Text; }
+                        else if (i % 11 == 9) { line.From = me; line.To = other; line.Text = "(private) " + line.Text; }
+                        MPChat.DevAppendLocal(line);
+                        _hubShotsChat.Add(line);
+                    }
+                    return $"OK uifill chat: added={n} realOthers={real} total={MPChat.Snapshot(500).Count}";
+                }
+                string[] kinds = { "loan", "gift", "business" };
+                int stamp = (int)(DateTime.UtcNow.Ticks % 100000);
+                for (int i = 0; i < n; i++)
+                {
+                    string cp = names[i % names.Count];
+                    string kind = kinds[i % 3];
+                    float principal = 5000f + i * 12500f;
+                    float pay = Math.Max(250f, principal / (7 + i % 5 * 7));
+                    float intr = Math.Max(25f, principal * 0.004f);
+                    MPHub.IncomingOffers.Add(new LoanOfferPayload { Id = $"{HubShotsFillId}in-{stamp}-{i}", From = cp, To = me, Principal = principal,
+                        DailyInterest = intr, DailyPayment = pay, Kind = kind, BusinessName = kind == "business" ? HubShotsBiz[i % HubShotsBiz.Length] : "", State = "offer" });
+                    MPHub.OutgoingOffers.Add(new LoanOfferPayload { Id = $"{HubShotsFillId}out-{stamp}-{i}", From = me, To = cp, Principal = principal * 0.8f,
+                        DailyInterest = intr, DailyPayment = pay, Kind = kinds[(i + 1) % 3], BusinessName = HubShotsBiz[(i + 2) % HubShotsBiz.Length], State = "offer" });
+                    bool iOwe = i % 2 == 0;
+                    MPHub.Loans.Add(new LoanEntry { Id = $"{HubShotsFillId}loan-{stamp}-{i}", Lender = iOwe ? cp : me, Borrower = iOwe ? me : cp,
+                        Remaining = principal * 0.6f, DailyInterest = intr, DailyPayment = pay });
+                }
+                MPHub.Version++;
+                return $"OK uifill hub: added={n} per list realOthers={real} in={MPHub.IncomingOffers.Count} out={MPHub.OutgoingOffers.Count} loans={MPHub.Loans.Count}";
+            }
+            catch (Exception ex) { return "ERR uifill: " + ex.Message; }
+        }
+
         private static string Execute(string line)
         {
             if (string.IsNullOrEmpty(line)) return "ERR empty command";
@@ -2542,6 +2748,18 @@ namespace BigAmbitionsMP
                     GameStatePatcher.EnqueueOnMainThread(() => MPWeatherSync.TryForceRain(on));
                     return $"OK rain {(on ? "on" : "off")} queued (same apply path as the F7 key)";
                 }
+                // DEV (2026-09-28) Business/Chat redesign screenshots - every open goes through the path a click uses.
+                // `phoneapp <Persona|Contacts|MyEmployees|BizMan|EconoView|MarketInsider|Rivals|close>`: SmartphoneUI.OpenApp
+                // (the phone icon) / FullMenu.CloseFullMenu. `hubview <transfers|loans|permissions|close|state>`: our Business
+                // page via MPPhoneButton.HubOpenRequested on that tab. `chatview <open|close|size W H|scroll N|state>`: the chat
+                // window via MPPhoneButton.OpenRequested. `contactopen <index|busiest>`: Contacts, then that contact's
+                // conversation (FullMenu.ShowApp + ContactsApp.OpenAppWithContact, the notification click's own pair).
+                // `uifill <hub|chat> <n>` / `uifill clear`: LOCAL display-only sample rows - never sent, never saved.
+                case "phoneapp":    return HubShotsPhoneApp(arg);
+                case "hubview":     return HubShotsHubView(arg);
+                case "chatview":    return HubShotsChatView(arg);
+                case "contactopen": return HubShotsContactOpen(arg);
+                case "uifill":      return HubShotsUiFill(arg);
                 case "uiview":   // DEV (2026-09-28): open the game's OWN main-menu screens for palette screenshots
                     return UiView(arg);
                 case "screenshot":
