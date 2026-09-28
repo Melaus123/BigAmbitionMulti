@@ -220,6 +220,7 @@ namespace BigAmbitionsMP
         ClientTrafficSnapshot = 217,     // TRAFFIC-CONSIST T1 (2026-09-18, design .modding/03-systems/traffic-consistency-design-2026-09-18.md Q1 option A; user ruling: "everyone needs to exist in the same world that is consistent with itself"): a CLIENT's own LEFTOVER ambient Gley cars, client -> HOST, on the UNRELIABLE lane and seq-guarded exactly like the host's own snapshot stream. Sent ONLY while that client's mode is ghost AND it still holds ambient local cars of its own - the switch-over window, where those cars exist on one machine and nowhere else; a client running local traffic alone is beyond 350 m from everyone and publishes nothing. The host keeps one SENSED visual stand-in per published car so its OWN thinking traffic brakes for them (and so the host's player can see them at all), and FOLDS the rows into the ordinary TrafficSnapshot it already sends to every OTHER peer under reserved ids (1,000,000 + 10,000 x owner ordinal + pool index), skipping the owner. No other client needs new code - 0.3.0 ones included. A 0.3.0 HOST does not know the type and only logs a warning (MPServer.cs:3024-3025), so the leftovers stay private exactly as they do today: degraded, never worse.
         ImportTransfer        = 218,     // H-MERGERIMPORT-1 (batch 24, 2026-09-21): AN IMPORT PARTNERSHIP LINE AIMED AT A MERGED PARTNER'S WAREHOUSE. Entities.ImportPartnership.DoDeliveries prices (:184) and delivers (:272) only products whose assigned warehouse answers RentedByPlayer, and that method is inside the authority veil, so every merger-flipped partner building reverts to native truth for the pass and the line is skipped in silence - no charge, no goods, no message. Four legs on one type, told apart by Action, each native effect landing ONCE on the machine that holds the object. "need": the plan owner -> HOST -> the warehouse's runner, carrying each product's amount and the plan's isTarget flag; the same message with Answer=true carries the per-item need back (ImportProduct.GetAmountToBuy's own arithmetic, :39-51, run where the pallets are). "deliver": sent only AFTER the plan owner has applied the weekly-cap arithmetic (:188-211) and PAID one native charge (:236-247); the runner places the goods with the game's own DeliverCargoToBuilding under the iswarehousestorage filter (:278) and books the positive DeliveryTransaction (:282-287). "ack": the per-item REMAINDER home, where the plan owner books the delivered half (:288-305) and pays the game's own refund (:306-337). "closed": the plan owner's confirmation, the only thing that drops the host's binding. Idempotent by TransferId at every step and persisted on both sides (cargo-marks.bamp.json's import sections). Rides Gameplay - timely and small.
         CustomerVisitState    = 219,     // H-HANDOFF-1 (batch 27, 2026-09-26; rides protocol 26, unreleased): the VISIT STATE of a shop's live customers - per customer the schedule entry id, the visit clock (spawn minute), the order's items with their available/acceptable/paid/processed flags, completed, leaving, basket, queue spot, the citizen, plus SeatItem/SeatIndex/Remaining kept for later efforts. Simulator -> Host -> the players INSIDE that building, routed exactly like CustomerPuppetState (144) with the same SimulatorPid == sender check. Final=true is the one snapshot a simulator sends at the moment it lets go (Reason "exit" from BuildingManager.ResetIndoors, "authority" from the swap to follower); Final=false rows are the continuous on-change stream (at most 1/s per building, full set every 10 s) that leaves the taker recent state when a simulator disconnects. The taker applies the newest row per id when it adopts the copies (CustomerHandoff / CustomerPuppets.AdoptPuppetAsNative).
+        CustomerUnsoldLeave   = 220,     // H-HANDOFF-1 R1 (hand-off stock S4, 2026-09-27; rides protocol 26, unreleased): a customer whose visit crossed a hand-off walked out UNSOLD on a PARTNER's machine (the partner runs the owner's shop as a helper; nothing paid, order still open at the game's own Customer.Leave). Partner -> HOST -> the building OWNER, routed like HelperOrderForward (142) - same sender check, owner lookup and Housing/Business grant gate. Items = the processed, non-service, non-bag lines: exactly what the game's own Leave puts back on a shelf (Customer.cs:316-327). The owner returns min(those lines, the units its own shelves gave the visit) and nothing more; the other units are the native pick-then-leave loss. Once per visit on both sides.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -1072,6 +1073,16 @@ namespace BigAmbitionsMP
 
     /// <summary>H-HANDOFF-1 (message 219): a simulator's visit rows for one building - a FINAL snapshot when
     /// it lets the crowd go, or the on-change stream while it runs them.</summary>
+    /// <summary>H-HANDOFF-1 R1 (message 220): partner -> host -> owner. A visit walked out unsold on the partner's
+    /// machine; Items are the lines the game's own Leave would return (processed, not a service, not a bag).</summary>
+    public class CustomerUnsoldLeavePayload
+    {
+        public string AddressKey { get; set; } = "";
+        public string PlayerId   { get; set; } = "";   // the partner whose machine the visit walked out on
+        public string EntryId    { get; set; } = "";   // the visit id (schedule entry id)
+        public List<string> Items { get; set; } = new();
+    }
+
     public class CustomerVisitStatePayload
     {
         public string AddressKey   { get; set; } = "";
@@ -1827,6 +1838,7 @@ namespace BigAmbitionsMP
         //      would still decide from the building's flag and flip a member's OWN lapsed rental. No capability
         //      gate and no old-peer branch (project rule 2026-09-18): mixed sessions refuse at Hello.
         //      H-HANDOFF-1 (batch 27) rides the same, still unreleased, 26: new message CustomerVisitState=219.
+        //      H-HANDOFF-1 R1 (2026-09-27) rides the same, still unreleased, 26: new message CustomerUnsoldLeave=220.
         public const int Version = 26;
     }
 

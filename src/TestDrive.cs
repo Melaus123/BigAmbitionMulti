@@ -760,8 +760,10 @@ namespace BigAmbitionsMP
                     // THIS MACHINE ONLY, and only the interior it is standing in, because
                     // IndoorCustomerSpawner.Customers IS the local interior's live register.
                     int ceWant;
-                    if (!int.TryParse(arg.Trim(), out ceWant) || ceWant <= 0)
-                        return "ERR usage: custevict <n> (a positive count of live bodies to send home)";
+                    var ceArgs = arg.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    bool ceTakenOnly = ceArgs.Length > 1 && ceArgs[1] == "taken";   // R1: only bodies holding a taken line
+                    if (ceArgs.Length == 0 || !int.TryParse(ceArgs[0], out ceWant) || ceWant <= 0)
+                        return "ERR usage: custevict <n> [taken] (a positive count of live bodies to send home)";
                     var ceTake = new System.Collections.Generic.List<Customer>();
                     try
                     {
@@ -776,6 +778,12 @@ namespace BigAmbitionsMP
                             var ceE = ceC.customerEntry;
                             if (ceE == null || ceE.order == null) continue;      // SkipHandback reads the ENTRY's order
                             if (ceC.order == null || ceC.order.completed) continue;  // Leave and the unpaid-exit counter read the BODY's
+                            if (ceTakenOnly)
+                            {
+                                bool ceHas = false;
+                                if (ceC.order.entries != null) foreach (var ceX in ceC.order.entries) if (CustomerHandoff.TakenOe(ceX) && !ceX.paid) ceHas = true;
+                                if (!ceHas) continue;
+                            }
                             ceTake.Add(ceC);
                         }
                     }
@@ -794,10 +802,26 @@ namespace BigAmbitionsMP
                             int ceH = -1;
                             try { ceH = ceE.spawnTime.Hour; } catch { }
                             int ceHash = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(ceE);
+                            // R1: the visit id and, per body, its processed / taken / total lines at the eviction
+                            string ceVid = "?"; int ceProc = 0, ceTk = 0, ceN = 0;
+                            try
+                            {
+                                var ceO = ceC.order;
+                                ceVid = CustomerEntrySync.EntryIdOf(ceO) ?? BookOnce.IdOf(ceO) ?? "?";
+                                if (ceO?.entries != null)
+                                    foreach (var ceX in ceO.entries)
+                                    {
+                                        if (ceX == null) continue;
+                                        ceN++;
+                                        if (ceX.processed) ceProc++;
+                                        if (CustomerHandoff.TakenOe(ceX)) ceTk++;
+                                    }
+                            }
+                            catch { }
                             ceMi.Invoke(ceC, new object[0]);
                             ceDone++;
                             if (ceIds.Length > 0) ceIds.Append(',');
-                            ceIds.Append($"h{ceH}#{ceHash:X}");
+                            ceIds.Append($"h{ceH}#{ceHash:X}={ceVid}:proc{ceProc}/taken{ceTk}/lines{ceN}");
                         }
                         catch (Exception exCe2)
                         {

@@ -1261,6 +1261,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.CustomerUnsoldLeave:   // H-HANDOFF-1 R1: host forwarded a partner's unsold walk-out - I'm the building owner
+                {
+                    var ul = env.GetPayload<CustomerUnsoldLeavePayload>();
+                    if (ul != null) GameStatePatcher.EnqueueOnMainThread(() => CustomerHandoff.OnUnsoldLeave(ul));
+                    break;
+                }
+
                 case MessageType.CustomerSimAuthority:   // host's per-building simulator election
                 {
                     var ca = env.GetPayload<CustomerSimAuthorityPayload>();

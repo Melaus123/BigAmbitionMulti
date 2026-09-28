@@ -346,7 +346,7 @@ namespace BigAmbitionsMP
                         _visit[r.Id] = new Known { Row = r, From = p.SimulatorPid ?? "", At = now, Final = p.Final, SourceBooks = p.SourceBooks };
                         n++;
                         if (boReg != null) BookOnce.Register(boReg, r.Id, null, p.Final ? "final received" : "stream received");
-                        if (boReg != null && r.Leaving) ReturnUnsoldWalkOut(boReg, r);   // fold S4
+                        if (boReg != null && r.Leaving) ReturnUnsoldWalkOut(boReg, r, p.SimulatorPid ?? "");   // fold S4 / R1
                     }
                 if (_visit.Count > 400)
                     foreach (var key in new List<string>(_visit.Keys))
@@ -574,7 +574,7 @@ namespace BigAmbitionsMP
         private static readonly object _markObj = new object();
         internal static int StockOutUnits, StockFwdCredited, StockFwdLiveCredited, StockAdoptCredited, StockAdoptDeducted, StockAdoptFailed, StockReturned, StockMarkSkips;
 
-        private static void ClearStock() { try { _out.Clear(); } catch { } }
+        private static void ClearStock() { try { _out.Clear(); _unsoldSent.Clear(); } catch { } }
 
         internal static bool IsPaperBag(string? n)
             => !string.IsNullOrEmpty(n) && n!.IndexOf("bag", StringComparison.OrdinalIgnoreCase) >= 0 && n.IndexOf("paper", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -696,15 +696,17 @@ namespace BigAmbitionsMP
                 try { addr = GameStateReader.AddressKey(reg); } catch { }
                 bool unsoldWalkOut = row != null && row.Leaving;
                 if (unsoldWalkOut && row!.Entries != null) foreach (var re in row.Entries) if (re != null && re.Paid) { unsoldWalkOut = false; break; }
-                if (unsoldWalkOut)
-                {
-                    StockUnsoldReturns++;
-                    int back = ReturnLeftovers(reg, units, id, "its late-adopt duplicate was released; the visit walks out unsold");
-                    Plugin.Logger.LogInfo($"[Stock] late-adopt duplicate {id} @{addr}: {back}/{units.Count} unit(s) it took off this machine's shelves back on a shelf (the visit walks out unsold).");
-                    return units.Count;
-                }
                 if (!_out.TryGetValue(id, out var ov)) { ov = new OutVisit { Addr = addr }; _out[id] = ov; }
                 ov.Units.AddRange(units);
+                if (unsoldWalkOut)
+                {
+                    // R1 (2026-09-27): the duplicate's units are this visit's credits; the settle returns only what the
+                    // game's own Leave would (the row's processed lines), never more.
+                    StockOutUnits += units.Count;
+                    Plugin.Logger.LogInfo($"[Stock] late-adopt duplicate {id} @{addr}: {units.Count} unit(s) it took off this machine's shelves become the visit's credits (the visit walks out unsold).");
+                    SettleUnsoldWalkOut(reg, id, ProcessedOf(row!), "the partner");
+                    return units.Count;
+                }
                 try { var eo = CustomerEntrySync.TryFindEntry(reg, id)?.order; if (eo != null && !_outOrders.TryGetValue(eo, out _)) _outOrders.Add(eo, _markObj); } catch { }
                 StockOutUnits += units.Count;
                 Plugin.Logger.LogInfo($"[Stock] late-adopt duplicate {id} @{addr}: {units.Count} unit(s) it took off this machine's shelves recorded as the visit's credits before its release (the adoption of its row uses them).");
@@ -891,22 +893,145 @@ namespace BigAmbitionsMP
         /// gave the visit (out with the body, or held by its kept till snapshot) go back on a shelf, as the native Leave
         /// (Customer.cs:309-313) would put them. Reached only through a row this machine receives (the partner streams
         /// while this machine's player is inside, or sends a Final); once per visit (the units are used up).</summary>
-        private static void ReturnUnsoldWalkOut(BuildingRegistration reg, CustomerVisitRow r)
+        private static void ReturnUnsoldWalkOut(BuildingRegistration reg, CustomerVisitRow r, string from)
         {
             try
             {
                 if (r == null || string.IsNullOrEmpty(r.Id) || !r.Leaving) return;
                 if (r.Entries != null) foreach (var e in r.Entries) if (e != null && e.Paid) return;   // paid: its forward settles the units
                 if (BookOnce.IsBooked(r.Id)) return;
-                var units = TakeOut(r.Id);
-                foreach (var e in TillTakenOf(reg, r.Id)) { MarkCreditedLine(e); units.Add(new KeyValuePair<string, float>(e.itemName, e.wholesalePrice)); }
-                if (units.Count == 0) return;
-                StockUnsoldReturns++;
-                ReturnLeftovers(reg, units, r.Id, "the visit walked out unsold on the partner's machine");
+                SettleUnsoldWalkOut(reg, r.Id, ProcessedOf(r), string.IsNullOrEmpty(from) ? "the partner" : from);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] unsold walk-out {r?.Id}: {ex.Message}"); }
         }
         internal static int StockUnsoldReturns;
+
+        /// <summary>R1: the row's processed lines - what the game's own Leave returns (Customer.cs:316-327).</summary>
+        private static List<string> ProcessedOf(CustomerVisitRow r)
+        {
+            var l = new List<string>();
+            try { if (r?.Entries != null) foreach (var e in r.Entries) if (e != null && e.Processed && !string.IsNullOrEmpty(e.ItemName)) l.Add(e.ItemName); } catch { }
+            return l;
+        }
+
+        /// <summary>H-HANDOFF-1 R1 (2026-09-27), OWNER machine, MAIN THREAD: a visit walked out UNSOLD on a partner's machine.
+        /// The game's own Leave puts back only PROCESSED, non-service lines (Customer.cs:309-313 -> ReturnItemsToShelf
+        /// :316-327); a picked but unprocessed unit is lost, also in single-player. So the units my shelves gave the visit
+        /// (out with the body, or held by its kept till snapshot) go back on a shelf only up to the lines the game would
+        /// return: min(native return set, what my shelves gave), never more. The rest is the native loss. Once per visit
+        /// (TakeOut uses the credits up), so a row and a message for the same visit never both return. Returns the number
+        /// of credits settled (0 = nothing of mine was out for it).</summary>
+        internal static int SettleUnsoldWalkOut(BuildingRegistration? reg, string id, List<string>? nativeBack, string from)
+        {
+            try
+            {
+                if (reg == null || string.IsNullOrEmpty(id)) return 0;
+                bool books = false;
+                try { books = MergerFlip.BooksHere(reg); } catch { }
+                if (!books || BookOnce.IsBooked(id)) return 0;
+                string addr = "";
+                try { addr = GameStateReader.AddressKey(reg); } catch { }
+                var outUnits = TakeOut(id);
+                var tillUnits = new List<KeyValuePair<string, float>>();
+                foreach (var e in TillTakenOf(reg, id)) { MarkCreditedLine(e); tillUnits.Add(new KeyValuePair<string, float>(e.itemName, e.wholesalePrice)); }
+                if (outUnits.Count + tillUnits.Count == 0) return 0;
+                StockUnsoldReturns++;
+                int credits = 0;
+                foreach (var kv in outUnits) if (!IsPaperBag(kv.Key)) credits++;
+                foreach (var kv in tillUnits) if (!IsPaperBag(kv.Key)) credits++;
+                var back = new List<KeyValuePair<string, float>>();
+                if (nativeBack != null)
+                    foreach (var nm in nativeBack)
+                    {
+                        if (string.IsNullOrEmpty(nm) || IsPaperBag(nm)) continue;
+                        if (UseCredit(outUnits, nm, out var ws) || UseCredit(tillUnits, nm, out ws)) back.Add(new KeyValuePair<string, float>(nm, ws));
+                    }
+                int returned = back.Count > 0 ? ReturnLeftovers(reg, back, id, $"the visit walked out unsold on {from}'s machine; the lines the game's own Leave returns") : 0;
+                int lost = 0;
+                foreach (var kv in outUnits)
+                {
+                    if (IsPaperBag(kv.Key)) continue;
+                    lost++;
+#if BAMP_DEV
+                    try { if (_sdTraceSet != null && _sdKey == addr) SdAdd(_sdLeft, kv.Key, 1); } catch { }   // the oracle's native-loss term
+#endif
+                }
+                foreach (var kv in tillUnits) if (!IsPaperBag(kv.Key)) lost++;
+                Plugin.Logger.LogInfo($"[Stock] {id} walked out unsold on {from}'s machine: {returned}/{credits} unit(s) my shelves gave back on a shelf; {lost} picked-but-unprocessed unit(s) lost as natively (Customer.cs:316-327).");
+                return outUnits.Count + tillUnits.Count + back.Count;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] settle unsold {id}: {ex.Message}"); return 0; }
+        }
+
+        // R1 sender/receiver (message 220). One send per visit id on the partner, cleared with the stock ledger.
+        private static readonly HashSet<string> _unsoldSent = new();
+        internal static int UnsoldLeavesSent, UnsoldLeavesIn;
+
+        /// <summary>R1 receiver, OWNER machine, MAIN THREAD: a partner's unsold walk-out (message 220).</summary>
+        internal static void OnUnsoldLeave(CustomerUnsoldLeavePayload p)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.EntryId)) return;
+                BuildingRegistration? reg = null;
+                var regs = SaveGameManager.Current?.BuildingRegistrations;
+                if (regs != null) foreach (var r in regs) if (r != null && GameStateReader.AddressKey(r) == p.AddressKey) { reg = r; break; }
+                bool books = false;
+                try { books = reg != null && MergerFlip.BooksHere(reg); } catch { }
+                if (!books) { Plugin.Logger.LogInfo($"[Stock] unsold walk-out {p.EntryId} for '{p.AddressKey}' from {p.PlayerId}: not my books - dropped."); return; }
+                UnsoldLeavesIn++;
+                if (_fwdSeen.Contains(p.EntryId) || BookOnce.IsBooked(p.EntryId))
+                {
+                    Plugin.Logger.LogInfo($"[Stock] unsold walk-out {p.EntryId} from {p.PlayerId}: the visit was sold (forwarded or booked) - skipped.");
+                    return;
+                }
+                int n = SettleUnsoldWalkOut(reg, p.EntryId, p.Items, p.PlayerId);
+                if (n == 0) Plugin.Logger.LogInfo($"[Stock] unsold walk-out {p.EntryId} from {p.PlayerId} @{p.AddressKey}: no unit of my shelves was out for it - nothing to settle.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] unsold leave in: {ex.Message}"); }
+        }
+
+        /// <summary>R1 sender, PARTNER machine, MAIN THREAD (Customer.Leave prefix - the order is still open: Leave sets
+        /// completed at :311). A live native of the owner's shop, on a machine that is a helper there (it does not keep
+        /// the books), leaves with nothing paid: the lines the game's own Leave returns go to the owner, whose shelves
+        /// gave the units. Once per visit id.</summary>
+        internal static void ReportUnsoldLeave(Customer? c)
+        {
+            try
+            {
+                if (c == null || c.isPlayer) return;
+                var o = c.order;
+                if (o?.entries == null || o.completed) return;
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                if (CustomerPuppets.SpawnerSuppressedHere) return;   // a follower runs no natives here
+                if (!BusinessHelperRoute.HelperHere(out var addr)) return;
+                if (BookOnce.IsBookedCopy(o)) return;   // a booked visit is sold
+                string? id = CustomerEntrySync.EntryIdOf(o);
+                if (string.IsNullOrEmpty(id)) id = BookOnce.IdOf(o);
+                if (string.IsNullOrEmpty(id) || _unsoldSent.Contains(id!)) return;
+                var items = new List<string>();
+                int taken = 0;
+                foreach (var e in o.entries)
+                {
+                    if (e == null || string.IsNullOrEmpty(e.itemName)) continue;
+                    if (e.paid) return;   // paid: the sale forward settles its units
+                    if (e.processed || TakenOe(e)) taken++;
+                    if (!e.processed || IsPaperBag(e.itemName)) continue;
+                    bool service = false;
+                    try { var it = BigAmbitions.Items.ItemsGetter.GetByName(e.itemName); service = it != null && (it.type & BigAmbitions.Items.ItemType.ServiceProduct) != 0; } catch { }
+                    if (service) continue;
+                    items.Add(e.itemName);
+                }
+                if (taken == 0) return;   // nothing was taken for it: no shelf of the owner's gave it anything
+                _unsoldSent.Add(id!);
+                var p = new CustomerUnsoldLeavePayload { AddressKey = addr, PlayerId = MPConfig.PlayerId, EntryId = id!, Items = items };
+                if (MPServer.IsRunning) MPServer.HandleCustomerUnsoldLeave(p, MPConfig.PlayerId);
+                else MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.CustomerUnsoldLeave, MPConfig.PlayerId, p));
+                UnsoldLeavesSent++;
+                Plugin.Logger.LogInfo($"[Stock] {id} walked out unsold here @{addr} (the owner keeps the books): {items.Count} processed unit(s) reported for the owner's shelves.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] unsold leave send: {ex.Message}"); }
+        }
 
         /// <summary>A live body of a visit just booked by another Order is finished (CustomerPuppets.FinishLiveBodiesOf): the
         /// units it holds that the booking does not sell go back on a shelf; the booking sold the rest.</summary>
@@ -1001,7 +1126,7 @@ namespace BigAmbitionsMP
         }
 
         internal static string StockReadout()
-            => $"once=out{StockOutUnits}/fwdCred{StockFwdCredited}/fwdLive{StockFwdLiveCredited}/fwdTill{StockFwdTillCredited}/adoptCred{StockAdoptCredited}/adoptDed{StockAdoptDeducted}/adoptFail{StockAdoptFailed}/ret{StockReturned}/skip{StockMarkSkips}/bagSkip{StockBagSkips}/unsold{StockUnsoldReturns}";
+            => $"once=out{StockOutUnits}/fwdCred{StockFwdCredited}/fwdLive{StockFwdLiveCredited}/fwdTill{StockFwdTillCredited}/adoptCred{StockAdoptCredited}/adoptDed{StockAdoptDeducted}/adoptFail{StockAdoptFailed}/ret{StockReturned}/skip{StockMarkSkips}/bagSkip{StockBagSkips}/unsold{StockUnsoldReturns}/leave220out{UnsoldLeavesSent}/in{UnsoldLeavesIn}";
 
 #if BAMP_DEV
         // ── DEV: `custstate arm <n>` - one log line the moment this interior holds n customers ────────
@@ -1862,6 +1987,17 @@ namespace BigAmbitionsMP
         }
     }
 #endif
+
+    /// <summary>H-HANDOFF-1 R1 (2026-09-27): a partner's unsold walk-out reports the lines the game's own Leave returns to
+    /// the owner, whose shelves gave the units (message 220). Prefix: the order is still open here. Never skips Leave.</summary>
+    [HarmonyPatch(typeof(Customer), nameof(Customer.Leave))]
+    public static class Patch_CustomerLeave_UnsoldReport
+    {
+        static void Prefix(Customer __instance)
+        {
+            try { CustomerHandoff.ReportUnsoldLeave(__instance); } catch { }
+        }
+    }
 
 #if BAMP_DEV
     /// <summary>DEV stock oracle (fold F5, 2026-09-27): the identity's `leftUnprocessed` term - a leaving customer's picked but

@@ -3194,6 +3194,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.CustomerUnsoldLeave:   // H-HANDOFF-1 R1: a partner's unsold walk-out -> the shop's owner
+                {
+                    var ul = env.GetPayload<CustomerUnsoldLeavePayload>();
+                    if (ul != null) HandleCustomerUnsoldLeave(ul, senderPid);
+                    break;
+                }
+
                 case MessageType.CustomerPuppetState:   // a client simulator's stream — apply locally + relay
                 {
                     var cp = env.GetPayload<CustomerPuppetStatePayload>();
@@ -4447,21 +4454,49 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (p == null || string.IsNullOrEmpty(p.AddressKey)) return;
-                if (!SenderIs(p.PlayerId, senderPid, MessageType.HelperOrderForward)) return;
-                string owner = (BuildingOwners.TryGetValue(p.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
-                             : (BuildingRealEstateOwners.TryGetValue(p.AddressKey, out var r) ? r : "");
-                if (string.IsNullOrEmpty(owner)) return;
-                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
-                if (ownerPid != p.PlayerId
-                    && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, p.PlayerId)
-                    && !GrantSync.IsGranted(GrantKind.Business, ownerPid, p.PlayerId)) return;   // grant gate
+                if (p == null) return;
+                string? ownerPid = HelperRouteOwner(p.AddressKey, p.PlayerId, senderPid, MessageType.HelperOrderForward);
+                if (ownerPid == null) return;
                 if (ownerPid == MPConfig.PlayerId)
                     GameStatePatcher.EnqueueOnMainThread(() => CustomerEntrySync.OwnerAdoptForwardedOrder(p));
                 else
                     SendHubTo(ownerPid, MessageType.HelperOrderForward, p);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Business] HandleHelperOrder: {ex.Message}"); }
+        }
+
+        /// <summary>The helper-to-owner route shared by a helper-hosted sale (142) and an unsold walk-out (220, H-HANDOFF-1
+        /// R1): the sender check, the building's owner (tenant, else real-estate owner) and the Housing/Business grant gate
+        /// (permitted guests = owner parity). Null = drop.</summary>
+        private static string? HelperRouteOwner(string addressKey, string playerId, string senderPid, MessageType type)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return null;
+            if (!SenderIs(playerId, senderPid, type)) return null;
+            string owner = (BuildingOwners.TryGetValue(addressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
+                         : (BuildingRealEstateOwners.TryGetValue(addressKey, out var r) ? r : "");
+            if (string.IsNullOrEmpty(owner)) return null;
+            string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
+            if (ownerPid != playerId
+                && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, playerId)
+                && !GrantSync.IsGranted(GrantKind.Business, ownerPid, playerId)) return null;   // grant gate
+            return ownerPid;
+        }
+
+        /// <summary>H-HANDOFF-1 R1: a visit walked out unsold on a partner's machine - to the shop's owner, who puts back
+        /// on its shelves what the game's own Leave would have returned (or adopt directly when the host owns it).</summary>
+        public static void HandleCustomerUnsoldLeave(CustomerUnsoldLeavePayload p, string senderPid)
+        {
+            try
+            {
+                if (p == null || string.IsNullOrEmpty(p.EntryId)) return;
+                string? ownerPid = HelperRouteOwner(p.AddressKey, p.PlayerId, senderPid, MessageType.CustomerUnsoldLeave);
+                if (ownerPid == null) return;
+                if (ownerPid == MPConfig.PlayerId)
+                    GameStatePatcher.EnqueueOnMainThread(() => CustomerHandoff.OnUnsoldLeave(p));
+                else
+                    SendHubTo(ownerPid, MessageType.CustomerUnsoldLeave, p);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Stock] HandleCustomerUnsoldLeave: {ex.Message}"); }
         }
 
         // (HandleVehicleCargoRes / HandleBuildingCargoRes retired with their wire types in v16 —

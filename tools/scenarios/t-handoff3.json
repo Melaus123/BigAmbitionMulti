@@ -11,6 +11,7 @@
     "shop": "20 ba:street_fifthavenue"
   },
   "oracles_absent": [
+    "\\[Stock\\] (settle unsold|unsold leave in|unsold leave send|HandleCustomerUnsoldLeave)\\b[^:]*: ",
     "\\[BookOnce\\] (register|book|till watch|hourly begin|hourly restore|hourly end)\\b[^:]*: ",
     "\\[TickIso\\]",
     "\\[Guard\\]",
@@ -334,6 +335,11 @@
     },
     {"seq": 102, "role": "h", "cmd": "stockdelta ${shop}", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sdC1Lost": "lostTotal=(\\d+)", "sdC1LostNamed": "lostNamed=(\\S+)", "sdC1LostUnx": "lostUnexplained=(\\d+)", "sdC1Bad": "bad=(\\S+)", "sdC1Once": "once=(\\S+)"}, "note": "STOCK ORACLE (fold S1 2026-09-27, HARD): stockOk=True needs the per-unit identity AND lostUnexplained=0 (every lost unit has a named cause: exitNative / pending) - the leg before this step"},
     {"seq": 103, "role": "h", "cmd": "stockdelta ${shop} mark", "expect_result": "^OK stockdelta .* marked ", "note": "STOCK ORACLE mark before the leg"},
+    {"seq": 105, "role": "both", "cmd": "mark TEST T-HANDOFF3 LEG1B PARTNER-EVICTS-UNSOLD", "expect_result": "OK MARK"},
+    {"seq": 106, "role": "c", "cmd": "custevict 1 taken", "expect_result": "^OK custevict asked=1 evicted=1 ", "abort_on_fail": false, "capture": {"r1Evict": "ids=(\\S+)"}, "expect_log": [{"role": "c", "regex": "\\[Stock\\] \\S+ walked out unsold here @${shop} \\(the owner keeps the books\\): [0-9]+ processed unit", "within_s": 10}, {"role": "h", "regex": "\\[Stock\\] \\S+ walked out unsold on ${clientPid}'s machine: [0-9]+/[1-9][0-9]* unit\\(s\\) my shelves gave back on a shelf; [0-9]+ picked-but-unprocessed", "within_s": 10}], "note": "R1 (hand-off stock S4, 2026-09-27): the OWNER is OUTSIDE; the client (simulator) sends one live body holding a taken line home through the game's own InstantlyLeave -> Leave, with its order open and nothing paid. The client reports the processed lines to the owner (message 220 via the host); the owner puts back on HIS shelves min(those lines, the units his shelves gave the visit) and names the rest as the native pick-then-leave loss (leftUnprocessed). ids= prints visit:proc/taken/lines per body."},
+    {"seq": 107, "role": "h", "sleep_s": 2},
+    {"seq": 108, "role": "h", "cmd": "stockdelta ${shop}", "expect_result": "^OK stockdelta .* lostUnexplained=0 .*stockOk=True ", "abort_on_fail": false, "capture": {"sdR1Left": "leftUnprocessed=(\\d+)", "sdR1Out": "outDelta=(-?\\d+)", "sdR1Drop": "dropTotal=(-?\\d+)", "sdR1Bad": "bad=(\\S+)", "sdR1Once": "once=(\\S+)"}, "note": "STOCK ORACLE (R1, HARD) on the OWNER, still outside: the returned units are back in his stock (dropTotal falls), the visit's out units are gone (outDelta), and the picked-but-unprocessed rest is leftUnprocessed - stockOk=True lostUnexplained=0"},
+    {"seq": 109, "role": "h", "cmd": "handoffbook ${shop}", "expect_result": "^OK handoffbook .* books=True .*dupIds=0 lostIds=0 identity=ok ", "abort_on_fail": false, "note": "R1: the unsold walk-out books nothing"},
     {
       "seq": 38,
       "role": "both",
