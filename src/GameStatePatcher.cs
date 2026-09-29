@@ -1301,6 +1301,10 @@ namespace BigAmbitionsMP
                         // Stage 0 review MAJOR-6: an identical payload against an unchanged local copy
                         // means this machine already HOLDS the state a re-ask would fetch — owed satisfied.
                         InteriorSync.ClearResyncOwed(payload.AddressKey);
+                        // ABSENCE-HANDBACK-1 F7: a returned owner who already holds this exact hand-back state must still ack
+                        // it - the host keeps the address held until it hears "applied" (ConsumeReturnInterior sends that).
+                        if (payload.SeedOrHeal && MergerAbsence.IsReturnInterior(payload.AddressKey))
+                            MergerAbsence.ConsumeReturnInterior(payload.AddressKey);
                         NoteApplySkipped(payload.AddressKey);
                         return;
                     }
@@ -1601,8 +1605,12 @@ namespace BigAmbitionsMP
                             // state. When THIS machine owns the building, pre-existing items keep their LIVE
                             // cargo; new items (a placed box) keep the snapshot's. Guests applying owner pushes
                             // are untouched (RentedByPlayer false there).
+                            // ABSENCE-HANDBACK-1 F8: EXCEPT the absence hand-back (a SeedOrHeal snapshot of an address my
+                            // return named): that cargo IS my shop's truth - what my stand-in sold and restocked while I was
+                            // away - so it replaces my stale live cargo instead of being shielded from it.
                             bool receiverOwnsThis = false;
-                            try { receiverOwnsThis = MergerFlip.TrulyMine(reg); } catch { }   // TrulyMine: never shield replica cargo against the true owner
+                            try { receiverOwnsThis = MergerFlip.TrulyMine(reg)
+                                                     && !(payload.SeedOrHeal && MergerAbsence.IsReturnInterior(payload.AddressKey)); } catch { }   // TrulyMine: never shield replica cargo against the true owner
                             int cargoShielded = 0;
                             // Stage 0 — THE HANDS RULE (user decision Q4 + F-2026-08-25-A): while an item is
                             // in the LOCAL player's hands, no incoming message may RE-CREATE it in this
@@ -1827,8 +1835,9 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Patcher] Interior applied for '{payload.AddressKey}': layout='{payload.Layout}' {InteriorSync.SnapshotSummary(payload)} (changed={changedIds.Count} moved={movedIds.Count} cargoOnly={cargoOnlyIds.Count} stackedInPlace={stackedInPlace} removed={removedIds.Count}){_deltaNames}.");
                     // MERGER PHASE 3-C r2 (F1c): THE RETURN SET IS CONSUMED HERE, and nowhere else - this is
                     // the one point at which this snapshot's items and designs are actually on the local
-                    // copy. Every refusal and every deferral returns ABOVE this line (the S4-identical skip,
-                    // the round-178 owner guard, the round-184 resurrection window, the all-zero refusal, the
+                    // copy. Every refusal and every deferral returns ABOVE this line (the S4-identical skip -
+                    // which, since ABSENCE-HANDBACK-1 F7, consumes a return address itself: this machine already
+                    // holds that exact state -, the round-178 owner guard, the round-184 resurrection window, the all-zero refusal, the
                     // no-registration miss, the non-authoritative skip and the mid-edit busy gate), so a
                     // return snapshot that did not land still finds its address in the set when the host
                     // re-sends or the re-ask is answered. A return whose host copy is EMPTY reaches here too

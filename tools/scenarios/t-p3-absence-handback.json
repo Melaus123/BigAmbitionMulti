@@ -1,0 +1,720 @@
+{
+  "id": "T-P3-2-HANDBACK",
+  "title": "ABSENCE-HANDBACK-1 leg A (2P, host stand-in): the host's absence-time changes to the partner shop (stock take/restock, move, paint, dirt, till) come back to the returning owner exactly - fingerprints equal, no duplicated goods; race leg: the owner's own upload is held until the hand-back is applied",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX). Dev build with ABSENCE-HANDBACK-1 (interiorfp / shelfput / itemnudge / pushinterior / absence fp / absence holdreturn levers). Uses the driver's drop/relaunch steps. Every lever step asserts its OK and every absence edit is premise-checked (stock and fingerprint must MOVE) before the return asserts. Ends dissolved (fixture hygiene); no save step.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "\\[Paperwork\\] .* refused",
+    "hand-back of .* acknowledged .*MISMATCH",
+    "OwnerSnapshot rejected: player='Client1'",
+    "owner cargo sync .* hash mismatch",
+    "\\[Absence\\] hand-back ack for .* ignored"
+  ],
+  "oracles_report": [
+    "\\[Paperwork\\]",
+    "\\[Absence\\]",
+    "\\[EconProbe\\] wallet",
+    "\\[Merger\\] offer from"
+  ],
+  "steps": [
+    {
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK",
+      "seq": 1
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 2
+    },
+    {
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 240
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ],
+      "seq": 3
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST P3-2 START",
+      "expect_result": "OK MARK",
+      "seq": 4
+    },
+    {
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent",
+      "seq": 5
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 6
+    },
+    {
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]",
+      "seq": 7
+    },
+    {
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] FORMED group",
+          "within_s": 20
+        }
+      ],
+      "seq": 8
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 9
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "clientShop": "keys=\\['([^']+)'"
+      },
+      "seq": 10
+    },
+    {
+      "role": "c",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed day=\\d+ businesses=[1-9]",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Paperwork\\] stored for '${clientPid}'",
+          "within_s": 15
+        }
+      ],
+      "note": "the member publishes its paperwork; the host stores it",
+      "seq": 11
+    },
+    {
+      "role": "h",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed day=\\d+ businesses=[1-9]",
+      "note": "the host member publishes too (applied locally)",
+      "seq": 12
+    },
+    {
+      "role": "h",
+      "cmd": "paperwork",
+      "expect_result": "^OK paperwork stored=\\[.*stable=",
+      "note": "host census lists stored bundles",
+      "seq": 13
+    },
+    {
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[\\] simulating_here=\\[\\]",
+      "seq": 14
+    },
+    {
+      "role": "c",
+      "cmd": "mark READ C-PREDROP",
+      "expect_result": ".",
+      "seq": 15
+    },
+    {
+      "role": "c",
+      "cmd": "stockof ${clientShop}",
+      "expect_result": "^OK stockof .*items=\\[.+\\]",
+      "note": "C-PREDROP",
+      "capture": {
+        "predropStock": "items=\\[([^\\]]*)\\]"
+      },
+      "seq": 16
+    },
+    {
+      "role": "c",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": ".",
+      "note": "C-PREDROP",
+      "seq": 17
+    },
+    {
+      "role": "c",
+      "cmd": "tillledger show ${clientShop}",
+      "expect_result": ".",
+      "note": "C-PREDROP",
+      "seq": 18
+    },
+    {
+      "role": "c",
+      "cmd": "interiorfp ${clientShop}",
+      "expect_result": "^OK interiorfp .*fp=\\[items=[1-9]",
+      "capture": {
+        "cPreFp": "fp=\\[([^\\]]+)\\]"
+      },
+      "note": "B5 pre-drop: the owner's live fingerprint",
+      "seq": 19
+    },
+    {
+      "role": "h",
+      "cmd": "mark READ H-PREDROP",
+      "expect_result": ".",
+      "seq": 20
+    },
+    {
+      "role": "h",
+      "cmd": "stockof ${clientShop}",
+      "expect_result": "items=\\[${predropStock}\\]",
+      "note": "H-PREDROP: the host's copy holds the owner's stock",
+      "seq": 21
+    },
+    {
+      "role": "h",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": ".",
+      "note": "H-PREDROP",
+      "seq": 22
+    },
+    {
+      "role": "h",
+      "cmd": "tillledger show ${clientShop}",
+      "expect_result": ".",
+      "note": "H-PREDROP",
+      "seq": 23
+    },
+    {
+      "role": "h",
+      "cmd": "interiorfp ${clientShop}",
+      "expect_result": "fp=\\[${cPreFp}\\]",
+      "note": "B5 pre-drop: host fingerprint == owner fingerprint",
+      "seq": 24,
+      "abort_on_fail": false
+    },
+    {
+      "role": "h",
+      "cmd": "mark pre-drop baseline",
+      "expect_result": "OK MARK",
+      "note": "sets the host's search baseline before the disconnect",
+      "seq": 25
+    },
+    {
+      "role": "c",
+      "drop": true,
+      "note": "the client member drops out",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] simulating '${clientShop}' for '${clientPid}'",
+          "within_s": 90
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] stand-in start '${clientShop}' for '${clientPid}'",
+          "within_s": 90
+        }
+      ],
+      "seq": 26
+    },
+    {
+      "role": "h",
+      "cmd": "mark client dropped",
+      "expect_result": "OK MARK",
+      "note": "the host is a member: it designates itself and starts simulating the absent member's businesses (no hand-over send) (the take-over evidence is asserted on the drop step itself: it fires in the same second as the disconnect)",
+      "seq": 27
+    },
+    {
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[${clientPid}->${hostPid}( ownerBack=\\d)?: .*${clientShop}.*\\] simulating_here=\\[.*${clientShop}",
+      "seq": 28
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "note": "the departed member stays a member; its buildings stay flipped",
+      "seq": 29
+    },
+    {
+      "role": "h",
+      "cmd": "tillledger seed 7 3 ${clientShop}",
+      "expect_result": ".",
+      "note": "absence-time till",
+      "seq": 30
+    },
+    {
+      "role": "h",
+      "cmd": "shelftake ${clientShop}",
+      "expect_result": "^OK shelftake",
+      "note": "absence-time stock",
+      "capture": {
+        "takeItem": "item=(\\S+)"
+      },
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BStore\\] owner applied TAKE",
+          "within_s": 30
+        }
+      ],
+      "seq": 31
+    },
+    {
+      "role": "h",
+      "cmd": "shelftake ${clientShop}",
+      "expect_result": "^OK shelftake",
+      "note": "absence-time stock",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BStore\\] owner applied TAKE",
+          "within_s": 30
+        }
+      ],
+      "seq": 32
+    },
+    {
+      "role": "h",
+      "cmd": "shelfput ${clientShop}",
+      "expect_result": "^OK shelfput",
+      "note": "absence-time restock (1 unit)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BStore\\] owner applied PUT",
+          "within_s": 30
+        }
+      ],
+      "seq": 33
+    },
+    {
+      "role": "h",
+      "cmd": "itemnudge ${clientShop} ${takeItem} 0.5 0",
+      "expect_result": "^OK itemnudge",
+      "note": "absence-time move",
+      "seq": 34
+    },
+    {
+      "role": "h",
+      "cmd": "itemedit ${clientShop} ${takeItem} paint",
+      "expect_result": "^OK itemedit",
+      "note": "absence-time paint",
+      "seq": 35
+    },
+    {
+      "role": "h",
+      "sleep_s": 20,
+      "note": "let a few owner-style pushes for the simulated shop go by",
+      "seq": 36
+    },
+    {
+      "role": "h",
+      "cmd": "dirtseed ${clientShop} 60 9",
+      "expect_result": "^OK dirtseed .*dirtyNow=[1-9]",
+      "note": "absence-time dirt, seeded AFTER the sleep so staff cannot clean it before the return",
+      "seq": 37
+    },
+    {
+      "role": "h",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "note": "the simulator's publish now covers the marked addresses too",
+      "seq": 38
+    },
+    {
+      "role": "h",
+      "cmd": "mark READ H-ENDABSENCE",
+      "expect_result": ".",
+      "seq": 39
+    },
+    {
+      "role": "h",
+      "cmd": "stockof ${clientShop}",
+      "expect_result": "^OK stockof",
+      "note": "H-ENDABSENCE: premise - the absence changed the stock",
+      "refute_result": "items=\\[${predropStock}\\]",
+      "capture": {
+        "hostAbsStock": "items=\\[([^\\]]*)\\]"
+      },
+      "seq": 40
+    },
+    {
+      "role": "h",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": "dirty=[1-9]",
+      "note": "H-ENDABSENCE: premise - the absence dirt is on the host",
+      "seq": 41
+    },
+    {
+      "role": "h",
+      "cmd": "tillledger show ${clientShop}",
+      "expect_result": ".",
+      "note": "H-ENDABSENCE",
+      "seq": 42
+    },
+    {
+      "role": "h",
+      "cmd": "interiorfp ${clientShop}",
+      "expect_result": "^OK interiorfp",
+      "refute_result": "fp=\\[${cPreFp}\\]",
+      "capture": {
+        "hostAbsFp": "fp=\\[([^\\]]+)\\]"
+      },
+      "note": "premise: the host's live fingerprint moved during the absence",
+      "seq": 43
+    },
+    {
+      "role": "h",
+      "cmd": "absence holdreturn on",
+      "expect_result": "^OK absence holdreturn=on",
+      "note": "race leg: hold ONLY the return-leg interior drain",
+      "seq": 44
+    },
+    {
+      "role": "c",
+      "relaunch": true,
+      "note": "the absent member returns",
+      "seq": 45
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 46
+    },
+    {
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] owner '${clientPid}' returned",
+          "within_s": 120
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] return to '${clientPid}'",
+          "within_s": 150
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] stand-in stopped: froze '${clientShop}' for '${clientPid}' fp=\\[items=[1-9]",
+          "within_s": 150
+        }
+      ],
+      "note": "P3-B: the host detects the owner's return (simulator dropped, mark kept). P3-C: the return leg fires at the owner's applying edge (after its own load) - paperwork + interiors sent, mark cleared.",
+      "seq": 47
+    },
+    {
+      "role": "h",
+      "cmd": "mark RACE hold open",
+      "expect_result": "OK MARK",
+      "seq": 48,
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Absence\\] return applied: \\d+ address",
+          "within_s": 90
+        },
+        {
+          "role": "c",
+          "regex": "\\[Absence\\] return toast shown to '${clientPid}'",
+          "within_s": 90
+        }
+      ],
+      "note": "c: the paperwork half of the return is applied (and the toast shown) while the interiors are held"
+    },
+    {
+      "role": "c",
+      "cmd": "pushinterior ${clientShop}",
+      "expect_result": "^OK pushinterior .* sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "OwnerSnapshot held: player='${clientPid}' addr='${clientShop}' - absence hold: hand-back of '${clientShop}' not yet applied",
+          "within_s": 30
+        }
+      ],
+      "note": "race leg: the returned owner's own upload arrives while the hand-back is held - refused",
+      "seq": 49
+    },
+    {
+      "role": "h",
+      "cmd": "stockof ${clientShop}",
+      "expect_result": "items=\\[${hostAbsStock}\\]",
+      "note": "race leg: the host still holds the absence stock",
+      "seq": 50
+    },
+    {
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "pendingInteriors=\\[${clientPid}:[1-9]",
+      "note": "F7: the interiors are pending (held)",
+      "seq": 51
+    },
+    {
+      "role": "h",
+      "cmd": "absence holdreturn off",
+      "expect_result": "^OK absence holdreturn=off",
+      "seq": 52
+    },
+    {
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "returned=\\[.+\\]",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Absence\\] replaced my '",
+          "within_s": 90
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] hand-back '${clientShop}' -> '${clientPid}' sent=\\[items=[1-9]",
+          "within_s": 90,
+          "since_prev_step": true
+        },
+        {
+          "role": "c",
+          "regex": "\\[Absence\\] hand-back applied '${clientShop}' fp=\\[items=[1-9]",
+          "within_s": 90
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] hand-back of '${clientShop}' acknowledged by '${clientPid}' - hold released",
+          "within_s": 90,
+          "since_prev_step": true
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] return of '${clientPid}' acknowledged - mark cleared",
+          "within_s": 120,
+          "since_prev_step": true
+        }
+      ],
+      "note": "P3-C: the host's verb shows the last return; the owner applied it, replaced its stale copies (round-178 exception) and saw the approved toast (D17). Client lines are scanned from the client's last mark (its join). | ABSENCE-HANDBACK-1: host lines searched from the 'holdreturn off' step (since_prev_step); the client's paperwork lines moved to the RACE step (its last mark is now the pushinterior step).",
+      "seq": 53
+    },
+    {
+      "role": "c",
+      "cmd": "absence",
+      "expect_result": "replaced=\\[.+\\]",
+      "note": "P3-C: the owner's verb lists the addresses the return replaced here",
+      "seq": 54
+    },
+    {
+      "role": "h",
+      "cmd": "absence fp ${clientShop}",
+      "expect_result": "^OK absence fp .*frozen=\\[items=[1-9].*sent=\\[items=[1-9].*mismatch=0 held=0",
+      "capture": {
+        "sentFp": "sent=\\[([^\\]]+)\\]"
+      },
+      "note": "the hand-back sent; the ack found host copy == host live",
+      "seq": 55
+    },
+    {
+      "role": "c",
+      "cmd": "absence fp ${clientShop}",
+      "expect_result": "applied=\\[${sentFp}\\]",
+      "note": "owner-applied fingerprint == the one the host sent",
+      "seq": 56,
+      "abort_on_fail": false
+    },
+    {
+      "role": "c",
+      "cmd": "mark READ C-AFTERRETURN",
+      "expect_result": ".",
+      "seq": 57
+    },
+    {
+      "role": "c",
+      "cmd": "stockof ${clientShop}",
+      "expect_result": "items=\\[${hostAbsStock}\\]",
+      "note": "C-AFTERRETURN: the owner has the host's absence stock (not the pre-drop one)",
+      "seq": 58
+    },
+    {
+      "role": "c",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": ".",
+      "note": "C-AFTERRETURN",
+      "seq": 59
+    },
+    {
+      "role": "c",
+      "cmd": "tillledger show ${clientShop}",
+      "expect_result": ".",
+      "note": "C-AFTERRETURN",
+      "seq": 60
+    },
+    {
+      "role": "c",
+      "cmd": "interiorfp ${clientShop}",
+      "expect_result": "^OK interiorfp",
+      "capture": {
+        "cAfterFp": "fp=\\[([^\\]]+)\\]"
+      },
+      "seq": 61
+    },
+    {
+      "role": "h",
+      "cmd": "mark READ H-AFTERRETURN",
+      "expect_result": ".",
+      "seq": 62
+    },
+    {
+      "role": "h",
+      "cmd": "stockof ${clientShop}",
+      "expect_result": "items=\\[${hostAbsStock}\\]",
+      "note": "H-AFTERRETURN",
+      "seq": 63
+    },
+    {
+      "role": "h",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": ".",
+      "note": "H-AFTERRETURN",
+      "seq": 64
+    },
+    {
+      "role": "h",
+      "cmd": "tillledger show ${clientShop}",
+      "expect_result": ".",
+      "note": "H-AFTERRETURN",
+      "seq": 65
+    },
+    {
+      "role": "h",
+      "cmd": "interiorfp ${clientShop}",
+      "expect_result": "fp=\\[${cAfterFp}\\]",
+      "note": "both machines equal after the return",
+      "seq": 66,
+      "abort_on_fail": false
+    },
+    {
+      "role": "c",
+      "sleep_s": 15,
+      "seq": 67
+    },
+    {
+      "role": "c",
+      "cmd": "mark READ C-AFTERRETURN2",
+      "expect_result": ".",
+      "seq": 68
+    },
+    {
+      "role": "c",
+      "cmd": "stockof ${clientShop}",
+      "expect_result": "items=\\[${hostAbsStock}\\]",
+      "note": "C-AFTERRETURN2",
+      "seq": 69
+    },
+    {
+      "role": "c",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": ".",
+      "note": "C-AFTERRETURN2",
+      "seq": 70
+    },
+    {
+      "role": "c",
+      "cmd": "tillledger show ${clientShop}",
+      "expect_result": ".",
+      "note": "C-AFTERRETURN2",
+      "seq": 71
+    },
+    {
+      "role": "c",
+      "cmd": "interiorfp ${clientShop}",
+      "expect_result": "^OK interiorfp",
+      "capture": {
+        "cAfter2Fp": "fp=\\[([^\\]]+)\\]"
+      },
+      "seq": 72
+    },
+    {
+      "role": "h",
+      "cmd": "interiorfp ${clientShop}",
+      "expect_result": "fp=\\[${cAfter2Fp}\\]",
+      "note": "still equal after 15 s",
+      "seq": 73,
+      "abort_on_fail": false
+    },
+    {
+      "role": "c",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Paperwork\\] stored for '${clientPid}'",
+          "within_s": 20
+        }
+      ],
+      "note": "P3-C: with the mark cleared the owner's own publish stores normally (no OwnerBack guard)",
+      "seq": 74
+    },
+    {
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "role=c.*inMp=True",
+      "seq": 75
+    },
+    {
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True",
+      "seq": 76
+    },
+    {
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] '${clientPid}' left their merger group",
+          "within_s": 20
+        }
+      ],
+      "note": "FIXTURE HYGIENE: end with the company dissolved so the save step never writes a merger into save1's manifest (T-P3-3 run 1 lesson)",
+      "seq": 77
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 78
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST P3-2 END",
+      "expect_result": "OK MARK",
+      "seq": 79
+    }
+  ]
+}

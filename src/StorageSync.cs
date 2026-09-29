@@ -536,6 +536,31 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        /// <summary>ABSENCE-HANDBACK-1 F9, HOST, MAIN THREAD: a building op for an ONLINE owner whose shop is held for the
+        /// absence hand-back (MergerAbsence.HostHandbackHeld - the return not sent yet, or that address's interior not yet
+        /// acked as applied). Their machine still holds the stale pre-absence copy, and an op applied there would be undone
+        /// by the hand-back while its other half (the goods in hand, the money) stays - goods duplicated. So the op is
+        /// answered 'busy' (nothing moves) for the seconds the hold lasts. Give-backs (return / boxreturn / stationreturn
+        /// puts) and silent mirrors are NOT refused: a refused give-back strands goods that are already out of the shop.
+        /// Returns true when it answered.</summary>
+        internal static bool HostAnswerHeldForHandback(StorageOpPayload req, string ownerPid)
+        {
+            try
+            {
+                if (req == null || req.Container == ContainerVehicle || req.Silent) return false;
+                if (req.Op == OpPut && (req.Ctx == "return" || req.Ctx == "boxreturn" || req.Ctx == "stationreturn")) return false;
+                if (!MergerAbsence.HostHandbackHeld(req.AddressKey ?? "", ownerPid)) return false;
+                var res = ResFrom(req);
+                res.Ok = false; res.Reason = "busy";
+                Plugin.Logger.LogInfo($"[BStore] {req.Op} {req.Amount}x{req.ItemName} on '{req.AddressKey}' for '{req.PlayerId}' answered 'busy' - "
+                                    + $"the absence hand-back of that shop to '{ownerPid}' is not applied yet.");
+                if (res.PlayerId == MPConfig.PlayerId) OnResult(res);   // the host is the accessor
+                else MPServer.SendHubTo(res.PlayerId, MessageType.StorageRes, res);
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BStore] hand-back hold check: {ex.Message}"); return false; }
+        }
+
         private static void OwnerApplyBuilding(StorageOpPayload req, StorageResPayload res)
         {
             // Grant backstop (the host already gated; re-verify on the authoritative machine).

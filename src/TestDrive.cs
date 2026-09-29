@@ -1808,6 +1808,84 @@ namespace BigAmbitionsMP
                     return $"OK rotation {rtKey} mine={rtMine} " + CustomerEntrySync.RotationReport(rtReg) + " " + CustomerEntryOrigin.OwnReport(rtKey) + " ";
                 }
 
+                // ── ABSENCE-HANDBACK-1 rig levers (2026-09-29) ──
+                case "interiorfp":
+                {
+                    // `interiorfp <num> <ba:street_x>` - THIS machine's live fingerprint of the interior (InteriorSync.Fingerprint:
+                    // items / cargo units / dirty spots / structure, goods and dirt hashes, machine-order independent), plus
+                    // diagnostics that are never part of it: st= item state, cs= stack-exact cargo, cr= prices, cc= cargo colours.
+                    if (arg.Length == 0) return "ERR usage: interiorfp <num> <ba:street_x>";
+                    var fpReg = GameStatePatcher.FindRegistration(arg);
+                    if (fpReg == null) return $"ERR no registration at '{arg}'";
+                    string fpKey = arg; try { fpKey = GameStateReader.AddressKey(fpReg); } catch { }
+                    return $"OK interiorfp addr='{fpKey}' fp=[{InteriorSync.Fingerprint(fpKey)}] {InteriorSync.FingerprintDiag(fpKey)}";
+                }
+
+                case "shelfput":
+                {
+                    // `shelfput <num> <ba:street_x>` - a routed PUT of ONE unit onto the first stocked shelf of a shop, ctx "return"
+                    // (a give-back shape: nothing leaves this machine's hands). It goes where any restock goes - the owner, or the
+                    // stand-in of an absent owner ('[BStore] owner applied PUT').
+                    if (arg.Length == 0) return "ERR usage: shelfput <num> <ba:street_x>";
+                    var spReg = GameStatePatcher.FindRegistration(arg);
+                    if (spReg == null) return $"ERR no registration at '{arg}'";
+                    string spKey = arg; try { spKey = GameStateReader.AddressKey(spReg); } catch { }
+                    if (spReg.itemInstances == null) return "ERR shelfput: no items";
+                    foreach (var kv in spReg.itemInstances)
+                    {
+                        var it = kv.Value;
+                        if (it == null) continue;
+                        try
+                        {
+                            var sci = it.GetStockInstance();
+                            if (sci == null || sci.amount < 1 || string.IsNullOrEmpty(sci.itemName)) continue;
+                            BuildingStorageSync.RequestPut(spKey, it.id?.ToString() ?? "", sci.itemName, 1, sci.paid, sci.pricePerUnit, "return");
+                            return $"OK shelfput {spKey} item={it.id} name={sci.itemName} had={sci.amount}";
+                        }
+                        catch { }
+                    }
+                    return "ERR shelfput: no stocked shelf";
+                }
+
+                case "itemnudge":
+                {
+                    // `itemnudge <num> <ba:street_x> <idPrefix> <dx> <dz>` - move ONE item (id prefix) on THIS machine's copy by
+                    // (dx, dz) and forward the edit like an interior-designer move (InteriorSync.ForwardGuestInteriorEditDelta).
+                    string[] nz = (arg ?? "").Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (nz.Length < 5) return "ERR usage: itemnudge <num> <ba:street_x> <idPrefix> <dx> <dz>";
+                    var inv = System.Globalization.CultureInfo.InvariantCulture;
+                    if (!float.TryParse(nz[nz.Length - 2], System.Globalization.NumberStyles.Float, inv, out float ndx)
+                        || !float.TryParse(nz[nz.Length - 1], System.Globalization.NumberStyles.Float, inv, out float ndz))
+                        return "ERR usage: itemnudge <num> <ba:street_x> <idPrefix> <dx> <dz>";
+                    string nWho = nz[nz.Length - 3];
+                    string nAddr = string.Join(" ", nz, 0, nz.Length - 3);
+                    var nReg = GameStatePatcher.FindRegistration(nAddr);
+                    if (nReg == null || nReg.itemInstances == null) return $"ERR no registration at '{nAddr}'";
+                    string nKey = nAddr; try { nKey = GameStateReader.AddressKey(nReg); } catch { }
+                    string nId = ""; BigAmbitions.Items.ItemInstance? nInst = null;
+                    foreach (var kv in nReg.itemInstances)
+                        if (kv.Value != null && !string.IsNullOrEmpty(kv.Key) && kv.Key.StartsWith(nWho, StringComparison.Ordinal)) { nId = kv.Key; nInst = kv.Value; break; }
+                    if (nInst == null) return $"ERR itemnudge: no item '{nWho}' in '{nKey}'";
+                    var np = nInst.position;
+                    nInst.position = new SerializableVector3 { x = np.x + ndx, y = np.y, z = np.z + ndz };
+                    InteriorSync.ForwardGuestInteriorEditDelta(nKey);
+                    Plugin.Logger.LogInfo($"[TestDrive] itemnudge '{nKey}' {nId} ({np.x:F2},{np.z:F2}) -> ({np.x + ndx:F2},{np.z + ndz:F2}); edit forwarded.");
+                    return $"OK itemnudge id={nId} from=({np.x.ToString("F2", inv)},{np.z.ToString("F2", inv)}) to=({(np.x + ndx).ToString("F2", inv)},{(np.z + ndz).ToString("F2", inv)})";
+                }
+
+                case "pushinterior":
+                {
+                    // `pushinterior <num> <ba:street_x>` - CLIENT: one FORCED owner-style upload of this machine's live copy of the
+                    // interior (InteriorSync.ForceOwnerPush) - the race leg's "owner upload into the open hold".
+                    if (arg.Length == 0) return "ERR usage: pushinterior <num> <ba:street_x>";
+                    var piReg = GameStatePatcher.FindRegistration(arg);
+                    if (piReg == null) return $"ERR no registration at '{arg}'";
+                    string piKey = arg; try { piKey = GameStateReader.AddressKey(piReg); } catch { }
+                    return InteriorSync.ForceOwnerPush(piKey, "rig pushinterior", seedOrHeal: false)
+                         ? $"OK pushinterior {piKey} sent"
+                         : $"ERR pushinterior {piKey}: not sent (host, not connected, or mid-placement)";
+                }
+
                 case "shelftake":
                 {
                     // `shelftake <num> <ba:street_x>` - fold Q2 rig lever (2026-09-28): a routed TAKE of one unit from the first
@@ -3357,6 +3435,26 @@ namespace BigAmbitionsMP
 
                 case "absence":
                 {
+                    // ABSENCE-HANDBACK-1 rig levers: `absence fp <num> <ba:street_x>` prints the fingerprints this machine
+                    // recorded for that address (frozen / sent / applied / at the ack); `absence holdreturn on|off` (host)
+                    // holds ONLY the return-leg snapshot drain, so a returned owner's upload can be sent into the open hold.
+                    string abArg = (arg ?? "").Trim();
+                    if (abArg.StartsWith("fp ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string abAddr = abArg.Substring(3).Trim();
+                        var abReg = GameStatePatcher.FindRegistration(abAddr);
+                        if (abReg != null) { try { abAddr = GameStateReader.AddressKey(abReg); } catch { } }
+                        return MergerAbsence.FingerprintLine(abAddr);
+                    }
+                    if (abArg.StartsWith("holdreturn", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!MPServer.IsRunning) return "ERR absence holdreturn: host only";
+                        string hv = abArg.Substring(10).Trim().ToLowerInvariant();
+                        if (hv != "on" && hv != "off") return "ERR usage: absence holdreturn on|off";
+                        MergerAbsence.DevHoldReturn = hv == "on";
+                        Plugin.Logger.LogInfo($"[TestDrive] absence holdreturn {hv}.");
+                        return $"OK absence holdreturn={hv}";
+                    }
                     // Merger phase 3-B (B6). On the HOST the marks come from the live table; on any
                     // other machine from the MergerState broadcast. simulating_here is what THIS
                     // machine actually runs for an absent owner. Read-only - no write path of its own.

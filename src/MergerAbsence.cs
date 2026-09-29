@@ -23,7 +23,8 @@ namespace BigAmbitionsMP
     /// THE RETURN LEG IS P3-C - BUILT (2026-09-11, D2/D13/D15): when the owner is back AND their own
     /// world has loaded, the host sends them MergerHandover with Return=true - the host's paperwork for
     /// exactly the marked addresses - then paces those interiors to them and clears the mark WHEN THE
-    /// OWNER ACKS IT (r2 F4 - the send only flags it); their own
+    /// OWNER ACKS IT (r2 F4 - the send only flags it; ABSENCE-HANDBACK-1 F7: the paperwork ack AND one
+    /// "hand-back applied" ack per interior); their own
     /// machine applies it to its OWN registrations, lists and staff (never a native save field written
     /// for another player) and shows the one approved toast.  r4 (m1) is what finally
     /// makes the mark SURVIVE the owner's return: HostNoteReturn flags it OwnerBack and the host's
@@ -62,6 +63,15 @@ namespace BigAmbitionsMP
             /// something to re-fire from. IN-MEMORY ONLY - deliberately never persisted to the manifest, so
             /// a host restart re-fires the return, which is the intended outcome.</summary>
             public bool ReturnSent;
+            /// <summary>ABSENCE-HANDBACK-1 F7: the addresses whose hand-back interior the returned owner has not acked as
+            /// APPLIED yet. While an address is in here the host holds the owner's own uploads of it (InteriorSync.
+            /// HostUploadVerdict) and answers routed storage ops on it 'busy' (StorageSync F9). IN-MEMORY ONLY, like
+            /// ReturnSent: a restored mark re-fires the whole return.</summary>
+            public HashSet<string> PendingInteriors = new(StringComparer.OrdinalIgnoreCase);
+            /// <summary>ABSENCE-HANDBACK-1 F7: the owner's "return-applied" (paperwork) ack has landed. It ends
+            /// StorePaperwork's OwnerBack guard exactly where the old mark removal did; the mark itself stays until
+            /// PendingInteriors is empty too. In-memory only.</summary>
+            public bool PaperworkAcked;
         }
 
         private static readonly Dictionary<string, AbsenceMark> _marks = new();   // ownerStable → mark
@@ -81,6 +91,7 @@ namespace BigAmbitionsMP
             if (_marks.TryGetValue(ownerStable, out var have)
                 && have.SimulatorPid == simulatorPid && SameSet(have.Addresses, addresses))
             { have.OwnerPid = ownerPid ?? have.OwnerPid; have.OwnerBack = false; have.ReturnSent = false;   // r2 F4: absent again
+              have.PendingInteriors.Clear(); have.PaperworkAcked = false;                                  // F7: a void return holds nothing
               have.LastSimulatorPid = simulatorPid; return false; }
 
             _marks[ownerStable] = new AbsenceMark
@@ -141,10 +152,12 @@ namespace BigAmbitionsMP
         /// re-fires at the owner's next load instead of vanishing while their stale publish overwrites the
         /// host's simulated record (r1 m5). Only the mark's OWN owner can clear it: the caller passes the
         /// SENDER's player id and stable id, never anything the payload claims. Returns how many cleared -
-        /// zero is a refusal and says why.</summary>
+        /// zero is a refusal and says why, or (ABSENCE-HANDBACK-1 F7) a mark KEPT because hand-back interiors are
+        /// still pending: this ack is then the PAPERWORK half only (PaperworkAcked ends StorePaperwork's guard) and
+        /// the last HostInteriorAck clears the mark.</summary>
         public static int HostClearMarkOnReturnAck(string ownerPid, string ownerStable)
         {
-            int n = 0;
+            int n = 0, held = 0;
             try
             {
                 var kill = new List<string>();
@@ -154,7 +167,15 @@ namespace BigAmbitionsMP
                     if (m == null || !m.OwnerBack) continue;
                     bool isOwner = (!string.IsNullOrEmpty(ownerPid)    && m.OwnerPid    == ownerPid)
                                 || (!string.IsNullOrEmpty(ownerStable) && m.OwnerStable == ownerStable);
-                    if (isOwner) kill.Add(kv.Key);
+                    if (!isOwner) continue;
+                    m.PaperworkAcked = true;
+                    if (m.PendingInteriors.Count == 0) kill.Add(kv.Key);
+                    else
+                    {
+                        held++;
+                        Plugin.Logger.LogInfo($"[Absence] return of '{ownerPid}' acknowledged (paperwork) - mark kept until its "
+                                            + $"{m.PendingInteriors.Count} hand-back interior(s) are applied.");
+                    }
                 }
                 foreach (var s in kill) { _marks.Remove(s); n++; }
                 if (n > 0)
@@ -162,7 +183,7 @@ namespace BigAmbitionsMP
                     _returnLogged.Remove(ownerPid ?? "");
                     Plugin.Logger.LogInfo($"[Absence] return of '{ownerPid}' acknowledged - mark cleared.");
                 }
-                else
+                else if (held == 0)
                     Plugin.Logger.LogInfo($"[Absence] return ack from '{ownerPid}' names no mark of theirs that is back - "
                                         + "ignored (already cleared, or the sender is not that mark's owner).");
             }
@@ -178,7 +199,10 @@ namespace BigAmbitionsMP
         /// <summary>HOST (r2 F4): the owner went absent again, so the sent-but-unacked return is void and
         /// the normal designation takes over.</summary>
         public static void HostClearReturnSent(string ownerStable)
-        { if (_marks.TryGetValue(ownerStable ?? "", out var m) && m != null) m.ReturnSent = false; }
+        {
+            if (_marks.TryGetValue(ownerStable ?? "", out var m) && m != null)
+            { m.ReturnSent = false; m.PendingInteriors.Clear(); m.PaperworkAcked = false; }   // F7: nothing is held for an absent owner
+        }
 
         /// <summary>HOST: put one mark back from the manifest (clear-then-apply restore, MPServer).
         /// SimulatorPid is deliberately NOT restored - a player id from the previous session names
@@ -235,7 +259,11 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>HOST: reset with the world (new world / manifest restore).</summary>
-        public static void HostReset() { _marks.Clear(); _returnLogged.Clear(); _snapQueue.Clear(); _lastReturnLine = ""; _handbacks.Clear(); }
+        public static void HostReset()
+        {
+            _marks.Clear(); _returnLogged.Clear(); _snapQueue.Clear(); _lastReturnLine = ""; _handbacks.Clear();
+            _awaitFlush.Clear(); _hostStint.Clear();   // ABSENCE-HANDBACK-1 F6 / F3
+        }
 
         // ── B2 hand-over send (host) ──────────────────────────────────────────
         // r2 F1a: the third element says whether this pair belongs to the RETURN LEG. A return's snapshot
@@ -304,6 +332,15 @@ namespace BigAmbitionsMP
             {
                 var addrs = new HashSet<string>(addresses ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
                 _snapQueue.RemoveAll(q => q.pid == simPid && addrs.Contains(q.addr ?? ""));
+                // ABSENCE-HANDBACK-1 F6: a CLIENT stand-in's last work reaches the host only through its final flush (F5),
+                // so no snapshot of these addresses leaves the host (Tick) until that machine acks "standin-flushed" or
+                // disconnects. Only for a machine that is online now - an offline one flushes nothing.
+                if (simPid != MPConfig.PlayerId && MPServer.IsRunning && MPServer.IsOnlinePid(simPid) && addrs.Count > 0)
+                {
+                    foreach (var a in addrs) if (!string.IsNullOrEmpty(a)) _awaitFlush[a] = (simPid, ownerStable);   // (no ?? here: it would mark the parameter maybe-null for the flow analysis below)
+                    Plugin.Logger.LogInfo($"[Absence] waiting for '{simPid}''s final interior flush of {addrs.Count} address(es) of "
+                                        + $"'{ownerPid}' before any snapshot of them is sent.");
+                }
                 HostNoteHandback(simPid, ownerStable, ownerPid, addresses);   // H-STANDINTILL-2 T5: BEFORE the local apply below
                 Plugin.Logger.LogInfo($"[Absence] '{simPid}' stops simulating '{ownerPid}' ({why}).");
                 var p = new MergerHandoverPayload
@@ -434,6 +471,11 @@ namespace BigAmbitionsMP
                     Marks         = HostSnapshot(),
                 };
                 int snaps = 0;
+                // ABSENCE-HANDBACK-1 F7: every address stays HELD (owner uploads refused, storage ops 'busy') until the owner
+                // acks its interior as applied; the host owner gets no snapshots, so nothing is pending for it.
+                m.PendingInteriors.Clear();
+                m.PaperworkAcked = false;
+                if (owner != MPConfig.PlayerId) foreach (var a in addresses) m.PendingInteriors.Add(a);
                 if (owner == MPConfig.PlayerId) ApplyReturn(p);          // the host is the owner: no wire, no snapshots
                 else
                 {
@@ -465,6 +507,8 @@ namespace BigAmbitionsMP
             // nothing" still holds. StorePaperwork's OwnerBack guard therefore ends at the ACK, one hop
             // later - harmless: the owner sends the ack at the end of ApplyReturn, before its own next
             // paperwork publish, so the guard is already gone when that publish reaches the host.
+            // ABSENCE-HANDBACK-1 F7: that ack now sets PaperworkAcked (which is what ends the guard); the MARK
+            // lives on until every address in PendingInteriors has been acked as applied (HostInteriorAck).
             m.ReturnSent = true;
             return true;
         }
@@ -483,14 +527,269 @@ namespace BigAmbitionsMP
                     if (ready) { var held = _heldReturn; _heldReturn = null; ApplyReturn(held); }
                 }
                 if (_snapQueue.Count == 0 || !MPServer.IsRunning) return;
-                var (addr, pid, returnLeg) = _snapQueue[0];
-                _snapQueue.RemoveAt(0);
+                // ABSENCE-HANDBACK-1 F6: the FIRST entry whose address is not waiting for a client stand-in's final flush
+                // (a hand-back / re-designation must carry that machine's last work, not the host's older copy).
+                int pick = -1;
+                for (int i = 0; i < _snapQueue.Count; i++)
+                {
+                    var qe = _snapQueue[i];
+#if BAMP_DEV
+                    if (qe.returnLeg && DevHoldReturn) continue;   // rig lever `absence holdreturn on`: the return-leg drain only
+#endif
+                    if (_awaitFlush.Count > 0 && _awaitFlush.ContainsKey(qe.addr ?? "")) continue;
+                    pick = i; break;
+                }
+                if (pick < 0) return;
+                var (addr, pid, returnLeg) = _snapQueue[pick];
+                _snapQueue.RemoveAt(pick);
+                if (returnLeg)
+                {
+                    // B5: what the owner is handed, and the host's live copy beside it (they differ only if the host's world
+                    // moved after the freeze).
+                    string sentFp = InteriorSync.FingerprintHostSend(addr);
+                    _fpSent[addr] = sentFp;
+                    Plugin.Logger.LogInfo($"[Absence] hand-back '{addr}' -> '{pid}' sent=[{sentFp}] hostLive=[{InteriorSync.Fingerprint(addr)}].");
+                }
                 // r2 F1a: vouchEmpty for a RETURN only - the host's copy of a marked address is the truth
                 // even when it holds zero items, so the returned owner's apply must not skip it as
                 // non-authoritative. A hand-over keeps the old "never vouch an empty list" rule.
                 InteriorSync.SendSnapshotToPlayer(addr, pid, forceItemAuthority: true, vouchEmpty: returnLeg);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] paced snapshot: {ex.Message}"); }
+        }
+
+        // ══ ABSENCE-HANDBACK-1 (owner-approved 2026-09-29, decision 42) - HOST side ══════════════════
+        // F6: address -> (the client stand-in whose final flush is awaited, its owner's stable). Main thread.
+        private static readonly Dictionary<string, (string sim, string ownerStable)> _awaitFlush = new(StringComparer.OrdinalIgnoreCase);
+        // F3: addresses the HOST has started standing in for since its last freeze (the start check runs once per stint).
+        private static readonly HashSet<string> _hostStint = new(StringComparer.OrdinalIgnoreCase);
+        // B5: the last fingerprints per address (log + the `absence fp` rig verb only).
+        private static readonly Dictionary<string, string> _fpFrozen  = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> _fpSent    = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, string> _fpApplied = new(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, (string host, string live, bool mismatch)> _fpAck = new(StringComparer.OrdinalIgnoreCase);
+        private static string _returnStable = "";   // OWNER: the stable the return named (rides the interior ack)
+#if BAMP_DEV
+        /// <summary>Rig lever (`absence holdreturn on|off`): hold ONLY the return-leg snapshot drain.</summary>
+        internal static bool DevHoldReturn;
+#endif
+
+        /// <summary>HOST: the mark whose Addresses name this address, or null. One scan of a small table.</summary>
+        public static AbsenceMark? HostMarkFor(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey) || _marks.Count == 0) return null;
+            foreach (var kv in _marks)
+            {
+                var m = kv.Value;
+                if (m?.Addresses == null) continue;
+                foreach (var a in m.Addresses)
+                    if (string.Equals(a, addressKey, StringComparison.OrdinalIgnoreCase)) return m;
+            }
+            return null;
+        }
+
+        /// <summary>F9, HOST, MAIN THREAD: is this ONLINE owner's shop held for the absence hand-back - the return not sent
+        /// yet, or sent and this address's interior not yet acked as applied? Then their machine still holds the stale
+        /// pre-absence copy, and an op routed there would be undone by the hand-back (goods duplicated).</summary>
+        public static bool HostHandbackHeld(string addressKey, string ownerPid)
+        {
+            var m = HostMarkFor(addressKey);
+            if (m == null || string.IsNullOrEmpty(ownerPid) || m.OwnerPid != ownerPid) return false;
+            return !m.ReturnSent || m.PendingInteriors.Contains(addressKey);
+        }
+
+        /// <summary>F4, HOST: the returned owner uploaded a held address after its hand-back was sent - their apply of it
+        /// has not been acked, so it goes again (set-like: an entry already waiting is not doubled).</summary>
+        internal static void HostRequeueHandback(AbsenceMark m, string addressKey)
+        {
+            try
+            {
+                if (m == null || string.IsNullOrEmpty(addressKey) || !m.ReturnSent || !m.PendingInteriors.Contains(addressKey)) return;
+                string owner = m.OwnerPid ?? "";
+                if (owner.Length == 0 || owner == MPConfig.PlayerId) return;
+                foreach (var q in _snapQueue)
+                    if (q.pid == owner && string.Equals(q.addr, addressKey, StringComparison.OrdinalIgnoreCase)) return;
+                _snapQueue.Add((addressKey, owner, true));
+                Plugin.Logger.LogInfo($"[Absence] hand-back of '{addressKey}' re-queued for '{owner}': their own upload arrived while the "
+                                    + "hold is open (their apply of it has not been acknowledged).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back re-queue '{addressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>F6, HOST: is `senderPid` the dropped client stand-in whose final flush of this address is awaited?</summary>
+        public static bool HostAwaitsFlushFrom(string senderPid, string addressKey)
+            => _awaitFlush.Count > 0 && !string.IsNullOrEmpty(addressKey) && !string.IsNullOrEmpty(senderPid)
+               && _awaitFlush.TryGetValue(addressKey, out var w) && w.sim == senderPid;
+
+        /// <summary>F6, HOST, MAIN THREAD: the dropped stand-in acked "standin-flushed" - every address of that owner it was
+        /// holding is released for its snapshots (the flush uploads precede this ack on the same lane).</summary>
+        public static void HostStandInFlushed(string senderPid, string ownerStable, List<string>? delivered)
+        {
+            try
+            {
+                int n = 0;
+                if (_awaitFlush.Count > 0)
+                {
+                    var gone = new List<string>();
+                    foreach (var kv in _awaitFlush)
+                        if (kv.Value.sim == senderPid && (string.IsNullOrEmpty(ownerStable) || kv.Value.ownerStable == ownerStable)) gone.Add(kv.Key);
+                    foreach (var a in gone) _awaitFlush.Remove(a);
+                    n = gone.Count;
+                }
+                Plugin.Logger.LogInfo($"[Absence] stand-in '{senderPid}' flushed {delivered?.Count ?? 0} interior(s) - {n} address(es) "
+                                    + "released for their snapshots.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] stand-in flush ack from '{senderPid}': {ex.Message}"); }
+        }
+
+        /// <summary>F6, HOST, MAIN THREAD: a disconnect ends any wait for that machine's flush (its last accepted upload stands).</summary>
+        public static void HostPeerGone(string pid)
+        {
+            try
+            {
+                if (_awaitFlush.Count == 0 || string.IsNullOrEmpty(pid)) return;
+                var gone = new List<string>();
+                foreach (var kv in _awaitFlush) if (kv.Value.sim == pid) gone.Add(kv.Key);
+                foreach (var a in gone) _awaitFlush.Remove(a);
+                if (gone.Count > 0)
+                    Plugin.Logger.LogInfo($"[Absence] stand-in '{pid}' disconnected before its final interior flush - {gone.Count} address(es) "
+                                        + "released; the host's last accepted upload of each stands.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] stand-in disconnect '{pid}': {ex.Message}"); }
+        }
+
+        /// <summary>F7, HOST, MAIN THREAD: the RETURNED OWNER applied these hand-back interiors. The sender must be the mark's
+        /// owner (by player id or stable - never anything the payload claims). Each acked address leaves PendingInteriors
+        /// (its hold is released); a mark whose paperwork is acked and whose interiors are all applied is removed. Returns
+        /// how many marks were cleared (the caller broadcasts on > 0).</summary>
+        public static int HostInteriorAck(string senderPid, string senderStable, List<string>? addresses)
+        {
+            int cleared = 0;
+            try
+            {
+                foreach (var addr in addresses ?? new List<string>())
+                {
+                    if (string.IsNullOrEmpty(addr)) continue;
+                    AbsenceMark? hit = null;
+                    foreach (var kv in _marks)
+                    {
+                        var m = kv.Value;
+                        if (m == null || !m.PendingInteriors.Contains(addr)) continue;
+                        bool isOwner = (!string.IsNullOrEmpty(senderPid)    && m.OwnerPid    == senderPid)
+                                    || (!string.IsNullOrEmpty(senderStable) && m.OwnerStable == senderStable);
+                        if (isOwner) { hit = m; break; }
+                    }
+                    if (hit == null)
+                    {
+                        Plugin.Logger.LogInfo($"[Absence] hand-back ack for '{addr}' from '{senderPid}' names no pending hand-back of theirs - ignored.");
+                        continue;
+                    }
+                    hit.PendingInteriors.Remove(addr);
+                    string hostFp = InteriorSync.FingerprintHostSend(addr);
+                    string liveFp = InteriorSync.Fingerprint(addr);
+                    bool mismatch = hostFp != liveFp;
+                    _fpAck[addr] = (hostFp, liveFp, mismatch);
+                    Plugin.Logger.LogInfo($"[Absence] hand-back of '{addr}' acknowledged by '{senderPid}' - hold released; host fp=[{hostFp}] "
+                                        + $"live=[{liveFp}]{(mismatch ? " MISMATCH" : "")} ({hit.PendingInteriors.Count} still pending).");
+                }
+                var kill = new List<string>();
+                foreach (var kv in _marks)
+                {
+                    var m = kv.Value;
+                    if (m == null || !m.OwnerBack || !m.ReturnSent || !m.PaperworkAcked || m.PendingInteriors.Count > 0) continue;
+                    bool isOwner = (!string.IsNullOrEmpty(senderPid)    && m.OwnerPid    == senderPid)
+                                || (!string.IsNullOrEmpty(senderStable) && m.OwnerStable == senderStable);
+                    if (isOwner) kill.Add(kv.Key);
+                }
+                foreach (var s in kill) { _marks.Remove(s); cleared++; }
+                if (cleared > 0)
+                {
+                    _returnLogged.Remove(senderPid ?? "");
+                    Plugin.Logger.LogInfo($"[Absence] return of '{senderPid}' acknowledged - mark cleared (paperwork and every hand-back interior applied).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back ack from '{senderPid}': {ex.Message}"); }
+            return cleared;
+        }
+
+        /// <summary>B5 rig read-out (`absence fp &lt;addr&gt;`): the last fingerprints this machine recorded for the address.</summary>
+        public static string FingerprintLine(string addressKey)
+        {
+            string a = addressKey ?? "";
+            string G(Dictionary<string, string> d) => d.TryGetValue(a, out var v) ? v : "";
+            _fpAck.TryGetValue(a, out var ack);
+            int held = 0;
+            try { if (MPServer.IsRunning) { var m = HostMarkFor(a); if (m != null && m.PendingInteriors.Contains(a)) held = 1; } } catch { }
+            return $"OK absence fp addr='{a}' frozen=[{G(_fpFrozen)}] sent=[{G(_fpSent)}] applied=[{G(_fpApplied)}] "
+                 + $"ackHost=[{ack.host ?? ""}] ackLive=[{ack.live ?? ""}] mismatch={(ack.mismatch ? 1 : 0)} held={held}";
+        }
+
+        /// <summary>F2, HOST, MAIN THREAD: freeze every address this host stood in for, for that owner.</summary>
+        private static void HostFreezeStoodIn(string ownerPid)
+        {
+            try
+            {
+                string owner = ownerPid ?? "";
+                var addrs = new List<string>();
+                foreach (var kv in _simHere) if (kv.Value == owner) addrs.Add(kv.Key);
+                foreach (var a in addrs)
+                {
+                    string fp = InteriorSync.HostFreezeStandIn(a, owner, "the host stops standing in");
+                    if (fp.Length > 0) _fpFrozen[a] = fp;
+                    _hostStint.Remove(a);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] stand-in freeze for '{ownerPid}': {ex.Message}"); }
+        }
+
+        /// <summary>F5, CLIENT stand-in, MAIN THREAD: one last forced upload of every address it stood in for, for that owner,
+        /// then the "standin-flushed" ack the host waits for (sent even when nothing was stood in here, so the host never
+        /// waits on this machine for nothing). A mid-placement address is left out - its last accepted upload stands.</summary>
+        private static void FlushStoodIn(MergerHandoverPayload p)
+        {
+            try
+            {
+                if (!MPClient.IsConnected) return;
+                string owner = p.OwnerPid ?? "";
+                var addrs = new List<string>();
+                foreach (var kv in _simHere) if (kv.Value == owner) addrs.Add(kv.Key);
+                var delivered = new List<string>();
+                foreach (var a in addrs)
+                {
+                    if (InteriorSync.ForceOwnerPush(a, "stand-in hand-back", seedOrHeal: true)) delivered.Add(a);
+                    else Plugin.Logger.LogInfo($"[Absence] stand-in hand-back of '{a}' for '{owner}': left out (an item is mid-placement "
+                                             + "here, or the send failed) - the host keeps my last accepted upload of it.");
+                }
+                MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.MergerHandover, MPConfig.PlayerId,
+                    new MergerHandoverPayload
+                    {
+                        OwnerPid = owner, OwnerStable = p.OwnerStable ?? "", SimulatorPid = MPConfig.PlayerId,
+                        Ack = "standin-flushed", Addresses = delivered,
+                    }));
+                Plugin.Logger.LogInfo($"[Absence] stand-in hand-back of '{owner}': {delivered.Count}/{addrs.Count} interior(s) flushed to the "
+                                    + "host - told the host (standin-flushed).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] stand-in flush for '{p?.OwnerPid}': {ex.Message}"); }
+        }
+
+        /// <summary>F7, OWNER, MAIN THREAD: one hand-back interior is on my copy - fingerprint it and ack it to the host.</summary>
+        private static void AckReturnInterior(string addressKey)
+        {
+            try
+            {
+                string fp = InteriorSync.Fingerprint(addressKey);
+                _fpApplied[addressKey] = fp;
+                Plugin.Logger.LogInfo($"[Absence] hand-back applied '{addressKey}' fp=[{fp}] - acknowledging it to the host.");
+                if (MPServer.IsRunning) { MPServer.HostInteriorAck(MPConfig.PlayerId, new List<string> { addressKey }); return; }
+                if (MPClient.IsConnected)
+                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.MergerHandover, MPConfig.PlayerId,
+                        new MergerHandoverPayload
+                        {
+                            OwnerPid = MPConfig.PlayerId, OwnerStable = _returnStable, SimulatorPid = ReturnSentinel,
+                            Ack = "return-interior-applied", Addresses = new List<string> { addressKey },
+                        }));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back ack '{addressKey}': {ex.Message}"); }
         }
 
         // ══ SIMULATOR SIDE (any machine, main thread) ══════════════════════════
@@ -710,6 +1009,11 @@ namespace BigAmbitionsMP
                 if (p.Drop)
                 {
                     HandBackFlush(p.OwnerPid, "the host dropped the mark");   // H-STANDINTILL-2 T5: while the addresses are still ours
+                    // ABSENCE-HANDBACK-1 F2 / F5: the INTERIORS go back too, while the addresses are still ours. The HOST
+                    // freezes its live world into its stored copy (the hand-back source); a CLIENT stand-in uploads each one
+                    // last time and acks "standin-flushed" (the host holds their snapshots until then).
+                    if (MPServer.IsRunning) HostFreezeStoodIn(p.OwnerPid);
+                    else FlushStoodIn(p);
                     ForgetHeld(p.OwnerPid);
                     UndoLocal(p.OwnerPid, $"host dropped the mark for '{p.OwnerPid}'");
                     return;
@@ -751,6 +1055,10 @@ namespace BigAmbitionsMP
                 foreach (var addr in p.Addresses ?? new List<string>())
                 {
                     if (string.IsNullOrEmpty(addr)) continue;
+                    // ABSENCE-HANDBACK-1 F3: the host's first start of a stint - its live world must equal the stored copy
+                    // before F1 starts serving the live world as the truth. Once per stint (a re-apply keeps the host's work).
+                    if (MPServer.IsRunning && !_hostStint.Contains(addr) && !tillAlreadyHere.Contains(addr))
+                    { _hostStint.Add(addr); InteriorSync.HostAlignStandInStart(addr, owner); }
                     _simHere[addr] = owner;                  // (a)+(b)+(e): the veil exception, the interior
                                                               // publisher and the paperwork publish all read this
                     if (!tillAlreadyHere.Contains(addr))
@@ -1767,7 +2075,9 @@ namespace BigAmbitionsMP
         /// exactly as before. Called once at the commit point for every SeedOrHeal apply that gets there;
         /// an address no return named is a silent no-op, and an EMPTY host copy drains the set just like
         /// a full one - an address left behind in the set is what would let a much later heal walk
-        /// through the exception onto a by-then developed interior (r1 m4).</summary>
+        /// through the exception onto a by-then developed interior (r1 m4). ABSENCE-HANDBACK-1 F7: consuming is
+        /// also the moment this machine acks that address to the host ("return-interior-applied"), which releases
+        /// the host's hold on it.</summary>
         public static bool ConsumeReturnInterior(string addressKey)
         {
             try
@@ -1776,6 +2086,7 @@ namespace BigAmbitionsMP
                 if (!_returnAddrs.Remove(addressKey)) return false;
                 if (!_replaced.Contains(addressKey)) _replaced.Add(addressKey);
                 Plugin.Logger.LogInfo($"[Absence] replaced my '{addressKey}' with the simulated copy.");
+                AckReturnInterior(addressKey);   // ABSENCE-HANDBACK-1 F7: the explicit "hand-back applied" edge
                 return true;
             }
             catch { return false; }
@@ -1824,6 +2135,10 @@ namespace BigAmbitionsMP
                 if (addrs.Count == 0)
                 { Plugin.Logger.LogInfo($"[Absence] return from the host names no addresses - nothing to apply."); return; }
 
+                // ABSENCE-HANDBACK-1 F8: the hand-back must replace my LIVE objects - forget the per-item / S4-lite baselines,
+                // so the apply compares against what I hold instead of keeping "unchanged" live items (my stale stock).
+                foreach (var a in addrs) { try { GameStatePatcher.ForgetInteriorBaseline(a); } catch { } }
+                _returnStable = p.OwnerStable ?? "";
                 // (a) the interiors follow this message on the same lane, one per host tick.
                 _returnAddrs.Clear();
                 foreach (var a in addrs) _returnAddrs.Add(a);
@@ -1861,6 +2176,8 @@ namespace BigAmbitionsMP
                 // cadence is 30 s), so the guard outliving the apply by one hop costs nothing. The
                 // interiors are consumed independently as they arrive; a lost ack simply means the return
                 // re-fires at the next load, which the _peerApplying one-shot already tolerates.
+                // ABSENCE-HANDBACK-1 F7: this is the PAPERWORK ack only - each interior is acked on its own
+                // as it commits (ConsumeReturnInterior), and the host keeps the mark until all of them are.
                 if (MPServer.IsRunning)
                     MPServer.HostReturnAck(MPConfig.PlayerId);   // the host IS the owner: no wire
                 else if (MPClient.IsConnected)
@@ -2068,6 +2385,15 @@ namespace BigAmbitionsMP
             string extra = MPServer.IsRunning
                          ? $" returned=[{_lastReturnLine}]"
                          : $" replaced=[{string.Join(",", _replaced)}]";
+            if (MPServer.IsRunning)
+            {
+                // ABSENCE-HANDBACK-1 F7: per sent return, how many hand-back interiors are still unacked (+pw = paperwork acked).
+                var pend = new List<string>();
+                foreach (var kv in _marks)
+                    if (kv.Value != null && kv.Value.ReturnSent)
+                        pend.Add($"{kv.Value.OwnerPid}:{kv.Value.PendingInteriors.Count}{(kv.Value.PaperworkAcked ? "+pw" : "")}");
+                extra += $" pendingInteriors=[{string.Join(",", pend)}]";
+            }
             return $"OK absence marks=[{string.Join("; ", marks)}] simulating_here=[{string.Join(",", SimulatedAddresses())}]" + extra;
         }
     }

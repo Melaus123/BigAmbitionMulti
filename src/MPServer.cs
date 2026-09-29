@@ -655,12 +655,14 @@ namespace BigAmbitionsMP
                 // KEEPS its own parts for the MARKED addresses and takes the publisher's for every OTHER
                 // address. P3-C clears the mark - at the returned owner's ACK (r2 F4), not at the send -
                 // and that is what ends this guard. The ack precedes the owner's next publish, so the
-                // guard is always gone by the time that publish arrives.
+                // guard is always gone by the time that publish arrives. ABSENCE-HANDBACK-1 F7: the mark now
+                // outlives that ack until every hand-back interior is applied, so the guard ends on the ack's
+                // PaperworkAcked flag instead - exactly where it ended before.
                 int keptAddrs = 0, keptParts = 0;
                 try
                 {
                     if (MergerAbsence.Marks.TryGetValue(key, out var back) && back != null
-                        && back.OwnerBack && back.Addresses.Count > 0)
+                        && back.OwnerBack && !back.PaperworkAcked && back.Addresses.Count > 0)
                     {
                         string had;
                         lock (_paperwork) had = _paperwork.TryGetValue(key, out var pe) ? (pe.Json ?? "") : "";
@@ -1006,6 +1008,20 @@ namespace BigAmbitionsMP
                 if (MergerAbsence.HostClearMarkOnReturnAck(senderPid, stable) > 0) RefreshGrantsAndBroadcast();
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return ack from '{senderPid}': {ex.Message}"); }
+        }
+
+        /// <summary>HOST, MAIN THREAD (ABSENCE-HANDBACK-1 F7): the RETURNED OWNER applied these hand-back interiors. Only the
+        /// SENDER's identity counts (MergerAbsence.HostInteriorAck matches it against the mark's owner); a mark it clears
+        /// leaves the broadcast absence table, so the state goes out straight after.</summary>
+        internal static void HostInteriorAck(string senderPid, List<string> addresses)
+        {
+            try
+            {
+                if (!_running || string.IsNullOrEmpty(senderPid)) return;
+                string stable = ""; try { stable = StableOfPid(senderPid) ?? ""; } catch { }
+                if (MergerAbsence.HostInteriorAck(senderPid, stable, addresses) > 0) RefreshGrantsAndBroadcast();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back ack from '{senderPid}': {ex.Message}"); }
         }
 
         /// <summary>HOST, MAIN THREAD (P3-B r4 F3): re-send ONE hand-over to the machine that already
@@ -2164,6 +2180,8 @@ namespace BigAmbitionsMP
             {
                 ClearPlayerApplying(goneTrafficPid);   // v9: the applying latch is per-connection
                 GameStatePatcher.EnqueueOnMainThread(() => TrafficSync.ForgetPeer(goneTrafficPid));
+                // ABSENCE-HANDBACK-1 F6: a stand-in that disconnects will never ack its final flush - stop waiting for it.
+                GameStatePatcher.EnqueueOnMainThread(() => MergerAbsence.HostPeerGone(goneTrafficPid));
                 // v9 review MAJOR-3: the parked delivery mirror and last-sent position are
                 // per-connection state too — without this, a rejoiner's stale mirror suppresses
                 // every displacement send until MarkPlayerInGame happens to fire.
@@ -2557,7 +2575,10 @@ namespace BigAmbitionsMP
                     // again"). Nothing was added to the payload for it: this type already travelled this
                     // way carrying nothing but Ack. P3-C r2 (F4) adds the second: Ack="return-applied",
                     // the RETURNED OWNER confirming the return leg landed - the one thing that clears the
-                    // mark (the host's send only flags it ReturnSent).
+                    // mark (the host's send only flags it ReturnSent). ABSENCE-HANDBACK-1 adds two more, both on the
+                    // existing Addresses list: "return-interior-applied" (the owner applied that hand-back interior -
+                    // with the paperwork ack, what clears the mark now) and "standin-flushed" (a dropped client stand-in
+                    // has sent its final uploads - the host may send those addresses' snapshots).
                     var hv = env.GetPayload<MergerHandoverPayload>();
                     if (hv == null) break;
                     if (hv.Ack == "return-applied")
@@ -2573,6 +2594,18 @@ namespace BigAmbitionsMP
                     {
                         string askPid = senderPid, askStable = hv.OwnerStable ?? "";
                         GameStatePatcher.EnqueueOnMainThread(() => HostResendHandover(askPid, askStable));
+                    }
+                    else if (hv.Ack == "return-interior-applied")
+                    {
+                        string iaPid = senderPid;
+                        var iaAddrs = new List<string>(hv.Addresses ?? new List<string>());
+                        GameStatePatcher.EnqueueOnMainThread(() => HostInteriorAck(iaPid, iaAddrs));
+                    }
+                    else if (hv.Ack == "standin-flushed")
+                    {
+                        string sfPid = senderPid, sfStable = hv.OwnerStable ?? "";
+                        var sfAddrs = new List<string>(hv.Addresses ?? new List<string>());
+                        GameStatePatcher.EnqueueOnMainThread(() => MergerAbsence.HostStandInFlushed(sfPid, sfStable, sfAddrs));
                     }
                     else if (!string.IsNullOrEmpty(hv.Ack))
                         Plugin.Logger.LogInfo($"[Absence] '{senderPid}' acked the hand-over of '{hv.OwnerPid}': {hv.Ack}.");
@@ -3136,6 +3169,27 @@ namespace BigAmbitionsMP
                         || rp.Prices.Exists(x => !IsSaneMoney(x.Price, 1_000_000f) || x.Price < 0f))
                     {
                         Plugin.Logger.LogWarning($"[Server] RetailPrices for '{rp.AddressKey}' from '{senderPid}': implausible price table ({rp.Prices.Count} entries) — dropped.");
+                        break;
+                    }
+                    if (MergerAbsence.MarkCount > 0)
+                    {
+                        // ABSENCE-HANDBACK-1 (the F4 hold, extended to this channel - rig run T-P3-2-HANDBACK-20260929-180938):
+                        // a RETURNED owner's price table for a shop still held for the absence hand-back is its stale
+                        // pre-absence table - applied here it overwrote the host's absence-time prices after the freeze
+                        // (host copy != host live at the ack). The hand-back carries the prices; the owner's re-assert
+                        // heartbeat sends the handed-back table after its apply. Decided on the main thread (the table).
+                        string rpSender = senderPid;
+                        GameStatePatcher.EnqueueOnMainThread(() =>
+                        {
+                            if (!InteriorSync.HostUploadVerdict(rpSender, rp.AddressKey, out _, out string rpWhy)
+                                && rpWhy.StartsWith(InteriorSync.HoldWhyPrefix, StringComparison.Ordinal))
+                            {
+                                Plugin.Logger.LogInfo($"[PriceSync] price table from '{rpSender}' for '{rp.AddressKey}' held - {rpWhy} (the hand-back carries the prices).");
+                                return;
+                            }
+                            MPPriceSync.Apply(rp);
+                            BroadcastRetailPrices(rp);   // relay to all + cache for join replay (Class 4)
+                        });
                         break;
                     }
                     GameStatePatcher.EnqueueOnMainThread(() => MPPriceSync.Apply(rp));
@@ -4598,6 +4652,16 @@ namespace BigAmbitionsMP
                     // so the stand-in is looked up there. (A vehicle op keeps the old path below.)
                     GameStatePatcher.EnqueueOnMainThread(() => RouteStorageOpForAbsentOwner(req, ownerPid));
                 }
+                else if (req.Container != "vehicle" && MergerAbsence.MarkCount > 0)
+                {
+                    // ABSENCE-HANDBACK-1 F9: an ONLINE owner whose shop is held for the absence hand-back still holds the
+                    // stale pre-absence copy there - the op is answered 'busy' instead (StorageSync.HostAnswerHeldForHandback).
+                    // The absence table is main-thread state, so the decision is made there.
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        if (!StorageSync.HostAnswerHeldForHandback(req, ownerPid)) SendHubTo(ownerPid, MessageType.StorageOp, req);
+                    });
+                }
                 else
                 {
                     SendHubTo(ownerPid, MessageType.StorageOp, req);   // forward to the owner's machine to apply
@@ -4623,7 +4687,11 @@ namespace BigAmbitionsMP
             {
                 if (!_running || req == null) return;
                 string addr = req.AddressKey ?? "";
-                if (IsOnlinePid(ownerPid)) { SendHubTo(ownerPid, MessageType.StorageOp, req); return; }   // the owner came back meanwhile
+                if (IsOnlinePid(ownerPid))   // the owner came back meanwhile
+                {
+                    if (!StorageSync.HostAnswerHeldForHandback(req, ownerPid)) SendHubTo(ownerPid, MessageType.StorageOp, req);   // ABSENCE-HANDBACK-1 F9
+                    return;
+                }
                 string sim = "";
                 foreach (var kv in MergerAbsence.Marks)
                 {

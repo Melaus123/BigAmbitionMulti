@@ -750,9 +750,15 @@ namespace BigAmbitionsMP
             if (!MPServer.IsRunning || peer == null || payload == null || string.IsNullOrEmpty(payload.AddressKey)) return;
             try
             {
-                if (!HostKnowsPlayerOwnsAddress(playerId, payload.AddressKey))
+                // ABSENCE-HANDBACK-1 F4: ONE upload-authority predicate (HostUploadVerdict) - the recorded owner as before,
+                // PLUS the client stand-in of an absent merged owner (its uploads ARE that owner's interior now), MINUS the
+                // returned owner while the absence hand-back of this address is not applied on their machine yet.
+                if (!HostUploadVerdict(playerId, payload.AddressKey, out string upOwner, out string upWhy))
                 {
-                    Plugin.Logger.LogWarning($"[InteriorSync] OwnerSnapshot rejected: player='{playerId}' addr='{payload.AddressKey}' is not the recorded owner.");
+                    if (upWhy.StartsWith(HoldWhyPrefix, StringComparison.Ordinal))
+                        Plugin.Logger.LogInfo($"[InteriorSync] OwnerSnapshot held: player='{playerId}' addr='{payload.AddressKey}' - {upWhy}.");
+                    else
+                        Plugin.Logger.LogWarning($"[InteriorSync] OwnerSnapshot rejected: player='{playerId}' addr='{payload.AddressKey}' is not the recorded owner.");
                     return;
                 }
 
@@ -772,7 +778,7 @@ namespace BigAmbitionsMP
                     return;
                 }
 
-                payload.OwnerPlayerId = playerId;
+                payload.OwnerPlayerId = upOwner;   // ABSENCE-HANDBACK-1 F4: the OWNER, even when a stand-in uploaded it
                 payload.Authoritative = true;   // owner's own push — authoritative for the whole interior
                 // Round-103: same floor as the sender — the host must not PROMOTE an empty item set to
                 // authoritative on the owner's behalf. Older clients (pre-fix) still send empty pushes
@@ -793,7 +799,7 @@ namespace BigAmbitionsMP
                 // the cache write behind an already-queued cargo graft — the graft would land on the
                 // pre-push cache, then be overwritten by the older full state, and the dual-hash
                 // guard misses exactly the common only-cargo-moved case.
-                AcceptOwnerSnapshot(playerId, payload);
+                AcceptOwnerSnapshot(playerId, payload, upOwner);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] HandleOwnerSnapshot: {ex.Message}"); }
         }
@@ -819,10 +825,13 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] adopt discarded schedule: {ex.Message}"); }
         }
 
-        private static void AcceptOwnerSnapshot(string playerId, InteriorSnapshotPayload payload)
+        /// <summary>ownerPid (ABSENCE-HANDBACK-1 F4): whose interior this is - the sender, or the absent owner a client
+        /// stand-in uploads for. The cache names the OWNER either way, so subscribers and the hand-back keep naming them.</summary>
+        private static void AcceptOwnerSnapshot(string playerId, InteriorSnapshotPayload payload, string? ownerPid = null)
         {
             try
             {
+                string cacheOwner = string.IsNullOrEmpty(ownerPid) ? playerId : ownerPid!;
                 // Stage 0 gate — per-hop flag: read, then cleared, so the cached object the Tick
                 // rebroadcasts can never carry "always apply" to subscribers.
                 bool seedOrHeal = payload.SeedOrHeal;
@@ -879,12 +888,12 @@ namespace BigAmbitionsMP
                 bool changed = prev == null || prev.Hash != hash;
                 _ownerSnapshotsByAddr[payload.AddressKey] = new OwnerInteriorState
                 {
-                    OwnerPlayerId = playerId,
+                    OwnerPlayerId = cacheOwner,
                     Snapshot = payload,
                     Hash = hash,
                 };
 
-                Plugin.Logger.LogInfo($"[InteriorSync] OwnerSnapshot accepted from '{playerId}' addr='{payload.AddressKey}': {SnapshotSummary(payload)}{(changed ? "" : " (unchanged)")}.");
+                Plugin.Logger.LogInfo($"[InteriorSync] OwnerSnapshot accepted from '{playerId}'{(cacheOwner != playerId ? $" (stand-in for '{cacheOwner}')" : "")} addr='{payload.AddressKey}': {SnapshotSummary(payload)}{(changed ? "" : " (unchanged)")}.");
                 // Verification BLOCKER-A2: a byte-identical answer normally means the earlier apply of
                 // this exact state already satisfied the debt — but if THAT apply withheld its design
                 // bands (MAJOR-C partial: designer was open), the debt is real and the answer must run
@@ -1507,6 +1516,24 @@ namespace BigAmbitionsMP
 
         private static InteriorSnapshotPayload? BuildSnapshotForHostSend(string addressKey)
         {
+            // ABSENCE-HANDBACK-1 F1: while the HOST stands in for an absent merged owner, its LIVE world is that shop's
+            // truth (its takes, restocks, moves and mops land there - never in the owner's cached upload below), so it is
+            // what visitors are served and what a re-designation hands on. Stamped as the owner's own push would be.
+            try
+            {
+                if (MPServer.IsRunning && MergerAbsence.SimulatesHere(addressKey))
+                {
+                    var live = BuildSnapshot(addressKey);
+                    if (live != null)
+                    {
+                        live.OwnerPlayerId              = MergerAbsence.OwnerSimulatedFor(addressKey);
+                        live.Authoritative              = true;
+                        live.ItemInstancesAuthoritative = live.ItemInstances != null && live.ItemInstances.Count > 0;
+                        return live;
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] stand-in live serve '{addressKey}': {ex.Message}"); }
             if (_ownerSnapshotsByAddr.TryGetValue(addressKey, out var ownerState))
                 return ownerState.Snapshot;
 
@@ -1610,6 +1637,221 @@ namespace BigAmbitionsMP
             catch { }
             return false;
         }
+
+        // ══ ABSENCE-HANDBACK-1 (owner-approved 2026-09-29, decision 42) ══════════════════════════════════
+        /// <summary>The prefix every absence-hold refusal reason starts with (the handlers log those as a HOLD, not a rejection).</summary>
+        internal const string HoldWhyPrefix = "absence hold";
+
+        /// <summary>F4, HOST, MAIN THREAD: may `senderPid` upload `addressKey`'s interior (full / cargo / dirt), and whose
+        /// interior is it? No absence mark names the address -> the recorded owner only (HostKnowsPlayerOwnsAddress, as
+        /// before). A mark names it -> its CLIENT stand-in (or a just-dropped stand-in whose final flush the host awaits,
+        /// F6) is accepted and the upload is filed under the ABSENT OWNER; the owner itself is HELD until the hand-back of
+        /// that address is applied on its machine (its own copy is the stale pre-absence one) - and, when the hand-back was
+        /// already sent, that upload re-queues it (the owner's upload is the recurrence event; set-like). Everyone else is
+        /// refused as before.</summary>
+        internal static bool HostUploadVerdict(string senderPid, string addressKey, out string ownerPid, out string why)
+        {
+            ownerPid = senderPid ?? ""; why = "";
+            try
+            {
+                var m = MergerAbsence.MarkCount > 0 ? MergerAbsence.HostMarkFor(addressKey) : null;
+                if (m == null)
+                {
+                    if (HostKnowsPlayerOwnsAddress(senderPid ?? "", addressKey)) return true;
+                    why = "not the recorded owner"; return false;
+                }
+                if (!string.IsNullOrEmpty(senderPid) && senderPid != MPConfig.PlayerId
+                    && (m.SimulatorPid == senderPid || MergerAbsence.HostAwaitsFlushFrom(senderPid!, addressKey)))
+                {
+                    ownerPid = string.IsNullOrEmpty(m.OwnerPid) ? senderPid! : m.OwnerPid;
+                    return true;
+                }
+                bool isOwner = (!string.IsNullOrEmpty(m.OwnerPid) && m.OwnerPid == senderPid)
+                               || HostKnowsPlayerOwnsAddress(senderPid ?? "", addressKey);
+                if (!isOwner) { why = "not the recorded owner"; return false; }
+                if (m.ReturnSent && !m.PendingInteriors.Contains(addressKey)) return true;   // handed back AND acked
+                why = $"{HoldWhyPrefix}: hand-back of '{addressKey}' not yet applied";
+                if (m.ReturnSent) MergerAbsence.HostRequeueHandback(m, addressKey);
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[InteriorSync] upload verdict '{addressKey}' for '{senderPid}': {ex.Message}");
+                bool own = HostKnowsPlayerOwnsAddress(senderPid ?? "", addressKey);
+                if (!own) why = "not the recorded owner";
+                return own;
+            }
+        }
+
+        /// <summary>F2, HOST, MAIN THREAD: the host stops standing in for `ownerPid` at `addressKey` - its LIVE world is
+        /// written into the stored owner copy (the only thing the hand-back and every later serve read) and the per-item
+        /// baseline is forgotten, so the owner's first post-hold upload is measured against the live objects. An all-zero
+        /// live read (not materialized) is never frozen - the stored copy stands. Returns the frozen fingerprint ("" if
+        /// nothing was frozen).</summary>
+        internal static string HostFreezeStandIn(string addressKey, string ownerPid, string why)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey)) return "";
+                var snap = BuildSnapshot(addressKey);
+                if (snap == null || (snap.ItemInstances.Count == 0 && snap.InteriorDesigns.Count == 0 && snap.DirtSpots.Count == 0))
+                {
+                    Plugin.Logger.LogInfo($"[Absence] stand-in stopped: '{addressKey}' for '{ownerPid}' not frozen - the live registration reads "
+                                           + $"{(snap == null ? "absent" : "all-zero")}; the stored copy stands ({why}).");
+                    return "";
+                }
+                snap.OwnerPlayerId              = ownerPid ?? "";
+                snap.Authoritative              = true;
+                snap.ItemInstancesAuthoritative = snap.ItemInstances.Count > 0;
+                snap.SeedOrHeal                 = false;
+                // The round-103 / v10 convention: an empty schedule never replaces a known one in the cache.
+                if ((snap.CustomerEntries == null || snap.CustomerEntries.Count == 0)
+                    && _ownerSnapshotsByAddr.TryGetValue(addressKey, out var prev) && prev?.Snapshot?.CustomerEntries != null)
+                    snap.CustomerEntries = prev.Snapshot.CustomerEntries;
+                _ownerSnapshotsByAddr[addressKey] = new OwnerInteriorState { OwnerPlayerId = ownerPid ?? "", Snapshot = snap, Hash = CacheHash(snap) };
+                GameStatePatcher.ForgetInteriorBaseline(addressKey);
+                _volatileSentAtByAddr.Remove(addressKey);
+                string fp = Fingerprint(snap);
+                Plugin.Logger.LogInfo($"[Absence] stand-in stopped: froze '{addressKey}' for '{ownerPid}' fp=[{fp}] ({why}).");
+                return fp;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] stand-in freeze '{addressKey}': {ex.Message}"); return ""; }
+        }
+
+        /// <summary>F3, HOST, MAIN THREAD, defensive: at the START of a host stint the host's live world must equal the stored
+        /// owner copy (a discarded or deferred owner apply at drop time would otherwise be lost for good, because F1 now
+        /// serves the live world). On a fingerprint difference the stored copy is applied first. Called once per stint
+        /// (MergerAbsence keeps the stint set).</summary>
+        internal static void HostAlignStandInStart(string addressKey, string ownerPid)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey)) return;
+                if (!_ownerSnapshotsByAddr.TryGetValue(addressKey, out var st) || st?.Snapshot == null) return;
+                string cacheFp = Fingerprint(st.Snapshot);
+                string liveFp  = Fingerprint(BuildSnapshot(addressKey));
+                if (cacheFp == liveFp)
+                {
+                    Plugin.Logger.LogInfo($"[Absence] stand-in start '{addressKey}' for '{ownerPid}': live == stored copy fp=[{liveFp}].");
+                    return;
+                }
+                Plugin.Logger.LogWarning($"[Absence] stand-in start '{addressKey}' for '{ownerPid}': live fp=[{liveFp}] differs from the stored "
+                                       + $"copy fp=[{cacheFp}] - the stored copy is applied first (F3).");
+                GameStatePatcher.ForgetInteriorBaseline(addressKey);
+                GameStatePatcher.ApplyInteriorSnapshot(st.Snapshot, seedOrHealOverride: true);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] stand-in start check '{addressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>F5 (client stand-in's final flush) and the rig's `pushinterior`: one FORCED owner-style upload of this
+        /// machine's live copy. False when it could not go (not a connected client, mid-placement here, or it threw).</summary>
+        internal static bool ForceOwnerPush(string addressKey, string reason, bool seedOrHeal)
+        {
+            try
+            {
+                if (MPServer.IsRunning || !MPClient.IsConnected || string.IsNullOrEmpty(addressKey)) return false;
+                return SendLocalOwnerSnapshot(addressKey, force: true, reason: reason, seedOrHeal: seedOrHeal);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] forced owner push '{addressKey}': {ex.Message}"); return false; }
+        }
+
+        /// <summary>B5: a machine-independent fingerprint of one interior - `items=N units=N dirty=N s=X c=X d=X`. The
+        /// snapshot is copied with items sorted by id, dirt by (X, Z, value), designs by UUID and prices by name (the list
+        /// order can differ per machine and ComputeHashes is order-sensitive); the shopper schedule and fulfilled demands
+        /// are left out (legitimately per-day). s = ComputeHashes' structure band, d = its dirt band, c = the GOODS of every
+        /// item: per item (by id), the total amount of each (item name, paid) pair. NOT ComputeHashes' full band, and not
+        /// the stack-exact cargo either: rig runs T-P3-2-HANDBACK-20260929-180129 / -180548 showed the owner and the host
+        /// holding the same shop PRE-DROP with equal s / units / d / item state and still a different full band and a
+        /// different stack-exact cargo fold (how the same goods are split into stacks / priced / coloured differs per
+        /// machine) - so those cannot prove two copies equal; what a player can take or sell can. units = the sum of every
+        /// cargo amount, dirty = spots at 5 or more. Log/verb use only.</summary>
+        internal static string Fingerprint(InteriorSnapshotPayload? snap) => Fingerprint(snap, out _, out _);
+
+        /// <summary>B5, as above, plus diagnostics that are never part of the fingerprint: `stateHash` = the items'
+        /// StateIndex fold; `diag` = "cs=X cr=X cc=X" (stack-exact cargo, prices, cargo colours).</summary>
+        internal static string Fingerprint(InteriorSnapshotPayload? snap, out int stateHash, out string diag)
+        {
+            stateHash = 0; diag = "";
+            try
+            {
+                if (snap == null) return "none";
+                var items = new List<ItemInstanceInfo>();
+                if (snap.ItemInstances != null) foreach (var it in snap.ItemInstances) if (it != null) items.Add(it);
+                items.Sort((a, b) => string.CompareOrdinal(a.Id ?? "", b.Id ?? ""));
+                var dirt = new List<DirtSpotInfo>();
+                if (snap.DirtSpots != null) foreach (var ds in snap.DirtSpots) if (ds != null) dirt.Add(ds);
+                dirt.Sort((a, b) =>
+                {
+                    int c = a.X.CompareTo(b.X); if (c != 0) return c;
+                    c = a.Z.CompareTo(b.Z); if (c != 0) return c;
+                    return a.Dirtiness.CompareTo(b.Dirtiness);
+                });
+                var designs = new List<InteriorDesignInfo>();
+                if (snap.InteriorDesigns != null) foreach (var d in snap.InteriorDesigns) if (d != null) designs.Add(d);
+                designs.Sort((a, b) => string.CompareOrdinal(a.UUID ?? "", b.UUID ?? ""));
+                var prices = new List<RetailPriceInfo>();
+                if (snap.RetailPrices != null) foreach (var rp in snap.RetailPrices) if (rp != null) prices.Add(rp);
+                prices.Sort((a, b) => string.CompareOrdinal(a.ItemName ?? "", b.ItemName ?? ""));
+                var copy = new InteriorSnapshotPayload
+                {
+                    AddressKey = snap.AddressKey, Layout = snap.Layout, RadioStation = snap.RadioStation, RadioVolume = snap.RadioVolume,
+                    InteriorDesigns = designs, RetailPrices = prices, DirtSpots = dirt, ItemInstances = items,
+                };
+                var (hs, _, _, hd) = ComputeHashes(copy);
+                long units = 0;
+                int hc = 17, st = 17, hs2 = 17, hr = 17, hcc = 17;
+                var stacks = new List<CargoInstanceInfo>();
+                foreach (var it in items)
+                {
+                    unchecked { st = st * 31 + it.StateIndex; hc = hc * 31 + MPAudit.StableHash(it.Id); hs2 = hs2 * 31 + MPAudit.StableHash(it.Id); }
+                    stacks.Clear();
+                    if (it.CargoInstances != null) foreach (var cg in it.CargoInstances) if (cg != null) stacks.Add(cg);
+                    stacks.Sort((a, b) =>
+                    {
+                        int c = string.CompareOrdinal(a.ItemName ?? "", b.ItemName ?? ""); if (c != 0) return c;
+                        c = a.Paid.CompareTo(b.Paid); if (c != 0) return c;
+                        c = a.Amount.CompareTo(b.Amount); if (c != 0) return c;
+                        return a.PricePerUnit.CompareTo(b.PricePerUnit);
+                    });
+                    string runName = ""; bool runPaid = false; int runAmt = 0; bool inRun = false;
+                    foreach (var cg in stacks)
+                    {
+                        units += cg.Amount;
+                        unchecked
+                        {
+                            // the goods band: one term per (name, paid) run with its TOTAL amount
+                            if (inRun && (cg.ItemName ?? "") == runName && cg.Paid == runPaid) runAmt += cg.Amount;
+                            else
+                            {
+                                if (inRun) { hc = hc * 31 + MPAudit.StableHash(runName); hc = hc * 31 + (runPaid ? 1 : 0); hc = hc * 31 + runAmt; }
+                                runName = cg.ItemName ?? ""; runPaid = cg.Paid; runAmt = cg.Amount; inRun = true;
+                            }
+                            // diagnostics: stack-exact, prices, colours
+                            hs2 = hs2 * 31 + MPAudit.StableHash(cg.ItemName); hs2 = hs2 * 31 + cg.Amount; hs2 = hs2 * 31 + (cg.Paid ? 1 : 0);
+                            hr = hr * 31 + ((int)System.Math.Round(cg.PricePerUnit * 100f)).GetHashCode();
+                            if (cg.CustomColors != null) foreach (var cc in cg.CustomColors) { hcc = hcc * 31 + cc.Channel; hcc = hcc * 31 + cc.ColorPacked; }
+                        }
+                    }
+                    if (inRun) unchecked { hc = hc * 31 + MPAudit.StableHash(runName); hc = hc * 31 + (runPaid ? 1 : 0); hc = hc * 31 + runAmt; }
+                }
+                stateHash = st;
+                diag = $"cs={hs2:X8} cr={hr:X8} cc={hcc:X8}";
+                int dirty = 0;
+                foreach (var ds in dirt) if (ds.Dirtiness >= 5f) dirty++;
+                return $"items={items.Count} units={units} dirty={dirty} s={hs:X8} c={hc:X8} d={hd:X8}";
+            }
+            catch (Exception ex) { return "error:" + ex.GetType().Name; }
+        }
+
+        /// <summary>B5: the fingerprint of THIS machine's live copy of the address.</summary>
+        internal static string Fingerprint(string addressKey) => Fingerprint(BuildSnapshot(addressKey));
+
+        /// <summary>B5, HOST: the fingerprint of what the host would serve / hand back for the address right now.</summary>
+        internal static string FingerprintHostSend(string addressKey) => Fingerprint(BuildSnapshotForHostSend(addressKey));
+
+        /// <summary>B5 diagnostics for the rig verb (never part of the fingerprint): item-state fold, stack-exact cargo, prices, colours.</summary>
+        internal static string FingerprintDiag(string addressKey)
+        { Fingerprint(BuildSnapshot(addressKey), out int st, out string dg); return $"st={st:X8} {dg}"; }
 
         internal static string SnapshotSummary(InteriorSnapshotPayload snap)
         {
@@ -2165,9 +2407,12 @@ namespace BigAmbitionsMP
             if (!MPServer.IsRunning || peer == null || p == null || string.IsNullOrEmpty(p.AddressKey)) return;
             try
             {
-                if (!HostKnowsPlayerOwnsAddress(playerId, p.AddressKey))
+                if (!HostUploadVerdict(playerId, p.AddressKey, out _, out string cWhy))   // ABSENCE-HANDBACK-1 F4
                 {
-                    Plugin.Logger.LogWarning($"[InteriorSync] owner cargo sync rejected: '{playerId}' is not the recorded owner of '{p.AddressKey}'.");
+                    if (cWhy.StartsWith(HoldWhyPrefix, StringComparison.Ordinal))
+                        Plugin.Logger.LogInfo($"[InteriorSync] owner cargo sync held: '{playerId}' addr='{p.AddressKey}' - {cWhy}.");
+                    else
+                        Plugin.Logger.LogWarning($"[InteriorSync] owner cargo sync rejected: '{playerId}' is not the recorded owner of '{p.AddressKey}'.");
                     return;
                 }
                 if (!_ownerSnapshotsByAddr.TryGetValue(p.AddressKey, out var state) || state?.Snapshot == null)
@@ -2228,9 +2473,12 @@ namespace BigAmbitionsMP
             if (!MPServer.IsRunning || peer == null || p == null || string.IsNullOrEmpty(p.AddressKey)) return;
             try
             {
-                if (!HostKnowsPlayerOwnsAddress(playerId, p.AddressKey))
+                if (!HostUploadVerdict(playerId, p.AddressKey, out _, out string dWhy))   // ABSENCE-HANDBACK-1 F4
                 {
-                    Plugin.Logger.LogWarning($"[InteriorSync] owner dirt sync rejected: '{playerId}' is not the recorded owner of '{p.AddressKey}'.");
+                    if (dWhy.StartsWith(HoldWhyPrefix, StringComparison.Ordinal))
+                        Plugin.Logger.LogInfo($"[InteriorSync] owner dirt sync held: '{playerId}' addr='{p.AddressKey}' - {dWhy}.");
+                    else
+                        Plugin.Logger.LogWarning($"[InteriorSync] owner dirt sync rejected: '{playerId}' is not the recorded owner of '{p.AddressKey}'.");
                     return;
                 }
                 if (_ownerSnapshotsByAddr.TryGetValue(p.AddressKey, out var state) && state?.Snapshot?.DirtSpots != null)
