@@ -456,6 +456,10 @@ namespace BigAmbitionsMP
                 }
                 if (a == "mergerpopup") return "OK hubview mergerpopup: " + ui.DevBizMergerPopup(true);   // opens it, sends nothing
                 if (a == "popupclose") return "OK hubview popupclose: " + ui.DevBizMergerPopup(false);
+                // MERGE-TOOLTIP-1: hover 'Propose merger' through the page's own hover path (virtual pointer on the button).
+                if (a == "mergetip") return "OK hubview mergetip: " + ui.DevBizMergeTip("on");
+                if (a == "mergetipstate") return "OK hubview mergetipstate: " + ui.DevBizMergeTip("state");
+                if (a == "mergetipoff") return "OK hubview mergetipoff: " + ui.DevBizMergeTip("off");
                 // One Esc press through both halves of the key's path (ours + the game's CancelButtonHandler); sends nothing.
                 if (a == "escbox") return "OK hubview escbox: " + ui.DevBizEsc(true);
                 if (a == "escmenu") return "OK hubview escmenu: " + ui.DevBizEsc(false);
@@ -464,7 +468,7 @@ namespace BigAmbitionsMP
                 // Tabs of the rebuilt page (2026-09-28); the old names map onto their successors.
                 int tab = a == "offers" || a == "transfers" ? 0 : a == "yours" ? 1 : a == "loans" ? 2
                         : a == "access" || a == "permissions" ? 3 : a == "company" ? 4 : -1;
-                if (tab < 0) return "ERR usage: hubview <offers|yours|loans|access|company|mergerpopup|popupclose|escbox|escmenu|paydouble|close|state>";
+                if (tab < 0) return "ERR usage: hubview <offers|yours|loans|access|company|mergerpopup|popupclose|mergetip|mergetipstate|mergetipoff|escbox|escmenu|paydouble|close|state>";
                 if (!MPHubNativePage.Ready) return "ERR hubview: the Business page is not injected yet " + ui.DevHubState();
                 ui.DevSetHubTab(tab);
                 if (ui.DevHubVisible) return $"OK hubview {a}: tab set (already open) " + ui.DevHubState();
@@ -6017,6 +6021,7 @@ namespace BigAmbitionsMP
                 // P-CLEANLOOP rig levers (2026-09-28, DEV): see MopLever below.
                 case "mopstation": case "handstate": case "mopcell": case "mopaway":
                 case "dirtstate": case "dirtseed": case "dirtdrip": case "clientgrant": case "dirtshrink":
+                case "dirtvis":
                     return MopLever(verb, arg);
 
                 case "grant":
@@ -6151,6 +6156,43 @@ namespace BigAmbitionsMP
                 {
                     case "handstate":
                         return "OK handstate " + HandState();
+
+                    case "dirtvis":
+                    {
+                        // DIRT-HIGHLIGHT-1 (observation only, 2026-09-28): what drives the dirt VISUAL on THIS machine. The native
+                        // highlight is a per-process shader global (BuildingCleanlinessHelper.Show/HideDirtinessHighlighting:
+                        // _hov_Highlight 0.75 / 0), set via the LOCAL MopController.AssignToPlayer -> EnableCleaningMode.
+                        float hl = -1f;
+                        try { hl = UnityEngine.Shader.GetGlobalFloat(UnityEngine.Shader.PropertyToID("_hov_Highlight")); } catch { }
+                        int mcActive = -1, mcAll = -1;
+                        try
+                        {
+                            mcActive = UnityEngine.Object.FindObjectsOfType<MopController>().Length;
+                            mcAll = UnityEngine.Object.FindObjectsOfType<MopController>(true).Length;
+                        }
+                        catch { }
+                        int onClose = -1, onCloseMop = -1;
+                        try
+                        {
+                            // public static Action (decompile UI.InteriorDesigner/InteriorDesignerUI.cs:36); MopController.AssignToPlayer
+                            // adds its OnCloseInteriorDesigner, the put-away removes it.
+                            var fi = HarmonyLib.AccessTools.Field(typeof(UI.InteriorDesigner.InteriorDesignerUI), "onCloseInteriorDesigner");
+                            onClose = 0; onCloseMop = 0;
+                            if (fi?.GetValue(null) is Delegate dl)
+                                foreach (var x in dl.GetInvocationList())
+                                {
+                                    onClose++;
+                                    if (x.Target is MopController || x.Method.DeclaringType == typeof(MopController)) onCloseMop++;
+                                }
+                        }
+                        catch { }
+                        bool holding = false; try { holding = Helpers.PlayerHelper.IsHoldingAMop; } catch { }
+                        string where = "";
+                        try { if (bm != null && BuildingManager.IsInsideBuilding && bm.buildingRegistration != null) where = GameStateReader.AddressKey(bm.buildingRegistration); } catch { }
+                        return $"OK dirtvis me='{MPConfig.PlayerId}' in='{where}' highlight={hl.ToString("F2", inv)} strokeLive={MopController.currentCleaningMop != null} " +
+                               $"holdingMop={holding} mopCtlActive={mcActive} mopCtlAll={mcAll} onCloseMopTargets={onCloseMop}/{onClose} " +
+                               $"syncLines={GameStatePatcher.DirtSyncLines} syncTouched={GameStatePatcher.DirtSyncTouched}";
+                    }
 
                     case "mopstation":
                     {

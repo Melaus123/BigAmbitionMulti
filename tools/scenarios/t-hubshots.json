@@ -1,7 +1,7 @@
 {
   "id": "T-HUBSHOTS",
   "title": "DEV screenshot capture (2026-09-28, redesign reference: 'make sure visually it matches more closely with the other screens from the same phone'): the game's own phone apps (BizMan, MyEmployees, Contacts + two conversations, Rivals, EconoView, Persona) opened through SmartphoneUI.OpenApp like their icons; then the REBUILT Business page (2026-09-28: Offers to you / Your offers / Loans / Access / Company) empty and with 12 LOCAL sample rows per list (9 player cards), a merger proposal row (the client's real proposal, withdrawn after) and the merger popup (DEV lever, sends nothing); then the floating chat window empty, with 40 LOCAL lines (two long wrapped ones), scrolled back, and at a small size. 'screenshot hub-<view>' captures each on the host. Host + 1 client on save1 (a real second player exists). Sample rows are display-only (never sent, never saved) and cleared at the end. Run at two sizes: normal, and BAMP_RIG_WINDOW=1280x720.",
-  "preconditions": "Dev build with the phoneapp / hubview (offers|yours|loans|access|company|mergerpopup|popupclose) / chatview / contactopen / uifill levers (TestDrive.cs). Fixture save1 (host melaus, client Client1). Keep the host window unfocused but NOT minimised (a minimised window does not render).",
+  "preconditions": "Dev build with the phoneapp / hubview (offers|yours|loans|access|company|mergerpopup|popupclose|mergetip|mergetipstate|mergetipoff) / chatview / contactopen / uifill levers (TestDrive.cs). Fixture save1 (host melaus, client Client1). Keep the host window unfocused but NOT minimised (a minimised window does not render).",
   "instances": 2,
   "vars": {
     "clientPid": "Client1",
@@ -792,51 +792,61 @@
     },
     {
       "role": "h",
-      "cmd": "hubview escbox",
-      "expect_result": "^OK hubview escbox: selBefore=True focus=0 amount=25000 menuOpen=True",
-      "note": "DEV: focus the Amount box with a draft, then one Esc (ours + the game's CancelButtonHandler): the box is left, the draft kept, the menu stays open",
+      "cmd": "hubview mergetip",
+      "expect_result": "^OK hubview mergetip: hold=True ",
+      "note": "DEV (MERGE-TOOLTIP-1): the page's own hover path with the pointer treated as resting on 'Propose merger' (a card for an online non-member is selected if needed); sends nothing",
       "seq": 102
     },
     {
       "role": "h",
-      "sleep_s": 1,
+      "sleep_s": 1.5,
+      "note": "0.1 s hover delay + one frame for the tooltip's layout",
       "seq": 103
+    },
+    {
+      "role": "h",
+      "cmd": "hubview mergetipstate",
+      "expect_result": "^OK hubview mergetipstate: visible=True shown=True hold=True btn=True label='Propose merger' .* above=True inScreen=True ",
+      "note": "the game's tooltip is up, its canvas sorts above the page's canvas and the merger popup's, and its box is on screen (orders logged)",
+      "seq": 104
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot hub-biz-mergetooltip",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-hub-biz-mergetooltip\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 105
+    },
+    {
+      "role": "h",
+      "cmd": "hubview mergetipoff",
+      "expect_result": "^OK hubview mergetipoff: visible=False shown=False hold=False ",
+      "note": "pointer leaves: the tooltip hides",
+      "seq": 106
+    },
+    {
+      "role": "h",
+      "cmd": "hubview escbox",
+      "expect_result": "^OK hubview escbox: selBefore=True focus=0 amount=25000 menuOpen=True",
+      "note": "DEV: focus the Amount box with a draft, then one Esc (ours + the game's CancelButtonHandler): the box is left, the draft kept, the menu stays open",
+      "seq": 107
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 108
     },
     {
       "role": "h",
       "cmd": "hubview escmenu",
       "expect_result": "^OK hubview escmenu: selBefore=False focus=0 amount=25000 menuOpen=False",
       "note": "the second Esc closes the menu as the game does",
-      "seq": 104
-    },
-    {
-      "role": "h",
-      "sleep_s": 2,
-      "seq": 105
-    },
-    {
-      "role": "h",
-      "cmd": "hubview state",
-      "expect_result": "^OK hubview state: ready=True visible=False ",
-      "note": "closed by Esc",
-      "seq": 106
-    },
-    {
-      "role": "h",
-      "cmd": "hubview offers",
-      "expect_result": "^OK hubview offers: ",
-      "note": "reopen for the icon-toggle close below",
-      "seq": 107
-    },
-    {
-      "role": "h",
-      "sleep_s": 2,
-      "seq": 108
-    },
-    {
-      "role": "h",
-      "cmd": "hubview close",
-      "expect_result": "^OK hubview close: requested ",
       "seq": 109
     },
     {
@@ -848,31 +858,61 @@
       "role": "h",
       "cmd": "hubview state",
       "expect_result": "^OK hubview state: ready=True visible=False ",
-      "note": "closed through the Business icon's toggle",
+      "note": "closed by Esc",
       "seq": 111
     },
     {
       "role": "h",
-      "cmd": "chatview open",
-      "expect_result": "^OK chatview open: requested ",
+      "cmd": "hubview offers",
+      "expect_result": "^OK hubview offers: ",
+      "note": "reopen for the icon-toggle close below",
       "seq": 112
     },
     {
       "role": "h",
-      "sleep_s": 1,
+      "sleep_s": 2,
       "seq": 113
     },
     {
       "role": "h",
-      "cmd": "chatview state",
-      "expect_result": "^OK chatview state: visible=True active=True ",
+      "cmd": "hubview close",
+      "expect_result": "^OK hubview close: requested ",
       "seq": 114
     },
     {
       "role": "h",
       "sleep_s": 2,
-      "note": "let the hub-chat-empty view settle",
       "seq": 115
+    },
+    {
+      "role": "h",
+      "cmd": "hubview state",
+      "expect_result": "^OK hubview state: ready=True visible=False ",
+      "note": "closed through the Business icon's toggle",
+      "seq": 116
+    },
+    {
+      "role": "h",
+      "cmd": "chatview open",
+      "expect_result": "^OK chatview open: requested ",
+      "seq": 117
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 118
+    },
+    {
+      "role": "h",
+      "cmd": "chatview state",
+      "expect_result": "^OK chatview state: visible=True active=True ",
+      "seq": 119
+    },
+    {
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the hub-chat-empty view settle",
+      "seq": 120
     },
     {
       "role": "h",
@@ -885,20 +925,20 @@
           "within_s": 10
         }
       ],
-      "seq": 116
+      "seq": 121
     },
     {
       "role": "h",
       "cmd": "uifill chat 40",
       "expect_result": "^OK uifill chat: added=40 realOthers=1 ",
       "note": "40 LOCAL lines, two long ones that wrap, a few private ones",
-      "seq": 117
+      "seq": 122
     },
     {
       "role": "h",
       "sleep_s": 2,
       "note": "let the hub-chat-fill view settle",
-      "seq": 118
+      "seq": 123
     },
     {
       "role": "h",
@@ -911,20 +951,20 @@
           "within_s": 10
         }
       ],
-      "seq": 119
+      "seq": 124
     },
     {
       "role": "h",
       "cmd": "chatview scroll 300",
       "expect_result": "^OK chatview scroll: visible=True ",
       "note": "300 px back from the bottom (the list scrolls by rendered height, as the wheel does)",
-      "seq": 120
+      "seq": 125
     },
     {
       "role": "h",
       "sleep_s": 2,
       "note": "let the hub-chat-scrolled view settle",
-      "seq": 121
+      "seq": 126
     },
     {
       "role": "h",
@@ -937,26 +977,26 @@
           "within_s": 10
         }
       ],
-      "seq": 122
+      "seq": 127
     },
     {
       "role": "h",
       "cmd": "chatview scroll 0",
       "expect_result": "^OK chatview scroll: ",
-      "seq": 123
+      "seq": 128
     },
     {
       "role": "h",
       "cmd": "chatview size 320 220",
       "expect_result": "^OK chatview size: visible=True active=True size=320x220 ",
       "note": "a small window (the grip's own clamp)",
-      "seq": 124
+      "seq": 129
     },
     {
       "role": "h",
       "sleep_s": 2,
       "note": "let the hub-chat-small view settle",
-      "seq": 125
+      "seq": 130
     },
     {
       "role": "h",
@@ -969,7 +1009,7 @@
           "within_s": 10
         }
       ],
-      "seq": 126
+      "seq": 131
     },
     {
       "role": "h",
@@ -977,25 +1017,25 @@
       "abort_on_fail": false,
       "expect_result": "^OK chatview state: ",
       "note": "report: lines visible at the small size",
-      "seq": 127
+      "seq": 132
     },
     {
       "role": "h",
       "cmd": "uifill clear",
       "expect_result": "^OK uifill clear: chat=40 hub=36 grantees=2$",
-      "seq": 128
+      "seq": 133
     },
     {
       "role": "h",
       "cmd": "chatview close",
       "expect_result": "^OK chatview close: requested ",
-      "seq": 129
+      "seq": 134
     },
     {
       "role": "both",
       "cmd": "mark TEST HUBSHOTS END",
       "expect_result": "OK MARK",
-      "seq": 130
+      "seq": 135
     }
   ]
 }

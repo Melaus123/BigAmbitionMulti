@@ -4,6 +4,7 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 using TMPro;
+using Localizor;   // .Localize (the tooltip header: TooltipSystem.AddHeader takes the game's text holder)
 
 namespace BigAmbitionsMP
 {
@@ -124,6 +125,18 @@ namespace BigAmbitionsMP
         private RectTransform? _rtMergerOk;
         private BBtn? _mergerOkBtn, _mergerCancelBtn;
         private string _mergerConfirmMode = "", _mergerConfirmPid = "";
+        // MERGE-TOOLTIP-1 (user-approved 2026-09-28, decision 15): the GAME'S OWN tooltip on 'Propose merger', driven the
+        // way its TooltipTarget drives it (0.1 s hover delay, then Show + header / splitter / label). Text is built only
+        // when it opens; every other frame is a hit test.
+        private float _bizTipSince = -1f;     // hover start (unscaled time); -1 = the pointer is not on the button
+        private bool _bizTipShown;            // our tooltip is up in TooltipSystem
+        private int _bizTipShowFrame = -10;   // frame of our last Show (review: the game fades a tooltip in one frame AFTER Show, unguarded)
+        private int _bizTipRehideUntil = -1;  // re-hide window after a Hide that came within a frame of our Show
+        private string _bizTipPid = "";       // the player it was built for (a selection change under the pointer rebuilds it)
+        private bool _bizTipRaiseLogged;
+#if BAMP_DEV
+        private bool _bizTipDevHold;          // DEV lever: the pointer is treated as resting on the button's centre
+#endif
         private Vector2 _bizFitFor = new Vector2(-1f, -1f);
         private float _bizToolW;
         private RectTransform? _bizLeftPane, _bizTabBadgeHost;
@@ -179,6 +192,10 @@ namespace BigAmbitionsMP
                 if (_hub != null && !_hubNative) UnityEngine.Object.Destroy(_hub);
             }
             catch { }
+            BizHideMergeTip();   // the tooltip system outlives the scene (DontDestroyOnLoad)
+#if BAMP_DEV
+            _bizTipDevHold = false;
+#endif
             _hub = null; _hubRT = null; _hubNative = false; _bizRoot = null; _mergerConfirmGO = null;
             _bizFocus = 0; _hubUiHover = false; _bizSel = ""; _hubRepayArm = "";
             _bizSelGO = null; _bizLeftPane = null; _bizTabBadgeHost = null; _bizLeftFor = new Vector2(-1f, -1f);
@@ -200,6 +217,7 @@ namespace BigAmbitionsMP
 
                 if (_hub == null)
                 {
+                    BizHideMergeTip();
                     if (!_hubVisible || _canvasGO == null) return;
                     BuildBizWindow();
                     if (_hub == null) return;
@@ -208,6 +226,7 @@ namespace BigAmbitionsMP
                 _hubUiHover = false;
                 if (!_hubVisible)
                 {
+                    BizHideMergeTip();   // page / menu closed
                     if (_bizFocus != 0) CommitHubInputs();
                     BizSyncSelection();
                     if (_mergerConfirmGO != null && _mergerConfirmGO.activeSelf) _mergerConfirmGO.SetActive(false);
@@ -238,6 +257,7 @@ namespace BigAmbitionsMP
                 // hover-based suppression fought the menu's own shortcuts (ESC took ~6 presses, 2026-06-10).
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
                 _hubUiHover = _hubNative ? _bizFocus != 0 : (HubHit(_hubRT, mp) || _bizFocus != 0);
+                BizTickMergeTip(mp);
                 if (!Input.GetMouseButtonDown(0)) return;
                 BizClick(mp);
             }
@@ -486,6 +506,7 @@ namespace BigAmbitionsMP
                     _bizSelGO = null;
                 }
                 if (_mergerConfirmGO != null && _mergerConfirmGO.activeSelf) _mergerConfirmGO.SetActive(false);
+                BizHideMergeTip();
             }
             catch (Exception ex) { BizErr("link lost", ex); }
         }
@@ -1274,12 +1295,112 @@ namespace BigAmbitionsMP
 
         // ══ merger confirmation popup ══
 
+        // ══ MERGE-TOOLTIP-1: 'Propose merger' hover tooltip (the game's TooltipSystem) ══
+
+        /// <summary>Every page tick: pointer on a visible 'Propose merger' (never 'Cancel merger offer', never with the merger
+        /// popup open) for TooltipSystem.Delay -> the tooltip opens; anything else closes it. No allocation per frame.</summary>
+        private void BizTickMergeTip(Vector2 mp)
+        {
+            try
+            {
+                // Review LOW: TooltipSystem.Show fades the box in one frame later without checking a Hide in between, so a
+                // Hide within a frame of our Show (e.g. clicking the button as the delay completes -> popup) would leave an
+                // empty box above the popup. For a few frames re-hide - only while the system says nothing is showing, so a
+                // real game tooltip is never closed.
+                if (_bizTipRehideUntil >= Time.frameCount && !_bizTipShown && !Tooltip.TooltipSystem.IsVisible) Tooltip.TooltipSystem.Hide();
+                bool popup = _mergerConfirmGO != null && _mergerConfirmGO.activeSelf;
+                bool eligible = !popup && _bizMergeBtn != null && _bizMergeAct == 8 && _bizMergePid != "" && _bizMergeBtn.go.activeInHierarchy;
+#if BAMP_DEV
+                if (eligible && _bizTipDevHold) mp = BizTipDevPoint();
+#endif
+                if (!eligible || !BHit(_bizMergeBtn!.rt, mp)) { BizHideMergeTip(); return; }
+                if (_bizTipShown && _bizTipPid != _bizMergePid) BizHideMergeTip();   // another player selected under the pointer
+                if (_bizTipSince < 0f) { _bizTipSince = Time.unscaledTime; return; }
+                if (!_bizTipShown && Time.unscaledTime - _bizTipSince >= Tooltip.TooltipSystem.Delay) BizShowMergeTip();
+#if BAMP_DEV
+                if (_bizTipShown && _bizTipDevHold) BizTipDevPlace(mp);
+#endif
+            }
+            catch (Exception ex) { BizErr("merge tooltip", ex); }
+        }
+
+        /// <summary>Opens it: header -> splitter -> label, the pattern of the game's BasicTooltip (approved text, verbatim).</summary>
+        private void BizShowMergeTip()
+        {
+            _bizTipShown = true; _bizTipPid = _bizMergePid;   // set first: a throw below must not retry every frame
+            _bizTipShowFrame = Time.frameCount;
+            try
+            {
+                var p = BizSelected();
+                string name = p != null && p.Pid == _bizMergePid ? p.Name : CwName(_bizMergePid);
+                if (string.IsNullOrEmpty(name)) name = B_UNKNOWN;
+                BizTipAboveUs();
+                Tooltip.TooltipSystem.Show();
+                Tooltip.TooltipSystem.AddHeader("Co-op feature".Localize());
+                Tooltip.TooltipSystem.AddSplitter();
+                Tooltip.TooltipSystem.AddLabel("Merge your company with " + name + "'s and run them as one: you both get full use of " +
+                    "everything the other owns, including businesses, homes and vehicles. Either of you can leave the merger at any time.",
+                    Color.white);
+            }
+            catch (Exception ex) { BizErr("merge tooltip show", ex); }
+        }
+
+        private void BizHideMergeTip()
+        {
+            _bizTipSince = -1f;
+            if (!_bizTipShown) return;
+            _bizTipShown = false; _bizTipPid = "";
+            try { if (Tooltip.TooltipSystem.IsVisible) Tooltip.TooltipSystem.Hide(); }
+            catch (Exception ex) { BizErr("merge tooltip hide", ex); }
+            if (Time.frameCount - _bizTipShowFrame <= 1) _bizTipRehideUntil = Time.frameCount + 3;
+        }
+
+        /// <summary>KNOWN TRAP (VehicleStoragePanel.EnsureTooltipsAboveUs precedent): the game's tooltip canvas can sort BELOW
+        /// the canvas hosting this page (the phone's full-menu canvas when native, our overlay canvas in the fallback
+        /// window) and below the merger popup's own sorted canvas (+100). Tooltips are topmost by design: RAISE the tooltip
+        /// canvas just above all of them (never lower it). Idempotent; logged once; the singleton is DontDestroyOnLoad.</summary>
+        private void BizTipAboveUs()
+        {
+            try
+            {
+                var ts = global::InstanceBehavior<Tooltip.TooltipSystem>.Instance;
+                var tc = ts != null ? HarmonyLib.AccessTools.Field(typeof(Tooltip.TooltipSystem), "canvas")?.GetValue(ts) as Canvas : null;
+                var hc = _hubRT != null ? _hubRT.GetComponentInParent<Canvas>() : null;
+                if (tc == null || hc == null) return;
+                var root = hc.rootCanvas;
+                int pop = BizTipPopupOrder(root);
+                int want = Mathf.Min(Mathf.Max(root.sortingOrder, pop) + 1, 32767);
+                int was = tc.sortingOrder;
+                string wasLayer = SortingLayer.IDToName(tc.sortingLayerID);
+                if (tc.sortingLayerID != root.sortingLayerID &&
+                    SortingLayer.GetLayerValueFromID(tc.sortingLayerID) < SortingLayer.GetLayerValueFromID(root.sortingLayerID))
+                    tc.sortingLayerID = root.sortingLayerID;
+                if (tc.sortingOrder < want) tc.sortingOrder = want;
+                if (!_bizTipRaiseLogged)
+                {
+                    _bizTipRaiseLogged = true;
+                    Plugin.Logger.LogInfo($"[Hub] merger tooltip: tooltip canvas {was} ({wasLayer}) -> {tc.sortingOrder} ({SortingLayer.IDToName(tc.sortingLayerID)}, {tc.renderMode}); " +
+                                          $"page canvas '{root.name}' {root.sortingOrder} ({SortingLayer.IDToName(root.sortingLayerID)}, {root.renderMode}); merger popup {pop} (tooltips are topmost by design).");
+                }
+            }
+            catch (Exception ex) { BizErr("merge tooltip sort", ex); }
+        }
+
+        /// <summary>The merger popup's sorted canvas order: its live value when built, else what ShowMergerConfirm will give it.</summary>
+        private int BizTipPopupOrder(Canvas root)
+        {
+            var ov = _mergerConfirmGO != null ? _mergerConfirmGO.GetComponent<Canvas>() : null;
+            int planned = Mathf.Min(root.sortingOrder + 100, 32767);
+            return ov != null && ov.overrideSorting ? Mathf.Max(ov.sortingOrder, planned) : planned;
+        }
+
         /// <summary>Merger confirm popup (build-once): the game's confirm-popup look (as the lobby's Hosting port popup:
         /// light title bar, slate body, no dimming, blocks clicks behind); its approved text is unchanged.</summary>
         private void ShowMergerConfirm(string mode, string pid)
         {
             try
             {
+                BizHideMergeTip();   // the popup opening closes the tooltip
                 if (string.IsNullOrEmpty(pid) || _hub == null) return;
                 if (_mergerConfirmGO == null)
                 {
@@ -1623,6 +1744,93 @@ namespace BigAmbitionsMP
                 return $"open={_mergerConfirmGO != null && _mergerConfirmGO.activeSelf} target='{pid}'";
             }
             catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        // ── MERGE-TOOLTIP-1 DEV lever (hubview mergetip|mergetipstate|mergetipoff): the page's own hover path with a virtual
+        // pointer resting on the button's centre (the rig's real pointer is wherever the desktop left it). Sends nothing.
+        private static System.Reflection.FieldInfo? _tsFCanvas, _tsFCanvasRT, _tsFTipRT, _tsFDataRT;
+
+        private Vector2 BizTipDevPoint()
+        {
+            var rt = _bizMergeBtn!.rt;
+            return RectTransformUtility.WorldToScreenPoint(_hubCam, rt.TransformPoint(rt.rect.center));
+        }
+
+        private void BizTipDevFields(out Canvas? canvas, out RectTransform? crt, out RectTransform? tip, out RectTransform? data)
+        {
+            canvas = null; crt = null; tip = null; data = null;
+            var ts = global::InstanceBehavior<Tooltip.TooltipSystem>.Instance;
+            if (ts == null) return;
+            var ty = typeof(Tooltip.TooltipSystem);
+            _tsFCanvas ??= HarmonyLib.AccessTools.Field(ty, "canvas");
+            _tsFCanvasRT ??= HarmonyLib.AccessTools.Field(ty, "canvasRectTransform");
+            _tsFTipRT ??= HarmonyLib.AccessTools.Field(ty, "tooltipRect");
+            _tsFDataRT ??= HarmonyLib.AccessTools.Field(ty, "dataRectTransform");
+            canvas = _tsFCanvas?.GetValue(ts) as Canvas;
+            crt = _tsFCanvasRT?.GetValue(ts) as RectTransform;
+            tip = _tsFTipRT?.GetValue(ts) as RectTransform;
+            data = _tsFDataRT?.GetValue(ts) as RectTransform;
+        }
+
+        /// <summary>= TooltipSystem.SetPosition (decompile Tooltip/TooltipSystem.cs) fed the virtual pointer.</summary>
+        private void BizTipDevPlace(Vector2 sp)
+        {
+            BizTipDevFields(out var canvas, out var crt, out var tip, out var data);
+            if (canvas == null || crt == null || tip == null || data == null) return;
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(crt, sp, canvas.worldCamera, out var lp);
+            Vector2 a = lp; Rect r = data.rect, r2 = crt.rect;
+            if (a.x + r2.width / 2f < r.width / 2f) a.x = -r2.width / 2f + r.width / 2f;
+            else if (a.x + r2.width / 2f + r.width / 2f > r2.width) a.x = r2.width / 2f - r.width / 2f;
+            if (a.y + r2.height / 2f + r.height > r2.height) a.y = r2.height / 2f - r.height;
+            if (lp.y > r2.height / 2f - r.height + 40f) a.y = lp.y - r.height - 40f;
+            tip.anchoredPosition = a;
+        }
+
+        internal string DevBizMergeTip(string what)
+        {
+            try
+            {
+                if (what == "off") { _bizTipDevHold = false; BizHideMergeTip(); return DevBizMergeTipState(); }
+                if (what == "on")
+                {
+                    if (_hub == null || !_hubVisible) return "ERR page not open";
+                    if (_bizMergeAct != 8)   // pick a player the button would offer 'Propose merger' for (= a card click)
+                        foreach (var p in _bizPls)
+                            if (p.Online && p.Pid != "" && !(MergerSync.IAmMember && MergerSync.IsMemberPid(p.Pid)) &&
+                                MergerSync.OutgoingToPid != p.Pid && !MergerSync.InAnyGroup(p.Pid))
+                            { _bizSel = p.Key; _bizDirty = true; break; }
+                    _bizTipDevHold = true;
+                    return $"hold=True sel='{_bizSel}' act={_bizMergeAct}";
+                }
+                return DevBizMergeTipState();
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
+        private string DevBizMergeTipState()
+        {
+            try
+            {
+                BizTipDevFields(out var canvas, out _, out _, out var data);
+                var hc = _hubRT != null ? _hubRT.GetComponentInParent<Canvas>() : null;
+                var root = hc != null ? hc.rootCanvas : null;
+                int tipO = canvas != null ? canvas.sortingOrder : int.MinValue, pageO = root != null ? root.sortingOrder : int.MinValue;
+                int popO = root != null ? BizTipPopupOrder(root) : int.MinValue;
+                bool inScreen = false; string box = "?";
+                if (canvas != null && data != null)
+                {
+                    var wc = new Vector3[4]; data.GetWorldCorners(wc);
+                    var cam = canvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : canvas.worldCamera;
+                    Vector2 lo = RectTransformUtility.WorldToScreenPoint(cam, wc[0]), hi = RectTransformUtility.WorldToScreenPoint(cam, wc[2]);
+                    inScreen = lo.x >= 0f && lo.y >= 0f && hi.x <= Screen.width && hi.y <= Screen.height && hi.x > lo.x && hi.y > lo.y;
+                    box = $"{lo.x:F0},{lo.y:F0}-{hi.x:F0},{hi.y:F0}/{Screen.width}x{Screen.height}";
+                }
+                return $"visible={Tooltip.TooltipSystem.IsVisible} shown={_bizTipShown} hold={_bizTipDevHold} btn={(_bizMergeBtn != null && _bizMergeBtn.go.activeInHierarchy)} " +
+                       $"label='{(_bizMergeBtn != null ? _bizMergeBtn.lbl.text : "")}' target='{_bizTipPid}' " +
+                       $"tipCanvas={tipO}/{(canvas != null ? canvas.renderMode.ToString() : "?")} pageCanvas={pageO}/{(root != null ? root.renderMode.ToString() : "?")} popupCanvas={popO} " +
+                       $"above={(tipO > pageO && tipO > popO)} inScreen={inScreen} box={box}";
+            }
+            catch (Exception ex) { return "stateErr=" + ex.Message; }
         }
 #endif
     }

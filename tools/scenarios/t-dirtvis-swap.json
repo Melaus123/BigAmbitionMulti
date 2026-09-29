@@ -1,0 +1,413 @@
+{
+  "id": "T-DIRTVIS-SWAP",
+  "title": "DIRT-HIGHLIGHT-1 OBSERVATION, SWAPPED ROLES (no fix, 2026-09-28): the CLIENT (the shop's owner) mops, the HOST (merged partner) observes. Same four moments as T-DIRTVIS (before, holding a mop, during a stroke, after the put-away); `dirtvis` + a screenshot on each machine (dirtvis-swap-obs-* on the host, dirtvis-swap-mop-* on the client). Quiet: tillhold 900, no dirtseed / dirtdrip. Every step is report-only.",
+  "preconditions": "Reporter fixture fx-till1 (MERGED pair; the client owns '14 ba:street_fifthavenue'; vars.keepMerger true). Dev build with the dirtvis / mopstation / mopcell / mopaway / handstate levers (TestDrive.cs). Keep both windows unfocused but NOT minimised (a minimised window does not render). Roles swapped vs t-dirtvis: no mop lever goes to the host.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-till1",
+    "keepMerger": true,
+    "shop": "14 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "HarmonyException",
+    "Patching exception"
+  ],
+  "oracles_report": [
+    "\\[TestDrive\\] screenshot ",
+    "\\[MopProbe\\]",
+    "\\[Cleaning\\]",
+    "\\[Carry\\]",
+    "\\[Mop\\]",
+    "\\[Patcher\\] DirtSync",
+    "NullReferenceException"
+  ],
+  "steps": [
+    {
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK",
+      "seq": 1
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 2
+    },
+    {
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "seq": 3
+    },
+    {
+      "role": "h",
+      "sleep_s": 70,
+      "note": "both worlds load and settle",
+      "seq": 4
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST DIRTVIS-SWAP START",
+      "expect_result": "OK MARK",
+      "seq": 5
+    },
+    {
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "seq": 6
+    },
+    {
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "seq": 7
+    },
+    {
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK",
+      "seq": 8
+    },
+    {
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK",
+      "seq": 9
+    },
+    {
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "a fixture can load a player inside a building",
+      "seq": 10
+    },
+    {
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "seq": 11
+    },
+    {
+      "role": "h",
+      "sleep_s": 6,
+      "seq": 12
+    },
+    {
+      "role": "c",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK",
+      "note": "the OWNER (client, the MOPPER here) inside its produce shop",
+      "seq": 13
+    },
+    {
+      "role": "h",
+      "sleep_s": 8,
+      "seq": 14
+    },
+    {
+      "role": "h",
+      "cmd": "enterbuilding ${shop}",
+      "expect_result": "^OK",
+      "note": "the OBSERVER (host, merged partner) enters",
+      "seq": 15
+    },
+    {
+      "role": "h",
+      "sleep_s": 8,
+      "seq": 16
+    },
+    {
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True",
+      "abort_on_fail": false,
+      "note": "report: the pair is merged",
+      "seq": 17
+    },
+    {
+      "role": "h",
+      "cmd": "helperstate ${shop}",
+      "expect_result": "^OK helperstate ",
+      "abort_on_fail": false,
+      "note": "report: the mopper reads as a helper here",
+      "seq": 18
+    },
+    {
+      "role": "c",
+      "cmd": "tillhold 900",
+      "expect_result": "^OK",
+      "abort_on_fail": false,
+      "note": "quiet: no NPC checkouts (no dirtseed / dirtdrip anywhere in this run)",
+      "seq": 19
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 20
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST DIRTVIS-SWAP BEFORE",
+      "expect_result": "OK MARK",
+      "seq": 21
+    },
+    {
+      "role": "h",
+      "cmd": "dirtvis",
+      "expect_result": "^OK dirtvis ",
+      "abort_on_fail": false,
+      "note": "MOPPER before",
+      "seq": 22
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot dirtvis-swap-obs-before",
+      "expect_result": "^OK screenshot queued",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-dirtvis-swap-obs-before\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 23
+    },
+    {
+      "role": "c",
+      "cmd": "dirtvis",
+      "expect_result": "^OK dirtvis ",
+      "abort_on_fail": false,
+      "note": "OBSERVER before",
+      "seq": 24
+    },
+    {
+      "role": "c",
+      "cmd": "screenshot dirtvis-swap-mop-before",
+      "expect_result": "^OK screenshot queued",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] screenshot .*shot-dirtvis-swap-mop-before\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 25
+    },
+    {
+      "role": "h",
+      "sleep_s": 2,
+      "seq": 26
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST DIRTVIS-SWAP HOLDING",
+      "expect_result": "OK MARK",
+      "seq": 27
+    },
+    {
+      "role": "c",
+      "cmd": "mopstation",
+      "expect_result": "^OK",
+      "abort_on_fail": false,
+      "note": "the MOPPER (client, the shop's owner) - client only",
+      "seq": 28
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 29
+    },
+    {
+      "role": "h",
+      "cmd": "dirtvis",
+      "expect_result": "^OK dirtvis ",
+      "abort_on_fail": false,
+      "note": "MOPPER while the other player holds a mop",
+      "seq": 30
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot dirtvis-swap-obs-holding",
+      "expect_result": "^OK screenshot queued",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-dirtvis-swap-obs-holding\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 31
+    },
+    {
+      "role": "c",
+      "cmd": "dirtvis",
+      "expect_result": "^OK dirtvis ",
+      "abort_on_fail": false,
+      "note": "OBSERVER holding",
+      "seq": 32
+    },
+    {
+      "role": "c",
+      "cmd": "screenshot dirtvis-swap-mop-holding",
+      "expect_result": "^OK screenshot queued",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] screenshot .*shot-dirtvis-swap-mop-holding\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 33
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST DIRTVIS-SWAP MOPPING",
+      "expect_result": "OK MARK",
+      "seq": 34
+    },
+    {
+      "role": "c",
+      "cmd": "mopcell dirtiest",
+      "expect_result": "^OK",
+      "abort_on_fail": false,
+      "note": "the MOPPER (client, the shop's owner) - client only",
+      "seq": 35
+    },
+    {
+      "role": "h",
+      "cmd": "dirtvis",
+      "expect_result": "^OK dirtvis ",
+      "abort_on_fail": false,
+      "note": "MOPPER during the stroke",
+      "seq": 36
+    },
+    {
+      "role": "c",
+      "cmd": "dirtvis",
+      "expect_result": "^OK dirtvis ",
+      "abort_on_fail": false,
+      "note": "OBSERVER during the stroke",
+      "seq": 37
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot dirtvis-swap-obs-mopping",
+      "expect_result": "^OK screenshot queued",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-dirtvis-swap-obs-mopping\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 38
+    },
+    {
+      "role": "c",
+      "cmd": "screenshot dirtvis-swap-mop-mopping",
+      "expect_result": "^OK screenshot queued",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] screenshot .*shot-dirtvis-swap-mop-mopping\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 39
+    },
+    {
+      "role": "c",
+      "sleep_s": 8,
+      "note": "the stroke ends",
+      "seq": 40
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST DIRTVIS-SWAP AFTER",
+      "expect_result": "OK MARK",
+      "seq": 41
+    },
+    {
+      "role": "c",
+      "cmd": "mopaway discard",
+      "expect_result": "^OK",
+      "abort_on_fail": false,
+      "note": "the MOPPER (client, the shop's owner) - client only",
+      "seq": 42
+    },
+    {
+      "role": "c",
+      "sleep_s": 20,
+      "note": "the put-away walk to the station",
+      "seq": 43
+    },
+    {
+      "role": "c",
+      "cmd": "handstate",
+      "expect_result": "^OK",
+      "abort_on_fail": false,
+      "seq": 44,
+      "note": "the MOPPER (client, the shop's owner) - client only"
+    },
+    {
+      "role": "h",
+      "cmd": "dirtvis",
+      "expect_result": "^OK dirtvis ",
+      "abort_on_fail": false,
+      "note": "MOPPER after the put-away",
+      "seq": 45
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot dirtvis-swap-obs-after",
+      "expect_result": "^OK screenshot queued",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-dirtvis-swap-obs-after\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 46
+    },
+    {
+      "role": "c",
+      "cmd": "dirtvis",
+      "expect_result": "^OK dirtvis ",
+      "abort_on_fail": false,
+      "note": "OBSERVER after the put-away",
+      "seq": 47
+    },
+    {
+      "role": "c",
+      "cmd": "screenshot dirtvis-swap-mop-after",
+      "expect_result": "^OK screenshot queued",
+      "abort_on_fail": false,
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] screenshot .*shot-dirtvis-swap-mop-after\\.png",
+          "within_s": 10
+        }
+      ],
+      "seq": 48
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST DIRTVIS-SWAP END",
+      "expect_result": "OK MARK",
+      "seq": 49
+    }
+  ]
+}
