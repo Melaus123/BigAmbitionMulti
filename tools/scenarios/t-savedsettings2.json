@@ -9,6 +9,8 @@
     "session": "save1"
   },
   "oracles_absent": [
+    "behind \\+[0-9]{3,}\\.[0-9]+ h",
+    "TICK-ISO-1",
     "\\[World\\] settings apply rev=",
     "\\[World\\] host apply at ",
     "\\[World\\] send to ",
@@ -25,6 +27,9 @@
     "\\[World\\] settings rev=\\d+ \\(client(, held)?\\) not applied - rev not recorded"
   ],
   "oracles_report": [
+    "\\[TimeSync\\] host clock ignored - no world loaded\\.",
+    "\\[TimeSync\\] JOIN SNAP",
+    "forcing local to match",
     "\\[World\\] ",
     "\\[MenuUI\\] saved world settings",
     "\\[UI\\] settings window built",

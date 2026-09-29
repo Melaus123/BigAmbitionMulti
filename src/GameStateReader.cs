@@ -32,6 +32,29 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>TIMESYNC-TEARDOWN-1 (C1, 2026-09-29): the ONE shared "a world is live" test - a save is loaded
+        /// (SaveGameManager.Current; MainMenuController.Awake nulls it) AND the game is not unloading the city
+        /// (GameManager.isCitySceneBeingUnloaded, set at LoadScene.LoadMainMenuFromCity, cleared by the loading
+        /// screen once the menu is in). While false, GetGameTime reads (0, 0) and the game tick has no world.
+        /// Cheap, allocation-free, main thread. An unreadable flag counts as "not unloading" (as NoLiveWorld did).</summary>
+        public static bool HasLiveWorld()
+        {
+            try
+            {
+                if (SaveGameManager.Current == null) return false;
+                try { return !global::GameManager.isCitySceneBeingUnloaded; } catch { return true; }
+            }
+            catch { return false; }
+        }
+
+        /// <summary>UMBRELLA-LEAVE-1 (C6, decision 49 A): true while the game is unloading the city - the game's own
+        /// GameManager.isCitySceneBeingUnloaded, set at LoadScene.LoadMainMenuFromCity (and on quit) and cleared by the
+        /// loading screen once the menu is in. Unreadable -> false. Cheap, allocation-free, main thread.</summary>
+        public static bool CityUnloading()
+        {
+            try { return global::GameManager.isCitySceneBeingUnloaded; } catch { return false; }
+        }
+
         /// <summary>
         /// Attempts to apply a day/time value to the local GameInstance.
         /// </summary>

@@ -26,6 +26,7 @@ namespace BigAmbitionsMP
         private static float _lastLoggedScale = -999f;
         public static void ApplyNetwork(float scale)
         {
+            if (GameStateReader.CityUnloading()) return;   // UMBRELLA-LEAVE-1 (C6): no speed while the city unloads - the clock stays frozen until the game's loading screen sets 1
             Time.timeScale = scale;
             // Log only on an ACTUAL speed change. The unchanged 1.00× reprint every ~3s was ~2,100
             // lines/session of pure noise; the diagnostic value is the transitions (pause/skip/catch-up).
@@ -645,6 +646,23 @@ namespace BigAmbitionsMP
             // past the fast-run. Phase 2's rate-based drift inherits this same guard.
             if (MPRestSync.SkipActive) return;
 
+            // TIMESYNC-TEARDOWN-1 (C2, 2026-09-29): with no live world (joining from the menu, or a queued host clock
+            // message landing after the leave to the menu) the local clock reads (0, 0) - a false '+3204 h behind'
+            // that used to schedule a catch-up driving the game tick with no save. Drop any stored correction and
+            // stand down BEFORE reading the clock; the next message after the world is live does the real work
+            // (the one-time join snap is not consumed here).
+            if (!GameStateReader.HasLiveWorld())
+            {
+                ClearClockCorrection();
+                if (!_noWorldLogged)
+                {
+                    _noWorldLogged = true;
+                    Plugin.Logger.LogInfo("[TimeSync] host clock ignored - no world loaded.");
+                }
+                return;
+            }
+            _noWorldLogged = false;   // a world is live again - the next no-world period logs once more
+
             var (localDay, localHour) = GameStateReader.GetGameTime();
 
             float hostTotal  = hostDay  * 24f + hostHour;
@@ -707,6 +725,17 @@ namespace BigAmbitionsMP
             }
         }
 
+        private static bool _noWorldLogged;   // TIMESYNC-TEARDOWN-1: once per no-world period
+
+        /// <summary>TIMESYNC-TEARDOWN-1 (C2/C4): forget ONLY the stored clock correction - the behind catch-up gap and
+        /// the ahead hold. Used while no world is live and at 'left game scene'; unlike ResetClockState it leaves the
+        /// join-snap arm, the release gate and the manual pause alone.</summary>
+        public static void ClearClockCorrection()
+        {
+            _correctionHours = 0f;
+            AheadHeld        = false;
+        }
+
         /// <summary>Clear pending clock-correction state at a session/scene boundary so a fresh
         /// game (single-player, or a new MP session) never inherits leftover catch-up / ahead-hold.</summary>
         public static void ResetClockState()
@@ -741,6 +770,7 @@ namespace BigAmbitionsMP
         public static void TickClockCorrection()
         {
             if (!MPServer.IsRunning && !MPClient.InMpGame) return;   // never drain MP catch-up outside an MP game (e.g. a disconnect dropped us to single-player) — mirrors the AheadFreeze gate
+            if (!GameStateReader.HasLiveWorld()) return;   // TIMESYNC-TEARDOWN-1 (C3): a stored gap never drives the game tick without a world
             if (_correctionHours <= 0f) return;   // only the BEHIND catch-up runs here; AHEAD = the freeze flag
             if (Time.timeScale   == 0f) return;   // paused — hold
 

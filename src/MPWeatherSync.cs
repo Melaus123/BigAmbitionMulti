@@ -191,6 +191,10 @@ namespace BigAmbitionsMP
             }
             _hostVerdictAt = now;   // WEATHER-LATCH-1 staleness clock
             _stallLogged = false;
+            // TIMESYNC-TEARDOWN-1 (C5, decision 46): no live world (joining from the menu / leaving to it) - the host's
+            // verdict is recorded above (HostRainState + freshness) but nothing is forced: RainHelper is not initialized
+            // yet. The first heartbeat after the world is live re-runs this and converges.
+            if (!GameStateReader.HasLiveWorld()) return;
             int local = CurrentRainState();
             if (local < 0 || local == hostState) return;
             Plugin.Logger.LogInfo($"[Weather] host={(hostState == 1 ? "raining" : "dry")} local={(local == 1 ? "raining" : "dry")} — forcing local to match.");

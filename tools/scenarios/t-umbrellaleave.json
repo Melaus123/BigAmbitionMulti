@@ -1,0 +1,512 @@
+{
+  "id": "T-UMBRELLALEAVE",
+  "title": "UMBRELLA-LEAVE-1 + TIMESYNC-TEARDOWN-1: five client leaves to the menu in rain; the clock freezes for each city unload (as the plain game), no pedestrian umbrella wait throws mid-unload, no false huge catch-up, the client rejoins cleanly each time.",
+  "preconditions": "Dev build with the 'rain', 'status', 'leavegame menu', 'acceptjoin' and 'pause' levers. Fixture save1 (host melaus, client Client1).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "AddUmbrellaCoroutine",
+    "TICK-ISO-1",
+    "behind \\+[0-9]{3,}\\.[0-9]+ h",
+    "HarmonyException",
+    "Patching exception"
+  ],
+  "oracles_report": [
+    "\\[Pause\\] clock frozen for the city unload",
+    "\\[TimeSync\\] host clock ignored - no world loaded\\.",
+    "forcing local to match",
+    "Rain has not been initialized",
+    "\\[TimeSync\\] JOIN SNAP: clock set"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST UMBRELLALEAVE START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 55,
+      "note": "both worlds settle"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "both",
+      "cmd": "mark TEST UMBRELLALEAVE LEAVE1",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "rain on",
+      "expect_result": "^OK rain on queued",
+      "note": "the host is weather-authoritative; the client follows on the next heartbeat"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "rain starts on the host and reaches the client; pedestrians take out umbrellas"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "rain=1/1 ",
+      "note": "PREMISE: raining on the client (local/host) right before the leave"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "leavegame menu",
+      "expect_result": "^OK leavegame menu",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Pause\\] clock frozen for the city unload \\(as the plain game\\)\\.",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[UI\\] Left game scene",
+          "within_s": 90
+        }
+      ],
+      "note": "THE ASSERTION: the clock freezes at the unload edge and the client reaches the menu (clean leave)"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "sleep_s": 20
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "sleep_s": 60,
+      "note": "the client is served the world and settles"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 22,
+      "role": "both",
+      "cmd": "mark TEST UMBRELLALEAVE LEAVE2",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "rain on",
+      "expect_result": "^OK rain on queued",
+      "note": "the host is weather-authoritative; the client follows on the next heartbeat"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "rain starts on the host and reaches the client; pedestrians take out umbrellas"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "rain=1/1 ",
+      "note": "PREMISE: raining on the client (local/host) right before the leave"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "leavegame menu",
+      "expect_result": "^OK leavegame menu",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Pause\\] clock frozen for the city unload \\(as the plain game\\)\\.",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[UI\\] Left game scene",
+          "within_s": 90
+        }
+      ],
+      "note": "THE ASSERTION: the clock freezes at the unload edge and the client reaches the menu (clean leave)"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "sleep_s": 20
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "sleep_s": 60,
+      "note": "the client is served the world and settles"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 34,
+      "role": "both",
+      "cmd": "mark TEST UMBRELLALEAVE LEAVE3",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "rain on",
+      "expect_result": "^OK rain on queued",
+      "note": "the host is weather-authoritative; the client follows on the next heartbeat"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "rain starts on the host and reaches the client; pedestrians take out umbrellas"
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "rain=1/1 ",
+      "note": "PREMISE: raining on the client (local/host) right before the leave"
+    },
+    {
+      "seq": 38,
+      "role": "c",
+      "cmd": "leavegame menu",
+      "expect_result": "^OK leavegame menu",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Pause\\] clock frozen for the city unload \\(as the plain game\\)\\.",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[UI\\] Left game scene",
+          "within_s": 90
+        }
+      ],
+      "note": "THE ASSERTION: the clock freezes at the unload edge and the client reaches the menu (clean leave)"
+    },
+    {
+      "seq": 39,
+      "role": "c",
+      "sleep_s": 20
+    },
+    {
+      "seq": 40,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "sleep_s": 60,
+      "note": "the client is served the world and settles"
+    },
+    {
+      "seq": 44,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 46,
+      "role": "both",
+      "cmd": "mark TEST UMBRELLALEAVE LEAVE4",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "cmd": "rain on",
+      "expect_result": "^OK rain on queued",
+      "note": "the host is weather-authoritative; the client follows on the next heartbeat"
+    },
+    {
+      "seq": 48,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "rain starts on the host and reaches the client; pedestrians take out umbrellas"
+    },
+    {
+      "seq": 49,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "rain=1/1 ",
+      "note": "PREMISE: raining on the client (local/host) right before the leave"
+    },
+    {
+      "seq": 50,
+      "role": "c",
+      "cmd": "leavegame menu",
+      "expect_result": "^OK leavegame menu",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Pause\\] clock frozen for the city unload \\(as the plain game\\)\\.",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[UI\\] Left game scene",
+          "within_s": 90
+        }
+      ],
+      "note": "THE ASSERTION: the clock freezes at the unload edge and the client reaches the menu (clean leave)"
+    },
+    {
+      "seq": 51,
+      "role": "c",
+      "sleep_s": 20
+    },
+    {
+      "seq": 52,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 54,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 55,
+      "role": "c",
+      "sleep_s": 60,
+      "note": "the client is served the world and settles"
+    },
+    {
+      "seq": 56,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 57,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 58,
+      "role": "both",
+      "cmd": "mark TEST UMBRELLALEAVE LEAVE5",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 59,
+      "role": "h",
+      "cmd": "rain on",
+      "expect_result": "^OK rain on queued",
+      "note": "the host is weather-authoritative; the client follows on the next heartbeat"
+    },
+    {
+      "seq": 60,
+      "role": "h",
+      "sleep_s": 20,
+      "note": "rain starts on the host and reaches the client; pedestrians take out umbrellas"
+    },
+    {
+      "seq": 61,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "rain=1/1 ",
+      "note": "PREMISE: raining on the client (local/host) right before the leave"
+    },
+    {
+      "seq": 62,
+      "role": "c",
+      "cmd": "leavegame menu",
+      "expect_result": "^OK leavegame menu",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Pause\\] clock frozen for the city unload \\(as the plain game\\)\\.",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[UI\\] Left game scene",
+          "within_s": 90
+        }
+      ],
+      "note": "THE ASSERTION: the clock freezes at the unload edge and the client reaches the menu (clean leave)"
+    },
+    {
+      "seq": 63,
+      "role": "c",
+      "sleep_s": 20
+    },
+    {
+      "seq": 64,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 65,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 66,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 67,
+      "role": "c",
+      "sleep_s": 60,
+      "note": "the client is served the world and settles"
+    },
+    {
+      "seq": 68,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 69,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 70,
+      "role": "both",
+      "cmd": "mark TEST UMBRELLALEAVE END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

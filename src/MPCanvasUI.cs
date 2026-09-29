@@ -1022,6 +1022,8 @@ namespace BigAmbitionsMP
         //   3. EnforceSkipSuppression — clamps skip-timeScale in the same frame the
         //      game sets it, even if set by a non-GameManager MonoBehaviour.
 
+        private static bool _cityUnloadFreezeLogged;   // UMBRELLA-LEAVE-1: once per unload edge, re-armed when the flag clears
+
         private void LateUpdate()
         {
             if (FatalBootBanner != null) return;   // round-254: banner-only mode
@@ -1078,7 +1080,17 @@ namespace BigAmbitionsMP
                 // startup load hold.  Forcing it here (after the EventSystem and
                 // the game's own Update) overrides menu / bench / bed pauses —
                 // opening a menu no longer stops time for anyone.
-                bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld;
+                // UMBRELLA-LEAVE-1 (C6, decision 49 A): the plain game's clock is paused through the city unload (its exit
+                // menu pauses; LoadingScreen.cs:117 sets 1 only after the load), so scaled waits (a pedestrian's umbrella,
+                // AI/UmbrellaHandler.cs:57) cannot end mid-unload. This pin used to write 1 through the unload - freeze it.
+                bool cityUnloading = GameStateReader.CityUnloading();
+                if (!cityUnloading) _cityUnloadFreezeLogged = false;
+                else if (!_cityUnloadFreezeLogged)
+                {
+                    _cityUnloadFreezeLogged = true;
+                    Plugin.Logger.LogInfo("[Pause] clock frozen for the city unload (as the plain game).");
+                }
+                bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld || cityUnloading;
                 Time.timeScale = frozen ? 0f : 1f;
 
                 // World-clock guardian: taxi 1× clamp + unaccounted-acceleration
@@ -2480,6 +2492,7 @@ namespace BigAmbitionsMP
                 GameStatePatcher.EnqueueOnMainThread(() => RemotePlayerManager.RemoveAll());
                 _sceneLoadedPendingFreeze = false;
                 ReleaseHostSoftHold("left game scene");   // round-205: state must not survive the world
+                TimeSync.ClearClockCorrection();   // TIMESYNC-TEARDOWN-1 (C4): a stored catch-up gap / ahead hold dies with the world
                 // Per-world apply caches: the CBC objects die with the scene and
                 // the next world's sign states start fresh — stale entries would
                 // wrongly skip (or target dead controllers for) the first repaints.

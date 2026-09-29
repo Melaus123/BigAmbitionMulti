@@ -1620,8 +1620,7 @@ namespace BigAmbitionsMP
         /// <summary>M7: no save is live, or the city scene is being unloaded (GameManager.isCitySceneBeingUnloaded).</summary>
         private static bool NoLiveWorld()
         {
-            if (SaveGameManager.Current == null) return true;
-            try { return global::GameManager.isCitySceneBeingUnloaded; } catch { return false; }
+            return !GameStateReader.HasLiveWorld();   // TIMESYNC-TEARDOWN-1 (C1): the one shared test, same two reads
         }
 
         /// <summary>C1 review fold: MAIN THREAD, per frame (Tick). Cheap when nothing is parked; raises the parked payloads
