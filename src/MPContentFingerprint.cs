@@ -86,9 +86,16 @@ namespace BigAmbitionsMP
             // with no error to notice. Polling a tick we already own cannot lose its trigger.
             // Cost: one file stat per mod every 2 s (the per-DLL assembly name is cached by
             // path + write time + length), so the value any Hello reads is at most 2 s old.
-            if (_cachedMods.Length == 0 || UnityEngine.Time.unscaledTime >= _modsRefreshAt)
+            // MODS-FOLD (review 2026-09-29, R1/R2; re-check fold F3): the game's own mod state decides WHEN a list may be
+            // stored (TickModsScan / ComputeMods) - only while it is READY (ModsListReady: no scan running, the scan state
+            // initialised, no mods-panel change being applied) - and a change that just ended is re-read within a quarter
+            // second instead of waiting out the 2 s timer.
+            TickModsScan();
+            float nowT = UnityEngine.Time.unscaledTime;
+            if (nowT >= _modsRefreshAt || ((_cachedMods.Length == 0 || ModsChangePending) && nowT >= _modsFastAt))
             {
-                _modsRefreshAt = UnityEngine.Time.unscaledTime + 2f;
+                _modsRefreshAt = nowT + 2f;
+                _modsFastAt = nowT + 0.25f;
                 ComputeMods();
             }
             if (_gameBuild.Length == 0) ComputeGameBuild();  // MACBUILD-1: Unity asset load, so main thread only
@@ -258,45 +265,331 @@ namespace BigAmbitionsMP
         private static bool  _modsCountSaid;
         private static bool  _modsFallbackSaid;
         private static bool  _hadRegistryList;   // a registry-built list has been cached at least once this session (review HIGH)
+        private static volatile bool _cachedModsFromFolders;   // MODS-FOLD R1: the cached list came from the FOLDER walk
+        private static float _modsFastAt;
+        /// <summary>MODS-FOLD R1: true when <see cref="CachedMods"/> came from the installed-FOLDER walk - reached only when
+        /// the game's scan state cannot be read at all. The Refuse gate never refuses on such a list.</summary>
+        public static bool CachedModsFromFolders => _cachedModsFromFolders;
 #if BAMP_DEV
         private static readonly System.Collections.Generic.List<string> _fakeMods = new System.Collections.Generic.List<string>();
+        private static readonly System.Collections.Generic.List<string> _fakeFolders = new System.Collections.Generic.List<string>();
+        private static volatile bool _simEmptyRegistry, _simScanUnknown;
+        private static long _simBusyUntilMs;
 #endif
+
+        // ── MODS-FOLD (review 2026-09-29) R1/R2: the game's own mod-scan state ──
+        // ModDiscoveryRegistry (BigAmbitions.ModsInternal; the installed assembly is the 2026-09-16 one, unchanged by
+        // Build 3682) has no public "scan done" signal: HasDiscoveredEntries is false both BEFORE the first scan and AFTER a
+        // scan that loaded nothing. Two private statics answer it, read by reflection:
+        //   DiscoverySemaphore (SemaphoreSlim(1,1)) is HELD for the whole of every discovery - DiscoverAllModsAsync takes it
+        //     before Clear() and releases it after NotifyDiscoveryUpdated (DiscoverSteamModsByIdsAsync the same) - so
+        //     CurrentCount == 0 <=> the registry is being emptied/refilled right now. CurrentCount is safe on any thread.
+        //   Initialized (bool) is set by Initialize(), which a discovery calls inside the semaphore - but GetAllModsAsync calls
+        //     it too, OUTSIDE the semaphore (ModDiscoveryRegistry.cs:244-246), so Initialized alone does not prove that a
+        //     discovery ran to its end. With the semaphore free it says the registry is set up and nothing is emptying or
+        //     refilling it right now; the game's own start-up discovery sets it long before any lobby exists.
+        // OnDiscoveryUpdated (public; raised at the end of every discovery and by RemoveDiscoveredSteamMods) bumps a
+        // generation counter, so a cached list older than the last raise reads as stale. The subscription is renewed every
+        // 2 s because the game's ResetStaticState nulls the event (see EnsureCached).
+        // Re-check fold F2 (2026-09-29): 'ready' is decided by EVENTS, not a time window (the 3 s settle window is gone). The
+        // mods panel's apply (ModsView.OnManifestChanged, when the panel closes: discover the added mods -> apply the scope
+        // changes, awaiting each mod's load code with no time limit -> RemoveDiscoveredSteamMods, ModsView.cs:187-195) holds
+        // old and new mods in the registry with the semaphore free, so it is bracketed by two Harmony patches (end of this
+        // file): a prefix on OnManifestChanged marks it, a postfix on RemoveDiscoveredSteamMods (its only caller in Build
+        // 3682; the method's early return is inside it, so the postfix runs even when nothing was removed) clears it.
+        //   ready = semaphore free AND Initialized AND no apply in progress (ModsListReady).
+        // If either patch did not bind, readiness falls back to 'semaphore free AND Initialized' (logged once). A flag still
+        // set after 60 s (the apply threw before its remove step) is CLEARED and logged - that backstop only unsticks the
+        // flag, it never decides a verdict.
+        private enum ModsScan { Unknown, NotScanned, Busy, Done }
+        private static System.Threading.SemaphoreSlim? _regSem;
+        private static System.Reflection.FieldInfo? _regInitField;
+        private static bool  _regProbed, _regProbeOk, _modsWaitSaid, _modsScanUnknownSaid, _regSawBusy;
+        private static int   _regGen;            // OnDiscoveryUpdated raises (and ended scans / applies) seen - Interlocked
+        private static int   _cachedGen = -1;    // _regGen when _cachedMods was last captured
+        private static float _regSubAt, _applyHookAt;
+        private static readonly Action _onRegUpdated = OnRegistryUpdated;
+        private static long NowMs => System.Diagnostics.Stopwatch.GetTimestamp() / (System.Diagnostics.Stopwatch.Frequency / 1000L);
+        private static bool ModsChangePending => System.Threading.Volatile.Read(ref _regGen) != System.Threading.Volatile.Read(ref _cachedGen);
+        // F2: the mods-panel apply bracket.
+        private static int  _applyDepth;                 // apply starts not yet matched by an end - Interlocked
+        private static long _applySinceMs;               // NowMs of the last apply start - Interlocked
+        private static volatile bool _applyHooksOk;      // both apply patches bound (checked after patching)
+        private static bool _applyHooksChecked;
+        private static int  _applyHookTries;
+        private const long  ApplyStuckMs = 60000;
+        private const string HarmonyOwner = "com.bamp.bigambitionsmp";
+        private static bool ApplyInProgress => _applyHooksOk && System.Threading.Volatile.Read(ref _applyDepth) > 0;
+
+        private static void OnRegistryUpdated()
+        {
+            try { System.Threading.Interlocked.Increment(ref _regGen); }
+            catch { }
+        }
+
+        /// <summary>F2. MAIN THREAD (Harmony prefix on ModsView.OnManifestChanged): a mods-panel change starts being applied.</summary>
+        internal static void ModsApplyStarted()
+        {
+            try
+            {
+                System.Threading.Interlocked.Increment(ref _applyDepth);
+                System.Threading.Interlocked.Exchange(ref _applySinceMs, Math.Max(1L, NowMs));
+                Plugin.Logger.LogInfo("[Mods] a mods-panel change is being applied - the host's mod list is not ready until it ends.");
+            }
+            catch { }
+        }
+
+        /// <summary>F2. The game's continuation thread (Harmony postfix on ModDiscoveryRegistry.RemoveDiscoveredSteamMods, the
+        /// apply's last step): the change is applied; the list is re-read (the generation bump).</summary>
+        internal static void ModsApplyEnded()
+        {
+            try
+            {
+                int d, left = 0;
+                while (true)
+                {
+                    d = System.Threading.Volatile.Read(ref _applyDepth);
+                    if (d <= 0) break;
+                    if (System.Threading.Interlocked.CompareExchange(ref _applyDepth, d - 1, d) == d) { left = d - 1; break; }
+                }
+                if (left == 0) System.Threading.Interlocked.Exchange(ref _applySinceMs, 0);
+                System.Threading.Interlocked.Increment(ref _regGen);
+                Plugin.Logger.LogInfo(left > 0
+                    ? $"[Mods] a mods-panel change finished applying ({left} more still running)."
+                    : "[Mods] a mods-panel change finished applying - the host's mod list is re-read now.");
+            }
+            catch { }
+        }
+
+        /// <summary>F2. MAIN THREAD: did our patch (prefix or postfix) bind to <paramref name="m"/>?</summary>
+        private static bool OwnsPatch(System.Reflection.MethodBase? m, bool prefix)
+        {
+            try
+            {
+                if (m == null) return false;
+                var info = HarmonyLib.Harmony.GetPatchInfo(m);
+                if (info == null) return false;
+                foreach (var pt in (prefix ? info.Prefixes : info.Postfixes))
+                    if (pt != null && pt.owner == HarmonyOwner) return true;
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>F2. MAIN THREAD, after patching: log whether both apply patches bound. True when the answer is final
+        /// (bound, or not bound on the last try).</summary>
+        private static bool CheckApplyHooks(bool lastTry)
+        {
+            try
+            {
+                bool pre = OwnsPatch(HarmonyLib.AccessTools.Method(typeof(global::BigAmbitions.ModsView), "OnManifestChanged"), true);
+                bool post = OwnsPatch(HarmonyLib.AccessTools.Method(typeof(global::BigAmbitions.ModsInternal.ModDiscoveryRegistry), "RemoveDiscoveredSteamMods"), false);
+                if (pre && post)
+                {
+                    _applyHooksOk = true;
+                    Plugin.Logger.LogInfo("[Mods] mods-panel apply tracking bound (ModsView.OnManifestChanged prefix=True, ModDiscoveryRegistry.RemoveDiscoveredSteamMods postfix=True) - the mod list is ready only when no scan and no mods-panel change is running.");
+                    return true;
+                }
+                if (!lastTry) return false;
+                _applyHooksOk = false;
+                Plugin.Logger.LogWarning($"[Mods] mods-panel apply tracking NOT bound (ModsView.OnManifestChanged prefix={pre}, ModDiscoveryRegistry.RemoveDiscoveredSteamMods postfix={post}) - readiness falls back to 'no scan running AND scan state initialised'.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (!lastTry) return false;
+                _applyHooksOk = false;
+                Plugin.Logger.LogWarning($"[Mods] mods-panel apply tracking check failed ({ex.GetType().Name}) - readiness falls back to 'no scan running AND scan state initialised'.");
+                return true;
+            }
+        }
+
+        /// <summary>MAIN THREAD, once.</summary>
+        private static void ProbeRegistry()
+        {
+            try
+            {
+                var t = typeof(global::BigAmbitions.ModsInternal.ModDiscoveryRegistry);
+                const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
+                _regSem = t.GetField("DiscoverySemaphore", F)?.GetValue(null) as System.Threading.SemaphoreSlim;
+                var fi = t.GetField("Initialized", F);
+                _regInitField = fi != null && fi.FieldType == typeof(bool) ? fi : null;
+                _regProbeOk = _regSem != null && _regInitField != null;
+                Plugin.Logger.LogInfo(_regProbeOk
+                    ? "[Mods] the game's mod-scan state is readable - the join list is taken only from a completed scan."
+                    : $"[Mods] the game's mod-scan state is NOT readable (semaphore={_regSem != null}, flag={_regInitField != null}) - old list rule, and a folder-derived list never refuses a join.");
+            }
+            catch (Exception ex) { _regProbeOk = false; Plugin.Logger.LogWarning($"[Mods] mod-scan state probe failed ({ex.GetType().Name}) - old list rule in force."); }
+        }
+
+        /// <summary>MAIN THREAD (reads the registry's Initialized flag).</summary>
+        private static ModsScan ScanState()
+        {
+#if BAMP_DEV
+            if (System.Threading.Interlocked.Read(ref _simBusyUntilMs) > NowMs) return ModsScan.Busy;
+            if (_simScanUnknown) return ModsScan.Unknown;
+#endif
+            try
+            {
+                var sem = _regSem; var fi = _regInitField;
+                if (!_regProbeOk || sem == null || fi == null) return ModsScan.Unknown;
+                if (sem.CurrentCount == 0) return ModsScan.Busy;
+                return (bool)fi.GetValue(null) ? ModsScan.Done : ModsScan.NotScanned;
+            }
+            catch { return ModsScan.Unknown; }
+        }
+
+        /// <summary>MAIN THREAD, every frame (EnsureCached): probe once, keep the event subscribed, and mark the list
+        /// stale when a scan ends - also one the subscription missed.</summary>
+        private static void TickModsScan()
+        {
+            try
+            {
+                if (!_regProbed) { _regProbed = true; ProbeRegistry(); }
+                float now = UnityEngine.Time.unscaledTime;
+                if (now >= _regSubAt)
+                {
+                    _regSubAt = now + 2f;
+                    global::BigAmbitions.ModsInternal.ModDiscoveryRegistry.OnDiscoveryUpdated -= _onRegUpdated;
+                    global::BigAmbitions.ModsInternal.ModDiscoveryRegistry.OnDiscoveryUpdated += _onRegUpdated;
+                }
+#if BAMP_DEV
+                long simEnd = System.Threading.Interlocked.Read(ref _simBusyUntilMs);
+                if (simEnd != 0 && NowMs >= simEnd)
+                {
+                    System.Threading.Interlocked.Exchange(ref _simBusyUntilMs, 0);
+                    OnRegistryUpdated();   // a real discovery raises OnDiscoveryUpdated as it ends
+                    Plugin.Logger.LogInfo("[Mods] DEV simulated rescan ended.");
+                }
+#endif
+                if (ScanState() == ModsScan.Busy) _regSawBusy = true;
+                else if (_regSawBusy) { _regSawBusy = false; System.Threading.Interlocked.Increment(ref _regGen); }
+                // F2: once patching has run (MPSaveManager.PatchingStarted), check the apply patches bound - up to 3 tries 2 s apart.
+                if (!_applyHooksChecked && MPSaveManager.PatchingStarted && now >= _applyHookAt)
+                {
+                    _applyHookAt = now + 2f;
+                    if (CheckApplyHooks(++_applyHookTries >= 3)) _applyHooksChecked = true;
+                }
+                // F2 backstop: a flag stuck for 60 s (the apply threw before its remove step) is cleared - never a verdict.
+                long since = System.Threading.Interlocked.Read(ref _applySinceMs);
+                if (since != 0 && System.Threading.Volatile.Read(ref _applyDepth) > 0 && NowMs - since >= ApplyStuckMs)
+                {
+                    System.Threading.Interlocked.Exchange(ref _applyDepth, 0);
+                    System.Threading.Interlocked.Exchange(ref _applySinceMs, 0);
+                    System.Threading.Interlocked.Increment(ref _regGen);
+                    Plugin.Logger.LogWarning($"[Mods] a mods-panel change was still marked as being applied after {ApplyStuckMs / 1000} s (its apply step likely failed before the remove step) - the mark is cleared and the list is re-read.");
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>Re-check fold F2. ANY THREAD: the game's mod state is READY - no discovery running (the semaphore free),
+        /// the scan state initialised, and no mods-panel change being applied (when both apply patches bound). Read LIVE.
+        /// The one readiness function: ComputeMods captures a list only when it is true (F3), and the Refuse verdict
+        /// (ModsVerdictReady) builds on it. The DEV lever 'fakemod busy N' makes it false. Otherwise <paramref name="why"/>
+        /// names what is not ready.</summary>
+        public static bool ModsListReady(out string why)
+        {
+            why = "";
+            try
+            {
+#if BAMP_DEV
+                if (System.Threading.Interlocked.Read(ref _simBusyUntilMs) > NowMs) { why = "the game is rescanning its mods (DEV simulated)"; return false; }
+#endif
+                var sem = _regSem; var fi = _regInitField;
+                if (sem != null && sem.CurrentCount == 0) { why = "the game is scanning its mods"; return false; }
+                if (ApplyInProgress) { why = "a mods-panel change is being applied"; return false; }
+                if (fi != null && !(bool)fi.GetValue(null)) { why = "the game has not completed a mod scan yet"; return false; }
+                return true;
+            }
+            catch { why = "the game's mod-scan state could not be read"; return false; }
+        }
+
+        /// <summary>MODS-FOLD R2 / re-check fold. ANY THREAD (the Hello handler): true when the host's list may decide a
+        /// Refuse verdict - the mod state is ready (ModsListReady), <see cref="CachedMods"/> was captured after the last
+        /// change, and it exists. When false the Hello is admitted as Allow, never refused and never held.</summary>
+        public static bool ModsVerdictReady(out string why)
+        {
+            try
+            {
+                if (!ModsListReady(out why)) return false;
+                if (ModsChangePending) { why = "the host's mod list is being re-read after a change"; return false; }
+                if (_cachedMods.Length == 0) { why = "the host's mod list is not computed yet"; return false; }
+                return true;
+            }
+            catch { why = "the host's mod list could not be checked"; return false; }
+        }
 
         /// <summary>MAIN THREAD ONLY (called from EnsureCached).</summary>
         private static void ComputeMods()
         {
             try
             {
-                string m = ListLoadedMods();
-                // Review HIGH: the game CLEARS its registry and repopulates it across awaits whenever it
-                // re-discovers (window focus after a file change, a mod toggled). A refresh landing in that window
-                // must NOT swap the good `mod:` list for folder tokens - a HELLO built then would make every mod
-                // differ on both sides, and the host keeps that verdict for the whole lobby. The folder fallback is
-                // only right BEFORE a registry list has ever been seen; afterwards the last good value stands.
-                if (m.Length == 0 && _hadRegistryList) return;
-                if (m.Length > 0) _hadRegistryList = true;
+                var st = ScanState();
+                // R2 / F3: never capture a list mid-scan or mid-apply - the registry is emptied and refilled across awaits,
+                // so a list read then is PARTIAL, and a Hello sent with it (or a verdict made on it) is wrong.
+                if (st == ModsScan.Busy) return;
+                int gen = System.Threading.Volatile.Read(ref _regGen);
+                if (st == ModsScan.NotScanned)
+                {
+                    // R1: the game has not finished its first scan. Nothing is sent yet ("" = not computed) - never the
+                    // FOLDER list, which counts switched-off Workshop items and every ModsLocal folder as loaded mods.
+                    if (!_modsWaitSaid) { _modsWaitSaid = true; Plugin.Logger.LogInfo("[Mods] the game has not finished its first mod scan - no mod list until it does."); }
+                    return;
+                }
+                if (!ModsListReady(out _)) return;   // F3: a mods-panel change being applied (or the DEV 'busy' lever)
+                // Done: an empty registry now MEANS no loaded mods = "(none)" (R1; R3: switching every mod off reads as
+                // "(none)", not as the last list). Unknown (state unreadable): a raise of OnDiscoveryUpdated still proves a scan ended.
+                bool scanDone = st == ModsScan.Done || gen > 0;
+#if BAMP_DEV
+                if (_simScanUnknown) scanDone = false;
+#endif
+                string m = ListLoadedMods(scanDone);
+                bool fromFolders = false;
                 if (m.Length == 0)
                 {
-                    // Nothing discovered yet, or the registry could not be read. HasDiscoveredEntries
-                    // is false for BOTH "no mods installed" and "the scan has not run", so the two
-                    // cannot be told apart — fall back to the installed-FOLDER listing for this pass
-                    // and ask the registry again on the next one (2 s), which self-heals as soon as
-                    // discovery lands. One line, once per session.
-                    if (!_modsFallbackSaid)
+                    // The registry threw, or (state unreadable, no raise seen) it is empty: the last good list stands.
+                    if (_hadRegistryList || st == ModsScan.Done) { System.Threading.Volatile.Write(ref _cachedGen, gen); return; }
+                    // Only when the scan state cannot be read at all and nothing was ever listed: the old installed-FOLDER
+                    // walk, MARKED - the Refuse gate never refuses on it (MPServer.ValidateHelloVersion).
+                    if (!_modsScanUnknownSaid)
                     {
-                        _modsFallbackSaid = true;
-                        Plugin.Logger.LogInfo("[Mods] the game's mod registry has discovered nothing yet - falling back to the installed-FOLDER list until it does.");
+                        _modsScanUnknownSaid = true;
+                        Plugin.Logger.LogInfo("[Mods] the game's mod-scan state is unreadable and its registry has listed nothing - using the installed-FOLDER list (informational; it never refuses a join).");
                     }
                     m = MPBugReport.ListInstalledMods();
+#if BAMP_DEV
+                    lock (_fakeFolders)
+                        foreach (var f in _fakeFolders)
+                            m = m.Length == 0 ? ("local:" + f) : (m + ", local:" + f);
+#endif
+                    fromFolders = true;
                 }
+                else _hadRegistryList = true;
 #if BAMP_DEV
                 lock (_fakeMods)
                     foreach (var f in _fakeMods)
                         m = (m.Length == 0 || m == "(none)") ? ("test:" + f) : (m + ", test:" + f);
 #endif
-                _cachedMods = string.IsNullOrEmpty(m) ? "(none)" : m;   // "(none)" ≠ "" so an empty list still reads as "computed"
+                _cachedModsFromFolders = fromFolders;
+                _cachedMods = string.IsNullOrEmpty(m) ? "(none)" : m;   // "(none)" != "" so an empty list still reads as "computed"
+                System.Threading.Volatile.Write(ref _cachedGen, gen);
             }
             catch { }
+        }
+
+        /// <summary>MODS-FOLD R1: true when a mod list carries installed-FOLDER tokens ("workshop:", "local:") - a list built
+        /// by the folder walk (an older build's, or a side whose scan state is unreadable). A folder is not a loaded mod, so
+        /// the Refuse gate never refuses on such a list.</summary>
+        public static bool IsFolderList(string list)
+        {
+            try
+            {
+                foreach (var t in ParseModList(list))
+                    if (t.StartsWith("workshop:", StringComparison.OrdinalIgnoreCase) || t.StartsWith("local:", StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            catch { }
+            return false;
         }
 
         /// <summary>H-MODSDIFFER-1 step 2 (user-approved 2026-09-20). MAIN THREAD ONLY.
@@ -326,15 +619,19 @@ namespace BigAmbitionsMP
         /// PRIVACY: a LOCAL mod's ModId is its FULL PATH on disk (ModDiscoveryRegistry). It never
         /// leaves this method — only an assembly name, a workshop id or a display name does.
         ///
-        /// Returns "" when the registry has discovered nothing (or threw), so the caller can fall
-        /// back for that pass; "(none)" when it has discovered entries that yield no token.</summary>
-        public static string ListLoadedMods()
+        /// Returns "(none)" when the registry is empty and <paramref name="scanDone"/> (MODS-FOLD R1: a completed scan that
+        /// loaded nothing), "" when it is empty before a completed scan or threw, "(none)" also for entries that yield no token.</summary>
+        public static string ListLoadedMods(bool scanDone = false)
         {
             var tokens = new System.Collections.Generic.List<string>();
             int byAsm = 0, byWs = 0, byName = 0, failed = 0;
             try
             {
-                if (!global::BigAmbitions.ModsInternal.ModDiscoveryRegistry.HasDiscoveredEntries) return "";
+                bool empty = !global::BigAmbitions.ModsInternal.ModDiscoveryRegistry.HasDiscoveredEntries;
+#if BAMP_DEV
+                if (_simEmptyRegistry) empty = true;
+#endif
+                if (empty) return scanDone ? "(none)" : "";
                 var entries = global::BigAmbitions.ModsInternal.ModDiscoveryRegistry.Entries;
                 if (entries == null) return "";
                 // One mod is listed once per ACTIVATION SCOPE it registers in, so dedupe by ModId
@@ -370,7 +667,7 @@ namespace BigAmbitionsMP
                 if (!_modsFallbackSaid)
                 {
                     _modsFallbackSaid = true;
-                    Plugin.Logger.LogWarning($"[Mods] the game's mod registry could not be read ({ex.GetType().Name}) - the last good list stands, or the installed-FOLDER list if there is none yet.");
+                    Plugin.Logger.LogWarning($"[Mods] the game's mod registry could not be read ({ex.GetType().Name}) - the last good list stands.");
                 }
                 return "";
             }
@@ -457,7 +754,34 @@ namespace BigAmbitionsMP
             lock (_fakeMods) _fakeMods.Add(name);
             ComputeMods();
         }
-        internal static void TestClearFakeMods() { lock (_fakeMods) _fakeMods.Clear(); ComputeMods(); }
+        internal static void TestClearFakeMods()
+        {
+            lock (_fakeMods) _fakeMods.Clear();
+            lock (_fakeFolders) _fakeFolders.Clear();
+            _simEmptyRegistry = false; _simScanUnknown = false;
+            System.Threading.Interlocked.Exchange(ref _simBusyUntilMs, 0);
+            ComputeMods();
+        }
+        /// <summary>MODS-FOLD test (a): the registry reads as EMPTY after a completed scan (nothing loaded).</summary>
+        internal static void TestEmptyRegistry(bool on) { _simEmptyRegistry = on; ComputeMods(); }
+        /// <summary>MODS-FOLD test (a): an extra/disabled folder on disk - it appears only in the installed-FOLDER walk.</summary>
+        internal static void TestAddFakeFolder(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return;
+            lock (_fakeFolders) _fakeFolders.Add(name);
+            ComputeMods();
+        }
+        /// <summary>MODS-FOLD test (a): the game's scan state reads as unreadable and nothing was listed yet - the only
+        /// condition that still takes the FOLDER walk.</summary>
+        internal static void TestScanUnknown(bool on) { _simScanUnknown = on; if (on) _hadRegistryList = false; ComputeMods(); }
+        /// <summary>MODS-FOLD test (b): a rescan in progress for <paramref name="seconds"/> s, ending with the raise a real one makes.
+        /// Seen through the one readiness function (ModsListReady): the host's list is NOT ready meanwhile, so a Refuse
+        /// verdict admits the joiner as Allow.</summary>
+        internal static void TestSimulateRescan(int seconds)
+        {
+            System.Threading.Interlocked.Exchange(ref _simBusyUntilMs, NowMs + Math.Max(1, seconds) * 1000L);
+            Plugin.Logger.LogInfo($"[Mods] DEV simulated rescan: {seconds} s.");
+        }
 #endif
 
         /// <summary>Diff two comma-separated mod lists (the report.md InstalledMods format).
@@ -469,8 +793,8 @@ namespace BigAmbitionsMP
         /// H-MODSDIFFER-1 step 2 (2026-09-20): that drop is now dead weight for the NORMAL list —
         /// the tokens are "mod:/ws:/name:" from the game's own registry, and a blueprint never
         /// enters that registry (the workshop tags it "Blueprint", not "mod"). It is kept because
-        /// it still does its job on the installed-FOLDER list, which is the fallback used before
-        /// discovery has run; against the new tokens it simply matches nothing.</summary>
+        /// it still does its job on an installed-FOLDER list (an older build's, or the fallback taken only when the
+        /// game's scan state cannot be read); against the new tokens it simply matches nothing.</summary>
         public static bool DiffMods(string mine, string theirs, out string onlyMine, out string onlyTheirs, out int onlyMineCount, out int onlyTheirsCount)
         {
             onlyMine = onlyTheirs = ""; onlyMineCount = onlyTheirsCount = 0;
@@ -491,6 +815,105 @@ namespace BigAmbitionsMP
                 return om.Count > 0 || ot.Count > 0;
             }
             catch { return false; }
+        }
+
+        // ── MODS-GATE-1 (user-approved 2026-09-29): the refusal the host's 'Different mods: Refuse' sends ──
+        /// <summary>The disconnect tag for a mod-list refusal: "BAMP:mods:&lt;nMissing&gt;|&lt;nExtra&gt;|&lt;names&gt;|&lt;names&gt;",
+        /// names TAB-separated, at most 5 per side, from the JOINER's point of view (missing = only on the host, extra = only
+        /// on the joiner) - the same compared sets as <see cref="DiffMods"/>. The tag rides the transport's disconnect data;
+        /// by construction it stays under 400 bytes, far under that limit: long names are shortened (40, 24, 12, 6
+        /// characters, ellipsized) and, last, the names are dropped.</summary>
+        public static string ModsRefusalTag(string hostMods, string joinerMods, out int nMissing, out int nExtra)
+        {
+            nMissing = nExtra = 0;
+            try
+            {
+                var missing = new System.Collections.Generic.List<string>();
+                var extra   = new System.Collections.Generic.List<string>();
+                ReadableModDiff(hostMods, joinerMods, missing, extra);
+                nMissing = missing.Count; nExtra = extra.Count;
+                string head = "BAMP:mods:" + nMissing.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|"
+                            + nExtra.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|";
+                foreach (int cap in new[] { 40, 24, 12, 6 })
+                {
+                    string tag = head + TagNames(missing, cap) + "|" + TagNames(extra, cap);
+                    if (System.Text.Encoding.UTF8.GetByteCount(tag) <= 400) return tag;
+                }
+                return head + "|";
+            }
+            catch { return "BAMP:mods"; }
+        }
+
+        private static string TagNames(System.Collections.Generic.List<string> names, int cap)
+        {
+            var sb = new System.Text.StringBuilder();
+            for (int i = 0; i < names.Count && i < 5; i++)
+            {
+                string s = names[i].Replace('|', '/').Replace('\t', ' ');
+                if (s.Length > cap)
+                {
+                    int cut = cap - 1;
+                    if (cut > 0 && char.IsHighSurrogate(s[cut - 1])) cut--;   // R4: never split a UTF-16 surrogate pair
+                    s = s.Substring(0, cut).TrimEnd() + "\u2026";
+                }
+                if (sb.Length > 0) sb.Append('\t');
+                sb.Append(s);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>The DiffMods sets (layout: dropped, case-insensitive) as readable NAMES, sorted: the token's kind prefix
+        /// ("mod:", "ws:", "name:", "test:", a fallback folder kind) and a mod token's "@version" are cut; the version is
+        /// kept only when the same name is on BOTH sides (a version drift would otherwise read "missing X; extra X").</summary>
+        public static void ReadableModDiff(string hostMods, string joinerMods,
+            System.Collections.Generic.List<string> hostOnly, System.Collections.Generic.List<string> joinerOnly)
+        {
+            try
+            {
+                var sa = ParseModList(hostMods);
+                var sj = ParseModList(joinerMods);
+                sa.RemoveWhere(s => s.StartsWith("layout:", StringComparison.OrdinalIgnoreCase));
+                sj.RemoveWhere(s => s.StartsWith("layout:", StringComparison.OrdinalIgnoreCase));
+                var ta = new System.Collections.Generic.List<string>();
+                var tj = new System.Collections.Generic.List<string>();
+                foreach (var s in sa) if (!sj.Contains(s)) ta.Add(s);
+                foreach (var s in sj) if (!sa.Contains(s)) tj.Add(s);
+                var na = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var nj = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var s in ta) na.Add(ReadableModName(s, false));
+                foreach (var s in tj) nj.Add(ReadableModName(s, false));
+                foreach (var s in ta) { string r = ReadableModName(s, false); hostOnly.Add(nj.Contains(r) ? ReadableModName(s, true) : r); }
+                foreach (var s in tj) { string r = ReadableModName(s, false); joinerOnly.Add(na.Contains(r) ? ReadableModName(s, true) : r); }
+                hostOnly.Sort(StringComparer.OrdinalIgnoreCase);
+                joinerOnly.Sort(StringComparer.OrdinalIgnoreCase);
+            }
+            catch { }
+        }
+
+        private static string ReadableModName(string token, bool withVersion)
+        {
+            try
+            {
+                string s = token ?? "";
+                int c = s.IndexOf(':');
+                bool isMod = s.StartsWith("mod:", StringComparison.OrdinalIgnoreCase);
+                if (c > 0 && c <= 10)
+                {
+                    bool kind = true;
+                    for (int i = 0; i < c; i++) if (!char.IsLetter(s[i])) { kind = false; break; }
+                    if (kind) s = s.Substring(c + 1);
+                }
+                string ver = "";
+                if (isMod)
+                {
+                    int at = s.LastIndexOf('@');
+                    if (at > 0) { ver = s.Substring(at + 1); s = s.Substring(0, at); }
+                }
+                s = s.Replace('<', '(').Replace('>', ')').Trim();   // the card is TMP rich text: no '<' may open a tag; '(' ')' are in every font (R4)
+                if (s.Length == 0) s = token ?? "?";
+                return withVersion && ver.Length > 0 ? s + " " + ver : s;
+            }
+            catch { return token ?? "?"; }
         }
 
         // ── H-MODSDIFFER-1 step 1 (2026-09-20, log-only) ──
@@ -590,6 +1013,34 @@ namespace BigAmbitionsMP
                 set.Add(s);
             }
             return set;
+        }
+    }
+
+    /// <summary>Re-check fold F2 (2026-09-29): the mods panel's apply STARTS here (ModsView.cs:82-84 calls it on the main
+    /// thread when the panel closes with a changed manifest; the body is async, the prefix runs at its synchronous start).</summary>
+    [HarmonyLib.HarmonyPatch]
+    public static class Patch_ModsView_OnManifestChanged_ApplyStart
+    {
+        static System.Reflection.MethodBase? TargetMethod()
+            => HarmonyLib.AccessTools.Method(typeof(global::BigAmbitions.ModsView), "OnManifestChanged");
+
+        static void Prefix()
+        {
+            try { MPContentFingerprint.ModsApplyStarted(); } catch { }
+        }
+    }
+
+    /// <summary>Re-check fold F2: the apply's LAST step (ModsView.cs:194, its only caller in Build 3682). Its early return
+    /// is inside the method, so this postfix runs even when nothing was removed.</summary>
+    [HarmonyLib.HarmonyPatch]
+    public static class Patch_ModDiscoveryRegistry_RemoveDiscoveredSteamMods_ApplyEnd
+    {
+        static System.Reflection.MethodBase? TargetMethod()
+            => HarmonyLib.AccessTools.Method(typeof(global::BigAmbitions.ModsInternal.ModDiscoveryRegistry), "RemoveDiscoveredSteamMods");
+
+        static void Postfix()
+        {
+            try { MPContentFingerprint.ModsApplyEnded(); } catch { }
         }
     }
 }

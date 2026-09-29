@@ -132,6 +132,22 @@ namespace BigAmbitionsMP
         /// <summary>The chat window's place on THIS machine (user U2 2026-09-28): "x,y,w,h" in canvas units, anchored
         /// bottom-right; "" = the default next to the phone. Written on a drag / resize release only.</summary>
         public static string ChatWindowPlace { get { try { return Get("ChatWindowPlace"); } catch { return ""; } } }
+
+        // MODS-GATE-1 (user-approved 2026-09-29, decisions 16-17): the host's lobby 'Different mods' setting.
+        // false = Allow (a joiner with a different mod list joins with the mismatch warnings - the behaviour before this
+        // setting existed, and the default); true = Refuse (MPServer refuses that joiner at Hello, before admission).
+        // Read on the NETWORK thread by the Hello check, so it lives in a volatile field loaded at Init and written only by
+        // the lobby click (SetRefuseModMismatch), which also persists it.
+        private static volatile bool _refuseModMismatch;
+        public static bool RefuseModMismatch => _refuseModMismatch;
+        /// <summary>The raw persisted value ("" when never saved) - for the DEV lever's persistence check.</summary>
+        public static string RefuseModMismatchSaved { get { try { return Get("RefuseModMismatch", ""); } catch { return ""; } } }
+        public static void SetRefuseModMismatch(bool refuse)
+        {
+            _refuseModMismatch = refuse;
+            try { Set("RefuseModMismatch", refuse ? "true" : "false"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] RefuseModMismatch save: {ex.Message}"); }
+        }
         public static void SetChatWindowPlace(string v)
         {
             try { Set("ChatWindowPlace", v ?? ""); }
@@ -390,6 +406,11 @@ namespace BigAmbitionsMP
                 try { Set("HostPort", HostPort.ToString()); } catch { }
             }
             else HostPort = hpv;
+
+            // MODS-GATE-1: anything but a saved "true" is Allow (the default).
+            try { _refuseModMismatch = string.Equals(Get("RefuseModMismatch", "false").Trim(), "true", StringComparison.OrdinalIgnoreCase); }
+            catch { _refuseModMismatch = false; }
+            Plugin.Logger.LogInfo($"[Config] Different mods: {(_refuseModMismatch ? "Refuse" : "Allow")}.");
 
             StableId = ResolveStableId(true);
             Plugin.Logger.LogInfo($"[Config] Stable id: {StableId}");

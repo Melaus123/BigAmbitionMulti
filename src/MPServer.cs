@@ -3670,6 +3670,78 @@ namespace BigAmbitionsMP
             return false;
         }
 
+        /// <summary>MODS-GATE-1 (user-approved 2026-09-29): refuse a joiner whose mod list differs while the host's
+        /// 'Different mods' is Refuse - the version refusals' path (a tagged disconnect, nothing bound). The tag names the
+        /// difference from the joiner's side (MPContentFingerprint.ModsRefusalTag); the joiner's Couldn't join card turns it
+        /// into the approved sentence (MPClient.ModsRefusalFromTag). One host log line per refusal; no host pop-up (the host
+        /// chose this). <paramref name="noList"/>: the joiner sent no mod list (a current build whose first mod scan had not completed).</summary>
+        private static void RefuseModsJoin(MPLink peer, HelloPayload hello, string mine, string theirs, bool noList)
+        {
+            string tag = "BAMP:mods";
+            try
+            {
+                int nMissing = 0, nExtra = 0;
+                if (!noList)
+                {
+                    tag = MPContentFingerprint.ModsRefusalTag(mine, theirs, out nMissing, out nExtra);
+                    MPContentFingerprint.LogFullModBlockOnce(hello.PlayerId, mine, theirs, hello.PlayerId);
+                }
+                string when = IsInLobby ? "lobby" : "mid-game";
+                Plugin.Logger.LogWarning(noList
+                    ? $"[Server] Hello from '{hello.PlayerId}' (peer {peer.Id}) refused — Different mods is Refuse and they sent no mod list (not computed yet on their side), so their mods cannot be checked; {when} join, never admitted."
+                    : $"[Server] Hello from '{hello.PlayerId}' (peer {peer.Id}) refused — different mods (Different mods: Refuse): {nMissing} of the host's mods missing on their side, {nExtra} extra; {when} join, never admitted.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] mods refusal for '{hello.PlayerId}': {ex.Message}"); }
+            try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes(tag)); } catch { }
+            // Re-check fold F4 (2026-09-29): a joiner that sent NO mod list is not a mod difference - log only, no host notice.
+            if (!noList) NotifyHostModsRefusal(hello.PlayerId);
+        }
+
+        // MODS-FOLD decision 22 (user-approved 2026-09-29): the HOST is told when Refuse turns someone away - the lobby's
+        // orange notice (the version refusals' Round-215 mechanism) or, in-world, the toast (the round-253b mid-game
+        // mod-mismatch mechanism). Once per refusal, at most one per player per 30 s so a joiner retrying in a loop does
+        // not spam the host.
+        private static readonly Dictionary<string, long> _modsRefusalNoticeAt = new Dictionary<string, long>(StringComparer.Ordinal);
+        private const long ModsRefusalNoticeGapMs = 30000;
+
+        /// <summary>ANY THREAD (the Hello handler); the notice itself is shown on the main thread.</summary>
+        private static void NotifyHostModsRefusal(string name)
+        {
+            try
+            {
+                string who = name ?? "";
+                long now = TickMs64;
+                lock (_modsRefusalNoticeAt)
+                {
+                    if (_modsRefusalNoticeAt.TryGetValue(who, out long at) && now - at < ModsRefusalNoticeGapMs)
+                    {
+                        Plugin.Logger.LogInfo($"[Server] host notice for '{who}' skipped - one was shown {(now - at) / 1000} s ago (at most one per player per {ModsRefusalNoticeGapMs / 1000} s).");
+                        return;
+                    }
+                    _modsRefusalNoticeAt[who] = now;
+                }
+                string text = $"{who} was turned away: different mods.";
+                GameStatePatcher.EnqueueOnMainThread(() =>
+                {
+                    try
+                    {
+                        if (IsInLobby)
+                        {
+                            MPCanvasUI.PostLobbyNotice(text);
+                            Plugin.Logger.LogInfo($"[Server] host notice (lobby): \"{text}\"");
+                        }
+                        else
+                        {
+                            PassengerHud.Toast(text, 10f);
+                            Plugin.Logger.LogInfo($"[Server] host notice (in-game toast): \"{text}\"");
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] mods refusal notice: {ex.Message}"); }
+                });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] mods refusal notice: {ex.Message}"); }
+        }
+
         /// <summary>Refuse a peer running an incompatible build BEFORE binding any
         /// identity — a protocol-number mismatch means the wire format differs (an
         /// out-of-date mod build would misparse messages), and a game-version
@@ -3731,11 +3803,41 @@ namespace BigAmbitionsMP
                 try
                 {
                     string mine = MPContentFingerprint.CachedMods, theirsMods = hello.Mods ?? "";
+                    // MODS-GATE-1 (user-approved 2026-09-29): with the host's 'Different mods: Refuse' the same verdict
+                    // that warns below REFUSES instead - here, before the identity bind, the ban gate and the mid-game
+                    // parking, so a refused joiner is never admitted and never reaches the host's join requests.
+                    bool refuseMods = MPConfig.RefuseModMismatch;
+                    // MODS-FOLD R2 (re-check 2026-09-29, manager decision): Refuse is a commitment, so it is made only on a
+                    // VERIFIED host list - one captured after the game's last scan / mods-panel change completed, read live
+                    // here (MPContentFingerprint.ModsVerdictReady). When it is not ready (a scan running, a mods-panel change
+                    // being applied, no completed scan yet) the joiner is admitted exactly as Allow does: never refused on a
+                    // list that cannot be verified, and never held - this Hello stays on the transport's receive thread.
+                    if (refuseMods && !MPContentFingerprint.ModsVerdictReady(out string notReady))
+                    {
+                        refuseMods = false;
+                        Plugin.Logger.LogInfo($"[Server] Hello from '{hello.PlayerId}' (peer {peer.Id}): mods verdict not ready ({notReady}) - admitted as Allow, not refused.");
+                    }
+                    mine = MPContentFingerprint.CachedMods;   // read after the readiness check
+                    // MODS-FOLD R1: a list built from installed FOLDERS (either side) cannot prove different LOADED mods - a
+                    // switched-off Workshop item or a leftover folder looks like a mod there. Never refuse on it; the
+                    // informational Allow path below still reports the difference.
+                    if (refuseMods && (MPContentFingerprint.CachedModsFromFolders || MPContentFingerprint.IsFolderList(theirsMods)))
+                    {
+                        refuseMods = false;
+                        Plugin.Logger.LogInfo($"[Server] Hello from '{hello.PlayerId}' (peer {peer.Id}): not refused on mods - the {(MPContentFingerprint.CachedModsFromFolders ? "host's" : "joiner's")} list came from installed folders, which cannot show what is loaded; handled as Allow.");
+                    }
                     if (string.IsNullOrEmpty(theirsMods))
-                        Plugin.Logger.LogInfo($"[Content] '{hello.PlayerId}' sent no mod list (older build) — mod diff skipped.");
+                    {
+                        // Not an older build: a build without the mod list is refused earlier, by the protocol check. This is
+                        // a current build that connected before its first mod scan completed (MPContentFingerprint.ComputeMods
+                        // sends no list until then), so its mods cannot be checked: Refuse refuses it.
+                        if (refuseMods) { RefuseModsJoin(peer, hello, mine, "", true); return false; }
+                        Plugin.Logger.LogInfo($"[Content] '{hello.PlayerId}' sent no mod list (not computed yet on their side) — mod diff skipped.");
+                    }
                     else if (!string.IsNullOrEmpty(mine)
                              && MPContentFingerprint.DiffMods(mine, theirsMods, out var onlyMine, out var onlyTheirs, out int nMine, out int nTheirs))
                     {
+                        if (refuseMods) { RefuseModsJoin(peer, hello, mine, theirsMods, false); return false; }
                         ModMismatchByPlayer[hello.PlayerId] = (nTheirs, nMine);   // round-253b: feeds the lobby start-gate popup
                         string detail = $"only on host ({nMine}): {(nMine > 0 ? onlyMine : "-")} | only on '{hello.PlayerId}' ({nTheirs}): {(nTheirs > 0 ? onlyTheirs : "-")}";
                         Plugin.Logger.LogWarning($"[Content] MOD MISMATCH: '{hello.PlayerId}' runs a different mod set — {detail}. "

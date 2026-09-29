@@ -1,0 +1,673 @@
+{
+  "id": "T-MODSGATE",
+  "title": "MODS-GATE-1 (user-approved 2026-09-29): the host's lobby 'Different mods' Allow/Refuse. (1) Allow = today: a mismatched joiner (DEV 'fakemod' on both sides: host-only ModsGateHostOnly, client-only ModsGateClientOnly) joins with the MOD MISMATCH warning; (2) Refuse through the button's click path is saved; the same joiner is refused at Hello and its log / Couldn't join card carries the approved sentence; (4) matching mods + Refuse joins normally; (3) mid-game (host loaded ${session}) with Refuse the mismatched join is refused and never parked (acceptjoin: none pending); (5) a host restart keeps Refuse. MODS-FOLD (review 2026-09-29): (a) Refuse never refuses on a folder-derived list and an empty completed scan is '(none)' whatever folders are on disk; (b) re-check fold: while the host's mod list is NOT ready (DEV 'fakemod busy', through the one readiness function) a mismatched joiner under Refuse is admitted as Allow with the 'not ready' line - never held, never refused; once ready the same joiner is refused. Decision 22: each refusal tells the host 'X was turned away: different mods.' (lobby notice / in-game toast, at most one per player per 30 s). Restores Allow and clears the fake mods.",
+  "preconditions": "Dev build with the 'uiview modsgate' and 'fakemod' levers (TestDrive.cs / MPCanvasUI.DevUi). Fixture save1 (host melaus, client Client1). Both instances share one ModsLocal, so the real mod lists match; the difference comes only from 'fakemod'.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "\\[Server\\] mid-game join request from 'Client1'",
+    "\\[Server\\] returning player 'Client1' auto-accepted",
+    "\\[Server\\] mods refusal for ",
+    "\\[MenuUI\\] Different mods: ",
+    "\\[MenuUI\\] lobby refresh: ",
+    "\\[MenuUI\\] lobby tick: ",
+    "\\[MenuUI\\] BuildLobbyWindow: ",
+    "\\[TestDrive\\] uiview: ",
+    "\\[TestDrive\\] screenshot: ",
+    "\\[Config\\] RefuseModMismatch save: ",
+    "\\[Server\\] Hello from .*mods verdict held",
+    "\\[Mods\\] mods-panel apply tracking NOT bound",
+    "\\[Mods\\] mods-panel apply tracking check failed"
+  ],
+  "oracles_report": [
+    "\\[Config\\] Different mods",
+    "\\[MenuUI\\] Different mods",
+    "\\[Server\\] Hello from ",
+    "\\[Content\\] MOD MISMATCH",
+    "\\[Client\\] disconnect reason tag",
+    "\\[MenuUI\\] Couldn't join",
+    "\\[TestDrive\\] screenshot ",
+    "\\[Mods\\] ",
+    "\\[Server\\] host notice",
+    "\\[Mods\\] mods-panel apply tracking"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "both",
+      "cmd": "mark TEST MODSGATE START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 2,
+      "role": "both",
+      "sleep_s": 20,
+      "note": "let the main menu finish building before the first lever"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "uiview modsgate allow",
+      "expect_result": "^OK uiview modsgate: state=Allow saved='false'",
+      "note": "RESTORE (idempotent): the click path, lobby not open yet"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "fakemod clear",
+      "expect_result": "^OK mod list restored"
+    },
+    {
+      "seq": 5,
+      "role": "c",
+      "cmd": "fakemod clear",
+      "expect_result": "^OK mod list restored"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "uiview lobbysaved",
+      "expect_result": "^OK uiview lobbysaved: fake saved-game lobby"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "uiview modsgate",
+      "expect_result": "^OK uiview modsgate: state=Allow saved='false' shown=True allowKind=1 refuseKind=0",
+      "note": "the row shows in the saved-game variant, Allow blue"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the view settle"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "screenshot ms-lobbysaved-allow",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ms-lobbysaved-allow\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "uiview host",
+      "expect_result": "^OK uiview host: server=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Listening on port 7777$",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "uiview lobbyreal",
+      "expect_result": "^OK uiview lobbyreal: real lobby server=True"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "uiview modsgate",
+      "expect_result": "^OK uiview modsgate: state=Allow saved='false' shown=True allowKind=1 refuseKind=0",
+      "note": "(1) default Allow, blue"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the view settle"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "screenshot ms-lobby-allow",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ms-lobby-allow\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 15,
+      "role": "both",
+      "cmd": "mark TEST MODSGATE ALLOW",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "fakemod add ModsGateHostOnly",
+      "expect_result": "^OK mod list now: .*test:ModsGateHostOnly"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "fakemod add ModsGateClientOnly",
+      "expect_result": "^OK mod list now: .*test:ModsGateClientOnly"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Content\\] MOD MISMATCH: 'Client1' runs a different mod set .*informational only, join proceeds\\.",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] 'Client1' joined lobby\\.",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave: left server=False client=False"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "sleep_s": 4,
+      "note": "the host drops the peer"
+    },
+    {
+      "seq": 22,
+      "role": "both",
+      "cmd": "mark TEST MODSGATE REFUSE-LOBBY",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "uiview modsgate refuse",
+      "expect_result": "^OK uiview modsgate: state=Refuse saved='true' shown=True allowKind=0 refuseKind=1",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[MenuUI\\] Different mods . Refuse \\(saved RefuseModMismatch=true\\)\\.",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "sleep_s": 2,
+      "note": "let the view settle"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "screenshot ms-lobby-refuse",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ms-lobby-refuse\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "uiview joinaddr 127.0.0.1:7777",
+      "expect_result": "^OK uiview joinaddr: ip='127.0.0.1' port='7777' err=''",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Hello from 'Client1' \\(peer \\d+\\) refused . different mods \\(Different mods: Refuse\\): 1 of the host's mods missing on their side, 1 extra; lobby join, never admitted\\.",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:mods:1\\|1\\|ModsGateHostOnly\\|ModsGateClientOnly' . \\\"This host only allows players with the same mods\\. Yours differ: missing ModsGateHostOnly; extra ModsGateClientOnly\\.\\\"",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] host notice \\(lobby\\): \"Client1 was turned away: different mods\\.\"",
+          "within_s": 30
+        }
+      ],
+      "note": "the join through Join a Game, so the Couldn't join card shows; decision 22: the host's orange lobby notice"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "sleep_s": 4,
+      "note": "the Couldn't join card"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "screenshot ms-card",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ms-card\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "uiview modsgate",
+      "expect_result": "state=Refuse",
+      "note": "still Refuse"
+    },
+    {
+      "seq": 30,
+      "role": "both",
+      "cmd": "mark TEST MODSGATE MATCH",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "fakemod clear",
+      "expect_result": "^OK mod list restored"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "fakemod clear",
+      "expect_result": "^OK mod list restored"
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] 'Client1' joined lobby\\.",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave: left server=False client=False"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "sleep_s": 4,
+      "note": "the host drops the peer"
+    },
+    {
+      "seq": 37,
+      "role": "both",
+      "cmd": "mark TEST MODSGATE FOLDERS",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "fakemod emptyreg on",
+      "expect_result": "^OK fakemod emptyreg on - mod list now: \\(none\\)$",
+      "note": "(a) Refuse is still on. Both games' registries read EMPTY after a completed scan = no loaded mods"
+    },
+    {
+      "seq": 39,
+      "role": "c",
+      "cmd": "fakemod emptyreg on",
+      "expect_result": "^OK fakemod emptyreg on - mod list now: \\(none\\)$"
+    },
+    {
+      "seq": 40,
+      "role": "c",
+      "cmd": "fakemod folder ModsGateDisabledFolder",
+      "expect_result": "^OK fakemod folder added - mod list now: \\(none\\)$",
+      "note": "an extra/disabled folder on the joiner's disk never reaches the LOADED list (before the fold it did, via the folder fallback)"
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] 'Client1' joined lobby\\.",
+          "within_s": 30
+        }
+      ],
+      "note": "(a) '(none)' vs '(none)' under Refuse: admitted"
+    },
+    {
+      "seq": 42,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave: left server=False client=False"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "sleep_s": 4,
+      "note": "the host drops the peer"
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "fakemod scanunknown on",
+      "expect_result": "^OK fakemod scanunknown on - mod list now: .*local:ModsGateDisabledFolder",
+      "note": "(a2) the joiner's scan state unreadable - the one case that still walks folders; its list carries the folder"
+    },
+    {
+      "seq": 46,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Hello from 'Client1' \\(peer \\d+\\): not refused on mods - the joiner's list came from installed folders",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] 'Client1' joined lobby\\.",
+          "within_s": 30
+        }
+      ],
+      "note": "(a2) a folder-derived list never refuses: handled as Allow"
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 48,
+      "role": "c",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave: left server=False client=False"
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "sleep_s": 4,
+      "note": "the host drops the peer"
+    },
+    {
+      "seq": 50,
+      "role": "c",
+      "cmd": "fakemod clear",
+      "expect_result": "^OK mod list restored"
+    },
+    {
+      "seq": 51,
+      "role": "h",
+      "cmd": "fakemod clear",
+      "expect_result": "^OK mod list restored"
+    },
+    {
+      "seq": 52,
+      "role": "both",
+      "cmd": "mark TEST MODSGATE NOTREADY",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "sleep_s": 4,
+      "note": "let the restored lists settle"
+    },
+    {
+      "seq": 54,
+      "role": "h",
+      "cmd": "fakemod add ModsGateHostOnly",
+      "expect_result": "^OK mod list now: .*test:ModsGateHostOnly"
+    },
+    {
+      "seq": 55,
+      "role": "c",
+      "cmd": "fakemod add ModsGateClientOnly",
+      "expect_result": "^OK mod list now: .*test:ModsGateClientOnly"
+    },
+    {
+      "seq": 56,
+      "role": "h",
+      "cmd": "fakemod busy 15",
+      "expect_result": "^OK fakemod simulated rescan 15 s",
+      "note": "(b) Refuse is on; the host's mod list is NOT ready (simulated rescan) when the Hello arrives"
+    },
+    {
+      "seq": 57,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Hello from 'Client1' \\(peer \\d+\\): mods verdict not ready \\(the game is rescanning its mods \\(DEV simulated\\)\\) - admitted as Allow, not refused\\.",
+          "within_s": 20
+        },
+        {
+          "role": "h",
+          "regex": "\\[Content\\] MOD MISMATCH: 'Client1' runs a different mod set .*informational only, join proceeds\\.",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] 'Client1' joined lobby\\.",
+          "within_s": 30
+        }
+      ],
+      "note": "(b) not ready + MISMATCHED joiner under Refuse: admitted as Allow (never held, never refused)"
+    },
+    {
+      "seq": 58,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 59,
+      "role": "c",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave: left server=False client=False"
+    },
+    {
+      "seq": 60,
+      "role": "h",
+      "sleep_s": 14,
+      "note": "the host drops the peer; the 15 s simulated rescan ends and the list is re-read"
+    },
+    {
+      "seq": 61,
+      "role": "c",
+      "cmd": "uiview joinaddr 127.0.0.1:7777",
+      "expect_result": "^OK uiview joinaddr: ip='127.0.0.1' port='7777' err=''",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Hello from 'Client1' \\(peer \\d+\\) refused . different mods \\(Different mods: Refuse\\): 1 of the host's mods missing on their side, 1 extra; lobby join, never admitted\\.",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:mods:1\\|1\\|ModsGateHostOnly\\|ModsGateClientOnly' . \\\"This host only allows players with the same mods\\. Yours differ: missing ModsGateHostOnly; extra ModsGateClientOnly\\.\\\"",
+          "within_s": 30
+        }
+      ],
+      "note": "(b) ready + the same joiner: refused"
+    },
+    {
+      "seq": 62,
+      "role": "c",
+      "sleep_s": 4,
+      "note": "the Couldn't join card"
+    },
+    {
+      "seq": 63,
+      "role": "h",
+      "cmd": "fakemod clear",
+      "expect_result": "^OK mod list restored"
+    },
+    {
+      "seq": 64,
+      "role": "c",
+      "cmd": "fakemod clear",
+      "expect_result": "^OK mod list restored",
+      "note": "the mid-game leg adds the fakes again"
+    },
+    {
+      "seq": 65,
+      "role": "both",
+      "cmd": "mark TEST MODSGATE MIDGAME",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 66,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK StartLoadGame\\('${session}'\\) invoked"
+    },
+    {
+      "seq": 67,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "the host's world loads"
+    },
+    {
+      "seq": 68,
+      "role": "h",
+      "cmd": "fakemod add ModsGateHostOnly",
+      "expect_result": "^OK mod list now: .*test:ModsGateHostOnly"
+    },
+    {
+      "seq": 69,
+      "role": "c",
+      "cmd": "fakemod add ModsGateClientOnly",
+      "expect_result": "^OK mod list now: .*test:ModsGateClientOnly"
+    },
+    {
+      "seq": 70,
+      "role": "c",
+      "cmd": "uiview joinaddr 127.0.0.1:7777",
+      "expect_result": "^OK uiview joinaddr: ip='127.0.0.1' port='7777' err=''",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Hello from 'Client1' \\(peer \\d+\\) refused . different mods \\(Different mods: Refuse\\): 1 of the host's mods missing on their side, 1 extra; mid-game join, never admitted\\.",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:mods:1\\|1\\|ModsGateHostOnly\\|ModsGateClientOnly' . \\\"This host only allows players with the same mods\\. Yours differ: missing ModsGateHostOnly; extra ModsGateClientOnly\\.\\\"",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] host notice \\(in-game toast\\): \"Client1 was turned away: different mods\\.\"",
+          "within_s": 30
+        }
+      ],
+      "note": "decision 22: the host's in-game toast"
+    },
+    {
+      "seq": 71,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 72,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK none pending",
+      "note": "THE ASSERTION: the refused join never reached the host's join requests"
+    },
+    {
+      "seq": 73,
+      "role": "both",
+      "cmd": "mark TEST MODSGATE RESTART",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 74,
+      "role": "h",
+      "drop": true
+    },
+    {
+      "seq": 75,
+      "role": "h",
+      "relaunch": true
+    },
+    {
+      "seq": 76,
+      "role": "h",
+      "sleep_s": 15,
+      "note": "main menu"
+    },
+    {
+      "seq": 77,
+      "role": "h",
+      "cmd": "uiview modsgate",
+      "expect_result": "^OK uiview modsgate: state=Refuse saved='true'",
+      "note": "restored from the host's config"
+    },
+    {
+      "seq": 78,
+      "role": "h",
+      "cmd": "uiview modsgate allow",
+      "expect_result": "^OK uiview modsgate: state=Allow saved='false'",
+      "note": "RESTORE the default"
+    },
+    {
+      "seq": 79,
+      "role": "c",
+      "cmd": "fakemod clear",
+      "expect_result": "^OK mod list restored"
+    },
+    {
+      "seq": 80,
+      "role": "both",
+      "cmd": "mark TEST MODSGATE END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

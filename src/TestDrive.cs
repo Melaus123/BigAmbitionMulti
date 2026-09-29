@@ -283,7 +283,7 @@ namespace BigAmbitionsMP
                         break;
                     }
                     case "host": case "port": case "joinaddr": case "cfg": case "leave": case "occupy":
-                    case "lobbymany": case "thumb": case "page": case "escape": case "rawpeer":
+                    case "lobbymany": case "thumb": case "page": case "escape": case "rawpeer": case "modsgate":
                     {
                         var ui = MPCanvasUI.Instance;
                         if (ui == null) return "ERR uiview " + which + ": no MPCanvasUI";
@@ -291,7 +291,7 @@ namespace BigAmbitionsMP
                         break;
                     }
                     default:
-                        return "ERR usage: uiview start|load|options|newgame|confirm|close|mp|join|joinerr|lobby|lobbysaved|lobbyclient|portpopup|connecting|failed|lobbyreal|host|port <n>|joinaddr <addr>|cfg|leave|occupy <port|a-b|off>|lobbymany|thumb <0..1>|page <-1|1>|escape|rawpeer <port|off>";
+                        return "ERR usage: uiview start|load|options|newgame|confirm|close|mp|join|joinerr|lobby|lobbysaved|lobbyclient|portpopup|connecting|failed|lobbyreal|host|port <n>|joinaddr <addr>|cfg|leave|occupy <port|a-b|off>|lobbymany|thumb <0..1>|page <-1|1>|escape|rawpeer <port|off>|modsgate [allow|refuse]";
                 }
                 Plugin.Logger.LogInfo("[TestDrive] uiview " + which + ": " + res);
                 return "OK uiview " + which + ": " + res;
@@ -2538,7 +2538,30 @@ namespace BigAmbitionsMP
                         MPContentFingerprint.TestClearFakeMods();
                         return $"OK mod list restored: {MPContentFingerprint.CachedMods}";
                     }
-                    return "ERR usage: fakemod add <name> | fakemod clear";
+                    // MODS-FOLD (review 2026-09-29) levers: the registry reads EMPTY after a completed scan; an extra folder on
+                    // disk (seen only by the folder walk); the scan state unreadable (the one case that still walks folders);
+                    // a rescan in progress for N s (the host's list reads NOT ready: a Refuse verdict admits as Allow until it ends).
+                    if (arg == "emptyreg on" || arg == "emptyreg off")
+                    {
+                        MPContentFingerprint.TestEmptyRegistry(arg.EndsWith(" on", StringComparison.Ordinal));
+                        return $"OK fakemod {arg} - mod list now: {MPContentFingerprint.CachedMods}";
+                    }
+                    if (arg.StartsWith("folder ", StringComparison.Ordinal))
+                    {
+                        MPContentFingerprint.TestAddFakeFolder(arg.Substring(7).Trim());
+                        return $"OK fakemod folder added - mod list now: {MPContentFingerprint.CachedMods}";
+                    }
+                    if (arg == "scanunknown on" || arg == "scanunknown off")
+                    {
+                        MPContentFingerprint.TestScanUnknown(arg.EndsWith(" on", StringComparison.Ordinal));
+                        return $"OK fakemod {arg} - mod list now: {MPContentFingerprint.CachedMods}";
+                    }
+                    if (arg.StartsWith("busy ", StringComparison.Ordinal) && int.TryParse(arg.Substring(5).Trim(), out int busyS) && busyS > 0 && busyS <= 60)
+                    {
+                        MPContentFingerprint.TestSimulateRescan(busyS);
+                        return $"OK fakemod simulated rescan {busyS} s - mod list now: {MPContentFingerprint.CachedMods}";
+                    }
+                    return "ERR usage: fakemod add <name> | fakemod clear | fakemod emptyreg on|off | fakemod folder <name> | fakemod scanunknown on|off | fakemod busy <1-60 s>";
                 }
 
                 // ── No-takeover package (user-approved 2026-08-18): rig runs must never

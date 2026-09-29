@@ -3419,6 +3419,8 @@ namespace BigAmbitionsMP
         private readonly LRow?[] _lwRows = new LRow?[LW_SLOTS];
         private RectTransform? _rtLwList, _lwThumb, _rtLwSettings, _rtLwInvite, _rtLwWaiting, _rtLwSpin;
         private GameObject? _lwTrack;
+        private LBtn? _lwModsAllowB, _lwModsRefuseB;   // MODS-GATE-1: host-only 'Different mods' row
+        private TextMeshProUGUI? _lwModsLbl;
         private TextMeshProUGUI? _lwHdrCash, _lwHdrAge, _lwNotice, _lwDiffLbl, _lwSavedLbl, _lwDirectLbl, _lwAddrLbl, _lwHintLbl, _lwWaitLbl, _lwConnLbl, _lwFailLbl, _ppErrLbl;
         private LBtn? _lwMoreB, _lwSaveSetB, _lwDiffEasyB, _lwDiffNormalB, _lwDiffHardB, _lwInviteB, _lwShowIpB, _lwPortB, _lwLeaveB, _lwStartB;
         private LBtn? _lwConnCancelB, _lwFailBackB, _lwFailRetryB, _ppCancelB, _ppSaveB;
@@ -5081,6 +5083,11 @@ namespace BigAmbitionsMP
                 _lwDiffEasyB   = LButton(st, "BAMP_DiffEasy",   "Easy",   94f,  56f, 80f, 36f, 0, 13f);
                 _lwDiffNormalB = LButton(st, "BAMP_DiffNormal", "Normal", 182f, 56f, 92f, 36f, 0, 13f);
                 _lwDiffHardB   = LButton(st, "BAMP_DiffHard",   "Hard",   282f, 56f, 80f, 36f, 0, 13f);
+                // MODS-GATE-1 (user-approved 2026-09-29): 'Different mods' Allow / Refuse, under Difficulty (new game) or the
+                // save name (saved game) - LobbyLayout places the row; the chosen one is the blue kind, like the difficulty.
+                _lwModsLbl     = LText(st, "Different mods", 13f, L_MUTED, 16f, 102f, 128f, 36f, TextAlignmentOptions.Left, true);
+                _lwModsAllowB  = LButton(st, "BAMP_ModsAllow",  "Allow",  150f, 102f, 100f, 36f, 0, 13f);
+                _lwModsRefuseB = LButton(st, "BAMP_ModsRefuse", "Refuse", 258f, 102f, 104f, 36f, 0, 13f);
                 _lwSavedLbl = LText(st, "", 15f, C_WHITE, 16f, 56f, 348f, 20f, TextAlignmentOptions.Left);
                 _lwSavedLbl.overflowMode = TextOverflowModes.Ellipsis;   // review item 12: a long save name stops at the box
 
@@ -5217,6 +5224,27 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[MenuUI] Difficulty → {d} (base cash {_hostSettings.StartingMoney})");
             HighlightDifficulty();
             RefreshLobbyWindow();
+        }
+
+        /// <summary>MODS-GATE-1: the chosen 'Different mods' button is the blue kind (1), the other the plain kind (0).</summary>
+        private void HighlightModsGate()
+        {
+            bool refuse = MPConfig.RefuseModMismatch;
+            LSetKind(_lwModsAllowB,  refuse ? 0 : 1);
+            LSetKind(_lwModsRefuseB, refuse ? 1 : 0);
+        }
+
+        /// <summary>MODS-GATE-1: the Allow / Refuse click path (the DEV lever 'uiview modsgate' calls this too). Saved in
+        /// the host's config at once; the next Hello reads it.</summary>
+        private void SetModsGate(bool refuse)
+        {
+            try
+            {
+                MPConfig.SetRefuseModMismatch(refuse);
+                Plugin.Logger.LogInfo($"[MenuUI] Different mods → {(refuse ? "Refuse" : "Allow")} (saved RefuseModMismatch={MPConfig.RefuseModMismatchSaved}).");
+                HighlightModsGate();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] Different mods: {ex.Message}"); }
         }
 
         /// <summary>The selected difficulty is the primary (blue) button, the others the normal grey-blue.</summary>
@@ -5371,6 +5399,7 @@ namespace BigAmbitionsMP
         private string LwFailReason()
         {
 #if BAMP_DEV
+            if (DevLobby == 6) return DevModsReason();
             if (DevLobby == 5) return "No host answered at that address. If your friend is on Steam, right-click their name and choose Join Game. Direct IP needs the host's public address and port 7777 opened on their router.";
 #endif
             string? f = MPClient.FriendlyDisconnectReason;
@@ -5445,12 +5474,18 @@ namespace BigAmbitionsMP
             LShowGO(_rtLwSettings != null ? _rtLwSettings.gameObject : null, host);
             LShowGO(_rtLwInvite != null ? _rtLwInvite.gameObject : null, host);
             LShowGO(_rtLwWaiting != null ? _rtLwWaiting.gameObject : null, client);
-            float sh = newGame ? 106f : 90f;
+            // MODS-GATE-1: the 'Different mods' row sits 10 under Difficulty (new game) or the save name (saved game); the
+            // section grows by that row, and Invite follows it (_lwInviteTop below).
+            float modsY = newGame ? 102f : 86f;
+            float sh = modsY + 36f + 14f;
             if (_rtLwSettings != null) LPos(_rtLwSettings, 678f, 64f, 380f, sh);
             LShow(_lwMoreB, newGame); LShow(_lwSaveSetB, !newGame);
             LShowGO(_lwDiffLbl != null ? _lwDiffLbl.gameObject : null, newGame);
             LShow(_lwDiffEasyB, newGame); LShow(_lwDiffNormalB, newGame); LShow(_lwDiffHardB, newGame);
             LShowGO(_lwSavedLbl != null ? _lwSavedLbl.gameObject : null, !newGame);
+            if (_lwModsLbl != null) LPos(_lwModsLbl.rectTransform, 16f, modsY, 128f, 36f);
+            if (_lwModsAllowB != null) LPos(_lwModsAllowB.rt, 150f, modsY, 100f, 36f);
+            if (_lwModsRefuseB != null) LPos(_lwModsRefuseB.rt, 258f, modsY, 104f, 36f);
             // Invite: Steam button, 'Direct connection:', the address (1 line hidden / 2 shown), Show IP + Change port, hint.
             float y = 46f;
             LShow(_lwInviteB, steamOk);
@@ -5568,6 +5603,7 @@ namespace BigAmbitionsMP
                     LSetText(_lwSavedLbl, sn.Length > 0 ? $"Saved game: {sn}" : "");
                 }
                 else HighlightDifficulty();
+                HighlightModsGate();
 
                 string addr;
                 bool dots = false;
@@ -5952,6 +5988,8 @@ namespace BigAmbitionsMP
                     if (LHit(_lwDiffEasyB, mp))   { SetDifficulty("Easy");   return; }
                     if (LHit(_lwDiffNormalB, mp)) { SetDifficulty("Normal"); return; }
                     if (LHit(_lwDiffHardB, mp))   { SetDifficulty("Hard");   return; }
+                    if (LHit(_lwModsAllowB, mp))  { SetModsGate(false); return; }
+                    if (LHit(_lwModsRefuseB, mp)) { SetModsGate(true);  return; }
                     if (LHit(_lwMoreB, mp) || LHit(_lwSaveSetB, mp)) { OnCustomize(); return; }
                 }
                 // Box focus: cash = host on any row; age = your OWN row only (host or joiner).
@@ -6082,6 +6120,21 @@ namespace BigAmbitionsMP
             ShowJoinDialog(false);
         }
 
+        /// <summary>MODS-GATE-1 DEV card: a sample refusal through the real tag + sentence path - 7 missing (one over-long
+        /// name, so the ellipsis and ' and N more' both show) and 1 extra.</summary>
+        private static string DevModsReason()
+        {
+            try
+            {
+                string tag = MPContentFingerprint.ModsRefusalTag(
+                    "mod:Advanced Business Simulation Overhaul Extended Edition@1.0.0.0, mod:BetterFurniture@1.0.0.0, mod:CheaperRent@1.0.0.0, "
+                    + "mod:MoreCars@1.0.0.0, mod:NightMarket@1.0.0.0, mod:QuietCity@1.0.0.0, mod:RealisticTraffic@1.2.0.0",
+                    "mod:ExtraShelves@2.0.0.0", out _, out _);
+                return MPClient.ModsRefusalFromTag(tag);
+            }
+            catch { return ""; }
+        }
+
         private void DevFill(int mode, int n, int me)
         {
             DevUiOff();
@@ -6153,7 +6206,16 @@ namespace BigAmbitionsMP
                         DevFill(1, 1, 0); _devBusyA = 7777; _devBusyB = 7778; RefreshLobbyWindow();
                         return $"fake host lobby + busy line, Hosting port popup open={OpenPortPopup()}";
                     case "connecting":  DevFill(4, 0, 0); return "fake connecting";
-                    case "failed":      DevFill(5, 0, 0); return "fake couldn't join";
+                    case "failed":      DevFill(arg == "mods" ? 6 : 5, 0, 0); return arg == "mods" ? "fake couldn't join (mods)" : "fake couldn't join";
+                    case "modsgate":
+                    {   // MODS-GATE-1: 'allow' / 'refuse' = the buttons' own click path; no argument = read the state
+                        if (arg == "allow") SetModsGate(false);
+                        else if (arg == "refuse") SetModsGate(true);
+                        else if (arg.Length > 0) return "ERR usage: modsgate [allow|refuse]";
+                        RefreshLobbyWindow();
+                        bool shown = _lwModsAllowB != null && _lwModsAllowB.go.activeInHierarchy;
+                        return $"state={(MPConfig.RefuseModMismatch ? "Refuse" : "Allow")} saved='{MPConfig.RefuseModMismatchSaved}' shown={shown} allowKind={(_lwModsAllowB != null ? _lwModsAllowB.kind : -9)} refuseKind={(_lwModsRefuseB != null ? _lwModsRefuseB.kind : -9)}";
+                    }
                     case "real":        DevUiOff(); ShowView(MpView.Lobby); return "real lobby";
                     case "host":
                         DevUiOff(); OnMpHostNew();

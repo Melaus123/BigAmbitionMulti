@@ -470,6 +470,7 @@ namespace BigAmbitionsMP
                     else if (tag == "BAMP:kicked") why = "KICKED by host";
                     else if (tag == "BAMP:banned") why = "Banned until host re-hosts";
                     else if (tag == "BAMP:identity") why = "Join refused — player identity invalid or already connected";
+                    else if (tag.StartsWith("BAMP:mods")) why = ModsRefusalFromTag(tag);   // MODS-GATE-1: the host's 'Different mods: Refuse'
                     else if (tag.StartsWith("BAMP:build"))
                     {
                         // 2026-09-01 (user-approved wording): same game version folder, different game build.
@@ -2836,5 +2837,52 @@ namespace BigAmbitionsMP
 
         // Poll loop lives in LnlClientTransport now (transport seam) — same
         // thread name, cadence, and throw-isolation as before.
+
+        // ── MODS-GATE-1 (user-approved 2026-09-29): the Couldn't join sentence for a mod-list refusal ──
+        /// <summary>Parse the host's "BAMP:mods:&lt;nMissing&gt;|&lt;nExtra&gt;|&lt;names&gt;|&lt;names&gt;" tag
+        /// (MPContentFingerprint.ModsRefusalTag) into the approved sentence.</summary>
+        internal static string ModsRefusalFromTag(string tag)
+        {
+            int nMissing = 0, nExtra = 0;
+            var missing = new List<string>();
+            var extra   = new List<string>();
+            try
+            {
+                string rest = tag.StartsWith("BAMP:mods:", StringComparison.Ordinal) ? tag.Substring("BAMP:mods:".Length) : "";
+                var p = rest.Split('|');
+                if (p.Length >= 4)
+                {
+                    int.TryParse(p[0], out nMissing); int.TryParse(p[1], out nExtra);
+                    foreach (var s in p[2].Split('\t')) if (s.Length > 0) missing.Add(s);
+                    foreach (var s in p[3].Split('\t')) if (s.Length > 0) extra.Add(s);
+                }
+            }
+            catch { }
+            return ComposeModsRefusal(nMissing, missing, nExtra, extra);
+        }
+
+        /// <summary>"This host only allows players with the same mods. Yours differ: missing {mods}; extra {mods}." - a side
+        /// with no names is left out; at most 5 names per side, then " and N more".</summary>
+        internal static string ComposeModsRefusal(int nMissing, List<string> missing, int nExtra, List<string> extra)
+        {
+            const string Head = "This host only allows players with the same mods.";
+            try
+            {
+                string a = ModsSide("missing", nMissing, missing), b = ModsSide("extra", nExtra, extra);
+                if (a.Length == 0 && b.Length == 0) return Head;
+                return Head + " Yours differ: " + (a.Length > 0 && b.Length > 0 ? a + "; " + b : a + b) + ".";
+            }
+            catch { return Head; }
+        }
+
+        private static string ModsSide(string word, int n, List<string> names)
+        {
+            if (names == null || names.Count == 0) return "";
+            int shown = Math.Min(5, names.Count);
+            string s = word + " " + string.Join(", ", names.GetRange(0, shown));
+            int more = Math.Max(n, names.Count) - shown;
+            if (more > 0) s += " and " + more + " more";
+            return s;
+        }
     }
 }
