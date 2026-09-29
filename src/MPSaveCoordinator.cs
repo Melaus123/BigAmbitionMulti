@@ -1191,6 +1191,7 @@ namespace BigAmbitionsMP
             // preset. Placed after the own-slot validation so a REFUSED load changes no shared state
             // (the 2026-08-18 ordering fix above).
             MPServer.LastStartSettings = m?.StartSettings;   // H-FRESH-1 r2: null when the manifest predates the field → the world-ready backstop derives it from the live world
+            MPServer.WorldSettingsRev = Math.Max(0, m?.WorldSettingsRev ?? 0);   // SAVED-SETTINGS-1: the world's settings rev continues from the save
             if (m?.StartSettings != null)
                 Plugin.Logger.LogInfo($"[MPSave] start settings restored from the manifest (cash {m.StartSettings.StartingMoney}).");
             else
@@ -3856,6 +3857,13 @@ namespace BigAmbitionsMP
                 m.TuneRestSpeed    = MPNeedsTuning.RestPercent;
                 m.TuneMoraleTempo  = MPNeedsTuning.MoralePercent;
                 m.TunePowerNap     = MPNeedsTuning.PowerNapAllowed ? 1 : 0;   // POWERNAP host gate persists with the save
+                // SAVED-SETTINGS-1: the world's live settings + their rev ride the same save moment (the next load lobby shows these).
+                try
+                {
+                    var wsGv = SaveGameManager.Current?.gameVariables;
+                    if (MPServer.IsRunning && wsGv != null) { m.WorldSettings = MPServer.DtoFromGameVariables(wsGv); m.WorldSettingsRev = MPServer.WorldSettingsRev; }
+                }
+                catch (Exception wsx) { Plugin.Logger.LogWarning($"[World] manifest stamp: {wsx.Message}"); }
                 // Handoff slice 1/2: store provenance — who hosted when this was written,
                 // and which host-start of the lineage this is.
                 m.LastHostStableId = MPConfig.StableId;

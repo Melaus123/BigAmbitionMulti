@@ -1717,6 +1717,7 @@ namespace BigAmbitionsMP
 
         public static void Stop()
         {
+            WorldSettingsRev = 0; PendingWorldSettings = null; WorldSettingsLoadArmed = false;   // SAVED-SETTINGS-1: per session
             LastStartSettings = null;   // H-FRESH-1 r2: a session's start settings die with it — the next world describes its own (review F-2026-09-06-E MAJOR-1)
             // Initiator forensics: clients see our Stop as RemoteConnectionClose
             // with no clue who pulled the plug — name the caller here so the
@@ -1795,6 +1796,7 @@ namespace BigAmbitionsMP
                 return;   // lobby untouched -- nothing has flipped yet
             }
             LastStartSettings = settings;
+            WorldSettingsRev = 0; PendingWorldSettings = null; WorldSettingsLoadArmed = false;   // SAVED-SETTINGS-1: a new world starts at rev 0
             MPLoadProfiler.Mark($"HOST StartNewGame ({settings.Difficulty}) — {_clients.Count} client(s)");
             // Round-217: identity at birth — mint the playthrough BEFORE anything can be
             // sent to a joiner, so no welcome package ever says "world: (blank)".
@@ -3223,6 +3225,17 @@ namespace BigAmbitionsMP
                     if (!string.IsNullOrEmpty(sess)) MPSaveCoordinator.ActiveSessionName = sess;
                     Plugin.Logger.LogInfo($"[Server] RequestSave from peer {peer.Id} (reason={reason}, exiting={rq?.Exiting}, name='{rq?.SaveName}') — coordinated save.");
                     MPSaveCoordinator.HostSaveNow(reason);
+                    break;
+                }
+
+                case MessageType.WorldSettings:   // SAVED-SETTINGS-1: a client whose applied rev differs from the heartbeat's asks for a re-send
+                {
+                    var wsq = env.GetPayload<WorldSettingsPayload>();
+                    if (wsq != null && wsq.Settings == null && !string.IsNullOrEmpty(senderPid))
+                    {
+                        string wsPid = senderPid; int wsTheirs = wsq.Rev;
+                        GameStatePatcher.EnqueueOnMainThread(() => SendWorldSettingsTo(wsPid, $"asked, their rev {wsTheirs}"));
+                    }
                     break;
                 }
 
@@ -4916,6 +4929,17 @@ namespace BigAmbitionsMP
                 // Enqueued second, and the main-thread queue is FIFO, so it also lands after the join
                 // re-send above. One-shot per load (the _peerApplying latch).
                 GameStatePatcher.EnqueueOnMainThread(() => HostReturnIfMarked(applyPid, broadcast: true));
+                // SAVED-SETTINGS-1: the same one-shot per-load edge (their own save has loaded and settled) delivers the world
+                // settings - covers lobby-start loads, mid-game joiners and rejoiners alike. No-op while the rev is 0.
+#if BAMP_DEV
+                if (DevSkipNextWorldLoadedSend)
+                {   // DEV (TestDrive 'wsskip', F4), test-only: leave this client to the heartbeat backstop
+                    DevSkipNextWorldLoadedSend = false;
+                    Plugin.Logger.LogInfo($"[World] DEV: skipped the world-loaded settings send to '{applyPid}' (wsskip) - the heartbeat backstop must deliver.");
+                }
+                else
+#endif
+                GameStatePatcher.EnqueueOnMainThread(() => SendWorldSettingsTo(applyPid, "world loaded"));
             }
             // Round-276b (verifier finding 5): a bare report winning the race must not
             // silence a later, detailed report of the SAME phase — the detail is the
@@ -5594,6 +5618,218 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogError($"[Server] DtoFromGameVariables: {ex.Message}");
             }
             return dto;
+        }
+
+        // ── SAVED-SETTINGS-1 (user-approved 2026-09-29, decisions 18, 20, 21): a saved world's settings, changed in the load lobby ──
+        // The host edits the save's FLEXIBLE settings in the load lobby (MPCanvasUI.StartLoadNow keeps them pending). At the
+        // host's world-ready they go through the game's own SaveGameManager.ApplyNewDifficulty (Options.cs:1024-1046), which
+        // itself keeps days per year / starting money / age / tutorial (SaveGameManager.cs:504-511). Every client gets them in
+        // WorldSettings (221) when it reports its world loaded, with the heartbeat's WorldRev as the backstop. OptionsGuard's
+        // in-session lockout is unchanged: the lobby stays the only change point.
+        /// <summary>Persisted with the save (manifest WorldSettingsRev): bumped each time the host applies changed settings.
+        /// 0 = never changed from the load lobby, so nothing is sent.</summary>
+        public static int WorldSettingsRev;
+        /// <summary>The load lobby's changed values waiting for the host's world-ready (null = nothing to apply).</summary>
+        public static GameVariablesDto? PendingWorldSettings;
+        public static string PendingWorldSettingsSession = "";
+        /// <summary>True from the load lobby's Start until that world is ready (so the no-change line is logged for loads only).</summary>
+        public static bool WorldSettingsLoadArmed;
+#if BAMP_DEV
+        /// <summary>DEV (TestDrive 'wsskip', F4): the next world-loaded WorldSettings send is skipped (test-only).</summary>
+        public static volatile bool DevSkipNextWorldLoadedSend;
+#endif
+
+        /// <summary>The flexible settings: the game's own EqualsFlexibleValues set (GameVariables.cs:64-76) minus disableEnergy,
+        /// which the needs dial owns in MP.</summary>
+        public static void CopyWorldFlex(GameVariablesDto from, GameVariablesDto to)
+        {
+            to.TaxPercentage                     = from.TaxPercentage;
+            to.MarketPriceMultiplier             = from.MarketPriceMultiplier;
+            to.EmployeeHourlySalaryMultiplier    = from.EmployeeHourlySalaryMultiplier;
+            to.BankInterestMultiplier            = from.BankInterestMultiplier;
+            to.RivalsDifficultyMultiplier        = from.RivalsDifficultyMultiplier;
+            to.BaseCustomerPromotionMultiplier   = from.BaseCustomerPromotionMultiplier;
+            to.WholesaleUrgentFeeMultiplier      = from.WholesaleUrgentFeeMultiplier;
+            to.ImporterUrgentFeeMultiplier       = from.ImporterUrgentFeeMultiplier;
+            to.ExportMultiplier                  = from.ExportMultiplier;
+            to.SellingMultiplier                 = from.SellingMultiplier;
+            to.DisableWholesaleAndImportLimits   = from.DisableWholesaleAndImportLimits;
+            to.AllProductsAvailableFromImporters = from.AllProductsAvailableFromImporters;
+            to.DisableAging                      = from.DisableAging;
+            to.DisableHappiness                  = from.DisableHappiness;
+            to.AllCoursesUnlocked                = from.AllCoursesUnlocked;
+            to.AllContactsUnlocked               = from.AllContactsUnlocked;
+            to.DisableVehicleDamage              = from.DisableVehicleDamage;
+            to.DisableVehicleFuel                = from.DisableVehicleFuel;
+        }
+
+        /// <summary>"" when the flexible values are equal; otherwise what changed (log text only).</summary>
+        public static string WorldFlexDiff(GameVariablesDto a, GameVariablesDto b)
+        {
+            var sb = new System.Text.StringBuilder();
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            void Fl(string n, float x, float y) { if (Math.Abs(x - y) > 0.0005f) sb.Append(sb.Length > 0 ? ", " : "").Append(n).Append(' ').Append(x.ToString("0.##", inv)).Append("->").Append(y.ToString("0.##", inv)); }
+            void Bo(string n, bool x, bool y) { if (x != y) sb.Append(sb.Length > 0 ? ", " : "").Append(n).Append(' ').Append(x ? "on" : "off").Append("->").Append(y ? "on" : "off"); }
+            Fl("tax", a.TaxPercentage, b.TaxPercentage);
+            Fl("market", a.MarketPriceMultiplier, b.MarketPriceMultiplier);
+            Fl("salary", a.EmployeeHourlySalaryMultiplier, b.EmployeeHourlySalaryMultiplier);
+            Fl("bank", a.BankInterestMultiplier, b.BankInterestMultiplier);
+            Fl("rival", a.RivalsDifficultyMultiplier, b.RivalsDifficultyMultiplier);
+            Fl("promo", a.BaseCustomerPromotionMultiplier, b.BaseCustomerPromotionMultiplier);
+            Fl("wholesaleFee", a.WholesaleUrgentFeeMultiplier, b.WholesaleUrgentFeeMultiplier);
+            Fl("importerFee", a.ImporterUrgentFeeMultiplier, b.ImporterUrgentFeeMultiplier);
+            Fl("export", a.ExportMultiplier, b.ExportMultiplier);
+            Fl("sellback", a.SellingMultiplier, b.SellingMultiplier);
+            Bo("noLimits", a.DisableWholesaleAndImportLimits, b.DisableWholesaleAndImportLimits);
+            Bo("allImporter", a.AllProductsAvailableFromImporters, b.AllProductsAvailableFromImporters);
+            Bo("noAging", a.DisableAging, b.DisableAging);
+            Bo("noHappiness", a.DisableHappiness, b.DisableHappiness);
+            Bo("courses", a.AllCoursesUnlocked, b.AllCoursesUnlocked);
+            Bo("contacts", a.AllContactsUnlocked, b.AllContactsUnlocked);
+            Bo("noDamage", a.DisableVehicleDamage, b.DisableVehicleDamage);
+            Bo("noFuel", a.DisableVehicleFuel, b.DisableVehicleFuel);
+            return sb.ToString();
+        }
+
+        private static string WorldDifficulty(GameVariables gv)
+        {
+            try { return MPReflect.Get(MPReflect.PropertyOrField(typeof(GameVariables), "difficulty"), gv)?.ToString() ?? "?"; }
+            catch { return "?"; }
+        }
+
+        /// <summary>This machine's world as it will be after the apply: the current world with the host's flexible values,
+        /// difficulty Custom (sell-back is read only under Custom, ItemHelper.cs:85 - the game's own Customize does the same,
+        /// CustomGameOptionsHandler.cs:255). Rigid fields and disableEnergy (the needs dial's) are the current world's.</summary>
+        private static GameVariables WorldCandidate(GameVariables cur, GameVariablesDto d)
+        {
+            var gv = new GameVariables
+            {
+                startingAge = cur.startingAge, startingMoney = cur.startingMoney, daysPerYear = cur.daysPerYear,
+                tutorialEnabled = cur.tutorialEnabled, disableEnergy = cur.disableEnergy,
+                taxPercentage                     = d.TaxPercentage,
+                marketPriceMultiplier             = d.MarketPriceMultiplier,
+                employeeHourlySalaryMultiplier    = d.EmployeeHourlySalaryMultiplier,
+                bankInterestMultiplier            = d.BankInterestMultiplier,
+                rivalsDifficultyMultiplier        = d.RivalsDifficultyMultiplier,
+                baseCustomerPromotionMultiplier   = d.BaseCustomerPromotionMultiplier,
+                wholesaleUrgentFeeMultiplier      = d.WholesaleUrgentFeeMultiplier,
+                importerUrgentFeeMultiplier       = d.ImporterUrgentFeeMultiplier,
+                exportMultiplier                  = d.ExportMultiplier,
+                sellingMultiplier                 = d.SellingMultiplier,
+                disableWholesaleAndImportLimits   = d.DisableWholesaleAndImportLimits,
+                allProductsAvailableFromImporters = d.AllProductsAvailableFromImporters,
+                disableAging                      = d.DisableAging,
+                disableHappiness                  = d.DisableHappiness,
+                allCoursesUnlocked                = d.AllCoursesUnlocked || cur.allCoursesUnlocked,     // one-way in the game (no re-lock)
+                allContactsUnlocked               = d.AllContactsUnlocked || cur.allContactsUnlocked,   // one-way in the game (no re-lock)
+                disableVehicleDamage              = d.DisableVehicleDamage,
+                disableVehicleFuel                = d.DisableVehicleFuel,
+            };
+            var dm = MPReflect.PropertyOrField(typeof(GameVariables), "difficulty");
+            var dt = MPReflect.TypeOf(dm);
+            if (dm != null && dt != null) MPReflect.Set(dm, gv, Enum.Parse(dt, "Custom"));
+            return gv;
+        }
+
+        private static string WG(float v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
+        /// <summary>The flexible values + difficulty, one line (the hash is taken over exactly this text).</summary>
+        public static string WorldDescribe(GameVariables gv) =>
+            $"difficulty={WorldDifficulty(gv)} tax={gv.taxPercentage} market={WG(gv.marketPriceMultiplier)} salary={WG(gv.employeeHourlySalaryMultiplier)} "
+            + $"bank={WG(gv.bankInterestMultiplier)} rival={WG(gv.rivalsDifficultyMultiplier)} promo={WG(gv.baseCustomerPromotionMultiplier)} "
+            + $"wholesaleFee={WG(gv.wholesaleUrgentFeeMultiplier)} importerFee={WG(gv.importerUrgentFeeMultiplier)} export={WG(gv.exportMultiplier)} "
+            + $"sellback={WG(gv.sellingMultiplier)} noLimits={(gv.disableWholesaleAndImportLimits ? 1 : 0)} allImporter={(gv.allProductsAvailableFromImporters ? 1 : 0)} "
+            + $"noAging={(gv.disableAging ? 1 : 0)} noHappiness={(gv.disableHappiness ? 1 : 0)} courses={(gv.allCoursesUnlocked ? 1 : 0)} "
+            + $"contacts={(gv.allContactsUnlocked ? 1 : 0)} noDamage={(gv.disableVehicleDamage ? 1 : 0)} noFuel={(gv.disableVehicleFuel ? 1 : 0)}";
+
+        public static string WorldHash(GameVariables gv)
+        {
+            uint h = 2166136261u;
+            foreach (char ch in WorldDescribe(gv)) { h ^= ch; h *= 16777619u; }
+            return h.ToString("x8");
+        }
+
+        public static string WorldSettingsLine(GameVariables gv) =>
+            $"hash={WorldHash(gv)} {WorldDescribe(gv)} rigid=days{gv.daysPerYear}/age{gv.startingAge}/money{gv.startingMoney}/tutorial{(gv.tutorialEnabled ? 1 : 0)}";
+
+        /// <summary>Main thread. Applies a world-settings set to THIS machine's loaded world through the game's own
+        /// ApplyNewDifficulty; skipped when the world already holds exactly these flexible values under Custom.
+        /// Every machine logs '[World] settings applied|already equal rev=N hash=H'.</summary>
+        public static bool ApplyWorldSettings(GameVariablesDto d, int rev, string who) => ApplyWorldSettings(d, rev, who, out _);
+
+        /// <summary>As above; <paramref name="ok"/> = this world now holds the set (applied, or already equal) - false only
+        /// when no world is loaded or the apply threw (F1: a client records the rev only when ok).</summary>
+        public static bool ApplyWorldSettings(GameVariablesDto d, int rev, string who, out bool ok)
+        {
+            ok = false;
+            try
+            {
+                var cur = SaveGameManager.Current?.gameVariables;
+                if (cur == null) { Plugin.Logger.LogWarning($"[World] settings rev={rev} ({who}): no world loaded - not applied."); return false; }
+                var gv = WorldCandidate(cur, d);
+                if (cur.EqualsFlexibleValues(gv) && WorldDifficulty(cur) == "Custom")
+                {
+                    Plugin.Logger.LogInfo($"[World] settings already equal rev={rev} hash={WorldHash(cur)} ({who}) - nothing applied.");
+                    ok = true;
+                    return false;
+                }
+                string before = $"{cur.daysPerYear}/{cur.startingAge}/{cur.startingMoney}/{cur.tutorialEnabled}";
+                SaveGameManager.ApplyNewDifficulty(gv);
+                ok = true;
+                var now = SaveGameManager.Current!.gameVariables;
+                string after = $"{now.daysPerYear}/{now.startingAge}/{now.startingMoney}/{now.tutorialEnabled}";
+                Plugin.Logger.LogInfo($"[World] settings applied rev={rev} {WorldSettingsLine(now)} ({who}) rigidKept={before == after}");
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[World] settings apply rev={rev} ({who}): {ex.Message}"); return false; }
+        }
+
+        /// <summary>HOST, main thread, at world-ready: apply the load lobby's changed settings, let fresh joiners be born with
+        /// them (LastStartSettings), persist them with a bumped rev, and deliver them to everyone connected.</summary>
+        public static void HostApplyPendingWorldSettings(string why)
+        {
+            try
+            {
+                if (!_running) return;
+                bool armed = WorldSettingsLoadArmed;
+                WorldSettingsLoadArmed = false;
+                var p = PendingWorldSettings;
+                PendingWorldSettings = null;
+                var cur = SaveGameManager.Current?.gameVariables;
+                if (cur == null) return;
+                if (p == null)
+                {
+                    if (armed) Plugin.Logger.LogInfo($"[World] no change this load - nothing applied (rev={WorldSettingsRev} hash={WorldHash(cur)}).");
+                    return;
+                }
+                int rev = WorldSettingsRev + 1;
+                if (!ApplyWorldSettings(p, rev, "host " + why)) return;
+                WorldSettingsRev = rev;
+                var live = DtoFromGameVariables(SaveGameManager.Current!.gameVariables);
+                if (LastStartSettings != null) { CopyWorldFlex(live, LastStartSettings); LastStartSettings.Difficulty = live.Difficulty; }
+                // F2: the manifest's WorldSettings + rev are written ONLY with the host save stamp (MPSaveCoordinator), together
+                // with the world file - a crash/exit without saving leaves both at what the world really kept.
+                string sess = PendingWorldSettingsSession;
+                Plugin.Logger.LogInfo($"[World] settings rev={rev} held in memory for '{sess}' (fresh joiners are born with them) - the next host save records them.");
+                Broadcast(MessageEnvelope.Create(MessageType.WorldSettings, "host", new WorldSettingsPayload { Rev = rev, Settings = live }));
+                Plugin.Logger.LogInfo($"[World] settings rev={rev} hash={WorldHash(SaveGameManager.Current!.gameVariables)} sent to everyone connected ({_clients.Count}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[World] host apply at {why}: {ex.Message}"); }
+        }
+
+        /// <summary>HOST, main thread: the world settings to one player (no-op while the rev is 0 or the host's own apply is pending).</summary>
+        internal static void SendWorldSettingsTo(string pid, string why)
+        {
+            try
+            {
+                if (!_running || WorldSettingsRev <= 0 || PendingWorldSettings != null) return;
+                var cur = SaveGameManager.Current?.gameVariables;
+                if (cur == null) return;
+                SendToPlayer(pid, MessageEnvelope.Create(MessageType.WorldSettings, "host",
+                    new WorldSettingsPayload { Rev = WorldSettingsRev, Settings = DtoFromGameVariables(cur) }));
+                Plugin.Logger.LogInfo($"[World] settings rev={WorldSettingsRev} hash={WorldHash(cur)} sent to '{pid}' ({why}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[World] send to '{pid}': {ex.Message}"); }
         }
 
         /// <summary>Default multiplayer GameVariables — used for fallback (no-save) paths.</summary>
@@ -11626,6 +11862,7 @@ namespace BigAmbitionsMP
                 TuneDrain = MPNeedsTuning.DrainPercent, TuneRest = MPNeedsTuning.RestPercent,
                 TuneMorale = MPNeedsTuning.MoralePercent,
                 TunePowerNap = MPNeedsTuning.PowerNapAllowed ? 1 : 0,   // POWERNAP host gate rides the 3s heartbeat
+                WorldRev = WorldSettingsRev,   // SAVED-SETTINGS-1 backstop: a client whose applied rev differs asks for WorldSettings
                 Seq = System.Threading.Interlocked.Increment(ref _gtsSeq),   // round-283 freshness stamp
                 // Round-284/F2: pause INTENT rides the heartbeat — a LIVE read at send time of
                 // the same synchronously-flipped fields the F1 join inform reads (never the

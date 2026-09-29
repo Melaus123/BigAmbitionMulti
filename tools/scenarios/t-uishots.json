@@ -772,6 +772,173 @@
     },
     {
       "seq": 72,
+      "role": "h",
+      "cmd": "uiview ssopen",
+      "expect_result": "^OK uiview ssopen: open=True mode=new rows=23 locked=\\[\\]"
+    },
+    {
+      "seq": 73,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 74,
+      "role": "h",
+      "cmd": "screenshot ui-settings-new",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui\\-settings\\-new\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 75,
+      "role": "h",
+      "cmd": "uiview sstip Days per year",
+      "expect_result": "^OK uiview sstip: tip 'Days per year': In-game days per year\\. Affects aging and yearly events\\.$"
+    },
+    {
+      "seq": 76,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 77,
+      "role": "h",
+      "cmd": "screenshot ui-settings-new-tip",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui\\-settings\\-new\\-tip\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 78,
+      "role": "h",
+      "cmd": "uiview sstip",
+      "expect_result": "tip cleared"
+    },
+    {
+      "seq": 79,
+      "role": "h",
+      "cmd": "uiview ssclose",
+      "expect_result": "open=False"
+    },
+    {
+      "seq": 80,
+      "role": "h",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave: left server=False"
+    },
+    {
+      "seq": 81,
+      "role": "h",
+      "sleep_s": 4
+    },
+    {
+      "seq": 82,
+      "role": "h",
+      "cmd": "uiview ssload save1",
+      "expect_result": "^OK uiview ssload: lobby load=True seeded=True from=StartSettings courses=True contacts=True"
+    },
+    {
+      "seq": 83,
+      "role": "h",
+      "cmd": "uiview ssopen",
+      "expect_result": "^OK uiview ssopen: open=True mode=saved rows=23 locked=\\[Days per year,All courses unlocked,All contacts unlocked\\]"
+    },
+    {
+      "seq": 84,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 85,
+      "role": "h",
+      "cmd": "screenshot ui-settings-saved",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui\\-settings\\-saved\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 86,
+      "role": "h",
+      "cmd": "uiview sstip Days per year",
+      "expect_result": "Set when this world was created; it can't be changed\\.$"
+    },
+    {
+      "seq": 87,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 88,
+      "role": "h",
+      "cmd": "screenshot ui-settings-saved-tipdays",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui\\-settings\\-saved\\-tipdays\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 89,
+      "role": "h",
+      "cmd": "uiview sstip All courses unlocked",
+      "expect_result": "Already on for this world; it can't be turned off again\\.$"
+    },
+    {
+      "seq": 90,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 91,
+      "role": "h",
+      "cmd": "screenshot ui-settings-saved-tipcourses",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ui\\-settings\\-saved\\-tipcourses\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 92,
+      "role": "h",
+      "cmd": "uiview sstip",
+      "expect_result": "tip cleared"
+    },
+    {
+      "seq": 93,
+      "role": "h",
+      "cmd": "uiview ssclose",
+      "expect_result": "open=False"
+    },
+    {
+      "seq": 94,
+      "role": "h",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave: left server=False"
+    },
+    {
+      "seq": 95,
       "role": "both",
       "cmd": "mark TEST UISHOTS END",
       "expect_result": "OK MARK"

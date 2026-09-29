@@ -152,6 +152,12 @@ namespace BigAmbitionsMP
         public int TuneRestSpeed   { get; set; } = -1;
         public int TuneMoraleTempo { get; set; } = -1;
         public int TunePowerNap { get; set; } = -1;   // −1 = manifest predates POWERNAP
+        /// <summary>SAVED-SETTINGS-1 (2026-09-29): the world's REAL settings, stamped at every host save (and right after the
+        /// host applies changed settings); the load lobby's settings window is seeded from it (fallback StartSettings).
+        /// null = manifest predates the field.</summary>
+        public GameVariablesDto? WorldSettings { get; set; }
+        /// <summary>SAVED-SETTINGS-1: bumped each time the host applies changed world settings; rides the heartbeat as WorldRev.</summary>
+        public int WorldSettingsRev { get; set; }
 
         /// <summary>Handoff (slice 1, 2026-07-23): store provenance. LastHostStableId = who
         /// hosted when this manifest was written (stamped at every save-time metadata write);

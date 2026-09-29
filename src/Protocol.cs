@@ -221,6 +221,7 @@ namespace BigAmbitionsMP
         ImportTransfer        = 218,     // H-MERGERIMPORT-1 (batch 24, 2026-09-21): AN IMPORT PARTNERSHIP LINE AIMED AT A MERGED PARTNER'S WAREHOUSE. Entities.ImportPartnership.DoDeliveries prices (:184) and delivers (:272) only products whose assigned warehouse answers RentedByPlayer, and that method is inside the authority veil, so every merger-flipped partner building reverts to native truth for the pass and the line is skipped in silence - no charge, no goods, no message. Four legs on one type, told apart by Action, each native effect landing ONCE on the machine that holds the object. "need": the plan owner -> HOST -> the warehouse's runner, carrying each product's amount and the plan's isTarget flag; the same message with Answer=true carries the per-item need back (ImportProduct.GetAmountToBuy's own arithmetic, :39-51, run where the pallets are). "deliver": sent only AFTER the plan owner has applied the weekly-cap arithmetic (:188-211) and PAID one native charge (:236-247); the runner places the goods with the game's own DeliverCargoToBuilding under the iswarehousestorage filter (:278) and books the positive DeliveryTransaction (:282-287). "ack": the per-item REMAINDER home, where the plan owner books the delivered half (:288-305) and pays the game's own refund (:306-337). "closed": the plan owner's confirmation, the only thing that drops the host's binding. Idempotent by TransferId at every step and persisted on both sides (cargo-marks.bamp.json's import sections). Rides Gameplay - timely and small.
         CustomerVisitState    = 219,     // H-HANDOFF-1 (batch 27, 2026-09-26; rides protocol 26, unreleased): the VISIT STATE of a shop's live customers - per customer the schedule entry id, the visit clock (spawn minute), the order's items with their available/acceptable/paid/processed flags, completed, leaving, basket, queue spot, the citizen, plus SeatItem/SeatIndex/Remaining kept for later efforts. Simulator -> Host -> the players INSIDE that building, routed exactly like CustomerPuppetState (144) with the same SimulatorPid == sender check. Final=true is the one snapshot a simulator sends at the moment it lets go (Reason "exit" from BuildingManager.ResetIndoors, "authority" from the swap to follower); Final=false rows are the continuous on-change stream (at most 1/s per building, full set every 10 s) that leaves the taker recent state when a simulator disconnects. The taker applies the newest row per id when it adopts the copies (CustomerHandoff / CustomerPuppets.AdoptPuppetAsNative).
         CustomerUnsoldLeave   = 220,     // H-HANDOFF-1 R1 (hand-off stock S4, 2026-09-27; rides protocol 26, unreleased): a customer whose visit crossed a hand-off walked out UNSOLD on a PARTNER's machine (the partner runs the owner's shop as a helper; nothing paid, order still open at the game's own Customer.Leave). Partner -> HOST -> the building OWNER, routed like HelperOrderForward (142) - same sender check, owner lookup and Housing/Business grant gate. Items = the processed, non-service, non-bag lines: exactly what the game's own Leave puts back on a shelf (Customer.cs:316-327). The owner returns min(those lines, the units its own shelves gave the visit) and nothing more; the other units are the native pick-then-leave loss. Once per visit on both sides.
+        WorldSettings         = 221,     // SAVED-SETTINGS-1 (user-approved 2026-09-29, decisions 18/20/21; protocol 27): the saved world's FLEXIBLE settings the host changed in the load lobby. Host -> client {Rev, Settings} when the client reports its world loaded (the Settled/Running applying-edge), after the host's own world-ready apply (broadcast), and on ask; the client applies through the game's own SaveGameManager.ApplyNewDifficulty (skipped when already equal). Client -> host with Settings = null = 'my applied rev differs from the heartbeat's WorldRev - re-send'.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -1842,7 +1843,12 @@ namespace BigAmbitionsMP
         //      gate and no old-peer branch (project rule 2026-09-18): mixed sessions refuse at Hello.
         //      H-HANDOFF-1 (batch 27) rides the same, still unreleased, 26: new message CustomerVisitState=219.
         //      H-HANDOFF-1 R1 (2026-09-27) rides the same, still unreleased, 26: new message CustomerUnsoldLeave=220.
-        public const int Version = 26;
+        // v27 (2026-09-29, SAVED-SETTINGS-1): new message WorldSettings=221 (host -> client world settings, client -> host
+        //      re-send ask) and GameTimeSyncPayload.WorldRev (the heartbeat backstop). 26 shipped in v0.3.2 (tag 2026-09-28),
+        //      so per the freeze rule a wire-visible change bumps: a v26 client would drop 221 as "Unknown message type" and
+        //      keep its own economy settings while everyone else runs the host's. No capability gate and no old-peer branch
+        //      (project rule 2026-09-18): mixed sessions refuse at Hello.
+        public const int Version = 27;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -2154,6 +2160,16 @@ namespace BigAmbitionsMP
         /// roll) no longer exists; the wire field and its meaning for buffs are unchanged.</summary>
         public int MoraleTempoPercent            { get; set; } = 10;
         public bool PowerNapAllowed { get; set; } = true;   // 2026-09-05 POWERNAP host gate (additive; old peers ignore)
+    }
+
+    /// <summary>SAVED-SETTINGS-1 (MessageType.WorldSettings, protocol 27). Host -> client: Rev + the host's live world
+    /// settings (only the flexible fields are applied; days per year / starting money / age / tutorial stay each machine's own,
+    /// exactly as the game's ApplyNewDifficulty keeps them). Client -> host: Settings = null asks for a re-send (Rev = the
+    /// client's applied rev, log only).</summary>
+    public class WorldSettingsPayload
+    {
+        public int Rev { get; set; }
+        public GameVariablesDto? Settings { get; set; }
     }
 
     /// <summary>
@@ -2602,6 +2618,9 @@ namespace BigAmbitionsMP
         public int TuneRest   { get; set; } = -1;
         public int TuneMorale { get; set; } = -1;
         public int TunePowerNap { get; set; } = -1;   // −1 absent (old host) / 0 off / 1 on
+        /// <summary>SAVED-SETTINGS-1 backstop: the host's WorldSettingsRev (0 = the world's settings were never changed from the
+        /// load lobby; -1 absent). A client whose applied rev differs asks for WorldSettings again.</summary>
+        public int WorldRev { get; set; } = -1;
         /// <summary>Round-283 FRESHNESS STAMP (additive; monotonic per host, per session).  The
         /// express lane deliberately breaks ordering BETWEEN lanes, so a clock packet can now
         /// overtake an older one that is still stuck behind bulk — and applying the older one after

@@ -284,6 +284,7 @@ namespace BigAmbitionsMP
                     }
                     case "host": case "port": case "joinaddr": case "cfg": case "leave": case "occupy":
                     case "lobbymany": case "thumb": case "page": case "escape": case "rawpeer": case "modsgate":
+                    case "ssload": case "ssopen": case "ssset": case "ssdump": case "sstip": case "ssclose": case "ssstart":   // SAVED-SETTINGS-1
                     {
                         var ui = MPCanvasUI.Instance;
                         if (ui == null) return "ERR uiview " + which + ": no MPCanvasUI";
@@ -2855,6 +2856,46 @@ namespace BigAmbitionsMP
                 case "contactopen": return HubShotsContactOpen(arg);
                 case "uifill":      return HubShotsUiFill(arg);
                 case "hubnote":     return HubShotsHubNote(arg);   // host: a Business Hub note to <playerId> (MPHub.NotifyParty)
+                case "worldvars":   // SAVED-SETTINGS-1 (DEV): this machine's live world settings + hash, and functional spot checks
+                {
+                    var wvGv = SaveGameManager.Current?.gameVariables;
+                    if (wvGv == null) return "ERR no world loaded";
+                    string wvWs = "n/a";
+                    try
+                    {
+                        foreach (var e in SaveGameManager.Current!.productMarketEntries)
+                        {
+                            if (e == null || e.importPriceIndex <= 0f) continue;
+                            var it = BigAmbitions.Items.ItemsGetter.GetByName(e.itemName);
+                            if (it == null || it.wholesalePrice <= 0f) continue;
+                            float basePrice = it.wholesalePrice * e.importPriceIndex, got = it.GetWholesalePrice();
+                            wvWs = $"{e.itemName}:{got:0.00}/{basePrice:0.00}=x{got / basePrice:0.00}";
+                            break;
+                        }
+                    }
+                    catch (Exception ex) { wvWs = "ERR " + ex.Message; }
+                    int wvCars = 0, wvFuel = 0;
+                    try
+                    {
+                        foreach (var cc in UnityEngine.Object.FindObjectsByType<CarController>(UnityEngine.FindObjectsSortMode.None))
+                            if (cc != null && cc.vehicleInstance != null && SaveGameManager.Current!.VehicleInstances.Contains(cc.vehicleInstance))
+                            { wvCars++; if (cc.fuelModule != null && cc.fuelModule.useFuel) wvFuel++; }
+                    }
+                    catch { }
+                    int wvRev = MPServer.IsRunning ? MPServer.WorldSettingsRev : MPClient.WorldRevApplied;
+                    string wvLine = $"rev={wvRev} {MPServer.WorldSettingsLine(wvGv)} sellMult={ItemHelper.GetSellingMultiplier():0.00} wholesale={wvWs} cars={wvCars} fuelUsing={wvFuel}";
+                    Plugin.Logger.LogInfo("[TestDrive] worldvars: " + wvLine);
+                    return "OK worldvars " + wvLine;
+                }
+
+                case "wsskip":   // DEV (SAVED-SETTINGS-1 F4), test-only: the host skips the next client's world-loaded WorldSettings send
+                {
+                    if (!MPServer.IsRunning) return "ERR wsskip: not hosting";
+                    MPServer.DevSkipNextWorldLoadedSend = true;
+                    Plugin.Logger.LogInfo("[TestDrive] wsskip: the next client's world-loaded settings send will be skipped.");
+                    return "OK wsskip armed";
+                }
+
                 case "uiview":   // DEV (2026-09-28): open the game's OWN main-menu screens for palette screenshots
                     return UiView(arg);
                 case "screenshot":

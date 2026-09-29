@@ -203,7 +203,7 @@ namespace BigAmbitionsMP
         private bool _settingsOpen;
         private readonly List<(RectTransform rt, System.Action act)> _settingsHits = new();
         private readonly List<System.Action> _settingsRefreshers = new();
-        private readonly List<(RectTransform rt, string desc)> _settingsTips = new();
+        private readonly List<(RectTransform rt, string desc, string title)> _settingsTips = new();
         private readonly List<NumField> _numFields = new();
         private int    _editField  = -1;       // index into _numFields, or -1
         private string _editBuffer = "";
@@ -591,6 +591,10 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] start settings at world-ready: {ex.Message}"); }
+            // SAVED-SETTINGS-1: the host applies the load lobby's changed world settings (and delivers them); a client applies a set
+            // the host sent while its own save was still loading.
+            try { if (MPServer.IsRunning) MPServer.HostApplyPendingWorldSettings("world-ready"); else if (MPClient.IsConnected) MPClient.WorldSettingsOnWorldReady(); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[World] world-ready: {ex.Message}"); }
             MPSaveCoordinator.CheckManifestFreshness();    // round-58: stale ownership-ledger detector (host-only inside)
             ApplyFreshSpawnWarp();  // fresh-character joins: designated start, not the prefab spot
             ApplySpawnSidestep();   // fresh games: one navmesh-validated de-stack, placement final
@@ -3828,6 +3832,7 @@ namespace BigAmbitionsMP
         {
             Plugin.Logger.LogInfo("[MenuUI] Host New Game → hosting");
             _lobbyLoadMode = false;
+            RestorePreLoadSettings();   // SAVED-SETTINGS-1: a saved world's seeded values never carry into a new game
             try { OnHost(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] host: {ex.Message}"); }
             ShowView(MpView.Lobby);
         }
@@ -4416,6 +4421,7 @@ namespace BigAmbitionsMP
                     _hostSettings.PowerNapAllowed = m.TunePowerNap == 1;
                     Plugin.Logger.LogInfo($"[MenuUI] lobby mirrors save power nap: {_hostSettings.PowerNapAllowed} ('{name}').");
                 }
+                SeedSavedWorldSettings(m?.WorldSettings, m?.WorldSettingsRev ?? 0, m?.StartSettings, name);   // SAVED-SETTINGS-1
                 // Handoff slice 4: hosting a SHARED world (someone else hosted it last) from a
                 // mirror that hasn't been refreshed in days — if the group played since, a newer
                 // copy exists on another member's machine. Log-only, report-visible (round-58 style).
@@ -4496,7 +4502,7 @@ namespace BigAmbitionsMP
 
         // ── kit: sprites (generated once, white, tinted by Image.color) ──
         private static Sprite? _lFill, _lRing, _lShadow;
-        private static readonly Sprite?[] _lIcons = new Sprite?[4];
+        private static readonly Sprite?[] _lIcons = new Sprite?[5];
 
         /// <summary>40px white rounded rect (radius 10, 9-slice border 10). Image.pixelsPerUnitMultiplier = 10/radius picks the
         /// on-screen corner radius; ring = only a 2.5px outline (1 unit thick at the 4-unit window radius).</summary>
@@ -4575,6 +4581,11 @@ namespace BigAmbitionsMP
                 case 2:
                     polys.Add(new[] { new Vector2(3f, 5f), new Vector2(21f, 5f), new Vector2(21f, 19f), new Vector2(3f, 19f), new Vector2(3f, 5f) });
                     polys.Add(new[] { new Vector2(3f, 7f), new Vector2(12f, 13f), new Vector2(21f, 7f) });
+                    break;
+                case 4:   // SAVED-SETTINGS-1: the mock-up's small lock (body 5..19 x 11..21, shackle radius 4 around (12,7))
+                    polys.Add(new[] { new Vector2(5f, 11f), new Vector2(19f, 11f), new Vector2(19f, 21f), new Vector2(5f, 21f), new Vector2(5f, 11f) });
+                    polys.Add(new[] { new Vector2(8f, 11f), new Vector2(8f, 7f) }); polys.Add(new[] { new Vector2(16f, 7f), new Vector2(16f, 11f) });
+                    polys.Add(LArc(12f, 7f, 4f, PI, 2f * PI, 16)); hw = 1.25f;
                     break;
                 default:
                     polys.Add(LArc(12f, 12f, 9f, 0f, 1.5f * PI, 36)); hw = 1.25f;
@@ -6216,6 +6227,52 @@ namespace BigAmbitionsMP
                         bool shown = _lwModsAllowB != null && _lwModsAllowB.go.activeInHierarchy;
                         return $"state={(MPConfig.RefuseModMismatch ? "Refuse" : "Allow")} saved='{MPConfig.RefuseModMismatchSaved}' shown={shown} allowKind={(_lwModsAllowB != null ? _lwModsAllowB.kind : -9)} refuseKind={(_lwModsRefuseB != null ? _lwModsRefuseB.kind : -9)}";
                     }
+                    // ── SAVED-SETTINGS-1 levers: the real saved-game lobby and the settings window's own click paths ──
+                    case "ssload":
+                    {   // the save picker's Load click for session <arg>
+                        DevUiOff();
+                        _spSelSession = arg; _spSelPid = "";
+                        OnSpLoad();
+                        return $"lobby load={_lobbyLoadMode} seeded={_ssHas} from={_ssSource} courses={_ssCourses} contacts={_ssContacts}";
+                    }
+                    case "ssopen":
+                    {
+                        OnOpenSettings();
+                        var lk = new List<string>();
+                        foreach (var kv in _devSsRows) if (kv.Value.locked) lk.Add(kv.Key);
+                        return $"open={_settingsOpen} mode={(_settingsPanelLoadMode ? "saved" : "new")} rows={_devSsRows.Count} locked=[{string.Join(",", lk)}]";
+                    }
+                    case "ssset":
+                    {   // '<label>=<value>': a number is TYPED into the value box (click-to-type path); ON/OFF clicks the toggle if it differs
+                        int eq = arg.LastIndexOf('=');
+                        if (eq <= 0) return "ERR usage: ssset <label>=<value>";
+                        string lab = arg.Substring(0, eq).Trim(), val = arg.Substring(eq + 1).Trim();
+                        if (!_settingsOpen) return "ERR settings window not open";
+                        if (!_devSsRows.TryGetValue(lab, out var row)) return $"ERR no row '{lab}'";
+                        if (row.locked) return $"locked {lab}={row.show()}";
+                        if (row.num >= 0)
+                        {
+                            BeginSettingsEdit(row.num); _editBuffer = val; CommitSettingsEdit();
+                            return $"{lab}={_numFields[row.num].Lbl.text}";
+                        }
+                        bool want = val.Equals("ON", StringComparison.OrdinalIgnoreCase);
+                        if (row.get != null && row.tog != null && row.get() != want)
+                            foreach (var hh in _settingsHits) if (ReferenceEquals(hh.rt, row.tog)) { hh.act(); break; }
+                        return $"{lab}={row.show()}";
+                    }
+                    case "ssdump": return DevSsDump();
+                    case "sstip":
+                    {   // force the hover tooltip of row <arg> ('' clears)
+                        _devTip = -1;
+                        if (arg.Length > 0) for (int i = 0; i < _settingsTips.Count; i++) if (_settingsTips[i].title == arg) { _devTip = i; break; }
+                        return arg.Length == 0 ? "tip cleared" : _devTip >= 0 ? $"tip '{arg}': {_settingsTips[_devTip].desc}" : $"ERR no row '{arg}'";
+                    }
+                    case "ssclose": _devTip = -1; OnCloseSettings(); return $"open={_settingsOpen}";
+                    case "ssstart":
+                        _devTip = -1;
+                        if (_settingsOpen) OnCloseSettings();
+                        OnLobbyStart();
+                        return $"lobby start inLobby={MPServer.IsInLobby}";
                     case "real":        DevUiOff(); ShowView(MpView.Lobby); return "real lobby";
                     case "host":
                         DevUiOff(); OnMpHostNew();
@@ -7054,20 +7111,29 @@ namespace BigAmbitionsMP
             _startupScreenGO.SetActive(false);
         }
 
-        // ── Game settings editor panel ────────────────────────────────────────
-
-        private const float SET_W = 470f;
-
-        /// <summary>
-        /// Builds the modal "Game Settings" overlay — every GameVariables setting
-        /// shown and editable.  Bools toggle; numerics step with &lt; &gt; or are
-        /// clicked and typed directly.  Hovering a name shows a description.
-        /// Editing any value flips the difficulty to "Custom".
-        /// </summary>
-        // Round-53: the panel exists in two shapes — full (new game: everything) and load-mode
-        // (only the save-authoritative dials; the rest is baked into the save at creation and
-        // showing dead rows would be a UI-vs-behavior lie). Rebuilt on open when the mode flips.
+        // ── Game settings window ──────────────────────────────────────────────
+        // SAVED-SETTINGS-1 (user-approved 2026-09-29, decisions 18, 20, 21): the lobby's CARD style, one window for BOTH modes
+        // (approved mock-up lobbyart/gen_settings.py, boards SavedSettings / SavedSettingsTips; every size below is in MOCK-UP
+        // units, x LS like the lobby kit). Two columns WORLD | PLAYER, CLOSE bottom right. New game: everything editable.
+        // Saved game: the save's REAL values (manifest WorldSettings, fallback StartSettings - SeedSavedWorldSettings); Days per
+        // year locked (fixed at creation, SaveGameManager.cs:510); All courses / All contacts locked ON once the save has them
+        // (one-way in the game, SaveGameManager.cs:512-519); no world values known = only the needs rows, as before. Starting
+        // money / age / tutorial are never here (money/age are the lobby roster's; tutorial is the host world's, D26).
+        // Clicks stay on the hand-rolled RectHit dispatch (_settingsHits / _numFields / _rtSettingsClose).
         private bool _settingsPanelLoadMode;
+        private const float SW_COLW = 460f, SW_ROWW = 436f, SW_ROWH = 30f;
+        private const string SW_LOCKED_DAYS = " Set when this world was created; it can't be changed.";
+        private const string SW_LOCKED_ON   = " Already on for this world; it can't be turned off again.";
+        private static readonly Color SW_LOCKTXT = LC(0xAEB7BF), SW_TIPBG = LC(0x262B33);
+        private TextMeshProUGUI? _tooltipTitle;
+        private string _tipShown = "";
+
+        // Saved-game seed (SeedSavedWorldSettings): what the save holds, so only a real change is applied.
+        private bool _ssHas, _ssCourses, _ssContacts;
+        private string _ssSource = "none";
+        private GameVariablesDto? _ssSeed, _ssPreLoad;
+        private int _ssPreDays;
+        private string _ssPreDiff = "", _ssPreSel = "";   // F3: the lobby's difficulty before a saved world was seeded
 
         private void BuildSettingsPanel(Transform canvasRoot) => BuildSettingsPanel(canvasRoot, false);
 
@@ -7079,230 +7145,295 @@ namespace BigAmbitionsMP
             _settingsTips.Clear();
             _numFields.Clear();
             _editField = -1;
+            _tipShown = "";
+            _settingsContentImg = null;   // the card's own rounded kit - the legacy menu-sprite restyle must not re-skin it
+#if BAMP_DEV
+            _devSsRows.Clear(); _devTip = -1;
+#endif
+            bool world = !loadMode || _ssHas;
+            bool daysLocked = loadMode, coursesLocked = loadMode && _ssCourses, contactsLocked = loadMode && _ssContacts;
+            int rows = world ? 13 : 4;
+            float w = world ? 980f : SW_COLW + 44f;
+            float sectH = 42f + rows * (SW_ROWH + 5f);
+            const float colsY = 82f;
+            float footY = colsY + sectH + 14f, h = footY + 1f + 12f + 38f + 16f;
 
+            // Root: full-screen, transparent (no dimming, like the lobby's windows), swallows clicks behind it.
             _settingsPanelGO = MakeGO("BAMP_Settings", canvasRoot);
-            var brt = _settingsPanelGO.GetComponent<RectTransform>();
-            brt.anchorMin = Vector2.zero; brt.anchorMax = Vector2.one;
-            brt.offsetMin = brt.offsetMax = Vector2.zero;
-            _settingsPanelGO.AddComponent<Image>().color = new Color(0f, 0f, 0f, 0.75f);
+            LStretch(_settingsPanelGO.GetComponent<RectTransform>(), 0f, 0f, 0f, 0f);
+            _settingsPanelGO.AddComponent<Image>().color = new Color(0f, 0f, 0f, 0f);
 
-            var content = MakeGO("Content", _settingsPanelGO.transform);
-            var crt = content.GetComponent<RectTransform>();
-            crt.anchorMin = crt.anchorMax = crt.pivot = new Vector2(0.5f, 1f);
-            _settingsContentImg = content.AddComponent<Image>();
-            _settingsContentImg.color = new Color(0.10f, 0.10f, 0.13f, 0.98f);
-            var ct = content.transform;
+            var card = LMakeCard(_settingsPanelGO.transform, "Card", "Multiplayer Game Settings", w, h);
+            if (loadMode) { string sn = LwSaveName(); card.sub.text = sn.Length > 0 ? $"Saved game: {sn}" : ""; }
+            var ct = card.go.transform;
+            LText(ct, "Hover a name for a description  •  click a value to type it", 13f, L_MUTED, 22f, 56f, w - 44f, 16f, TextAlignmentOptions.Left);
 
-            float y = -PAD;
-            MakeLabel(ct, "Multiplayer Game Settings", SZ_HDR, C_WHITE,
-                      PAD, y, SET_W - PAD * 2f, HDR, TextAlignmentOptions.Center);
-            y -= HDR;
-            MakeLabel(ct, "Hover a name for a description  •  click a value to type it",
-                      SZ_STS, C_LBLGREY, PAD, y, SET_W - PAD * 2f, LH, TextAlignmentOptions.Center);
-            y -= LADV + 2f;
-
-            if (loadMode)
+            float x = 22f;
+            if (world)
             {
-                MakeLabel(ct, "This world already exists — settings below can be changed each time you host it.\nEverything else was fixed when the world was created.",
-                          SZ_STS, C_YELLOW, PAD, y, SET_W - PAD * 2f, LH * 2f, TextAlignmentOptions.Center);
-                y -= LADV * 2f;
+                var ws = SwSection(ct, "World", "WORLD — applies to everyone", x, colsY, sectH);
+                int r = 0;
+                SwNum(ws, r++, "Tax %", "Percent of profit paid as income tax each period.",
+                      () => _hostSettings.TaxPercentage, v => _hostSettings.TaxPercentage = (int)v, 1f, 0f, 50f, "0");
+                SwNum(ws, r++, "Days per year", "In-game days per year. Affects aging and yearly events." + (daysLocked ? SW_LOCKED_DAYS : ""),
+                      () => _hostSettings.DaysPerYear, v => _hostSettings.DaysPerYear = (int)v, 5f, 10f, 365f, "0", daysLocked);
+                SwNum(ws, r++, "Market price x", "Global multiplier on product market prices.",
+                      () => _hostSettings.MarketPriceMultiplier, v => _hostSettings.MarketPriceMultiplier = v, 0.05f, 0f, 5f, "0.00");
+                SwNum(ws, r++, "Employee salary x", "Multiplier on employee wages. Higher = staff cost more.",
+                      () => _hostSettings.EmployeeHourlySalaryMultiplier, v => _hostSettings.EmployeeHourlySalaryMultiplier = v, 0.05f, 0f, 5f, "0.00");
+                SwNum(ws, r++, "Bank interest x", "Multiplier applied to bank interest amounts.",
+                      () => _hostSettings.BankInterestMultiplier, v => _hostSettings.BankInterestMultiplier = v, 0.05f, 0f, 5f, "0.00");
+                // ("Bank interest rate" row removed for game 1.0 (2026-08-29): the banking overhaul deleted the flat rate.)
+                SwNum(ws, r++, "Rival difficulty x", "Strength of AI rival companies. Higher = tougher rivals.",
+                      () => _hostSettings.RivalsDifficultyMultiplier, v => _hostSettings.RivalsDifficultyMultiplier = v, 0.05f, 0f, 5f, "0.00");
+                SwNum(ws, r++, "Customer promotion x", "Effectiveness of marketing at attracting customers.",
+                      () => _hostSettings.BaseCustomerPromotionMultiplier, v => _hostSettings.BaseCustomerPromotionMultiplier = v, 0.05f, 0f, 5f, "0.00");
+                SwNum(ws, r++, "Wholesale urgent fee x", "Surcharge multiplier for rush (urgent) wholesale orders.",
+                      () => _hostSettings.WholesaleUrgentFeeMultiplier, v => _hostSettings.WholesaleUrgentFeeMultiplier = v, 0.05f, 0f, 5f, "0.00");
+                SwNum(ws, r++, "Importer urgent fee x", "Surcharge multiplier for rush (urgent) importer orders.",
+                      () => _hostSettings.ImporterUrgentFeeMultiplier, v => _hostSettings.ImporterUrgentFeeMultiplier = v, 0.05f, 0f, 5f, "0.00");
+                SwNum(ws, r++, "Export x", "Multiplier on revenue earned from exporting goods.",
+                      () => _hostSettings.ExportMultiplier, v => _hostSettings.ExportMultiplier = v, 0.05f, 0f, 5f, "0.00");
+                // Sell-back (game 1.0, 2026-08-29): live only under Custom (ItemHelper.cs:85), which any edit here selects; the
+                // game honours it only while STRICTLY POSITIVE, so the minimum is 0.05 - every selectable value is one it uses.
+                SwNum(ws, r++, "Sell-back x", "How much you get back when selling items, as a share of their value. 0.75 = 75% back.",
+                      () => _hostSettings.SellingMultiplier, v => _hostSettings.SellingMultiplier = v, 0.05f, 0.05f, 5f, "0.00");
+                SwBool(ws, r++, "No wholesale/import limits", "Removes per-order quantity caps on wholesale and imports.",
+                       () => _hostSettings.DisableWholesaleAndImportLimits, v => _hostSettings.DisableWholesaleAndImportLimits = v);
+                SwBool(ws, r++, "All importer products", "Every product is importable from the start of the game.",
+                       () => _hostSettings.AllProductsAvailableFromImporters, v => _hostSettings.AllProductsAvailableFromImporters = v);
+                x += SW_COLW + 16f;
             }
-            if (!loadMode) {
-            SettingsHeader(ct, ref y, "WORLD — applies to everyone");
-            SettingsNumRow (ct, ref y, "Tax %", "Percent of profit paid as income tax each period.",
-                            () => _hostSettings.TaxPercentage, v => _hostSettings.TaxPercentage = (int)v, 1f, 0f, 50f, "0");
-            SettingsNumRow (ct, ref y, "Days per year", "In-game days per year. Affects aging and yearly events.",
-                            () => _hostSettings.DaysPerYear, v => _hostSettings.DaysPerYear = (int)v, 5f, 10f, 365f, "0");
-            SettingsNumRow (ct, ref y, "Market price x", "Global multiplier on product market prices.",
-                            () => _hostSettings.MarketPriceMultiplier, v => _hostSettings.MarketPriceMultiplier = v, 0.05f, 0f, 5f, "0.00");
-            SettingsNumRow (ct, ref y, "Employee salary x", "Multiplier on employee wages. Higher = staff cost more.",
-                            () => _hostSettings.EmployeeHourlySalaryMultiplier, v => _hostSettings.EmployeeHourlySalaryMultiplier = v, 0.05f, 0f, 5f, "0.00");
-            SettingsNumRow (ct, ref y, "Bank interest x", "Multiplier applied to bank interest amounts.",
-                            () => _hostSettings.BankInterestMultiplier, v => _hostSettings.BankInterestMultiplier = v, 0.05f, 0f, 5f, "0.00");
-            // "Bank interest rate" row REMOVED for game 1.0 (2026-08-29): the banking overhaul deleted
-            // the flat base rate from BOTH DifficultySetting and GameVariables, so the host now sends 0
-            // and the client no longer applies it — the dial drove nothing. A labelled, tooltipped
-            // control that does nothing is a defect, not design. The "Bank interest x" MULTIPLIER row
-            // above is unaffected: it still exists in 1.0, is still synced, and still works.
-            SettingsNumRow (ct, ref y, "Rival difficulty x", "Strength of AI rival companies. Higher = tougher rivals.",
-                            () => _hostSettings.RivalsDifficultyMultiplier, v => _hostSettings.RivalsDifficultyMultiplier = v, 0.05f, 0f, 5f, "0.00");
-            SettingsNumRow (ct, ref y, "Customer promotion x", "Effectiveness of marketing at attracting customers.",
-                            () => _hostSettings.BaseCustomerPromotionMultiplier, v => _hostSettings.BaseCustomerPromotionMultiplier = v, 0.05f, 0f, 5f, "0.00");
-            SettingsNumRow (ct, ref y, "Wholesale urgent fee x", "Surcharge multiplier for rush (urgent) wholesale orders.",
-                            () => _hostSettings.WholesaleUrgentFeeMultiplier, v => _hostSettings.WholesaleUrgentFeeMultiplier = v, 0.05f, 0f, 5f, "0.00");
-            SettingsNumRow (ct, ref y, "Importer urgent fee x", "Surcharge multiplier for rush (urgent) importer orders.",
-                            () => _hostSettings.ImporterUrgentFeeMultiplier, v => _hostSettings.ImporterUrgentFeeMultiplier = v, 0.05f, 0f, 5f, "0.00");
-            SettingsNumRow (ct, ref y, "Export x", "Multiplier on revenue earned from exporting goods.",
-                            () => _hostSettings.ExportMultiplier, v => _hostSettings.ExportMultiplier = v, 0.05f, 0f, 5f, "0.00");
-            // NEW IN GAME 1.0 (row added 2026-08-29, wording user-approved). 1.0 added
-            // sellingMultiplier to DifficultySetting and GameVariables, replacing a hardcoded 0.8.
-            // It is LIVE here: editing ANY row in this window calls MarkCustom(), which sets
-            // Difficulty = "Custom", and under Custom ItemHelper.GetSellingMultiplier reads
-            // gv.sellingMultiplier directly (ItemHelper.cs:85) rather than a preset asset -
-            // GetDifficultySettings(Custom) returns null, so there is no preset to fall back to.
-            // Without this row the host shipped whatever the LAST PRESET carried while claiming a
-            // custom game; the value was synced but not choosable.
-            // MINIMUM IS 0.05, NOT 0 (2026-08-29). The game honours this value only while it is
-            // STRICTLY POSITIVE (ItemHelper.cs:85, `sellingMultiplier > 0f`), and under Custom there
-            // is no preset to fall through to - GetDifficultySettings(Custom) returns null
-            // (DifficultySetting.cs:79-82) - so a host who picked 0.00 would silently get NORMAL's
-            // 0.75 instead. A row that offers a value the game discards is the same defect as the
-            // dead "Bank interest rate" row removed a few lines above. Every selectable value here
-            // is one the game will actually use.
-            // (The game's own asset range is [Range(0.1f, 1f)]; the max is left at 5 to match every
-            // sibling row, and above 1.0 you are paid more than an item is worth - deliberate
-            // sandbox headroom, not a bug.)
-            SettingsNumRow (ct, ref y, "Sell-back x", "How much you get back when selling items, as a share of their value. 0.75 = 75% back.",
-                            () => _hostSettings.SellingMultiplier, v => _hostSettings.SellingMultiplier = v, 0.05f, 0.05f, 5f, "0.00");
-            SettingsBoolRow(ct, ref y, "No wholesale/import limits", "Removes per-order quantity caps on wholesale and imports.",
-                            () => _hostSettings.DisableWholesaleAndImportLimits, v => _hostSettings.DisableWholesaleAndImportLimits = v);
-            SettingsBoolRow(ct, ref y, "All importer products", "Every product is importable from the start of the game.",
-                            () => _hostSettings.AllProductsAvailableFromImporters, v => _hostSettings.AllProductsAvailableFromImporters = v);
 
-            // NOTE: Starting age + starting money are now set per-player in the
-            // multiplayer lobby roster, not here (age is self-chosen, cash is
-            // host-dictated), so they're intentionally omitted from this page.
-            SettingsHeader(ct, ref y, "PLAYER — per character");
-            SettingsBoolRow(ct, ref y, "Disable aging", "Your character never grows older.",
-                            () => _hostSettings.DisableAging, v => _hostSettings.DisableAging = v);
-            }   // end !loadMode (round-53)
-            if (loadMode) SettingsHeader(ct, ref y, "THIS SAVE — adjustable each time you host");
-            // Needs & morale tempo (2026-07-20): single-percent controls replace the
-            // old energy on/off (0 = off, no redundant toggle).  MP's clock never
-            // pauses, so native rates feel much faster in real time — defaults
-            // compensate (drain 40% since 2026-09-02 - was 10%, rest 300%, buffs 300%, sad periods 25%).
-            SettingsNumRow (ct, ref y, "Needs drain %", "Energy & hunger drain speed as % of normal. 0 = off entirely (no sleep/food needs).",
-                            () => _hostSettings.NeedsDrainPercent, v => { _hostSettings.NeedsDrainPercent = (int)v; _hostSettings.DisableEnergy = (int)v == 0; },
-                            1f, 0f, 100f, "0");
-            // Tooltip: the user-approved 'Power nap' description (2026-09-05, specifics removed on request); the row label and this
-            // text are the only new on-screen strings on this row.
-            SettingsBoolRow(ct, ref y, "Power nap", "Lets players in a bed recover rest faster while napping. Off hides the button for everyone.",
-                            () => _hostSettings.PowerNapAllowed, v => _hostSettings.PowerNapAllowed = v);
-            SettingsNumRow (ct, ref y, "Rest speed %", "How fast energy recovers while resting (bed/bench/car), as % of normal.",
-                            () => _hostSettings.RestSpeedPercent, v => _hostSettings.RestSpeedPercent = (int)v,
-                            10f, 10f, 1000f, "0");
-            // Wording corrected for game 1.0 (2026-08-29): the sad-period half of this setting no
-            // longer exists — 1.0 deleted that subsystem outright — so the tooltip no longer promises it.
-            SettingsNumRow (ct, ref y, "Morale multiplier %", "How long positive morale effects last, as % of normal. Lower = they last longer (10% = buffs last 10x).",
-                            () => _hostSettings.MoraleTempoPercent, v => _hostSettings.MoraleTempoPercent = (int)v,
-                            1f, 1f, 100f, "0");
-            if (!loadMode) {
-            SettingsBoolRow(ct, ref y, "Disable happiness need", "Removes the happiness need from your character.",
-                            () => _hostSettings.DisableHappiness, v => _hostSettings.DisableHappiness = v);
-            SettingsBoolRow(ct, ref y, "All courses unlocked", "Every education course is available immediately.",
-                            () => _hostSettings.AllCoursesUnlocked, v => _hostSettings.AllCoursesUnlocked = v);
-            SettingsBoolRow(ct, ref y, "All contacts unlocked", "Every business contact is available immediately.",
-                            () => _hostSettings.AllContactsUnlocked, v => _hostSettings.AllContactsUnlocked = v);
-            SettingsBoolRow(ct, ref y, "Disable vehicle damage", "Your vehicles never take damage.",
-                            () => _hostSettings.DisableVehicleDamage, v => _hostSettings.DisableVehicleDamage = v);
-            SettingsBoolRow(ct, ref y, "Disable vehicle fuel", "Your vehicles never consume fuel.",
-                            () => _hostSettings.DisableVehicleFuel, v => _hostSettings.DisableVehicleFuel = v);
-            }   // end !loadMode (round-53)
-            // Tutorial is off by default; a host world with it on carries it to the session
-            // (D26, 2026-09-12). Not exposed here - the host world's own setting decides.
+            var ps = SwSection(ct, "Player", "PLAYER — per character", x, colsY, sectH);
+            int q = 0;
+            if (world)
+                SwBool(ps, q++, "Disable aging", "Your character never grows older.",
+                       () => _hostSettings.DisableAging, v => _hostSettings.DisableAging = v);
+            // Needs & morale tempo (2026-07-20): single-percent controls (0 = off). MP's clock never pauses, so the defaults
+            // compensate (drain 40% since 2026-09-02, rest 300%, morale 10%).
+            SwNum(ps, q++, "Needs drain %", "Energy & hunger drain speed as % of normal. 0 = off entirely (no sleep/food needs).",
+                  () => _hostSettings.NeedsDrainPercent, v => { _hostSettings.NeedsDrainPercent = (int)v; _hostSettings.DisableEnergy = (int)v == 0; },
+                  1f, 0f, 100f, "0");
+            SwBool(ps, q++, "Power nap", "Lets players in a bed recover rest faster while napping. Off hides the button for everyone.",
+                   () => _hostSettings.PowerNapAllowed, v => _hostSettings.PowerNapAllowed = v);
+            SwNum(ps, q++, "Rest speed %", "How fast energy recovers while resting (bed/bench/car), as % of normal.",
+                  () => _hostSettings.RestSpeedPercent, v => _hostSettings.RestSpeedPercent = (int)v, 10f, 10f, 1000f, "0");
+            SwNum(ps, q++, "Morale multiplier %", "How long positive morale effects last, as % of normal. Lower = they last longer (10% = buffs last 10x).",
+                  () => _hostSettings.MoraleTempoPercent, v => _hostSettings.MoraleTempoPercent = (int)v, 1f, 1f, 100f, "0");
+            if (world)
+            {
+                SwBool(ps, q++, "Disable happiness need", "Removes the happiness need from your character.",
+                       () => _hostSettings.DisableHappiness, v => _hostSettings.DisableHappiness = v);
+                SwBool(ps, q++, "All courses unlocked", "Every education course is available immediately." + (coursesLocked ? SW_LOCKED_ON : ""),
+                       () => _hostSettings.AllCoursesUnlocked, v => _hostSettings.AllCoursesUnlocked = v, coursesLocked);
+                SwBool(ps, q++, "All contacts unlocked", "Every business contact is available immediately." + (contactsLocked ? SW_LOCKED_ON : ""),
+                       () => _hostSettings.AllContactsUnlocked, v => _hostSettings.AllContactsUnlocked = v, contactsLocked);
+                SwBool(ps, q++, "Disable vehicle damage", "Your vehicles never take damage.",
+                       () => _hostSettings.DisableVehicleDamage, v => _hostSettings.DisableVehicleDamage = v);
+                SwBool(ps, q++, "Disable vehicle fuel", "Your vehicles never consume fuel.",
+                       () => _hostSettings.DisableVehicleFuel, v => _hostSettings.DisableVehicleFuel = v);
+            }
 
-            y -= SGAP;
-            var closeGO = MakeGO("Close", ct);
-            _rtSettingsClose = closeGO.GetComponent<RectTransform>();
-            SetAnchored(_rtSettingsClose, PAD, y, SET_W - PAD * 2f, BH);
-            closeGO.AddComponent<Image>().color = C_BTNBLUE;
-            MakeLabel(closeGO.transform, "Close", SZ_BTN, C_WHITE,
-                      0f, 0f, SET_W - PAD * 2f, BH, TextAlignmentOptions.Center);
-            y -= BADV;
+            LPos(LImg(ct, "Divider", L_DIVIDER, null, 0f).rectTransform, 22f, footY, w - 44f, 1f);
+            var close = LButton(ct, "Close", "CLOSE", w - 22f - 104f, footY + 13f, 104f, 38f, 0, 14f);
+            _rtSettingsClose = close.rt;
 
-            float h = -y + PAD;
-            crt.sizeDelta        = new Vector2(SET_W, h);
-            crt.anchoredPosition = new Vector2(0f, -Mathf.Round(Mathf.Max(0f, (Screen.height / UiScale - h) / 2f)));
-
-            // Tooltip — follows the cursor while hovering a setting name.
+            // Tooltip (approved mock-up): dark card, the row's name as a centred title, a thin rule, then the description.
             _tooltipGO = MakeGO("Tooltip", _settingsPanelGO.transform);
             var ttrt = _tooltipGO.GetComponent<RectTransform>();
             ttrt.anchorMin = ttrt.anchorMax = ttrt.pivot = new Vector2(0f, 1f);
-            ttrt.sizeDelta = new Vector2(340f, 62f);
-            _tooltipGO.AddComponent<Image>().color = new Color(0.04f, 0.04f, 0.06f, 0.98f);
-            _tooltipTxt = MakeLabel(_tooltipGO.transform, "", SZ_STS, C_WHITE,
-                                    8f, -5f, 324f, 52f, TextAlignmentOptions.TopLeft);
+            ttrt.sizeDelta = new Vector2(300f * LS, 80f * LS);
+            LStretch(LImg(_tooltipGO.transform, "Bg", SW_TIPBG, LRoundSprite(false), 3f).rectTransform, 0f, 0f, 0f, 0f);
+            _tooltipTitle = LText(_tooltipGO.transform, "", 14f, C_WHITE, 12f, 10f, 276f, 18f, TextAlignmentOptions.Center, true);
+            LPos(LImg(_tooltipGO.transform, "Rule", new Color(1f, 1f, 1f, 0.35f), null, 0f).rectTransform, 12f, 35f, 276f, 1f);
+            _tooltipTxt = LText(_tooltipGO.transform, "", 12f, C_WHITE, 12f, 43f, 276f, 17f, TextAlignmentOptions.TopLeft, wrap: true);
             _tooltipGO.SetActive(false);
 
             _settingsPanelGO.SetActive(false);
+            Plugin.Logger.LogInfo($"[UI] settings window built: mode={(loadMode ? "saved" : "new")} worldRows={world} daysLocked={daysLocked && world} coursesLocked={coursesLocked && world} contactsLocked={contactsLocked && world} ({w:0}x{h:0} mock-up units).");
         }
 
-        private void SettingsHeader(Transform p, ref float y, string text)
+        private void SetSettingsTip(string title, string desc)
         {
-            y -= 4f;
-            MakeLabel(p, text, SZ_LBL, C_YELLOW, PAD, y, SET_W - PAD * 2f, LH,
-                      TextAlignmentOptions.Left);
-            y -= LADV;
+            _tipShown = desc;
+            try
+            {
+                if (_tooltipTitle != null) _tooltipTitle.text = title;
+                if (_tooltipTxt == null || _tooltipGO == null) return;
+                _tooltipTxt.text = desc;
+                float bh = _tooltipTxt.GetPreferredValues(desc, 276f * LS, 0f).y;
+                _tooltipTxt.rectTransform.sizeDelta = new Vector2(276f * LS, bh);
+                ((RectTransform)_tooltipGO.transform).sizeDelta = new Vector2(300f * LS, 43f * LS + bh + 10f * LS);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[UI] settings tooltip: {ex.Message}"); }
         }
 
-        private void SettingsBoolRow(Transform p, ref float y, string label, string desc,
-                                     System.Func<bool> get, System.Action<bool> set)
+        /// <summary>A section box (mock-up: dark translucent fill, white-14% border, 12px bold light-grey title).</summary>
+        private RectTransform SwSection(Transform p, string name, string title, float x, float y, float h)
         {
-            var nameLbl = MakeLabel(p, label, SZ_LBL, C_LBLGREY, PAD, y, 250f, LH,
-                                    TextAlignmentOptions.Left);
-            _settingsTips.Add((nameLbl.rectTransform, desc));
+            var box = LImg(p, name, L_SECT, LRoundSprite(false), 4f);
+            LStretch(LImg(box.transform, "Line", L_SECTLINE, LRoundSprite(true), 4f).rectTransform, 0f, 0f, 0f, 0f);
+            LPos(box.rectTransform, x, y, SW_COLW, h);
+            LText(box.transform, title, 12f, L_HDR, 12f, 12f, SW_COLW - 24f, 15f, TextAlignmentOptions.Left, true, false, 8f);
+            return box.rectTransform;
+        }
 
-            var go  = MakeGO("t", p);
-            var rt  = go.GetComponent<RectTransform>();
-            SetAnchored(rt, 280f, y, 142f, LH);
-            var img = go.AddComponent<Image>();
-            var lbl = MakeLabel(go.transform, "", SZ_LBL, C_WHITE, 0f, 0f, 142f, LH,
-                                TextAlignmentOptions.Center);
+        private RectTransform SwRow(RectTransform sect, int i, string label, string desc, bool locked)
+        {
+            var row = LImg(sect, "Row" + i, L_ROW, LRoundSprite(false), 3f);
+            LPos(row.rectTransform, 12f, 35f + i * (SW_ROWH + 5f), SW_ROWW, SW_ROWH);
+            var lbl = LText(row.transform, label, 13f, locked ? SW_LOCKTXT : C_WHITE, 10f, 0f, SW_ROWW - 160f, SW_ROWH, TextAlignmentOptions.Left);
+            _settingsTips.Add((lbl.rectTransform, desc, label));
+            return row.rectTransform;
+        }
 
+        /// <summary>The mock-up's small button (24 high): kind 0 grey-blue, 1 blue (ON), 4 disabled.</summary>
+        private (RectTransform rt, Image img, TextMeshProUGUI lbl) SwSmallBtn(Transform p, string name, string text, float x, float w, int kind)
+        {
+            var img = LImg(p, name, L_BTN[kind], LRoundSprite(false), 3f);
+            LPos(img.rectTransform, x, 3f, w, 24f);
+            var t = LText(img.transform, text, 11f, kind == 4 ? L_DISTXT : C_WHITE, 0f, 0f, w, 24f, TextAlignmentOptions.Center, true, false, 4f);
+            return (img.rectTransform, img, t);
+        }
+
+        private void SwLock(RectTransform row, float x)
+        {
+            var lk = LImg(row, "Lock", SW_LOCKTXT, LIconSprite(4), 0f);
+            lk.type = Image.Type.Simple;
+            LPos(lk.rectTransform, x, 9f, 12f, 12f);
+        }
+
+        private void SwNum(RectTransform sect, int i, string label, string desc, System.Func<float> get, System.Action<float> set,
+                           float step, float min, float max, string fmt, bool locked = false)
+        {
+            var row = SwRow(sect, i, label, desc, locked);
+            var dec = SwSmallBtn(row, "-", "<", 306f, 24f, locked ? 4 : 0);
+            var boxLine = LImg(row, "val", L_FIELDLINE, LRoundSprite(false), 3f);
+            LPos(boxLine.rectTransform, 334f, 3f, 64f, 24f);
+            LStretch(LImg(boxLine.transform, "Fill", L_FIELD, LRoundSprite(false), 3f).rectTransform, 1f, 1f, 1f, 1f);
+            var valLbl = LText(boxLine.transform, "", 13f, locked ? L_DISTXT : C_WHITE, 0f, 0f, 64f, 24f, TextAlignmentOptions.Center);
+            var inc = SwSmallBtn(row, "+", ">", 402f, 24f, locked ? 4 : 0);
+            void Render() { valLbl.text = get().ToString(fmt); }
+            Render();
+            _settingsRefreshers.Add(Render);
+            if (locked)
+            {   // fixed at creation: greyed value, disabled arrows, a small lock - no clicks, no typing
+                SwLock(row, 288f);
+#if BAMP_DEV
+                _devSsRows[label] = (-1, null, null, true, () => get().ToString(fmt));
+#endif
+                return;
+            }
+            _settingsHits.Add((dec.rt, () => { set(Mathf.Clamp(get() - step, min, max)); MarkCustom(); Render(); }));
+            _settingsHits.Add((inc.rt, () => { set(Mathf.Clamp(get() + step, min, max)); MarkCustom(); Render(); }));
+            _numFields.Add(new NumField
+            {
+                Rt = boxLine.rectTransform, Lbl = valLbl, Get = get, Set = set, Min = min, Max = max, Fmt = fmt
+            });
+#if BAMP_DEV
+            _devSsRows[label] = (_numFields.Count - 1, null, null, false, () => get().ToString(fmt));
+#endif
+        }
+
+        private void SwBool(RectTransform sect, int i, string label, string desc, System.Func<bool> get, System.Action<bool> set, bool lockedOn = false)
+        {
+            var row = SwRow(sect, i, label, desc, lockedOn);
+            var b = SwSmallBtn(row, "t", "", 386f, 40f, 0);
+            if (lockedOn)
+            {   // one-way in the game: already on for this world, shown locked ON - no click
+                b.img.color = L_BTN[1]; b.lbl.text = "ON";
+                SwLock(row, 368f);
+#if BAMP_DEV
+                _devSsRows[label] = (-1, null, get, true, () => "ON");
+#endif
+                return;
+            }
             void Render()
             {
                 bool v = get();
-                lbl.text  = v ? "ON" : "OFF";
-                img.color = v ? new Color(0.20f, 0.45f, 0.25f, 1f)
-                              : new Color(0.40f, 0.22f, 0.22f, 1f);
+                b.lbl.text = v ? "ON" : "OFF";
+                b.img.color = v ? L_BTN[1] : L_BTN[0];
             }
             Render();
-            _settingsHits.Add((rt, () => { set(!get()); MarkCustom(); Render(); }));
+            _settingsHits.Add((b.rt, () => { set(!get()); MarkCustom(); Render(); }));
             _settingsRefreshers.Add(Render);
-            y -= LADV;
+#if BAMP_DEV
+            _devSsRows[label] = (-1, b.rt, get, false, () => get() ? "ON" : "OFF");
+#endif
         }
 
-        private void SettingsNumRow(Transform p, ref float y, string label, string desc,
-                                    System.Func<float> get, System.Action<float> set,
-                                    float step, float min, float max, string fmt)
+        /// <summary>SAVED-SETTINGS-1 (D2): the load lobby's window shows the save's REAL values - manifest WorldSettings (stamped
+        /// at every host save), else StartSettings (in MP nobody can change world settings mid-game - OptionsGuard - so the
+        /// creation values are still current), else nothing: only the needs rows are shown. The seed is remembered so only a
+        /// real change by the host is applied.</summary>
+        private void SeedSavedWorldSettings(GameVariablesDto? ws, int wsRev, GameVariablesDto? start, string name)
         {
-            var nameLbl = MakeLabel(p, label, SZ_LBL, C_LBLGREY, PAD, y, 228f, LH,
-                                    TextAlignmentOptions.Left);
-            _settingsTips.Add((nameLbl.rectTransform, desc));
-
-            var decGO = MakeGO("-", p);
-            var decRt = decGO.GetComponent<RectTransform>();
-            SetAnchored(decRt, 244f, y, 32f, LH);
-            decGO.AddComponent<Image>().color = C_BTNBLUE;
-            MakeLabel(decGO.transform, "<", SZ_BTN, C_WHITE, 0f, 0f, 32f, LH,
-                      TextAlignmentOptions.Center);
-
-            // Value field — click to type a value directly.
-            var fieldGO = MakeGO("val", p);
-            var fieldRt = fieldGO.GetComponent<RectTransform>();
-            SetAnchored(fieldRt, 280f, y, 142f, LH);
-            fieldGO.AddComponent<Image>().color = C_FIELD;
-            var valLbl = MakeLabel(fieldGO.transform, "", SZ_LBL, C_YELLOW, 0f, 0f, 142f, LH,
-                                   TextAlignmentOptions.Center);
-
-            var incGO = MakeGO("+", p);
-            var incRt = incGO.GetComponent<RectTransform>();
-            SetAnchored(incRt, 426f, y, 32f, LH);
-            incGO.AddComponent<Image>().color = C_BTNBLUE;
-            MakeLabel(incGO.transform, ">", SZ_BTN, C_WHITE, 0f, 0f, 32f, LH,
-                      TextAlignmentOptions.Center);
-
-            void Render() { valLbl.text = get().ToString(fmt); }
-            Render();
-            _settingsHits.Add((decRt, () => { set(Mathf.Clamp(get() - step, min, max)); MarkCustom(); Render(); }));
-            _settingsHits.Add((incRt, () => { set(Mathf.Clamp(get() + step, min, max)); MarkCustom(); Render(); }));
-            _settingsRefreshers.Add(Render);
-            _numFields.Add(new NumField
+            try
             {
-                Rt = fieldRt, Lbl = valLbl, Get = get, Set = set, Min = min, Max = max, Fmt = fmt
-            });
-            y -= LADV;
+                if (_ssPreLoad == null) { _ssPreLoad = new GameVariablesDto(); MPServer.CopyWorldFlex(_hostSettings, _ssPreLoad); _ssPreDays = _hostSettings.DaysPerYear; _ssPreDiff = _hostSettings.Difficulty ?? ""; _ssPreSel = _selectedDifficulty ?? ""; }
+                var src = ws ?? start;
+                _ssSource = ws != null ? $"WorldSettings rev={wsRev}" : start != null ? "StartSettings" : "none";
+                _ssHas = src != null; _ssSeed = null; _ssCourses = _ssContacts = false;
+                if (src == null)
+                {
+                    Plugin.Logger.LogInfo($"[MenuUI] saved world settings: '{name}' records none (no WorldSettings, no StartSettings) - the window shows only the needs rows.");
+                    return;
+                }
+                MPServer.CopyWorldFlex(src, _hostSettings);
+                _hostSettings.DaysPerYear = src.DaysPerYear;
+                // A record written before game 1.0 has no sell-back (0): the game then reads the preset's value
+                // (ItemHelper.cs:85-92), so that is what the world really runs - show it, never an unselectable 0.
+                if (src.SellingMultiplier <= 0f)
+                {
+                    float sb = 0.75f;
+                    try { if (src.Difficulty != "Custom") sb = MPServer.Preset(src.Difficulty).SellingMultiplier; } catch { }
+                    _hostSettings.SellingMultiplier = sb > 0f ? sb : 0.75f;
+                }
+                _ssCourses = src.AllCoursesUnlocked; _ssContacts = src.AllContactsUnlocked;
+                _ssSeed = new GameVariablesDto();
+                MPServer.CopyWorldFlex(_hostSettings, _ssSeed);
+                Plugin.Logger.LogInfo($"[MenuUI] saved world settings seeded from {_ssSource} ('{name}'): days {src.DaysPerYear}, tax {src.TaxPercentage}, market {src.MarketPriceMultiplier:0.00}, sell-back {_hostSettings.SellingMultiplier:0.00}, courses {(_ssCourses ? "on (locked)" : "off")}, contacts {(_ssContacts ? "on (locked)" : "off")}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] saved world settings seed: {ex.Message}"); }
         }
+
+        private void RestorePreLoadSettings()
+        {
+            try
+            {
+                if (_ssPreLoad != null)
+                {
+                    MPServer.CopyWorldFlex(_ssPreLoad, _hostSettings); _hostSettings.DaysPerYear = _ssPreDays; _ssPreLoad = null;
+                    // F3: an edit in the saved window called MarkCustom - the new game gets the lobby's preset back, not a Custom world
+                    if (_ssPreDiff.Length > 0) _hostSettings.Difficulty = _ssPreDiff;
+                    if (_ssPreSel.Length > 0) _selectedDifficulty = _ssPreSel;
+                    _ssPreDiff = _ssPreSel = "";
+                    Plugin.Logger.LogInfo($"[MenuUI] new-game settings restored (difficulty {_hostSettings.Difficulty}, preset {_selectedDifficulty}).");
+                }
+                _ssHas = false; _ssSeed = null; _ssCourses = _ssContacts = false; _ssSource = "none";
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] restore new-game settings: {ex.Message}"); }
+        }
+
+#if BAMP_DEV
+        private readonly Dictionary<string, (int num, RectTransform? tog, System.Func<bool>? get, bool locked, System.Func<string> show)> _devSsRows = new();
+        private int _devTip = -1;
+        private static readonly Vector3[] _devTipCorners = new Vector3[4];
+        /// <summary>DEV: a cursor point for a forced tooltip - the tip lands just right of the row name's start, below it.</summary>
+        private static Vector2 DevTipPoint(RectTransform rt)
+        {
+            rt.GetWorldCorners(_devTipCorners);
+            return new Vector2(_devTipCorners[0].x + (60f + 300f * LS + 24f) * UiScale, _devTipCorners[0].y);
+        }
+        private string DevSsDump()
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var kv in _devSsRows) sb.Append(kv.Key).Append('=').Append(kv.Value.show()).Append(kv.Value.locked ? "(locked)" : "").Append("; ");
+            string diff = _ssSeed != null ? MPServer.WorldFlexDiff(_ssSeed, _hostSettings) : "(no seed)";
+            return $"mode={(_settingsPanelLoadMode ? "saved" : "new")} from={_ssSource} rows={_devSsRows.Count} changed=[{diff}] {sb}";
+        }
+#endif
 
         // ── Settings panel — per-frame tooltip + click-to-type editing ────────
 
@@ -7316,20 +7447,25 @@ namespace BigAmbitionsMP
 
             var ms = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
 
-            // Hover → tooltip following the cursor
-            string? desc = null;
+            // Hover → tooltip following the cursor (SAVED-SETTINGS-1: the row's name as its title, as the approved mock-up)
+            string? desc = null, title = null;
             foreach (var t in _settingsTips)
-                if (RectHit(t.rt, ms)) { if (!string.IsNullOrEmpty(t.desc)) desc = t.desc; break; }   // POWERNAP: an empty desc must not pop an empty tooltip box
+                if (RectHit(t.rt, ms)) { if (!string.IsNullOrEmpty(t.desc)) { desc = t.desc; title = t.title; } break; }   // POWERNAP: an empty desc must not pop an empty tooltip box
+#if BAMP_DEV
+            if (desc == null && _devTip >= 0 && _devTip < _settingsTips.Count) { var dvt = _settingsTips[_devTip]; desc = dvt.desc; title = dvt.title; ms = DevTipPoint(dvt.rt); }
+#endif
 
             if (_tooltipGO != null && _tooltipTxt != null)
             {
                 if (desc != null)
                 {
-                    _tooltipTxt.text = desc;
+                    if (!ReferenceEquals(desc, _tipShown)) SetSettingsTip(title ?? "", desc);   // only when the hovered row changes
                     var ttrt = (RectTransform)_tooltipGO.transform;
                     float tw = ttrt.sizeDelta.x, th = ttrt.sizeDelta.y;
                     // Place to the LEFT of the cursor — a cursor's body extends
                     // down-right from its hotspot, so its left side is always clear.
+                    // SAVED-SETTINGS-1: the cursor is in screen pixels, the tooltip in canvas units (they differ below 1080p).
+                    ms /= UiScale;
                     const float gap = 24f;
                     float cx = ms.x - gap - tw;
                     float cy = ms.y - 8f;
@@ -7819,6 +7955,27 @@ namespace BigAmbitionsMP
                 }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] load tuning apply: {ex.Message}"); }
+            // SAVED-SETTINGS-1 (D3): dirty only when the host changed a flexible value from the save's own; the host applies it at
+            // world-ready (MPServer.HostApplyPendingWorldSettings), which also writes WorldSettings + the bumped rev to the manifest.
+            try
+            {
+                MPServer.PendingWorldSettings = null; MPServer.PendingWorldSettingsSession = ""; MPServer.WorldSettingsLoadArmed = true;
+                if (_ssHas && _ssSeed != null)
+                {
+                    string wsDiff = MPServer.WorldFlexDiff(_ssSeed, _hostSettings);
+                    if (wsDiff.Length > 0)
+                    {
+                        var wsP = new GameVariablesDto();
+                        MPServer.CopyWorldFlex(_hostSettings, wsP);
+                        wsP.Difficulty = "Custom";
+                        MPServer.PendingWorldSettings = wsP;
+                        MPServer.PendingWorldSettingsSession = MPServer.ChosenLoadSession ?? "";
+                        Plugin.Logger.LogInfo($"[MenuUI] saved world settings changed by the host ({wsDiff}) - applied at world-ready.");
+                    }
+                    else Plugin.Logger.LogInfo("[MenuUI] saved world settings unchanged - nothing to apply this load.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] saved world settings: {ex.Message}"); }
             MPServer.StartLoadGame();
             // F13 (2026-08-21): a refusal leaves IsInLobby TRUE — only a proceeding load may
             // claim "Loading save..." (live read; the refusal notice owns the line otherwise).
@@ -7858,14 +8015,12 @@ namespace BigAmbitionsMP
             _settingsOpen = true;
             // Round-53: the load lobby gets the save-authoritative shape of the panel; rebuild
             // when the mode differs from what's built (panel is otherwise built once).
+            // SAVED-SETTINGS-1: rebuilt on EVERY open - the saved game's seed, subtitle and locked rows are always the current ones.
             bool wantLoadMode = _lobbyLoadMode && MPServer.IsRunning;
-            if (_settingsPanelGO == null || wantLoadMode != _settingsPanelLoadMode)
-            {
-                try { if (_settingsPanelGO != null) Destroy(_settingsPanelGO); } catch { }
-                _settingsPanelGO = null;
-                try { BuildSettingsPanel(_canvasGO!.transform, wantLoadMode); }
-                catch (Exception ex) { Plugin.Logger.LogError($"[UI] BuildSettingsPanel rebuild failed: {ex}"); }
-            }
+            try { if (_settingsPanelGO != null) Destroy(_settingsPanelGO); } catch { }
+            _settingsPanelGO = null;
+            try { BuildSettingsPanel(_canvasGO!.transform, wantLoadMode); }
+            catch (Exception ex) { Plugin.Logger.LogError($"[UI] BuildSettingsPanel rebuild failed: {ex}"); }
             RefreshSettingsPanel();
             StyleSettingsPanel();   // native font + rounded panel (lazy — once assets are captured)
             if (_settingsPanelGO != null)

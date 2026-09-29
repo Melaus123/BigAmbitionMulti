@@ -1,0 +1,379 @@
+{
+  "id": "T-SAVEDSETTINGS2",
+  "title": "SAVED-SETTINGS-1 part 2: 3 values changed in the saved-game window are applied (rev=1) on host and client; host save, client back to the menu, host restart; the saved-game window then shows the edited values from manifest WorldSettings rev=1, and a load with no change applies nothing on either machine (same rev and hash). Then (F4) the heartbeat backstop: the host skips the world-loaded send ('wsskip') for a rejoining client, which asks at its heartbeat check and ends at the same rev and hash.",
+  "preconditions": "Dev build with the 'uiview ss*' levers and 'worldvars'. Fixture save1 (host melaus, client Client1). Uses the driver's drop/relaunch steps for the host.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "\\[World\\] settings apply rev=",
+    "\\[World\\] host apply at ",
+    "\\[World\\] send to ",
+    "\\[World\\] client receive: ",
+    "\\[World\\] client world-ready: ",
+    "\\[World\\] rev check: ",
+    "\\[World\\] world-ready: ",
+    "\\[World\\] manifest stamp: ",
+    "\\[MenuUI\\] saved world settings seed: ",
+    "\\[MenuUI\\] saved world settings: ",
+    "\\[UI\\] settings tooltip: ",
+    "\\[UI\\] BuildSettingsPanel rebuild failed",
+    "rigidKept=False",
+    "\\[World\\] settings rev=\\d+ \\(client(, held)?\\) not applied - rev not recorded"
+  ],
+  "oracles_report": [
+    "\\[World\\] ",
+    "\\[MenuUI\\] saved world settings",
+    "\\[UI\\] settings window built",
+    "\\[TestDrive\\] worldvars",
+    "\\[TestDrive\\] screenshot "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "all",
+      "cmd": "mark TEST SAVEDSETTINGS2 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 2,
+      "role": "all",
+      "sleep_s": 15
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "uiview ssload ${session}",
+      "expect_result": "^OK uiview ssload: lobby load=True seeded=True from=StartSettings courses=True contacts=True"
+    },
+    {
+      "seq": 4,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] 'Client1' joined lobby\\.",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "uiview ssopen",
+      "expect_result": "mode=saved rows=23 "
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "uiview ssset Tax %=25",
+      "expect_result": "^OK uiview ssset: Tax %=25$"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "uiview ssset Sell-back x=0.5",
+      "expect_result": "^OK uiview ssset: Sell-back x=0\\.50$"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "uiview ssset Disable vehicle fuel=ON",
+      "expect_result": "^OK uiview ssset: Disable vehicle fuel=ON$"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "uiview ssstart",
+      "expect_result": "^OK uiview ssstart: lobby start",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[MenuUI\\] saved world settings changed by the host \\(tax 10->25, sellback 0\\.75->0\\.5, noFuel off->on\\) - applied at world-ready\\.",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[World\\] settings applied rev=1 hash=[0-9a-f]{8} .* \\(host world-ready\\) rigidKept=True",
+          "within_s": 300
+        },
+        {
+          "role": "c",
+          "regex": "\\[World\\] settings applied rev=1 hash=[0-9a-f]{8} .*\\(client(, held)?\\) rigidKept=True",
+          "within_s": 360
+        }
+      ]
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "worldvars",
+      "expect_result": "^OK worldvars rev=1 hash=[0-9a-f]{8} ",
+      "capture": {
+        "hash": "hash=([0-9a-f]{8})"
+      }
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "worldvars",
+      "expect_result": "^OK worldvars rev=1 hash=${hash} "
+    },
+    {
+      "seq": 14,
+      "role": "all",
+      "cmd": "mark TEST SAVEDSETTINGS2 SAVE",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "leavegame menu",
+      "expect_result": "^OK leavegame menu"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "drop": true
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "relaunch": true
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "sleep_s": 20
+    },
+    {
+      "seq": 22,
+      "role": "all",
+      "cmd": "mark TEST SAVEDSETTINGS2 RELOAD",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "uiview ssload ${session}",
+      "expect_result": "^OK uiview ssload: lobby load=True seeded=True from=WorldSettings rev=1 courses=True contacts=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[MenuUI\\] saved world settings seeded from WorldSettings rev=1 \\('${session}'\\): days 60, tax 25, market 1\\.00, sell-back 0\\.50, ",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "uiview ssopen",
+      "expect_result": "mode=saved rows=23 locked=\\[Days per year,All courses unlocked,All contacts unlocked\\]"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "uiview ssdump",
+      "expect_result": "from=WorldSettings rev=1 rows=23 changed=\\[\\] Tax %=25; Days per year=60\\(locked\\); .*Sell-back x=0\\.50; .*Disable vehicle fuel=ON;"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "sleep_s": 2
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "screenshot ss-saved-reload-1920",
+      "expect_result": "^OK screenshot queued",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] screenshot .*shot-ss\\-saved\\-reload\\-1920\\.png",
+          "within_s": 10
+        }
+      ]
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "uiview ssclose",
+      "expect_result": "open=False"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] 'Client1' joined lobby\\.",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "uiview ssstart",
+      "expect_result": "^OK uiview ssstart: lobby start",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[MenuUI\\] saved world settings unchanged - nothing to apply this load\\.",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[World\\] no change this load - nothing applied \\(rev=1 hash=${hash}\\)\\.",
+          "within_s": 300
+        },
+        {
+          "role": "c",
+          "regex": "\\[World\\] settings already equal rev=1 hash=${hash} \\(client(, held)?\\) - nothing applied\\.",
+          "within_s": 360
+        }
+      ]
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "worldvars",
+      "expect_result": "^OK worldvars rev=1 hash=${hash} "
+    },
+    {
+      "seq": 34,
+      "role": "c",
+      "cmd": "worldvars",
+      "expect_result": "^OK worldvars rev=1 hash=${hash} "
+    },
+    {
+      "seq": 35,
+      "role": "all",
+      "cmd": "mark TEST SAVEDSETTINGS2 BACKSTOP",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "leavegame menu",
+      "expect_result": "^OK leavegame menu"
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "sleep_s": 25
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "wsskip",
+      "expect_result": "^OK wsskip armed"
+    },
+    {
+      "seq": 39,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[World\\] DEV: skipped the world-loaded settings send to 'Client1' \\(wsskip\\)",
+          "within_s": 300
+        },
+        {
+          "role": "c",
+          "regex": "\\[World\\] heartbeat says rev=1, this machine applied rev=0 - asked the host to re-send\\.",
+          "within_s": 360
+        },
+        {
+          "role": "h",
+          "regex": "\\[World\\] settings rev=1 hash=${hash} sent to 'Client1' \\(asked, their rev 0\\)\\.",
+          "within_s": 360
+        },
+        {
+          "role": "c",
+          "regex": "\\[World\\] settings (applied|already equal) rev=1 hash=${hash} \\(client\\)",
+          "within_s": 360
+        }
+      ]
+    },
+    {
+      "seq": 42,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "worldvars",
+      "expect_result": "^OK worldvars rev=1 hash=${hash} "
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "worldvars",
+      "expect_result": "^OK worldvars rev=1 hash=${hash} "
+    },
+    {
+      "seq": 45,
+      "role": "all",
+      "cmd": "mark TEST SAVEDSETTINGS2 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

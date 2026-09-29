@@ -343,6 +343,7 @@ namespace BigAmbitionsMP
             // reconnect → 2026-06-19 bug). Local seating is preserved. Harmless on the first connect
             // (state already empty). Marshalled — it mutates lists the main thread reads.
             GameStatePatcher.EnqueueOnMainThread(() => { try { MPRestSync.ClearVotesOnReconnect(); } catch { } });
+            GameStatePatcher.EnqueueOnMainThread(ResetWorldSettings);   // SAVED-SETTINGS-1: the applied rev is per connection
 
             IsInLobby = true;
             _lobbyPlayers = new List<string>();
@@ -1212,6 +1213,13 @@ namespace BigAmbitionsMP
                     BillboardAdSync.Apply(env.GetPayload<BillboardAdsPayload>());
                     break;
 
+                case MessageType.WorldSettings:   // SAVED-SETTINGS-1: the host's world settings (my world loaded, the host's own apply, or a re-send)
+                {
+                    var wsp = env.GetPayload<WorldSettingsPayload>();
+                    if (wsp?.Settings != null) GameStatePatcher.EnqueueOnMainThread(() => ReceiveWorldSettings(wsp));
+                    break;
+                }
+
                 case MessageType.ModMismatch:           // round-253: host says our mod list differs from theirs — informational, never a gate
                 {
                     var mm = env.GetPayload<ModMismatchPayload>();
@@ -1869,6 +1877,9 @@ namespace BigAmbitionsMP
             // Needs/morale tuning rides the heartbeat (loaded-session clients
             // converge too; -1 = older host, keep current values).
             MPNeedsTuning.SetFromHeartbeat(payload.TuneDrain, payload.TuneRest, payload.TuneMorale, payload.TunePowerNap);
+            // SAVED-SETTINGS-1 backstop: the host's world-settings rev differs from what this machine applied -> ask again (main thread, throttled).
+            int hostWorldRev = payload.WorldRev;
+            if (hostWorldRev > 0 && hostWorldRev != _worldRevApplied) GameStatePatcher.EnqueueOnMainThread(() => WorldRevCheck(hostWorldRev));
 
             // Weather (2026-07-14): align local rain with the host's state — main
             // thread, coalesced (only the newest state matters).  2026-08-18: the
@@ -2339,6 +2350,74 @@ namespace BigAmbitionsMP
         /// PhaseReportPayload.Seq).  Process-lifetime, never reset — the HOST clears its last-seen
         /// for us when we disconnect, so a restart of this process starting over at 1 is fine.</summary>
         private static long _phaseSeq;
+
+        // ── SAVED-SETTINGS-1: the host's saved-world settings on this client (main thread) ──
+        private static int _worldRevApplied;
+        private static WorldSettingsPayload? _worldHeld;
+        private static float _worldReadyAt = -999f, _worldAskNext;
+        internal static int WorldRevApplied => _worldRevApplied;
+
+        private static void ResetWorldSettings() { _worldRevApplied = 0; _worldHeld = null; _worldReadyAt = -999f; _worldAskNext = 0f; }
+
+        private static bool WorldOpen()
+        {
+            var ph = MPLifecycle.Phase;
+            return (ph == MPLifecycle.MPPhase.WorldReady || ph == MPLifecycle.MPPhase.Running) && SaveGameManager.Current?.gameVariables != null;
+        }
+
+        private static void ReceiveWorldSettings(WorldSettingsPayload p)
+        {
+            try
+            {
+                if (!IsConnected || MPServer.IsRunning || p.Settings == null) return;
+                if (!WorldOpen())
+                {   // only in an MP world: my own save is still loading and would overwrite it - apply at my world-ready
+                    _worldHeld = p;
+                    Plugin.Logger.LogInfo($"[World] settings rev={p.Rev} arrived before my world opened - held for world-ready.");
+                    return;
+                }
+                _worldHeld = null;
+                MPServer.ApplyWorldSettings(p.Settings, p.Rev, "client", out bool ok);
+                if (ok) _worldRevApplied = p.Rev;   // F1: a failed apply is never recorded as done
+                else Plugin.Logger.LogWarning($"[World] settings rev={p.Rev} (client) not applied - rev not recorded; the heartbeat will ask again.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[World] client receive: {ex.Message}"); }
+        }
+
+        /// <summary>MPCanvasUI world-ready (client): the world just came from disk, so what it holds is re-checked against the
+        /// host's (applied rev back to 0); a set that arrived during the load is applied now.</summary>
+        internal static void WorldSettingsOnWorldReady()
+        {
+            try
+            {
+                if (!IsConnected || MPServer.IsRunning) return;
+                _worldRevApplied = 0;
+                _worldReadyAt = UnityEngine.Time.unscaledTime;
+                var held = _worldHeld;
+                _worldHeld = null;
+                if (held?.Settings != null)
+                {
+                    MPServer.ApplyWorldSettings(held.Settings, held.Rev, "client, held", out bool ok);
+                    if (ok) _worldRevApplied = held.Rev;   // F1
+                    else Plugin.Logger.LogWarning($"[World] settings rev={held.Rev} (client, held) not applied - rev not recorded; the heartbeat will ask again.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[World] client world-ready: {ex.Message}"); }
+        }
+
+        private static void WorldRevCheck(int hostRev)
+        {
+            try
+            {
+                if (!IsConnected || MPServer.IsRunning || hostRev == _worldRevApplied || !WorldOpen()) return;
+                float now = UnityEngine.Time.unscaledTime;
+                if (now - _worldReadyAt < 20f || now < _worldAskNext) return;   // the host's world-loaded send normally lands first
+                _worldAskNext = now + 15f;
+                Send(MessageEnvelope.Create(MessageType.WorldSettings, MPConfig.PlayerId, new WorldSettingsPayload { Rev = _worldRevApplied }));
+                Plugin.Logger.LogInfo($"[World] heartbeat says rev={hostRev}, this machine applied rev={_worldRevApplied} - asked the host to re-send.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[World] rev check: {ex.Message}"); }
+        }
 
         public static void SendPhaseReport(string phase, string detail = "")
         {
