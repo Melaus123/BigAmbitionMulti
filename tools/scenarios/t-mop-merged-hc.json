@@ -1,0 +1,1087 @@
+{
+ "id": "T-MOP-MERGED-HC",
+ "title": "H-CLEANLOOP-1 FIX verification (fix attempt 2: F1 stroke guard, F2 stroke-end report always sent, F3 no false zeros) on the field case: the HOST (merged partner) mops the CLIENT's produce shop in fx-till1. M1 quiet control; M2 under the owner's 2 s dirt drip AND customer checkouts the stroke finishes, reports and the owner's cells end low; M3 put-away during a live stroke completes; M4 release; M5 the owner re-entering / a till full push / checkouts during a stroke do not extend it; F3 an ignored click is not a stroke and no report zeroes a dirty cell; M7 Escape still works. NO save. R1 (review 2026-09-28): a SHORTER full-snapshot dirt list during a live stroke is held and applied at the stroke's end; the stroke, and the put-away, survive.",
+ "preconditions": "Reporter fixture fx-till1 (MERGED pair; the client owns '14 ba:street_fifthavenue'; vars.keepMerger true). Dev build with the P-CLEANLOOP levers (mopstation, handstate, mopcell [force] with idxs=, mopaway, dirtstate with cellsMax=, dirtseed, dirtdrip) and the log-only [MopProbe] lines incl. the StrokeGuard line. The former -REPRO legs now assert the FIXED behaviour (reproduction: T-MOP-MERGED-HC-20260928-170639). Plus the R1 lever `dirtshrink [addr] [n] | dirtshrink restore`.",
+ "instances": 2,
+ "vars": {
+  "clientPid": "Client1",
+  "hostPid": "melaus",
+  "session": "fx-till1",
+  "keepMerger": true,
+  "shop": "14 ba:street_fifthavenue"
+ },
+ "oracles_absent": [
+  "HarmonyException",
+  "Patching exception",
+  "(?<!swallowed )NullReferenceException",
+  "\\[Cleaning\\] (ReportCleanedCells|Apply|helper mop handover|station click takeover):",
+  "\\[Mop\\] single-slot guard:",
+  "\\[TestDrive\\] dirtdrip:",
+  "\\[MopProbe\\] LIVELOCK\\?",
+  "\\[MopProbe\\] dirt update RAISED",
+  "P-MOP-EATEN.*zeroed anyway",
+  "\\[Cleaning\\] stop-report dropped",
+  "\\[MopProbe\\] stroke coroutine threw"
+ ],
+ "oracles_report": [
+  "\\[MopProbe\\]",
+  "\\[Cleaning\\]",
+  "\\[Patcher\\] DirtSync",
+  "\\[Mop\\]",
+  "\\[Carry\\]",
+  "\\[MopProbe\\] stroke guard held back",
+  "\\[Cleaning\\] stroke #[0-9]+ observed finished at its StopCleaning",
+  "P-MOP-EATEN",
+  "\\[MopProbe\\] other '",
+  "\\[Patcher\\] '.*' .*dirt: lists do not align",
+  "\\[Patcher\\] '.*': local dirt list regrown"
+ ],
+ "steps": [
+  {
+   "seq": 1,
+   "role": "h",
+   "cmd": "host",
+   "expect_result": "^OK"
+  },
+  {
+   "seq": 2,
+   "role": "c",
+   "cmd": "join",
+   "expect_result": "^OK"
+  },
+  {
+   "seq": 3,
+   "role": "h",
+   "cmd": "hostload ${session}",
+   "expect_result": "^OK"
+  },
+  {
+   "seq": 4,
+   "role": "h",
+   "sleep_s": 70,
+   "note": "both worlds load and settle (run 4: the host was not settled after 45 s)"
+  },
+  {
+   "seq": 5,
+   "role": "both",
+   "cmd": "mark TEST MOP MERGED-HC START",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 6,
+   "role": "h",
+   "cmd": "status",
+   "expect_result": "settled=True"
+  },
+  {
+   "seq": 7,
+   "role": "c",
+   "cmd": "status",
+   "expect_result": "settled=True"
+  },
+  {
+   "seq": 8,
+   "role": "h",
+   "cmd": "pause off",
+   "expect_result": "^OK"
+  },
+  {
+   "seq": 9,
+   "role": "c",
+   "cmd": "pause off",
+   "expect_result": "^OK"
+  },
+  {
+   "seq": 10,
+   "role": "h",
+   "cmd": "exitbuilding",
+   "abort_on_fail": false,
+   "note": "a fixture can load a player inside a building"
+  },
+  {
+   "seq": 11,
+   "role": "c",
+   "cmd": "exitbuilding",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 12,
+   "role": "h",
+   "sleep_s": 6
+  },
+  {
+   "seq": 13,
+   "role": "c",
+   "cmd": "enterbuilding ${shop}",
+   "expect_result": "^OK",
+   "note": "the OWNER (client) inside its produce shop"
+  },
+  {
+   "seq": 14,
+   "role": "h",
+   "sleep_s": 8
+  },
+  {
+   "seq": 15,
+   "role": "h",
+   "cmd": "enterbuilding ${shop}",
+   "expect_result": "^OK",
+   "note": "the HOST (merged partner) enters to mop - the field case"
+  },
+  {
+   "seq": 16,
+   "role": "h",
+   "sleep_s": 8
+  },
+  {
+   "seq": 17,
+   "role": "c",
+   "cmd": "mergestatus",
+   "expect_result": "member=True",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 18,
+   "role": "h",
+   "cmd": "helperstate ${shop}",
+   "expect_result": "^OK helperstate .*helper=True",
+   "abort_on_fail": false,
+   "note": "PREMISE: the mopper reads as a helper here (merger flip or pushed grant)"
+  },
+  {
+   "seq": 19,
+   "role": "c",
+   "cmd": "dirtstate ${shop}",
+   "expect_result": "^OK dirtstate .*over5=([5-9]|[1-9][0-9]+) ",
+   "abort_on_fail": false,
+   "note": "the owner's dirt (premise: some dirty spots)"
+  },
+  {
+   "seq": 20,
+   "role": "h",
+   "cmd": "dirtstate ${shop}",
+   "expect_result": "^OK dirtstate ",
+   "abort_on_fail": false,
+   "note": "the mopper's copy (report)"
+  },
+  {
+   "seq": 21,
+   "role": "both",
+   "cmd": "mark TEST MOP HC CTRL-NOSEED",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 22,
+   "role": "c",
+   "cmd": "tillhold 900",
+   "expect_result": "^OK",
+   "abort_on_fail": false,
+   "note": "CTRL-NOSEED: quiet customers (no NPC checkouts)"
+  },
+  {
+   "seq": 23,
+   "role": "c",
+   "cmd": "dirtdrip off",
+   "expect_result": "^OK dirtdrip off",
+   "abort_on_fail": false,
+   "note": "CTRL-NOSEED: no drip anywhere near this leg (and no dirtseed before it)"
+  },
+  {
+   "seq": 24,
+   "role": "h",
+   "sleep_s": 5
+  },
+  {
+   "seq": 25,
+   "role": "c",
+   "cmd": "dirtstate ${shop}",
+   "expect_result": "^OK dirtstate ",
+   "abort_on_fail": false,
+   "capture": {
+    "c0Sum": "sum=([0-9]+) ",
+    "c0Over5": "over5=([0-9]+) "
+   },
+   "note": "CTRL-NOSEED reading 1 (owner, before the helper takes a mop)"
+  },
+  {
+   "seq": 26,
+   "role": "h",
+   "cmd": "dirtstate ${shop}",
+   "expect_result": "^OK dirtstate ",
+   "abort_on_fail": false,
+   "capture": {
+    "c0Sync": "syncLines=([0-9]+) "
+   },
+   "note": "CTRL-NOSEED: the mopper's count of '[Patcher] DirtSync ... updated' lines before the pickup"
+  },
+  {
+   "seq": 27,
+   "role": "h",
+   "cmd": "mopstation",
+   "expect_result": "^OK mopstation path=helper",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper took a mop \\('ba:itemname_mop'\\) in '${shop}'",
+     "within_s": 25
+    }
+   ],
+   "note": "CTRL-NOSEED: the helper takes a mop (no seed, no drip)"
+  },
+  {
+   "seq": 28,
+   "role": "h",
+   "sleep_s": 5
+  },
+  {
+   "seq": 29,
+   "role": "c",
+   "cmd": "dirtstate ${shop} cmp=${c0Sum},${c0Over5}",
+   "expect_result": "^OK dirtstate ",
+   "abort_on_fail": false,
+   "note": "CTRL-NOSEED reading 2 (owner) - REPORT ONLY: the owner's dirt accrues on its own (run 20260928-190736: 553 -> 604 before the pickup, 642 after), so 'did not rise' was a wrong premise; the user's question is VISUAL (DIRT-HIGHLIGHT-1, own observation leg)"
+  },
+  {
+   "seq": 30,
+   "role": "h",
+   "cmd": "dirtstate ${shop}",
+   "expect_result": "^OK dirtstate ",
+   "abort_on_fail": false,
+   "note": "CTRL-NOSEED - REPORT ONLY (sync lines flow before and after the pickup alike)"
+  },
+  {
+   "seq": 31,
+   "role": "h",
+   "cmd": "mopaway discard",
+   "expect_result": "^OK mopaway discard heldBefore=True",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 32,
+   "role": "h",
+   "sleep_s": 20
+  },
+  {
+   "seq": 33,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate held=empty .*cleaning=False .*blockers=\\[\\]",
+   "abort_on_fail": false,
+   "note": "CTRL-NOSEED: hands empty again before M1"
+  },
+  {
+   "seq": 34,
+   "role": "both",
+   "cmd": "mark TEST MOP HC M1-CONTROL",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 35,
+   "role": "c",
+   "cmd": "tillhold 900",
+   "expect_result": "^OK",
+   "abort_on_fail": false,
+   "note": "no NPC checkouts (no immediate owner full pushes)"
+  },
+  {
+   "seq": 36,
+   "role": "c",
+   "cmd": "dirtdrip off",
+   "expect_result": "^OK dirtdrip off",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 37,
+   "role": "h",
+   "cmd": "mopstation",
+   "expect_result": "^OK mopstation path=helper",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper took a mop \\('ba:itemname_mop'\\) in '${shop}'",
+     "within_s": 25
+    }
+   ]
+  },
+  {
+   "seq": 38,
+   "role": "h",
+   "sleep_s": 3
+  },
+  {
+   "seq": 39,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate held=ba:itemname_mop mop=True mopCtl=1 .*cursor=Mop",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 40,
+   "role": "h",
+   "cmd": "mopcell below 30",
+   "expect_result": "^OK mopcell .*live=True",
+   "abort_on_fail": false,
+   "capture": {
+    "m1Cells": "cells=\\[([^\\]]*)\\]"
+   },
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper cleaned [0-9]+ cell\\(s\\) in '${shop}' . reported to the owner",
+     "within_s": 40
+    },
+    {
+     "role": "c",
+     "regex": "\\[Cleaning\\] applied [0-9]+ cleaned cell\\(s\\) from '${hostPid}' for '${shop}'",
+     "within_s": 45
+    }
+   ]
+  },
+  {
+   "seq": 41,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate .*cleaning=False",
+   "abort_on_fail": false,
+   "note": "M1: the stroke ended on its own"
+  },
+  {
+   "seq": 42,
+   "role": "both",
+   "cmd": "mark TEST MOP HC M2-STROKE-FIXED",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 43,
+   "role": "c",
+   "cmd": "dirtseed ${shop} 40 90",
+   "expect_result": "^OK dirtseed",
+   "abort_on_fail": false,
+   "note": "heavy dirt so one stroke spans several ~2 s bands (run 1: the fixture's only heavy spot was the drip spot); test dirt seeded here - visible on both screens"
+  },
+  {
+   "seq": 44,
+   "role": "h",
+   "sleep_s": 6
+  },
+  {
+   "seq": 45,
+   "role": "c",
+   "cmd": "tillhold off",
+   "abort_on_fail": false,
+   "note": "ordinary customer dirt: NPC checkouts resume (plus their immediate owner full pushes)"
+  },
+  {
+   "seq": 46,
+   "role": "c",
+   "cmd": "dirtdrip ${shop} 2 1",
+   "expect_result": "^OK dirtdrip addr=.* idx=[0-9]+ ",
+   "capture": {
+    "dripIdx": "idx=([0-9]+)"
+   },
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Patcher\\] DirtSync '${shop}': .* updated",
+     "within_s": 20
+    }
+   ]
+  },
+  {
+   "seq": 47,
+   "role": "h",
+   "sleep_s": 4
+  },
+  {
+   "seq": 48,
+   "role": "h",
+   "cmd": "mopcell dirtiest excl=${dripIdx}",
+   "expect_result": "^OK mopcell .*live=True .*idxs=[0-9]",
+   "capture": {
+    "m2Idxs": "idxs=([0-9,]+)"
+   },
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] stroke guard held back [0-9]+ of [0-9]+ cell\\(s\\) under live stroke #[0-9]+ in '${shop}'",
+     "within_s": 25
+    },
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] stroke #[0-9]+ in '${shop}' ended \\(StopCleaning\\)",
+     "within_s": 30
+    },
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper cleaned [0-9]+ cell\\(s\\) in '${shop}' . reported to the owner \\(current values\\)",
+     "within_s": 35
+    },
+    {
+     "role": "c",
+     "regex": "\\[Cleaning\\] applied [1-9][0-9]* cleaned cell\\(s\\) from '${hostPid}' for '${shop}'",
+     "within_s": 40
+    }
+   ],
+   "note": "M2 FIXED (was -REPRO): the band tries to re-dirty the stroke's cells, the guard holds them, the stroke ends, the report goes out and the owner applies it"
+  },
+  {
+   "seq": 49,
+   "role": "h",
+   "sleep_s": 8
+  },
+  {
+   "seq": 50,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate held=ba:itemname_mop .*cleaning=False .*blockers=\\[\\]",
+   "abort_on_fail": false,
+   "note": "M2 FIXED: the stroke ended by itself (mop still held, no CleaningFloor)"
+  },
+  {
+   "seq": 51,
+   "role": "c",
+   "cmd": "dirtstate ${shop} ${m2Idxs}",
+   "expect_result": "^OK dirtstate .*cellsMax=([0-9]|1[0-4])\\.[0-9] ",
+   "abort_on_fail": false,
+   "note": "M2 FIXED: the OWNER's values for the stroke's cells ended low (< 15; seeded 90; customer dirt may add a little)"
+  },
+  {
+   "seq": 52,
+   "role": "h",
+   "cmd": "dirtstate ${shop} ${m2Idxs}",
+   "expect_result": "^OK dirtstate ",
+   "abort_on_fail": false,
+   "note": "report: the mopper's copy of the same cells after the owner's next band"
+  },
+  {
+   "seq": 53,
+   "role": "both",
+   "cmd": "mark TEST MOP HC M3-PUTAWAY-FIXED",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 54,
+   "role": "h",
+   "cmd": "mopcell dirtiest excl=${dripIdx}",
+   "expect_result": "^OK mopcell .*live=True",
+   "abort_on_fail": false,
+   "note": "a new stroke, drip + customers still on"
+  },
+  {
+   "seq": 55,
+   "role": "h",
+   "sleep_s": 1
+  },
+  {
+   "seq": 56,
+   "role": "h",
+   "cmd": "mopaway discard",
+   "expect_result": "^OK mopaway discard heldBefore=True ",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] put-away \\(ReturnMopToStation\\)",
+     "within_s": 10
+    },
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] stroke #[0-9]+ in '${shop}' ended \\(StopCleaning\\)",
+     "within_s": 30
+    },
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper cleaned [0-9]+ cell\\(s\\) in '${shop}' . reported to the owner \\(current values\\)",
+     "within_s": 35
+    }
+   ],
+   "note": "the game still holds a put-away until the live stroke ends (native); the stroke now ends"
+  },
+  {
+   "seq": 57,
+   "role": "h",
+   "sleep_s": 25,
+   "note": "the stroke finished; the put-away walks the mopper to the station"
+  },
+  {
+   "seq": 58,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate held=empty mop=False mopCtl=0 .*cleaning=False .*blockers=\\[\\]",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "c",
+     "regex": "\\[Carry\\] '${hostPid}' put the mop away",
+     "within_s": 15
+    }
+   ],
+   "note": "M3 FIXED (was -REPRO): put-away completed under the drip - hand empty, no CleaningFloor"
+  },
+  {
+   "seq": 59,
+   "role": "both",
+   "cmd": "mark TEST MOP HC M4-RELEASE",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 60,
+   "role": "c",
+   "cmd": "dirtdrip off",
+   "expect_result": "^OK dirtdrip off wasArmed=True",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 61,
+   "role": "c",
+   "cmd": "tillhold 900",
+   "abort_on_fail": false,
+   "note": "quiet again"
+  },
+  {
+   "seq": 62,
+   "role": "h",
+   "cmd": "mopstation",
+   "expect_result": "^OK mopstation path=helper",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper took a mop",
+     "within_s": 25
+    }
+   ]
+  },
+  {
+   "seq": 63,
+   "role": "h",
+   "sleep_s": 4
+  },
+  {
+   "seq": 64,
+   "role": "h",
+   "cmd": "mopcell dirtiest",
+   "expect_result": "^OK mopcell .*live=True",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] stroke #[0-9]+ in '${shop}' ended \\(StopCleaning\\)",
+     "within_s": 30
+    },
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper cleaned [0-9]+ cell\\(s\\) in '${shop}' . reported to the owner \\(current values\\)",
+     "within_s": 35
+    },
+    {
+     "role": "c",
+     "regex": "\\[Cleaning\\] applied [1-9][0-9]* cleaned cell\\(s\\) from '${hostPid}' for '${shop}'",
+     "within_s": 40
+    }
+   ]
+  },
+  {
+   "seq": 65,
+   "role": "h",
+   "cmd": "mopaway discard",
+   "expect_result": "^OK mopaway discard heldBefore=True strokeWasLive=False deferred=False",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 66,
+   "role": "h",
+   "sleep_s": 20
+  },
+  {
+   "seq": 67,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate held=empty mop=False mopCtl=0 .*cleaning=False .*blockers=\\[\\]",
+   "abort_on_fail": false,
+   "note": "M4: the put-away completed"
+  },
+  {
+   "seq": 68,
+   "role": "both",
+   "cmd": "mark TEST MOP HC M5-PRESENCE",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 69,
+   "role": "c",
+   "cmd": "dirtseed ${shop} 40 95",
+   "expect_result": "^OK dirtseed",
+   "abort_on_fail": false,
+   "note": "test dirt seeded here - visible on both screens"
+  },
+  {
+   "seq": 70,
+   "role": "h",
+   "sleep_s": 6
+  },
+  {
+   "seq": 71,
+   "role": "h",
+   "cmd": "mopstation",
+   "expect_result": "^OK mopstation path=helper",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper took a mop",
+     "within_s": 25
+    }
+   ]
+  },
+  {
+   "seq": 72,
+   "role": "h",
+   "sleep_s": 4
+  },
+  {
+   "seq": 73,
+   "role": "c",
+   "cmd": "exitbuilding",
+   "expect_result": "^OK",
+   "abort_on_fail": false,
+   "note": "the owner steps out BEFORE the stroke"
+  },
+  {
+   "seq": 74,
+   "role": "h",
+   "sleep_s": 5
+  },
+  {
+   "seq": 75,
+   "role": "h",
+   "cmd": "mopcell dirtiest",
+   "expect_result": "^OK mopcell .*live=True",
+   "capture": {
+    "m5Probe": "probeStroke=([0-9]+)"
+   },
+   "abort_on_fail": false
+  },
+  {
+   "seq": 76,
+   "role": "c",
+   "cmd": "enterbuilding ${shop}",
+   "expect_result": "^OK",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] other '${clientPid}' ENTERED",
+     "within_s": 15
+    },
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] stroke #${m5Probe} in '${shop}' ended \\(StopCleaning\\) after [0-9.]+s; raised by dirt updates 0x",
+     "within_s": 40
+    }
+   ],
+   "note": "M5 FIXED: the owner re-enters DURING the stroke; the stroke is not raised and ends by itself"
+  },
+  {
+   "seq": 77,
+   "role": "h",
+   "sleep_s": 3
+  },
+  {
+   "seq": 78,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate .*cleaning=False",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 79,
+   "role": "c",
+   "cmd": "tillhold off",
+   "abort_on_fail": false,
+   "note": "NPC checkouts resume"
+  },
+  {
+   "seq": 80,
+   "role": "h",
+   "sleep_s": 4
+  },
+  {
+   "seq": 81,
+   "role": "h",
+   "cmd": "mopcell dirtiest",
+   "expect_result": "^OK mopcell .*live=True",
+   "capture": {
+    "m5bProbe": "probeStroke=([0-9]+)"
+   },
+   "abort_on_fail": false
+  },
+  {
+   "seq": 82,
+   "role": "c",
+   "cmd": "stationroom ${shop} 5",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] stroke #${m5bProbe} in '${shop}' ended \\(StopCleaning\\) after [0-9.]+s; raised by dirt updates 0x",
+     "within_s": 40
+    }
+   ],
+   "note": "a till op on the owner = its immediate full interior push, during the stroke (plus checkouts)"
+  },
+  {
+   "seq": 83,
+   "role": "h",
+   "sleep_s": 3
+  },
+  {
+   "seq": 84,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate .*cleaning=False",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 85,
+   "role": "h",
+   "cmd": "dirtstate",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 86,
+   "role": "c",
+   "cmd": "tillhold 900",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 87,
+   "role": "both",
+   "cmd": "mark TEST MOP HC F3-NOFALSEZERO",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 88,
+   "role": "c",
+   "cmd": "dirtseed ${shop} 40 90",
+   "expect_result": "^OK dirtseed",
+   "abort_on_fail": false,
+   "note": "test dirt seeded here - visible on both screens"
+  },
+  {
+   "seq": 89,
+   "role": "h",
+   "sleep_s": 8
+  },
+  {
+   "seq": 90,
+   "role": "h",
+   "cmd": "mopcell dirtiest",
+   "expect_result": "^OK mopcell .*live=True",
+   "capture": {
+    "f3Seq": "gate: stroke#=([0-9]+) "
+   },
+   "abort_on_fail": false
+  },
+  {
+   "seq": 91,
+   "role": "h",
+   "sleep_s": 1
+  },
+  {
+   "seq": 92,
+   "role": "h",
+   "cmd": "mopcell dirtiest force",
+   "expect_result": "^OK mopcell .*live=True .*gate: stroke#=${f3Seq} ",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper cleaned [0-9]+ cell\\(s\\) in '${shop}' . reported to the owner \\(current values\\)",
+     "within_s": 35
+    },
+    {
+     "role": "c",
+     "regex": "\\[Cleaning\\] applied [1-9][0-9]* cleaned cell\\(s\\) from '${hostPid}' for '${shop}'",
+     "within_s": 40
+    }
+   ],
+   "note": "F3: a click the game ignores (stroke live) no longer counts as a stroke; the stroke reports once"
+  },
+  {
+   "seq": 93,
+   "role": "h",
+   "sleep_s": 4
+  },
+  {
+   "seq": 94,
+   "role": "c",
+   "cmd": "dirtseed ${shop} 40 90",
+   "expect_result": "^OK dirtseed",
+   "abort_on_fail": false,
+   "note": "the owner's FRESH dirt after the stroke (the old flush zeroed exactly this); test dirt seeded here - visible on both screens"
+  },
+  {
+   "seq": 95,
+   "role": "h",
+   "sleep_s": 8
+  },
+  {
+   "seq": 96,
+   "role": "h",
+   "cmd": "mopcell dirtiest",
+   "expect_result": "^OK mopcell .*live=True",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper cleaned [0-9]+ cell\\(s\\) in '${shop}' . reported to the owner \\(current values\\)",
+     "within_s": 35
+    },
+    {
+     "role": "c",
+     "regex": "\\[Cleaning\\] applied [1-9][0-9]* cleaned cell\\(s\\) from '${hostPid}' for '${shop}'",
+     "within_s": 40
+    }
+   ],
+   "note": "F3: the next click never reports a dirty cell as zero (whole-run oracle: no 'zeroed anyway', no 'stop-report dropped')"
+  },
+  {
+   "seq": 97,
+   "role": "h",
+   "sleep_s": 3
+  },
+  {
+   "seq": 98,
+   "role": "c",
+   "cmd": "dirtstate ${shop}",
+   "expect_result": "^OK dirtstate .*over5=([2-9][0-9]|[1-9][0-9][0-9]+) ",
+   "abort_on_fail": false,
+   "note": "the owner's fresh seed was not erased (40 spots seeded, a stroke cleans at most 9)"
+  },
+  {
+   "seq": 99,
+   "role": "both",
+   "cmd": "mark TEST MOP HC M7-ESCAPE",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 100,
+   "role": "c",
+   "cmd": "dirtdrip ${shop} 2 1",
+   "expect_result": "^OK dirtdrip",
+   "capture": {
+    "dripIdx": "idx=([0-9]+)"
+   },
+   "abort_on_fail": false
+  },
+  {
+   "seq": 101,
+   "role": "h",
+   "sleep_s": 4
+  },
+  {
+   "seq": 102,
+   "role": "h",
+   "cmd": "mopcell dirtiest excl=${dripIdx}",
+   "expect_result": "^OK mopcell .*live=True",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 103,
+   "role": "h",
+   "sleep_s": 1
+  },
+  {
+   "seq": 104,
+   "role": "h",
+   "cmd": "mopaway escape",
+   "expect_result": "^OK mopaway escape heldBefore=True strokeWasLive=True .*held=empty .*cleaning=False .*blockers=\\[\\]",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] Escape \\(MopController.HandleEscape\\): handled=True strokeWasLive=True",
+     "within_s": 10
+    }
+   ],
+   "note": "M7: Escape during a live stroke still drops the mop at once"
+  },
+  {
+   "seq": 105,
+   "role": "h",
+   "sleep_s": 3
+  },
+  {
+   "seq": 106,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate held=empty .*mopCtl=0 .*cleaning=False .*blockers=\\[\\]",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 107,
+   "role": "c",
+   "cmd": "dirtdrip off",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 108,
+   "role": "both",
+   "cmd": "mark TEST MOP HC R1-SHORTSNAPSHOT",
+   "expect_result": "OK MARK"
+  },
+  {
+   "seq": 109,
+   "role": "c",
+   "cmd": "dirtseed ${shop} 40 95",
+   "expect_result": "^OK dirtseed",
+   "abort_on_fail": false,
+   "note": "heavy dirt so the stroke outlives the lever call; test dirt seeded here - visible on both screens"
+  },
+  {
+   "seq": 110,
+   "role": "h",
+   "sleep_s": 8
+  },
+  {
+   "seq": 111,
+   "role": "h",
+   "cmd": "mopstation",
+   "expect_result": "^OK mopstation path=helper",
+   "abort_on_fail": false,
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Cleaning\\] helper took a mop",
+     "within_s": 25
+    }
+   ]
+  },
+  {
+   "seq": 112,
+   "role": "h",
+   "sleep_s": 4
+  },
+  {
+   "seq": 113,
+   "role": "h",
+   "cmd": "mopcell dirtiest",
+   "expect_result": "^OK mopcell .*live=True",
+   "abort_on_fail": false,
+   "capture": {
+    "r1Probe": "probeStroke=([0-9]+)",
+    "r1Idxs": "idxs=([0-9,]+)"
+   }
+  },
+  {
+   "seq": 114,
+   "role": "h",
+   "cmd": "dirtshrink ${shop} 1 head bump=30",
+   "expect_result": "^OK dirtshrink .*lengthKept=True strokeLive=True xzOK=True .*clampedCells=[1-9][0-9]* .*\\| incoming=[0-9]+ .*pairedByXZ=True .*liveStroke=True",
+   "abort_on_fail": false,
+   "note": "G1: a full-snapshot dirt list one spot SHORTER (first spot dropped, every value +30) lands during the live stroke - applied AT ONCE, local length unchanged, values paired by X/Z, the stroke's cells clamped (not raised)",
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[Patcher\\] '${shop}' dev dirtshrink dirt: lists do not align - applied in place, local length kept \\(G1\\)",
+     "within_s": 10
+    },
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] stroke #${r1Probe} in '${shop}' ended \\(StopCleaning\\)",
+     "within_s": 40
+    }
+   ],
+   "capture": {
+    "r1Last": "lastIdx=([0-9]+)"
+   }
+  },
+  {
+   "seq": 115,
+   "role": "h",
+   "sleep_s": 3
+  },
+  {
+   "seq": 116,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate held=ba:itemname_mop .*cleaning=False .*blockers=\\[\\]",
+   "abort_on_fail": false,
+   "note": "R1a: the stroke ended by itself (no exception, no CleaningFloor left)"
+  },
+  {
+   "seq": 117,
+   "role": "h",
+   "cmd": "dirtstate ${shop} ${r1Idxs}",
+   "expect_result": "^OK dirtstate .* cellsMax=([0-9]|1[0-9])\\.",
+   "abort_on_fail": false,
+   "note": "G1: the stroke's cells finished clean and were NOT re-dirtied to their pre-stroke 23-100; a busy owner's shop accrues a little within seconds (runs -190736: 0-2, -193203: 4-10 with the owner having applied the report), so cellsMax < 20"
+  },
+  {
+   "seq": 118,
+   "role": "h",
+   "cmd": "mopcell last",
+   "expect_result": "^OK mopcell idx=${r1Last} .*live=True",
+   "abort_on_fail": false,
+   "note": "G1: a click on the LAST cell index after the shorter snapshot starts a stroke (its index is still inside the list)",
+   "expect_log": [
+    {
+     "role": "h",
+     "regex": "\\[MopProbe\\] stroke #[0-9]+ in '${shop}' ended \\(StopCleaning\\)",
+     "within_s": 60
+    }
+   ]
+  },
+  {
+   "seq": 119,
+   "role": "h",
+   "sleep_s": 3
+  },
+  {
+   "seq": 120,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate held=ba:itemname_mop .*cleaning=False .*blockers=\\[\\]",
+   "abort_on_fail": false,
+   "note": "G1: the tail-cell stroke completed (no 'coroutine threw' - whole-run oracle; no CleaningFloor left)"
+  },
+  {
+   "seq": 121,
+   "role": "h",
+   "cmd": "dirtshrink restore",
+   "expect_result": "^OK dirtshrink restore .*strokeLive=False",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 122,
+   "role": "h",
+   "cmd": "mopaway discard",
+   "expect_result": "^OK mopaway discard heldBefore=True strokeWasLive=False deferred=False",
+   "abort_on_fail": false
+  },
+  {
+   "seq": 123,
+   "role": "h",
+   "sleep_s": 20
+  },
+  {
+   "seq": 124,
+   "role": "h",
+   "cmd": "handstate",
+   "expect_result": "^OK handstate held=empty mop=False mopCtl=0 .*cleaning=False .*blockers=\\[\\]",
+   "abort_on_fail": false,
+   "note": "R1a: the put-away works after the deferred apply"
+  },
+  {
+   "seq": 125,
+   "role": "both",
+   "cmd": "mark TEST MOP MERGED-HC END",
+   "expect_result": "OK MARK"
+  }
+ ]
+}

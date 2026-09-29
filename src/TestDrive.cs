@@ -148,6 +148,7 @@ namespace BigAmbitionsMP
                 if (RejectNextJoin) TickRejectJoin();   // H-REFUSALMUTE-1: re-checks the pending joins every poll until one is refused
                 if (_workArmed) TickWork();   // H-WORKFF-1 part 2: 'work on' follow-through (DEV lever)
                 if (_ceEmptyUntil > 0f) TickEvictEmpty();   // t-handoff3 LEG1D premise wait (DEV lever)
+                if (_dripReg != null) TickDirtDrip();   // P-CLEANLOOP rig: `dirtdrip` (DEV lever)
                 if (!_armedLogged)
                 {
                     _armedLogged = true;
@@ -6013,6 +6014,11 @@ namespace BigAmbitionsMP
                     return $"OK bench {bn}" + bsb.ToString();
                 }
 
+                // P-CLEANLOOP rig levers (2026-09-28, DEV): see MopLever below.
+                case "mopstation": case "handstate": case "mopcell": case "mopaway":
+                case "dirtstate": case "dirtseed": case "dirtdrip": case "clientgrant": case "dirtshrink":
+                    return MopLever(verb, arg);
+
                 case "grant":
                 {
                     // BUILD POPUPS-1 P5. `grant <pid> business|housing|vehicle on|off` - the HOST's own grant
@@ -6040,6 +6046,434 @@ namespace BigAmbitionsMP
                 default:
                     return "ERR unknown verb '" + verb + "' (mark|status|ledgerdump|host|hostnew|hostload|acceptjoin|join|save|autosave|blocksave|energyflag|ledgerdrop|radiobreak|fakemod|rivalrace|charconfirm|rentdeny|rent|itemcount|enterbuilding|exitbuilding|rain|screenshot|merge|mergestatus|walletdump|regstate|employees|shift|shiftclear|autofill|fire|assign|money|prices|setprice|workedit|staffop|lists|plans|planbulk|planlist|hrtrain|hrtag|hrplanof|planown|grants|grant|bench|candidates|claim|transfer|transfers|train|messages|press|relaymsg|poachmsg|negotiations|dissolvecheck|dissolverun)";
             }
+        }
+
+        // ── P-CLEANLOOP rig levers (2026-09-28, DEV) ─────────────────────────────────────────
+        // Reproduce the cleaning loop / "fused mop" (H-CLEANLOOP-1) through the game's own entry points:
+        //   mopstation                    the nearest cleaning station's OnCleaningStationClick (the mod's
+        //                                 helper Prefix decides helper path vs native; the walk is real)
+        //   handstate                     what is in the hand, how many MopControllers hang under the right
+        //                                 hand (inactive included), the live stroke, the held-back put-away,
+        //                                 the navigation blockers, the cursor, the same-stroke gate counters
+        //   mopcell <idx> | last | dirtiest [excl=<idx>] | below <v> [excl=<idx>]
+        //                                 one floor click through BuildingManager.InteractFloorCell (the game's
+        //                                 own floor-click endpoint; the mop's listener + the mod's stroke Prefix run)
+        //   mopaway discard|escape        the item panel's discard button (ItemPanelUI.ClickDiscard) / the Escape
+        //                                 key's handler (CancelButtonHandler.HandleEscapeClick)
+        //   dirtstate [<num> <street>] [i,j,..]   dirt census + values at the listed / live-stroke cells
+        //   dirtseed <num> <street> <spots> <value>   OWNER: the game's SetDirtiness console body
+        //                                 (SetRandomDirtiness) + the owner's immediate interior push
+        //   dirtdrip <num> <street> <periodS> <delta> | off | (none: report)   OWNER: every period add <delta>
+        //                                 to ONE spot far from the cleaning station (a stand-in for customer
+        //                                 dirt; it changes the owner's dirt hash, so the band re-sends)
+        //   clientgrant <pid> business|housing|vehicle on|off   CLIENT: the permissions UI's own
+        //                                 MPClient.SendPermissionGrant
+        private static BuildingRegistration? _dripReg;
+        private static string _dripAddr = "";
+        private static int _dripIdx = -1, _dripCount;
+        private static float _dripPeriod, _dripDelta, _dripNext;
+
+        private static void TickDirtDrip()
+        {
+            try
+            {
+                if (_dripReg == null) return;
+                float now = UnityEngine.Time.unscaledTime;
+                if (now < _dripNext) return;
+                _dripNext = now + _dripPeriod;
+                var spots = _dripReg.dirtSpots;
+                if (spots == null || _dripIdx < 0 || _dripIdx >= spots.Count || spots[_dripIdx] == null) return;
+                float nv = spots[_dripIdx].dirtiness + _dripDelta;
+                if (nv > 100f) nv = 20f;   // keep CHANGING (the hash must move every period)
+                _dripReg.Cleanliness.SetDirtiness(_dripIdx, nv);
+                _dripCount++;
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                if (bm != null && BuildingManager.IsInsideBuilding && ReferenceEquals(bm.buildingRegistration, _dripReg))
+                    try { bm.UpdateDirtinessInSpecificSpot(_dripIdx); } catch { }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning("[TestDrive] dirtdrip: " + ex.Message); _dripReg = null; }
+        }
+
+        private static string HandState()
+        {
+            try
+            {
+                var pc = Helpers.PlayerHelper.PlayerController;
+                var ch = pc?.Character;
+                var hand = ch?.rightHand;
+                int mopCtl = -1, attached = -1;
+                if (hand != null)
+                {
+                    mopCtl = hand.GetComponentsInChildren<MopController>(true).Length;
+                    try
+                    {
+                        var f = HarmonyLib.AccessTools.Field(ch!.GetType(), "_attachedRenderers");
+                        attached = 0;
+                        if (f?.GetValue(ch) is System.Collections.IDictionary d && d.Contains(hand) && d[hand] is System.Collections.ICollection c) attached = c.Count;
+                    }
+                    catch { attached = -1; }
+                }
+                string held = Helpers.PlayerHelper.ItemInstanceInHands?.itemName ?? "empty";
+                return $"held={held} mop={Helpers.PlayerHelper.IsHoldingAMop} mopCtl={mopCtl} rightAttached={attached} cleaning={MopController.currentCleaningMop != null} "
+                    + $"strokeAge={MopProbe.StrokeAge():F1} pendingStop={MopProbe.PutAwayPending()} blockers=[{MopProbe.Blockers()}] cursor={MouseController.cursorOnHover} {HelperCleaning.DevGateState()}";
+            }
+            catch (Exception ex) { return "handstate-error " + ex.Message; }
+        }
+
+        private static BuildingRegistration? DirtReg(string[] a, ref int next, out string err)
+        {
+            err = "";
+            if (a.Length >= 2 && !a[0].Contains(",") && a[1].StartsWith("ba:", StringComparison.OrdinalIgnoreCase))
+            {
+                next = 2;
+                var r = GameStatePatcher.FindRegistration(a[0] + " " + a[1]);
+                if (r == null) err = $"ERR no registration for '{a[0]} {a[1]}'";
+                return r;
+            }
+            var cur = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+            if (cur == null || !BuildingManager.IsInsideBuilding) err = "ERR not inside a building (name one: <num> <ba:street_x>)";
+            return cur;
+        }
+
+        // Review R1 TEST lever (2026-09-28): `dirtshrink` saves the full list it shortened, for `dirtshrink restore`.
+        private static BuildingRegistration? _shrinkReg;
+        private static System.Collections.Generic.List<DirtSpotInfo>? _shrinkSaved;
+        private static string _shrinkAddr = "";
+
+        private static string MopLever(string verb, string arg)
+        {
+            try
+            {
+                var a = arg.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                var bm = InstanceBehavior<BuildingManager>.Instance;
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                switch (verb)
+                {
+                    case "handstate":
+                        return "OK handstate " + HandState();
+
+                    case "mopstation":
+                    {
+                        if (bm == null || !BuildingManager.IsInsideBuilding) return "ERR not inside a building";
+                        var ctrls = bm.allItemControllers;
+                        if (ctrls == null) return "ERR no item controllers";
+                        var ppos = Helpers.PlayerHelper.GetPosition();
+                        CleaningStationController? best = null; float bd = float.MaxValue;
+                        foreach (var ic in ctrls)
+                            if (ic is CleaningStationController cs && cs != null)
+                            {
+                                float d = (cs.transform.position - ppos).magnitude;
+                                if (d < bd) { bd = d; best = cs; }
+                            }
+                        if (best == null) return "ERR no cleaning station in this building";
+                        bool holding = Helpers.PlayerHelper.IsHoldingAMop;
+                        bool helper = HousingFurniture.LocalHelperHere();
+                        bool nativeOwner = bm.IsPlayerOwnedBusiness;
+                        best.OnCleaningStationClick();
+                        return $"OK mopstation path={(holding ? "held-noop" : helper ? "helper" : "native")} nativeOwner={nativeOwner} station={best.name} dist={bd:F1}";
+                    }
+
+                    case "mopcell":
+                    {
+                        if (bm == null || !BuildingManager.IsInsideBuilding) return "ERR not inside a building";
+                        if (!Helpers.PlayerHelper.IsHoldingAMop) return "ERR not holding a mop";
+                        // `force`: click even while a stroke is live - the game ignores such a click (H-CLEANLOOP-1 F3 rig
+                        // leg: the same-stroke gate's stroke# must not move).
+                        bool force = false;
+                        foreach (var tk in a) if (string.Equals(tk, "force", StringComparison.OrdinalIgnoreCase)) force = true;
+                        if (MopController.currentCleaningMop != null && !force) return "ERR a stroke is already live";
+                        var reg = bm.buildingRegistration;
+                        var spots = reg?.dirtSpots;
+                        if (spots == null || spots.Count == 0) return "ERR no dirt lattice here";
+                        const string usage = "ERR usage: mopcell <idx> | last | dirtiest [excl=<idx>] | below <v> [excl=<idx>]  [force]";
+                        int excl = -1, pick = -1; float below = -1f;
+                        string mode = a.Length > 0 ? a[0].ToLowerInvariant() : "dirtiest";
+                        foreach (var tk in a) if (tk.StartsWith("excl=", StringComparison.OrdinalIgnoreCase)) int.TryParse(tk.Substring(5), out excl);
+                        if (mode == "below") { if (a.Length < 2 || !float.TryParse(a[1], System.Globalization.NumberStyles.Float, inv, out below)) return usage; }
+                        else if (mode == "last") pick = spots.Count - 1;   // fold cleanfix2 TEST: the tail cell after a shorter snapshot
+                        else if (mode != "dirtiest" && !int.TryParse(mode, out pick)) return usage;
+                        if (pick < 0)
+                        {
+                            float bestScore = -1f;
+                            var ex = (excl >= 0 && excl < spots.Count) ? spots[excl] : null;
+                            for (int i = 0; i < spots.Count; i++)
+                            {
+                                var s = spots[i];
+                                if (s == null || s.dirtiness <= 0.1f) continue;
+                                if (ex != null && Math.Abs(ex.x - s.x) <= 2 && Math.Abs(ex.z - s.z) <= 2) continue;   // keep the drip spot out of the stroke
+                                float nmax = 0f, nsum = 0f;
+                                for (int j = 0; j < spots.Count; j++)
+                                {
+                                    var o = spots[j];
+                                    if (o == null || Math.Abs(o.x - s.x) > 1 || Math.Abs(o.z - s.z) > 1) continue;
+                                    nsum += o.dirtiness; if (o.dirtiness > nmax) nmax = o.dirtiness;
+                                }
+                                float score;
+                                if (below >= 0f) { if (nmax > below) continue; score = nsum; }
+                                else score = s.dirtiness;
+                                if (score > bestScore) { bestScore = score; pick = i; }
+                            }
+                            if (pick < 0) return $"ERR no spot matches '{arg}'";
+                        }
+                        if (pick >= spots.Count) return "ERR index out of range";
+                        DirtSpotObject? cell = null;
+                        try
+                        {
+                            var cf = HarmonyLib.AccessTools.Field(typeof(BuildingManager), "_cachedDirtSpotObjects");
+                            if (cf?.GetValue(bm) is System.Collections.Generic.List<DirtSpotObject> cached)
+                                foreach (var o in cached) if (o != null && o.DirtSpot == pick) { cell = o; break; }
+                        }
+                        catch { }
+                        if (cell == null)
+                            foreach (var o in UnityEngine.Object.FindObjectsOfType<DirtSpotObject>()) if (o != null && o.DirtSpot == pick) { cell = o; break; }
+                        if (cell == null) return $"ERR no DirtSpotObject for spot {pick}";
+                        float before = spots[pick].dirtiness;
+                        bm.InteractFloorCell(cell);   // the game's own floor-click endpoint (BuildingManager.cs:1415)
+                        var sb = new StringBuilder();
+                        var ix = new StringBuilder();   // the same indices, comma-separated (a `dirtstate` argument)
+                        var cells = HelperCleaning.AffectedCellsList();
+                        if (cells != null)
+                            foreach (var c in cells)
+                            {
+                                if (c == null) continue;
+                                int ci = c.DirtSpot;
+                                if (sb.Length > 0) sb.Append(' ');
+                                sb.Append(ci).Append(':').Append(ci >= 0 && ci < spots.Count && spots[ci] != null ? spots[ci].dirtiness.ToString("F0", inv) : "?");
+                                if (ix.Length > 0) ix.Append(',');
+                                ix.Append(ci);
+                            }
+                        return $"OK mopcell idx={pick} val={before:F0} live={MopController.currentCleaningMop != null} probeStroke={MopProbe.StrokeNo} cells=[{sb}] idxs={ix} {HelperCleaning.DevGateState()}";
+                    }
+
+                    case "mopaway":
+                    {
+                        string m = a.Length > 0 ? a[0].ToLowerInvariant() : "";
+                        bool heldBefore = Helpers.PlayerHelper.IsHoldingAMop;
+                        bool wasLive = MopController.currentCleaningMop != null;
+                        if (m == "discard")
+                        {
+                            var ip = InstanceBehavior<UI.UIs>.Instance?.playerHUD?.itemPanelUI;
+                            if (ip == null) return "ERR no item panel";
+                            ip.ClickDiscard();
+                        }
+                        else if (m == "escape") CancelButtonHandler.HandleEscapeClick();
+                        else return "ERR usage: mopaway discard|escape";
+                        return $"OK mopaway {m} heldBefore={heldBefore} strokeWasLive={wasLive} deferred={MopController.currentCleaningMop != null && MopProbe.PutAwayPending()} {HandState()}";
+                    }
+
+                    case "dirtstate":
+                    {
+                        int next = 0;
+                        var reg = DirtReg(a, ref next, out var err);
+                        if (reg == null) return err.Length > 0 ? err : "ERR no building";
+                        var spots = reg.dirtSpots;
+                        if (spots == null) return "ERR no dirt lattice";
+                        int n01 = 0, n5 = 0, maxIdx = -1; float sum = 0f, max = 0f;
+                        for (int i = 0; i < spots.Count; i++)
+                        {
+                            var s = spots[i]; if (s == null) continue;
+                            if (s.dirtiness >= 0.1f) n01++;
+                            if (s.dirtiness >= 5f) n5++;
+                            sum += s.dirtiness;
+                            if (s.dirtiness > max) { max = s.dirtiness; maxIdx = i; }
+                        }
+                        var list = new System.Collections.Generic.List<int>();
+                        // CTRL-NOSEED (fold cleanfix2): `cmp=<sum>,<over5>` compares with an earlier reading (rose=True/False).
+                        float dsCmpSum = -1f; int dsCmpOver5 = -1; bool dsIdx = false;
+                        for (int t0 = next; t0 < a.Length; t0++)
+                        {
+                            var tok = a[t0];
+                            if (tok.StartsWith("cmp=", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var pr = tok.Substring(4).Split(',');
+                                if (pr.Length != 2 || !float.TryParse(pr[0], System.Globalization.NumberStyles.Float, inv, out dsCmpSum)
+                                    || !int.TryParse(pr[1], out dsCmpOver5)) return "ERR usage: dirtstate [<num> <ba:street_x>] [idx,idx..] [cmp=<sum>,<over5>]";
+                                continue;
+                            }
+                            dsIdx = true;
+                            foreach (var tk in tok.Split(','))
+                                if (int.TryParse(tk, out var li)) list.Add(li);
+                        }
+                        if (!dsIdx)
+                        {
+                            var cells = HelperCleaning.AffectedCellsList();
+                            if (cells != null) foreach (var c in cells) if (c != null) list.Add(c.DirtSpot);
+                        }
+                        var sb = new StringBuilder();
+                        int left = 0;
+                        float cmax = 0f;
+                        foreach (var li in list)
+                        {
+                            float v = li >= 0 && li < spots.Count && spots[li] != null ? spots[li].dirtiness : -1f;
+                            if (v > 0f) left++;
+                            if (v > cmax) cmax = v;
+                            if (sb.Length > 0) sb.Append(' ');
+                            sb.Append(li).Append(':').Append(v.ToString("F0", inv));
+                        }
+                        float cl = -1f;
+                        try { cl = Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanlinessHelper.GetCleanliness(reg); } catch { }
+                        string key = ""; try { key = GameStateReader.AddressKey(reg); } catch { }
+                        return $"OK dirtstate addr='{key}' spots={spots.Count} dirty={n01} over5={n5} sum={sum:F0} max={max:F0}@{maxIdx} cleanliness={cl:F1} cells=[{sb}] cellsDirty={left}/{list.Count} cellsMax={cmax.ToString("F1", inv)} strokeLive={MopController.currentCleaningMop != null} drip={(_dripReg != null ? _dripIdx : -1)} syncLines={GameStatePatcher.DirtSyncLines} syncTouched={GameStatePatcher.DirtSyncTouched}"
+                            + (dsCmpSum >= 0f ? $" rose={((int)Math.Round(sum) > (int)Math.Round(dsCmpSum) || n5 > dsCmpOver5)} base={dsCmpSum.ToString("F0", inv)},{dsCmpOver5}" : "");
+                    }
+
+                    case "dirtseed":
+                    {
+                        if (a.Length != 4 || !int.TryParse(a[2], out var ns) || ns <= 0
+                            || !float.TryParse(a[3], System.Globalization.NumberStyles.Float, inv, out var nv))
+                            return "ERR usage: dirtseed <num> <ba:street_x> <spots> <value>";
+                        var reg = GameStatePatcher.FindRegistration(a[0] + " " + a[1]);
+                        if (reg == null) return $"ERR no registration for '{a[0]} {a[1]}'";
+                        string key = GameStateReader.AddressKey(reg);
+                        if (!MergerFlip.BooksHere(reg)) return $"ERR '{key}' is not booked on this machine (owner side only)";
+                        if (reg.dirtSpots == null || reg.dirtSpots.Count == 0) return $"ERR '{key}' has no dirt lattice (enter it once first)";
+                        reg.Cleanliness.SetRandomDirtiness(ns, nv);   // the game's SetDirtiness console body
+                        if (bm != null && BuildingManager.IsInsideBuilding && ReferenceEquals(bm.buildingRegistration, reg))
+                            try { bm.UpdateDirtinessInCurrentBuilding(); } catch { }
+                        try { InteriorSync.PushOwnedBuildingNow(key); } catch { }
+                        int dirty = 0; foreach (var s in reg.dirtSpots) if (s != null && s.dirtiness >= 0.1f) dirty++;
+                        return $"OK dirtseed addr='{key}' spots={ns} value={nv:F0} dirtyNow={dirty}/{reg.dirtSpots.Count}";
+                    }
+
+                    case "dirtdrip":
+                    {
+                        if (a.Length == 0)
+                            return $"OK dirtdrip addr='{_dripAddr}' armed={_dripReg != null} idx={_dripIdx} period={_dripPeriod:F1} delta={_dripDelta:F1} count={_dripCount}";
+                        if (string.Equals(a[a.Length - 1], "off", StringComparison.OrdinalIgnoreCase))
+                        {
+                            bool was = _dripReg != null;
+                            _dripReg = null;
+                            return $"OK dirtdrip off wasArmed={was} addr='{_dripAddr}' idx={_dripIdx} count={_dripCount}";
+                        }
+                        if (a.Length != 4 || !float.TryParse(a[2], System.Globalization.NumberStyles.Float, inv, out var per) || per < 0.5f
+                            || !float.TryParse(a[3], System.Globalization.NumberStyles.Float, inv, out var del) || del <= 0f)
+                            return "ERR usage: dirtdrip <num> <ba:street_x> <periodS> <delta> | off";
+                        var reg = GameStatePatcher.FindRegistration(a[0] + " " + a[1]);
+                        if (reg == null) return $"ERR no registration for '{a[0]} {a[1]}'";
+                        string key = GameStateReader.AddressKey(reg);
+                        if (!MergerFlip.BooksHere(reg)) return $"ERR '{key}' is not booked on this machine (owner side only)";
+                        var spots = reg.dirtSpots;
+                        if (spots == null || spots.Count == 0) return $"ERR '{key}' has no dirt lattice";
+                        // The spot FARTHEST from the cleaning station (the mopper starts there), else from the lattice's centre.
+                        float ox = 0f, oz = 0f; string origin = "centre";
+                        bool haveStation = false;
+                        if (bm != null && BuildingManager.IsInsideBuilding && ReferenceEquals(bm.buildingRegistration, reg) && bm.allItemControllers != null)
+                            foreach (var ic in bm.allItemControllers)
+                                if (ic is CleaningStationController cs && cs != null) { ox = cs.transform.position.x; oz = cs.transform.position.z; haveStation = true; origin = "station"; break; }
+                        if (!haveStation)
+                        {
+                            int cnt = 0;
+                            foreach (var s in spots) if (s != null) { ox += s.x; oz += s.z; cnt++; }
+                            if (cnt > 0) { ox /= cnt; oz /= cnt; }
+                        }
+                        int far = -1; float fd = -1f;
+                        for (int i = 0; i < spots.Count; i++)
+                        {
+                            var s = spots[i]; if (s == null) continue;
+                            float d = (s.x - ox) * (s.x - ox) + (s.z - oz) * (s.z - oz);
+                            if (d > fd) { fd = d; far = i; }
+                        }
+                        if (far < 0) return "ERR no spot";
+                        _dripReg = reg; _dripAddr = key; _dripIdx = far; _dripPeriod = per; _dripDelta = del; _dripCount = 0;
+                        _dripNext = UnityEngine.Time.unscaledTime;
+                        return $"OK dirtdrip addr='{key}' idx={far} from={origin} period={per:F1} delta={del:F1} val={spots[far].dirtiness:F0}";
+                    }
+
+                    case "dirtshrink":
+                    {
+                        // Fold cleanfix2 TEST (2026-09-28): a full snapshot whose dirt list is SHORTER, pushed through the very
+                        // function the snapshot apply uses (GameStatePatcher.ApplySnapshotDirt). G1: it applies AT ONCE, also during a
+                        // live local stroke, and the local list keeps its length; values are paired by X/Z. `head` drops the first n
+                        // spots instead of the last (index copying would then be off by n - the X/Z pairing is what gets checked);
+                        // `bump=<v>` sends every value raised by v (max 100), so a live stroke's cells must stay clamped (never raised).
+                        // `dirtshrink [<num> <ba:street_x>] [n] [head] [bump=<v>]`; `dirtshrink restore` sends the full list back.
+                        const string usage = "ERR usage: dirtshrink [<num> <ba:street_x>] [n] [head] [bump=<v>] | dirtshrink restore";
+                        if (a.Length >= 1 && string.Equals(a[a.Length - 1], "restore", StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (_shrinkReg?.dirtSpots == null || _shrinkSaved == null) return "ERR dirtshrink: nothing to restore";
+                            var cur = _shrinkReg.dirtSpots;
+                            var back = new System.Collections.Generic.List<DirtSpotInfo>(_shrinkSaved.Count);
+                            for (int i = 0; i < _shrinkSaved.Count; i++)
+                            {
+                                var s = i < cur.Count ? cur[i] : null;
+                                back.Add(s != null ? new DirtSpotInfo { X = s.x, Z = s.z, Dirtiness = s.dirtiness } : _shrinkSaved[i]);
+                            }
+                            bool live0 = MopController.currentCleaningMop != null;
+                            int b0 = cur.Count;
+                            GameStatePatcher.ApplySnapshotDirt(_shrinkReg, back, _shrinkAddr, "dev dirtshrink restore");
+                            int a0 = _shrinkReg.dirtSpots?.Count ?? -1;
+                            _shrinkReg = null; _shrinkSaved = null; _shrinkAddr = "";
+                            return $"OK dirtshrink restore before={b0} after={a0} strokeLive={live0} | {GameStatePatcher.SnapshotDirtStats()}";
+                        }
+                        int next = 0;
+                        var reg = DirtReg(a, ref next, out var err);
+                        if (reg == null) return err.Length > 0 ? err : "ERR no building";
+                        int drop = 1; bool shHead = false; float shBump = 0f;
+                        for (int t0 = next; t0 < a.Length; t0++)
+                        {
+                            var tok = a[t0];
+                            if (string.Equals(tok, "head", StringComparison.OrdinalIgnoreCase)) shHead = true;
+                            else if (tok.StartsWith("bump=", StringComparison.OrdinalIgnoreCase))
+                            { if (!float.TryParse(tok.Substring(5), System.Globalization.NumberStyles.Float, inv, out shBump) || shBump < 0f) return usage; }
+                            else if (!int.TryParse(tok, out drop) || drop < 1) return usage;
+                        }
+                        var spots = reg.dirtSpots;
+                        if (spots == null || spots.Count <= drop) return "ERR dirtshrink: no dirt lattice to shorten";
+                        string key = GameStateReader.AddressKey(reg) ?? "";
+                        var full = new System.Collections.Generic.List<DirtSpotInfo>(spots.Count);
+                        foreach (var s in spots) full.Add(new DirtSpotInfo { X = s?.x ?? 0, Z = s?.z ?? 0, Dirtiness = s?.dirtiness ?? 0f });
+                        if (_shrinkReg == null || !ReferenceEquals(_shrinkReg, reg)) { _shrinkReg = reg; _shrinkSaved = full; _shrinkAddr = key; }
+                        int shOff = shHead ? drop : 0, shLen = full.Count - drop;
+                        var shorter = new System.Collections.Generic.List<DirtSpotInfo>(shLen);
+                        for (int j = 0; j < shLen; j++)
+                        {
+                            var f = full[shOff + j];
+                            shorter.Add(new DirtSpotInfo { X = f.X, Z = f.Z, Dirtiness = Math.Min(100f, f.Dirtiness + shBump) });
+                        }
+                        bool live = MopController.currentCleaningMop != null;
+                        var shStroke = new System.Collections.Generic.HashSet<int>();
+                        var shCells = HelperCleaning.AffectedCellsList();
+                        if (live && shCells != null) foreach (var c in shCells) if (c != null) shStroke.Add(c.DirtSpot);
+                        int before = spots.Count;
+                        GameStatePatcher.ApplySnapshotDirt(reg, shorter, key, "dev dirtshrink");
+                        var shList = reg.dirtSpots;
+                        int after = shList?.Count ?? -1;
+                        // Self-check (same frame, so the stroke has not moved): every kept entry took its X/Z partner's value, a
+                        // live stroke's cell was not raised, a dropped entry kept its local value.
+                        int bad = 0, keptDropped = 0, clampedCells = 0; string firstBad = "";
+                        if (shList != null && after == before)
+                            for (int i = 0; i < after; i++)
+                            {
+                                var s = shList[i]; if (s == null) continue;
+                                float pre = full[i].Dirtiness, v = s.dirtiness;
+                                int j = i - shOff;
+                                bool ok;
+                                if (j < 0 || j >= shLen) { ok = v == pre; keptDropped++; }
+                                else if (shStroke.Contains(i) && shorter[j].Dirtiness > pre) { ok = v == pre; if (ok) clampedCells++; }
+                                else ok = v == shorter[j].Dirtiness;
+                                if (!ok) { bad++; if (firstBad.Length == 0) firstBad = $" firstBad={i}:{v.ToString("F1", inv)}(pre {pre.ToString("F1", inv)})"; }
+                            }
+                        return $"OK dirtshrink addr='{key}' mode={(shHead ? "head" : "tail")} drop={drop} bump={shBump.ToString("F0", inv)} incoming={shorter.Count} before={before} after={after} lengthKept={after == before} strokeLive={live} xzOK={after == before && bad == 0} bad={bad}{firstBad} keptDropped={keptDropped} clampedCells={clampedCells} lastIdx={after - 1} | {GameStatePatcher.SnapshotDirtStats()}";
+                    }
+
+                    case "clientgrant":
+                    {
+                        if (MPServer.IsRunning || !MPClient.IsConnected) return "ERR client only";
+                        if (a.Length != 3) return "ERR usage: clientgrant <pid> business|housing|vehicle on|off";
+                        string kn = a[1].ToLowerInvariant(), on = a[2].ToLowerInvariant();
+                        GrantKind kind;
+                        if (kn == "business") kind = GrantKind.Business;
+                        else if (kn == "housing") kind = GrantKind.Housing;
+                        else if (kn == "vehicle") kind = GrantKind.Vehicle;
+                        else return "ERR usage: clientgrant <pid> business|housing|vehicle on|off";
+                        if (on != "on" && on != "off") return "ERR usage: clientgrant <pid> business|housing|vehicle on|off";
+                        MPClient.SendPermissionGrant(kind, a[0], on == "on");   // the permissions UI's own send
+                        return $"OK clientgrant {a[0]} {kn} {on}";
+                    }
+                }
+                return "ERR unknown mop verb " + verb;
+            }
+            catch (Exception ex) { return $"ERR {verb}: {ex.GetType().Name} {ex.Message}"; }
         }
 
         /// <summary>'drive'/'board' (H-OWNERRIDE-HOSTDRIVER-1): put the LOCAL player 3 m to the side of a car with the

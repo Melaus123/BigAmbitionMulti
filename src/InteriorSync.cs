@@ -562,7 +562,11 @@ namespace BigAmbitionsMP
                         // building; an AMBIENT viewer outside has no active building and cannot use it.
                         var dirtSubs = EntrySubscribersOf(addr);
                         if (dirtSubs.Count > 0)
-                            MPServer.BroadcastInteriorDirtSyncTo(dirtSubs, BuildDirtSync(snap));
+                        {
+                            var dirtOut = BuildDirtSync(snap);
+                            MPServer.BroadcastInteriorDirtSyncTo(dirtSubs, dirtOut);
+                            MopProbe.OwnerDirtSent(addr, dirtOut, "host band", false);   // [PROBE:P-CLEANLOOP] log-only: why the band re-sent
+                        }
                     }
                     bool fullChanged = !_lastHashByAddr.TryGetValue(addr, out var pf) || pf != hv;
                     // K1 fold: a changed shopper schedule (the owner's new day) sends too - full, at once.
@@ -1035,6 +1039,7 @@ namespace BigAmbitionsMP
                     {
                         var dirtUp = BuildDirtSync(snap);
                         MPClient.SendInteriorDirtSync(dirtUp);
+                        MopProbe.OwnerDirtSent(addressKey, dirtUp, "owner upload", true);   // [PROBE:P-CLEANLOOP] log-only: why the owner re-sent
                         Plugin.Logger.LogInfo($"[InteriorSync] Sent owner DIRT sync ({reason}) addr='{addressKey}': {dirtUp.Spots.Count} dirty spot(s) (v10).");
                     }
                 }
@@ -1684,7 +1689,15 @@ namespace BigAmbitionsMP
                     for (int i = 0; i < reg.dirtSpots.Count; i++)
                     {
                         var ds = reg.dirtSpots[i];
-                        if (ds == null) continue;
+                        if (ds == null)
+                        {
+                            // Fold cleanfix2 G3: a placeholder keeps the INDEX alignment the receiver relies on (it copies by index
+                            // after an X/Z check, or pairs by X/Z when the lists do not align). No lattice tile sits at int.MinValue,
+                            // so this entry matches nothing there and a SNAPSHOT apply leaves that cell's local value; the band never
+                            // sends a 0-dirt entry, so a band apply sets that guest cell to 0 (the owner's cell is null anyway).
+                            snap.DirtSpots.Add(new DirtSpotInfo { X = int.MinValue, Z = int.MinValue, Dirtiness = 0f });
+                            continue;
+                        }
                         snap.DirtSpots.Add(new DirtSpotInfo
                         {
                             X         = ds.x,

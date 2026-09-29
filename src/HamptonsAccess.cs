@@ -395,6 +395,36 @@ namespace BigAmbitionsMP
                 int n = 0;
                 try { n = reg.itemInstances?.Count ?? 0; } catch { }
                 try { reg.itemInstances?.Clear(); } catch (Exception ex) { WarnOnce("ClearVacatedInterior/items", ex); }
+                // Review R1b (2026-09-28): a local mop stroke live on this registration indexes dirtSpots every frame;
+                // emptying the list under it throws inside the stroke coroutine, which dies before StopCleaning and fuses
+                // the mop (CleaningFloor blocker kept, put-away waiting forever). End it first through the game's own
+                // Escape path, MopController.HandleEscape (drops a held put-away, resets navigation, then
+                // PlayerHelper.RemoveItemsFromHands -> the mop's UnAssignFromPlayer + its hand object destroyed), then stop
+                // that mop's coroutine now - the Destroy lands only at the end of this frame and the coroutine could index
+                // the emptied list once more before it (the only coroutine a MopController starts is the stroke).
+                // Fold cleanfix2 G4: when HandleEscape does not handle it (false - e.g. the hands no longer read as holding a
+                // mop) while that stroke is still live, the stroke ends through the game's own MopController.StopCleaning
+                // (unsets CleaningFloor, fires OnStopCleaning, clears currentCleaningMop) before its coroutine is stopped. Each
+                // step has its own try, so one failing never skips the next; the dirt clear below stays in its own try.
+                MopController? liveMop = null;
+                bool strokeWasLive = false, handled = false, stopped = false;
+                try { strokeWasLive = StrokeGuard.LiveOn(reg); if (strokeWasLive) liveMop = MopController.currentCleaningMop; }
+                catch (Exception ex) { WarnOnce("ClearVacatedInterior/mop", ex); }
+                if (strokeWasLive)
+                {
+                    try { handled = MopController.HandleEscape(); }
+                    catch (Exception ex) { WarnOnce("ClearVacatedInterior/mop-escape", ex); }
+                    try
+                    {
+                        // Re-check: HandleEscape can return TRUE without releasing the mop (its null-item branch), so the test is
+                        // whether THAT stroke is still the live one - never the 'handled' flag.
+                        if (liveMop != null && ReferenceEquals(MopController.currentCleaningMop, liveMop)) { liveMop.StopCleaning(); stopped = true; }
+                    }
+                    catch (Exception ex) { WarnOnce("ClearVacatedInterior/mop-stop", ex); }
+                    try { if (liveMop != null) liveMop.StopAllCoroutines(); }
+                    catch (Exception ex) { WarnOnce("ClearVacatedInterior/mop-coroutines", ex); }
+                    try { Plugin.Logger.LogInfo($"[Hamptons] '{addr}' vacated during a local mop stroke - ended it first the Escape way (handled={handled}, stopCleaning={stopped}, still live={StrokeGuard.LiveOn(reg)})."); } catch { }
+                }
                 try { reg.dirtSpots?.Clear(); }     catch (Exception ex) { WarnOnce("ClearVacatedInterior/dirt", ex); }
                 try { GameStatePatcher.ForgetInteriorBaselines(addr); } catch (Exception ex) { WarnOnce("ClearVacatedInterior/baselines", ex); }
 

@@ -1545,11 +1545,7 @@ namespace BigAmbitionsMP
                     try
                     {
                         if (reg.dirtSpots != null)
-                        {
-                            reg.dirtSpots.Clear();
-                            foreach (var ds in payload.DirtSpots)
-                                reg.dirtSpots.Add(new DirtSpot { x = ds.X, z = ds.Z, dirtiness = ds.Dirtiness });
-                        }
+                            ApplySnapshotDirt(reg, payload.DirtSpots, payload.AddressKey, "full snapshot");   // G1: values in place - a network apply never changes the local list's length
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] dirtSpots apply: {ex.Message}"); }
 
@@ -2257,6 +2253,157 @@ namespace BigAmbitionsMP
             catch { return "unreadable"; }
         }
 
+        /// <summary>The full snapshot's dirt apply (fold cleanfix2 G1, 2026-09-28): a network apply NEVER changes the length of
+        /// the local dirt list. The game sizes registration.dirtSpots itself - one entry per floor cell
+        /// (BuildingCleanlinessHelper.GetDirtSpotsForBuilding), regrown only on building entry when the counts differ
+        /// (BuildingManager) - and a floor cell's index is its sibling position (DirtSpotObject.DirtSpot). The old
+        /// clear-and-rebuild left a SHORTER list under cells with a larger index range, so the next stroke on a tail cell read
+        /// past the end (MopController.FloorCellClick has no length check), threw inside its coroutine and fused the mop.
+        /// Values are now updated IN PLACE, like the band path (ApplyInteriorDirtSync):
+        ///  - equal counts: copied by index after the X/Z check (the band's load-bearing guard - X/Z alone is not unique
+        ///    across stacked storeys); if any index fails that check the whole list is paired by X/Z instead (below);
+        ///  - different counts: paired by X/Z, the Nth local entry of a tile taking the Nth incoming entry of that tile (both
+        ///    lists are built storey by storey in the same order); the local length is kept;
+        ///  - local list empty or shorter than the incoming one: first regrown with the game's own GetDirtSpotsForBuilding
+        ///    (only when that yields MORE cells - it never shortens; X/Z-matching values carried over; RegrowDirtLattice).
+        /// A local entry with no incoming match keeps its value. Every write goes through StrokeGuard.Clamp while this
+        /// machine's stroke is live, so a mid-stroke snapshot never re-dirties the stroke's cells - and applying mid-stroke is
+        /// safe because the list never shrinks under the stroke. Main thread; allocates only when the lists do not align.</summary>
+        internal static void ApplySnapshotDirt(BuildingRegistration reg, List<DirtSpotInfo> spots, string addr, string source)
+        {
+            if (reg?.dirtSpots == null || spots == null) return;
+            int before = reg.dirtSpots.Count, m = spots.Count, regrown = -1;
+            if (before == 0 || before < m) regrown = RegrowDirtLattice(reg, addr);
+            var local = reg.dirtSpots;
+            if (local == null) return;
+            int n = local.Count, matched = 0, unmatched = 0, clamped = 0, touched = 0;
+            bool paired = false;
+            bool mopProbe = MopProbe.LiveOn(reg);   // [PROBE:P-CLEANLOOP] log-only: does this apply raise a live stroke's cells?
+            if (mopProbe) MopProbe.Snap(reg);
+            // H-CLEANLOOP-1 fix F1: a live local mop stroke's cells take min(incoming, local) - StrokeGuard.
+            bool strokeGuard = StrokeGuard.Begin(reg);
+            bool live = StrokeGuard.LiveOn(reg);
+            try
+            {
+                if (n == m)
+                {
+                    for (int i = 0; i < n; i++)
+                    {
+                        var ds = local[i];
+                        if (ds == null) continue;
+                        var s = spots[i];
+                        if (s == null || s.X != ds.x || s.Z != ds.z) { unmatched++; continue; }   // lattice order divergence (or the owner's null placeholder, G3)
+                        SnapshotDirtWrite(i, ds, s.Dirtiness, strokeGuard, ref matched, ref clamped, ref touched);
+                    }
+                }
+                if (n > 0 && m > 0 && (n != m || unmatched > 0))
+                {
+                    paired = true;
+                    matched = 0; unmatched = 0; clamped = 0;   // the pairing pass re-writes the aligned entries with the same values
+                    var head = new Dictionary<long, int>(m);
+                    var nextOf = new int[m];
+                    for (int j = m - 1; j >= 0; j--)
+                    {
+                        nextOf[j] = -1;
+                        var s = spots[j];
+                        if (s == null) continue;
+                        long k = DirtKey(s.X, s.Z);
+                        if (head.TryGetValue(k, out var h)) nextOf[j] = h;
+                        head[k] = j;
+                    }
+                    for (int i = 0; i < n; i++)
+                    {
+                        var ds = local[i];
+                        if (ds == null) continue;
+                        long k = DirtKey(ds.x, ds.z);
+                        if (!head.TryGetValue(k, out var j)) { unmatched++; continue; }   // no incoming entry for this tile: keeps its value
+                        if (nextOf[j] >= 0) head[k] = nextOf[j]; else head.Remove(k);
+                        SnapshotDirtWrite(i, ds, spots[j].Dirtiness, strokeGuard, ref matched, ref clamped, ref touched);
+                    }
+                }
+                else if (n > 0 && m == 0) unmatched = n;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] dirtSpots apply ({source}) for '{addr}': {ex.Message}"); }
+            if (strokeGuard) StrokeGuard.End(reg, source);
+            if (mopProbe) MopProbe.AfterWrite(reg, source);
+            _sdIncoming = m; _sdBefore = before; _sdAfter = local.Count; _sdRegrown = regrown; _sdMatched = matched;
+            _sdUnmatched = unmatched; _sdClamped = clamped; _sdTouched = touched; _sdLive = live; _sdPaired = paired;
+            if (paired || regrown >= 0) NoteSnapshotDirtAlign(addr, source);
+        }
+
+        private static void SnapshotDirtWrite(int i, DirtSpot ds, float incoming, bool strokeGuard, ref int matched, ref int clamped, ref int touched)
+        {
+            matched++;
+            float v = incoming;
+            if (strokeGuard) { v = StrokeGuard.Clamp(i, v, ds.dirtiness); if (v != incoming) clamped++; }   // F1: a live stroke's cell is never raised
+            if (ds.dirtiness != v) { ds.dirtiness = v; touched++; }
+        }
+
+        private static long DirtKey(int x, int z) => ((long)x << 32) | (uint)z;
+
+        // G1: the last full-snapshot dirt apply (the alignment log line and the DEV `dirtshrink` lever) and the band's line count
+        // (the DEV `dirtstate` lever - CTRL-NOSEED). Plain counters, written on the main thread only.
+        private static int _sdIncoming = -1, _sdBefore = -1, _sdAfter = -1, _sdRegrown = -1, _sdMatched, _sdUnmatched, _sdClamped, _sdTouched;
+        private static bool _sdLive, _sdPaired;
+        internal static int DirtSyncLines, DirtSyncTouched;
+        internal static string SnapshotDirtStats() =>
+            $"incoming={_sdIncoming} localBefore={_sdBefore} localAfter={_sdAfter} regrown={_sdRegrown} pairedByXZ={_sdPaired} matched={_sdMatched} unmatched={_sdUnmatched} clamped={_sdClamped} touched={_sdTouched} liveStroke={_sdLive}";
+
+        private static readonly Dictionary<string, float> _sdNoteAt = new(StringComparer.Ordinal);
+        private static void NoteSnapshotDirtAlign(string addr, string source)
+        {
+            try
+            {
+                string k = addr ?? "";
+                float now = UnityEngine.Time.realtimeSinceStartup;
+                bool dev = source != null && source.StartsWith("dev", StringComparison.Ordinal);
+                if (!dev && _sdNoteAt.TryGetValue(k, out var at) && now - at < 60f) return;
+                _sdNoteAt[k] = now;
+                Plugin.Logger.LogInfo($"[Patcher] '{k}' {source} dirt: lists do not align - applied in place, local length kept (G1): {SnapshotDirtStats()}");
+            }
+            catch { }
+        }
+
+        private static readonly Dictionary<string, float> _regrowTriedAt = new(StringComparer.Ordinal);
+        private static readonly HashSet<string> _regrowWarned = new(StringComparer.Ordinal);
+        /// <summary>G1: lengthen a local dirt list that is empty or shorter than the incoming one with the game's own lattice
+        /// builder, BuildingCleanlinessHelper.GetDirtSpotsForBuilding(reg.BuildingCached) - the call BuildingManager makes on
+        /// entry (count differs from the floor cells) and BizManPresentation makes from outside. Used only when the fresh
+        /// lattice is LONGER (never shortens); an old entry whose index and X/Z still match keeps its value; the list object
+        /// is kept. One attempt per address per 30 s (the builder needs the building's structure loaded, else it warns "No
+        /// floors found" or throws - caught). Returns the new count, or -1 when nothing changed.</summary>
+        private static int RegrowDirtLattice(BuildingRegistration reg, string addr)
+        {
+            string k = addr ?? "";
+            try
+            {
+                float now = UnityEngine.Time.realtimeSinceStartup;
+                if (_regrowTriedAt.TryGetValue(k, out var at) && now - at < 30f) return -1;
+                _regrowTriedAt[k] = now;
+                var b = reg.BuildingCached;
+                var old = reg.dirtSpots;
+                if (b == null || old == null) return -1;
+                var fresh = Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanlinessHelper.GetDirtSpotsForBuilding(b);
+                if (fresh == null || fresh.Count <= old.Count) return -1;
+                for (int i = 0; i < old.Count; i++)
+                {
+                    var o = old[i]; var f = fresh[i];
+                    if (o != null && f != null && o.x == f.x && o.z == f.z) f.dirtiness = o.dirtiness;
+                }
+                int was = old.Count;
+                old.Clear();
+                old.AddRange(fresh);
+                _regrowTriedAt.Remove(k);
+                Plugin.Logger.LogInfo($"[Patcher] '{k}': local dirt list regrown {was} -> {old.Count} cell(s) with the game's own lattice before a network apply (G1).");
+                return old.Count;
+            }
+            catch (Exception ex)
+            {
+                try { if (_regrowWarned.Add(k)) Plugin.Logger.LogInfo($"[Patcher] '{k}': dirt lattice regrow not possible now ({ex.GetType().Name}: {ex.Message}) - the local length is kept; the game regrows on entry."); } catch { }
+                return -1;
+            }
+        }
+
         /// <summary>S4-lite counter.  Throttled to one line per address per minute WITH the count —
         /// a per-skip line would cost more than the skip saves, and a silent optimization is one
         /// nobody can confirm is working from a field log.</summary>
@@ -2439,6 +2586,11 @@ namespace BigAmbitionsMP
                     foreach (var r in gi.BuildingRegistrations)
                         if (r != null && GameStateReader.AddressKey(r) == payload.AddressKey) { reg = r; break; }
                     if (reg?.dirtSpots == null) return;
+                    bool mopProbe = MopProbe.LiveOn(reg);   // [PROBE:P-CLEANLOOP] log-only: does this update raise a live stroke's cells?
+                    if (mopProbe) MopProbe.Snap(reg);
+                    // H-CLEANLOOP-1 fix F1 (2026-09-28): this ABSOLUTE set re-dirtied a live local mop stroke's cells
+                    // every band, so the stroke never ended - its cells now take min(incoming, local) (StrokeGuard).
+                    bool strokeGuard = StrokeGuard.Begin(reg);
                     var byIndex = new System.Collections.Generic.Dictionary<int, DirtSpotDeltaInfo>();
                     foreach (var s in payload.Spots) if (s != null) byIndex[s.Index] = s;
                     int touched = 0, mismatched = 0;
@@ -2452,8 +2604,11 @@ namespace BigAmbitionsMP
                             if (sent.X != ds.x || sent.Z != ds.z) { mismatched++; continue; }   // lattice order divergence — don't guess (exact restored, review-mopping #4: this guard is load-bearing for stacked storeys and this channel SETS absolutely)
                             v = sent.Dirtiness;
                         }
+                        if (strokeGuard) v = StrokeGuard.Clamp(i, v, ds.dirtiness);   // F1: a live stroke's cell is never raised
                         if (ds.dirtiness != v) { ds.dirtiness = v; touched++; }
                     }
+                    if (strokeGuard) StrokeGuard.End(reg, MPServer.IsRunning ? "owner upload (host world)" : "dirt band");
+                    if (mopProbe) MopProbe.AfterWrite(reg, MPServer.IsRunning ? "owner upload (host world)" : "dirt band");
                     if (touched > 0)
                     {
                         // Review B1 (the cargo channel's :1818 precedent): a dirt write moves state the
@@ -2476,6 +2631,7 @@ namespace BigAmbitionsMP
                             }
                         }
                         catch { }
+                        DirtSyncLines++; DirtSyncTouched += touched;   // DEV `dirtstate` lever (CTRL-NOSEED): counts exactly these lines
                         Plugin.Logger.LogInfo($"[Patcher] DirtSync '{payload.AddressKey}': {payload.Spots.Count} dirty spot(s) sent, {touched} value(s) updated{(mismatched > 0 ? $", {mismatched} index/coord MISMATCH(ES) skipped" : "")} (v10).");
                     }
                     else if (mismatched > 0)
