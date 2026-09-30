@@ -1993,6 +1993,38 @@ namespace BigAmbitionsMP
         internal static string FingerprintDiag(string addressKey)
         { Fingerprint(BuildSnapshot(addressKey), out int st, out string dg); return $"st={st:X8} {dg}"; }
 
+#if BAMP_DEV
+        /// <summary>PRICE-PER-UNIT-DIVERGE-1 C4 (rig verb interiorfp only, never part of the fingerprint): THIS machine's
+        /// cargo per product and price-per-unit, "name@price:units" sorted, one term per (product, price) - so a run shows
+        /// WHICH stacks differ in price, not only that cr= differs.</summary>
+        internal static string FingerprintProducts(string addressKey)
+        {
+            try
+            {
+                var snap = BuildSnapshot(addressKey);
+                if (snap?.ItemInstances == null) return "";
+                var inv = System.Globalization.CultureInfo.InvariantCulture;
+                var agg = new SortedDictionary<string, long>(StringComparer.Ordinal);
+                foreach (var it in snap.ItemInstances)
+                {
+                    if (it?.CargoInstances == null) continue;
+                    foreach (var cg in it.CargoInstances)
+                    {
+                        if (cg == null || string.IsNullOrEmpty(cg.ItemName)) continue;
+                        string nm = cg.ItemName.StartsWith("ba:itemname_", StringComparison.Ordinal) ? cg.ItemName.Substring(12) : cg.ItemName;
+                        string k = nm + "@" + cg.PricePerUnit.ToString("0.00", inv);
+                        agg.TryGetValue(k, out long u);
+                        agg[k] = u + cg.Amount;
+                    }
+                }
+                var sb = new System.Text.StringBuilder();
+                foreach (var kv in agg) { if (sb.Length > 0) sb.Append(','); sb.Append(kv.Key).Append(':').Append(kv.Value); }
+                return sb.ToString();
+            }
+            catch (Exception ex) { return "error:" + ex.GetType().Name; }
+        }
+#endif
+
         internal static string SnapshotSummary(InteriorSnapshotPayload snap)
         {
             return $"designs={snap.InteriorDesigns.Count} prices={snap.RetailPrices.Count} dirt={snap.DirtSpots.Count} items={snap.ItemInstances.Count} itemAuth={snap.ItemInstancesAuthoritative}";

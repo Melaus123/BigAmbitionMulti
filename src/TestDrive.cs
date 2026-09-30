@@ -1813,12 +1813,58 @@ namespace BigAmbitionsMP
                 {
                     // `interiorfp <num> <ba:street_x>` - THIS machine's live fingerprint of the interior (InteriorSync.Fingerprint:
                     // items / cargo units / dirty spots / structure, goods and dirt hashes, machine-order independent), plus
-                    // diagnostics that are never part of it: st= item state, cs= stack-exact cargo, cr= prices, cc= cargo colours.
+                    // diagnostics that are never part of it: st= item state, cs= stack-exact cargo, cr= prices, cc= cargo colours,
+                    // prod=[name@price:units,...] per product and price-per-unit (PRICE-PER-UNIT-DIVERGE-1 C4).
                     if (arg.Length == 0) return "ERR usage: interiorfp <num> <ba:street_x>";
                     var fpReg = GameStatePatcher.FindRegistration(arg);
                     if (fpReg == null) return $"ERR no registration at '{arg}'";
                     string fpKey = arg; try { fpKey = GameStateReader.AddressKey(fpReg); } catch { }
-                    return $"OK interiorfp addr='{fpKey}' fp=[{InteriorSync.Fingerprint(fpKey)}] {InteriorSync.FingerprintDiag(fpKey)}";
+                    return $"OK interiorfp addr='{fpKey}' fp=[{InteriorSync.Fingerprint(fpKey)}] {InteriorSync.FingerprintDiag(fpKey)} prod=[{InteriorSync.FingerprintProducts(fpKey)}]";
+                }
+
+                case "basketprobe":
+                {
+                    // `basketprobe <num> <ba:street_x>` - PRICE-PER-UNIT-DIVERGE-1 C2 rig lever: standing INSIDE another player's shop,
+                    // take one unit from the first stocked showcase display through the game's own ShowcaseShelfController.GrabItem
+                    // into a temporary basket (the hands are restored afterwards; a visitor's grab never decrements the shelf), then
+                    // report the carried unit's price, the store-table price MPSale charges, and the shelf stack's price before/after.
+                    if (arg.Length == 0) return "ERR usage: basketprobe <num> <ba:street_x>";
+                    string bpHere = "";
+                    try { var bpReg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration; if (bpReg != null) bpHere = GameStateReader.AddressKey(bpReg); } catch { }
+                    if (!BuildingManager.IsInsideBuilding || bpHere != arg) return $"ERR basketprobe: not inside '{arg}' (here='{bpHere}')";
+                    var bpCd = Helpers.PlayerHelper.CharacterData;
+                    if (bpCd == null) return "ERR basketprobe: no character data";
+                    var bpMi = HarmonyLib.AccessTools.Method(typeof(Items.SpecialItems.ShowcaseShelfController), "GrabItem");
+                    if (bpMi == null) return "ERR basketprobe: GrabItem not found";
+                    int bpShelves = 0;
+                    foreach (var o in UnityEngine.Object.FindObjectsOfType<Items.SpecialItems.ShowcaseShelfController>())
+                    {
+                        if (o == null) continue;
+                        var bpSt = o.ItemInstance?.GetStockInstance();
+                        if (bpSt == null || bpSt.amount < 1 || string.IsNullOrEmpty(bpSt.itemName)) continue;
+                        bpShelves++;
+                        var bpSaved = bpCd.itemInHands;
+                        float costBefore = bpSt.pricePerUnit;
+                        int amtBefore = bpSt.amount;
+                        float carried = -1f;
+                        try
+                        {
+                            bpCd.itemInHands = ItemHelper.InitializeNewInstance("ba:itemname_shoppingbasket");
+                            bpMi.Invoke(o, null);
+                            var bpC = bpCd.itemInHands?.cargoInstances;
+                            if (bpC != null) foreach (var c in bpC) if (c != null && c.itemName == bpSt.itemName) { carried = c.pricePerUnit; break; }
+                        }
+                        catch (Exception ex) { return $"ERR basketprobe: grab threw {ex.GetType().Name}: {ex.Message}"; }
+                        finally { bpCd.itemInHands = bpSaved; }
+                        var bpInv = System.Globalization.CultureInfo.InvariantCulture;
+                        float table = MPRegisterSync.GetShopPriceAt(arg, bpSt.itemName);
+                        bool owned = false; try { owned = o.BuildingContext.IsPlayerOwnedBusiness; } catch { }
+                        return $"OK basketprobe addr='{arg}' item={o.ItemInstance?.id} product={bpSt.itemName} owned={owned} "
+                             + $"carried={carried.ToString("0.00", bpInv)} table={table.ToString("0.00", bpInv)} "
+                             + $"shelfBefore={costBefore.ToString("0.00", bpInv)} shelfAfter={bpSt.pricePerUnit.ToString("0.00", bpInv)} "
+                             + $"amount={amtBefore}->{bpSt.amount}";
+                    }
+                    return $"ERR basketprobe: no stocked showcase display in '{arg}' (checked {bpShelves})";
                 }
 
                 case "shelfput":

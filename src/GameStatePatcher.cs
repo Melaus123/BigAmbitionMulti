@@ -5085,10 +5085,13 @@ namespace BigAmbitionsMP
         /// <summary>Round-281: "does this item's cargo differ from what the wire says?"  Built from the
         /// two overloads above, so it can never disagree with the full-snapshot path's own cargo test.
         /// Round-281b (verifier finding, read-confirmed): PRICE IS EXCLUDED here — FillCargoInstances
-        /// deliberately re-stamps PricePerUnit from the local price table (by-design divergence, the
-        /// same reason the audit hash excludes it), so a live-vs-wire compare that includes price marks
+        /// deliberately re-stamped PricePerUnit from the local price table (by-design divergence, the
+        /// same reason the audit hash excludes it), so a live-vs-wire compare that includes price marked
         /// every table-priced item "changed" on EVERY sync: 9 phantom entries per sync in the soak,
-        /// native cargo callbacks fired for all of them, and S4-lite's baseline invalidated each time.</summary>
+        /// native cargo callbacks fired for all of them, and S4-lite's baseline invalidated each time.
+        /// PRICE-PER-UNIT-DIVERGE-1: the re-stamp is gone (cargo keeps the sender's cost), so the reason is
+        /// historical; price stays excluded here and a price-only change lands with the next full snapshot
+        /// (IdentitySig still includes price).</summary>
         private static bool CargoDiffers(BigAmbitions.Items.ItemInstance live, List<CargoInstanceInfo>? incoming)
         {
             var a = new System.Text.StringBuilder(); AppendCargoSig(a, live, includePrice: false);
@@ -5122,11 +5125,11 @@ namespace BigAmbitionsMP
         /// <summary>Rebuild one item's cargo list from the wire, IN PLACE on the target instance.
         /// Round-281 extracted this out of DeserializeItemInstance so the two channels that write cargo
         /// — the full snapshot and the cargo sync — share one definition.  Two copies of this would be
-        /// two places to remember the price-table stamp and the round-99 null-colour traps, and the
+        /// two places to remember the price rule and the round-99 null-colour traps, and the
         /// cheap channel is exactly where a forgotten one would hide.
-        /// `addressForPrices` is the shop whose retail table stamps the display price: the snapshot path
-        /// passes the item's own street address, the cargo path passes the payload's AddressKey — the
-        /// same string, from the same address format (GameStateReader.AddressKey).</summary>
+        /// `addressForPrices` is the shop's address key (snapshot path: the item's own street address; cargo
+        /// path: the payload's AddressKey). Since PRICE-PER-UNIT-DIVERGE-1 it no longer re-prices anything —
+        /// the cargo keeps the sender's price-per-unit (the owner's cost); kept for the call sites.</summary>
         private static void FillCargoInstances(BigAmbitions.Items.ItemInstance ii, List<CargoInstanceInfo>? cargo, string addressForPrices)
         {
             if (ii?.cargoInstances == null || cargo == null) return;
@@ -5134,17 +5137,24 @@ namespace BigAmbitionsMP
             foreach (var c in cargo)
             {
                 if (c == null) continue;
-                // Display correctness (user, 2026-06-12): the CHARGE comes
-                // from the store table; the replica cargo must show the
-                // same number (basket said $18 while the charge was $22).
-                // Stamp from the table when it has an entry.
+                // PRICE-PER-UNIT-DIVERGE-1 C1 (owner decision 53, 2026-09-29): pricePerUnit is the owner's PURCHASE
+                // COST (sale cost reports, sell / close-out value, tax repossession, theft cost and returns all read
+                // it), so every machine keeps it exactly as sent. It used to be re-stamped here with the store's
+                // RETAIL price for display (user rule 2026-06-12: basket $18 while the charge was $22), and since the
+                // absence hand-back that retail copy overwrote the returning owner's real cost. The basket rule now
+                // lives where goods leave a shelf (MPPatches Patch_ShowcaseGrab_RetailPrice). Only a non-finite value
+                // is repaired, by the game's own FixPricePerUnitNan rule (wholesale price, else default market price).
                 float price = c.PricePerUnit;
-                try
+                if (float.IsNaN(price) || float.IsInfinity(price))
                 {
-                    float t = MPRegisterSync.GetShopPriceAt(addressForPrices, c.ItemName);
-                    if (t >= 0f) price = t;
+                    price = 0f;
+                    try
+                    {
+                        var itN = BigAmbitions.Items.ItemsGetter.GetByName(c.ItemName);
+                        if (itN != null) { price = itN.GetWholesalePrice(); if (price == 0f) price = itN.DefaultMarketPrice; }
+                    }
+                    catch { price = 0f; }
                 }
-                catch { }
                 var ci = new BigAmbitions.Items.CargoInstance(
                     c.ItemName,
                     c.Amount,

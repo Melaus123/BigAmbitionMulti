@@ -10901,6 +10901,62 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── PRICE-PER-UNIT-DIVERGE-1 C2 (owner decision 53, 2026-09-29): the basket rule, at the take ──
+        // A replica's shelf stacks keep the owner's PURCHASE COST now (GameStatePatcher.FillCargoInstances), but
+        // the user's 2026-06-12 rule stands: goods a visitor carries show what the checkout charges (the store
+        // table; MPSale reads GetShopPrice). Two native take paths reach a replica display: the armed purchaser
+        // (PlayerItemPurchaser.GrabItem - priced from reg.retailPrices, already the table) and, when a display's
+        // purchaser is not armed (no retail cargo when its controller started; self-service / cinema shops),
+        // ShowcaseShelfController.GrabItem, which copies stockInstance.pricePerUnit into the carried unit
+        // (decompile ShowcaseShelfController.cs:45). For that one call the stock stack wears the table price; the
+        // finalizer puts the true cost back before anything else runs, so the shelf never keeps it.
+        [HarmonyPatch(typeof(Items.SpecialItems.ShowcaseShelfController), "GrabItem")]
+        public static class Patch_ShowcaseGrab_RetailPrice
+        {
+            static void Prefix(Items.SpecialItems.ShowcaseShelfController __instance,
+                               out (BigAmbitions.Items.CargoInstance? stock, float cost, float table, string key) __state)
+            {
+                __state = (null, 0f, 0f, "");
+                if (!MPServer.IsRunning && !MPClient.IsClientInWorld) return;
+                try
+                {
+                    var ctx = __instance.BuildingContext;
+                    if (ctx == null || ctx.IsPlayerOwnedBusiness) return;          // native prices an owned shop at 0
+                    var reg = ctx.Registration;
+                    if (reg == null) return;
+                    // Another SESSION player's shop only (the gym-grab gate below): an AI shop's stock price stands. Not
+                    // IsReplicatedInterior - that baseline is forgotten by a hand-back / heal until the next apply (rig run
+                    // T-P3-2-HANDBACK-20260930-004426: a visitor right after a return took at the cost price).
+                    string key = GameStateReader.AddressKey(reg);
+                    string owner = MPRegisterSync.CurrentShopOwner;
+                    if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return;
+                    if (key != MPRegisterSync.CurrentShopAddress || !MPRestSync.AllPlayers().Contains(owner)) return;
+                    var stock = __instance.ItemInstance?.GetStockInstance();
+                    if (stock == null || string.IsNullOrEmpty(stock.itemName)) return;
+                    float t = MPRegisterSync.GetShopPriceAt(key, stock.itemName);
+                    if (t < 0f || t == stock.pricePerUnit) return;                 // no table entry: the stack price stands
+                    __state = (stock, stock.pricePerUnit, t, key);
+                    stock.pricePerUnit = t;
+                }
+                catch { __state = (null, 0f, 0f, ""); }
+            }
+
+            static Exception? Finalizer(Exception? __exception,
+                                        (BigAmbitions.Items.CargoInstance? stock, float cost, float table, string key) __state)
+            {
+                try
+                {
+                    if (__state.stock != null)
+                    {
+                        __state.stock.pricePerUnit = __state.cost;
+                        Plugin.Logger.LogInfo($"[MPSale] showcase take in '{__state.key}': the carried {__state.stock.itemName} is priced ${__state.table:F2} from the store table; the shelf keeps its cost ${__state.cost:F2}.");
+                    }
+                }
+                catch { }
+                return __exception;
+            }
+        }
+
         // ── Round-249 HARDENING: a PARTIAL radio-station table self-heals (field 20260807-200348) ──
         // A content mod's asset fired RadioStationSource.OnEnable during GameManager.Awake's
         // synchronous bundle load — BEFORE GlobalReferences existed — so the native fill

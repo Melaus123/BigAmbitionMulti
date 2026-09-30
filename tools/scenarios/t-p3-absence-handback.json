@@ -176,9 +176,13 @@
       "cmd": "interiorfp ${clientShop}",
       "expect_result": "^OK interiorfp .*fp=\\[items=[1-9]",
       "capture": {
-        "cPreFp": "fp=\\[([^\\]]+)\\]"
+        "cPreFp": "fp=\\[([^\\]]+)\\]",
+        "cPreCr": "cr=([0-9A-F]{8})",
+        "cPreProd": "prod=\\[([^\\]]*)\\]",
+        "cPreP1": "prod=\\[([^:,\\]]+):",
+        "cPrePn": "([^:,\\[]+):\\d+\\]"
       },
-      "note": "B5 pre-drop: the owner's live fingerprint",
+      "note": "B5 pre-drop: the owner's live fingerprint | PRICE-PER-UNIT-DIVERGE-1: cr= and the per-product prices captured too",
       "seq": 19
     },
     {
@@ -211,8 +215,8 @@
     {
       "role": "h",
       "cmd": "interiorfp ${clientShop}",
-      "expect_result": "fp=\\[${cPreFp}\\]",
-      "note": "B5 pre-drop: host fingerprint == owner fingerprint",
+      "expect_result": "fp=\\[${cPreFp}\\] .*cr=${cPreCr} .*prod=\\[${cPreProd}\\]",
+      "note": "B5 pre-drop: host fingerprint == owner fingerprint | PRICE-PER-UNIT-DIVERGE-1 test 1: the cargo prices (cr= and per product) are equal too - the host's copy keeps the owner's cost",
       "seq": 24,
       "abort_on_fail": false
     },
@@ -601,76 +605,86 @@
       "cmd": "interiorfp ${clientShop}",
       "expect_result": "^OK interiorfp",
       "capture": {
-        "cAfterFp": "fp=\\[([^\\]]+)\\]"
+        "cAfterFp": "fp=\\[([^\\]]+)\\]",
+        "cAfterCr": "cr=([0-9A-F]{8})",
+        "cAfterProd": "prod=\\[([^\\]]*)\\]"
       },
       "seq": 62
+    },
+    {
+      "role": "c",
+      "cmd": "interiorfp ${clientShop}",
+      "expect_result": "prod=\\[${cPreP1}:\\d+(,.*)?,${cPrePn}:\\d+\\]",
+      "note": "PRICE-PER-UNIT-DIVERGE-1 test 2: the owner's per-product price-per-unit after the hand-back equals its pre-absence one (first and last product@price terms of prod=[]; units may move - the stand-in took 2 and put 1). cr= is NOT the oracle: it hashes prices in stack order, so a take that splits or empties a stack moves it with no price change (run T-P3-2-HANDBACK-20260930-004426: cr A3C85611 -> D5426C53 with prices energydrink@1.24 / sodacan@0.68 unchanged).",
+      "abort_on_fail": false,
+      "seq": 63
     },
     {
       "role": "h",
       "cmd": "mark READ H-AFTERRETURN",
       "expect_result": ".",
-      "seq": 63
+      "seq": 64
     },
     {
       "role": "h",
       "cmd": "stockof ${clientShop}",
       "expect_result": "items=\\[${hostAbsStock}\\]",
       "note": "H-AFTERRETURN",
-      "seq": 64
-    },
-    {
-      "role": "h",
-      "cmd": "dirtstate ${clientShop}",
-      "expect_result": ".",
-      "note": "H-AFTERRETURN",
       "seq": 65
     },
     {
       "role": "h",
-      "cmd": "tillledger show ${clientShop}",
+      "cmd": "dirtstate ${clientShop}",
       "expect_result": ".",
       "note": "H-AFTERRETURN",
       "seq": 66
     },
     {
       "role": "h",
+      "cmd": "tillledger show ${clientShop}",
+      "expect_result": ".",
+      "note": "H-AFTERRETURN",
+      "seq": 67
+    },
+    {
+      "role": "h",
       "cmd": "interiorfp ${clientShop}",
-      "expect_result": "fp=\\[${cAfterFp}\\]",
-      "note": "both machines equal after the return",
-      "seq": 67,
+      "expect_result": "fp=\\[${cAfterFp}\\] .*cr=${cAfterCr} .*prod=\\[${cAfterProd}\\]",
+      "note": "both machines equal after the return | PRICE-PER-UNIT-DIVERGE-1: prices included",
+      "seq": 68,
       "abort_on_fail": false
     },
     {
       "role": "c",
       "sleep_s": 15,
-      "seq": 68
+      "seq": 69
     },
     {
       "role": "c",
       "cmd": "mark READ C-AFTERRETURN2",
       "expect_result": ".",
-      "seq": 69
+      "seq": 70
     },
     {
       "role": "c",
       "cmd": "stockof ${clientShop}",
       "expect_result": "items=\\[${hostAbsStock}\\]",
       "note": "C-AFTERRETURN2",
-      "seq": 70
+      "seq": 71
     },
     {
       "role": "c",
       "cmd": "dirtstate ${clientShop}",
       "expect_result": ".",
       "note": "C-AFTERRETURN2",
-      "seq": 71
+      "seq": 72
     },
     {
       "role": "c",
       "cmd": "tillledger show ${clientShop}",
       "expect_result": ".",
       "note": "C-AFTERRETURN2",
-      "seq": 72
+      "seq": 73
     },
     {
       "role": "c",
@@ -679,14 +693,14 @@
       "capture": {
         "cAfter2Fp": "fp=\\[([^\\]]+)\\]"
       },
-      "seq": 73
+      "seq": 74
     },
     {
       "role": "h",
       "cmd": "interiorfp ${clientShop}",
       "expect_result": "fp=\\[${cAfter2Fp}\\]",
       "note": "still equal after 15 s",
-      "seq": 74,
+      "seq": 75,
       "abort_on_fail": false
     },
     {
@@ -694,7 +708,7 @@
       "cmd": "absence fp ${clientShop2}",
       "expect_result": "frozen=\\[\\] sent=\\[\\] .*held=0",
       "note": "R1 no-copy leg: nothing frozen, nothing handed back, no hold on the owner's second shop",
-      "seq": 75
+      "seq": 76
     },
     {
       "role": "c",
@@ -702,7 +716,7 @@
       "expect_result": "^OK absence",
       "refute_result": "replaced=\\[[^\\]]*${clientShop2}",
       "note": "R1 no-copy leg: the owner's second shop was NOT replaced (its own copy stands)",
-      "seq": 76
+      "seq": 77
     },
     {
       "role": "h",
@@ -710,7 +724,7 @@
       "expect_result": "^OK absence marks=\\[\\]",
       "abort_on_fail": false,
       "note": "R1 no-copy leg: the mark cleared (the no-copy address held nothing open)",
-      "seq": 77
+      "seq": 78
     },
     {
       "role": "c",
@@ -724,19 +738,19 @@
         }
       ],
       "note": "P3-C: with the mark cleared the owner's own publish stores normally (no OwnerBack guard)",
-      "seq": 78
+      "seq": 79
     },
     {
       "role": "c",
       "cmd": "status",
       "expect_result": "role=c.*inMp=True",
-      "seq": 79
+      "seq": 80
     },
     {
       "role": "c",
       "cmd": "mergestatus",
       "expect_result": "member=True",
-      "seq": 80
+      "seq": 81
     },
     {
       "role": "c",
@@ -750,18 +764,58 @@
         }
       ],
       "note": "FIXTURE HYGIENE: end with the company dissolved so the save step never writes a merger into save1's manifest (T-P3-3 run 1 lesson)",
-      "seq": 81
+      "seq": 82
     },
     {
       "role": "h",
       "sleep_s": 3,
-      "seq": 82
+      "seq": 83
+    },
+    {
+      "role": "h",
+      "cmd": "enterbuilding ${clientShop}",
+      "expect_result": "^OK enterbuilding",
+      "note": "PRICE-PER-UNIT-DIVERGE-1 test 3 (basket rule, user 2026-06-12): with the company dissolved the host is a plain VISITOR in the client's shop",
+      "abort_on_fail": false,
+      "seq": 84
+    },
+    {
+      "role": "h",
+      "sleep_s": 12,
+      "seq": 85
+    },
+    {
+      "role": "h",
+      "cmd": "basketprobe ${clientShop}",
+      "expect_result": "^OK basketprobe .*owned=False carried=(\\S+) table=\\1 shelfBefore=(\\S+) shelfAfter=\\2 ",
+      "note": "test 3: a unit taken through the game's own showcase grab is carried at the store-table price (the price MPSale charges); the shelf stack keeps its cost",
+      "abort_on_fail": false,
+      "seq": 86
+    },
+    {
+      "role": "h",
+      "cmd": "interiorfp ${clientShop}",
+      "expect_result": "^OK interiorfp",
+      "note": "report: the visitor's copy with its per-product costs",
+      "abort_on_fail": false,
+      "seq": 87
+    },
+    {
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "seq": 88
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 89
     },
     {
       "role": "both",
       "cmd": "mark TEST P3-2 END",
       "expect_result": "OK MARK",
-      "seq": 83
+      "seq": 90
     }
   ]
 }

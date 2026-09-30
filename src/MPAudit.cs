@@ -279,8 +279,8 @@ namespace BigAmbitionsMP
         /// <summary>Audit-stable interior hash: layout + designs + price table +
         /// item structure/stock.  EXCLUDES dirt (evolves continuously on the
         /// source; a replica is always one broadcast behind → permanent false
-        /// positive) and cargo PricePerUnit (the receiver deliberately re-stamps
-        /// it from the synced store table — by-design divergence).</summary>
+        /// positive) and cargo PricePerUnit (not compared here: every machine keeps the owner's true
+        /// purchase cost since PRICE-PER-UNIT-DIVERGE-1; the absence fingerprint's per-product list checks it).</summary>
         private static int? InteriorHash(string addressKey)
         {
             try
