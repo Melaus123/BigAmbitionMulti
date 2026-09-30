@@ -1240,12 +1240,20 @@ namespace BigAmbitionsMP
                         LastSimulatorPid = a.LastSimulatorPid,
                         Addresses        = new List<string>(a.Addresses ?? new List<string>()),
                         SinceDay         = a.SinceDay,
+                        TruthInWorld     = SortedTruth(a.TruthInWorld),   // ABSENCE-HANDBACK-1 fold 2 (D1 b)
                     });
                 }
                 list.Sort((x, y) => string.CompareOrdinal(x.OwnerStable, y.OwnerStable));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] manifest snapshot: {ex.Message}"); }
             return list;
+        }
+
+        private static List<string> SortedTruth(HashSet<string>? s)
+        {
+            var l = s == null ? new List<string>() : new List<string>(s);
+            l.Sort(string.CompareOrdinal);
+            return l;
         }
 
         /// <summary>Host: REPLACE the absence table from the manifest being restored - clear-then-apply
@@ -1263,7 +1271,7 @@ namespace BigAmbitionsMP
                     foreach (var a in m.Absence)
                     {
                         if (string.IsNullOrEmpty(a?.OwnerStable)) continue;
-                        MergerAbsence.HostRestoreMark(a.OwnerStable, a.OwnerPid, a.Addresses, a.SinceDay, a.LastSimulatorPid);
+                        MergerAbsence.HostRestoreMark(a.OwnerStable, a.OwnerPid, a.Addresses, a.SinceDay, a.LastSimulatorPid, a.TruthInWorld);
                         n++;
                     }
                 if (n > 0)

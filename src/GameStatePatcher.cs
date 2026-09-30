@@ -1281,6 +1281,7 @@ namespace BigAmbitionsMP
                     // apply recorded a signature, and a byte-identical re-send (the host's only
                     // corrective move) was then skipped forever.
                     bool appliedFully = true;
+                    bool itemsKeptOverEmpty = false;   // ABSENCE-HANDBACK-1 fold 2 (D3): the empty-set guard kept my items
                     // Two halves, cheap one first.  The payload half says "the host is telling me the
                     // same thing again"; the LOCAL half says "and my copy is still the one I applied it
                     // to".  Both are required — a save load, a heal, or any other path that replaces
@@ -1307,6 +1308,7 @@ namespace BigAmbitionsMP
                             MergerAbsence.ConsumeReturnInterior(payload.AddressKey);
                         // ABSENCE-HANDBACK-1 R4: a client stand-in that already holds the host's copy confirms it the same way.
                         if (payload.SeedOrHeal) MergerAbsence.NoteSeedApplied(payload.AddressKey, payload.Authoritative);
+                        InteriorSync.HostNoteWorldApplied(payload);   // ABSENCE-HANDBACK-1 fold 2 (D1 b): the host's world holds it
                         NoteApplySkipped(payload.AddressKey);
                         return;
                     }
@@ -1594,6 +1596,7 @@ namespace BigAmbitionsMP
                             if (protectPlayerBusiness && payload.ItemInstances.Count == 0 && reg.itemInstances.Count > 0)
                             {
                                 appliedFully = false;   // round-281b: a refusal is not a baseline
+                                itemsKeptOverEmpty = true;
                                 Plugin.Logger.LogWarning($"[Patcher] Interior item apply REFUSED for '{payload.AddressKey}': an empty snapshot (itemAuth={payload.ItemInstancesAuthoritative}) would have cleared {reg.itemInstances.Count} stored item(s) of a player-owned business. Kept the stored interior.");
                             }
                             else
@@ -1854,7 +1857,11 @@ namespace BigAmbitionsMP
                     // the throw below now ANSWER the host ("return-interior-refused"), so its hold ends there too.
                     if (payload.SeedOrHeal) MergerAbsence.ConsumeReturnInterior(payload.AddressKey);
                     // ABSENCE-HANDBACK-1 R4: a client stand-in confirms the host's authoritative copy is on its machine.
-                    if (payload.SeedOrHeal) MergerAbsence.NoteSeedApplied(payload.AddressKey, payload.Authoritative);
+                    // fold 2 (D3): NOT when the empty-set guard kept this machine's own items - its copy is not the host's then.
+                    if (payload.SeedOrHeal && !itemsKeptOverEmpty) MergerAbsence.NoteSeedApplied(payload.AddressKey, payload.Authoritative);
+                    else if (payload.SeedOrHeal && payload.Authoritative && MergerAbsence.SimulatesHere(payload.AddressKey))
+                        Plugin.Logger.LogWarning($"[Absence] stand-in: the host's copy of '{payload.AddressKey}' carries no items and my own were kept - "
+                                               + "not confirmed as applied (my uploads of it stay refused).");
                     InteriorSync.NoteSnapshotApply(payload.AddressKey);   // round-213: re-send-loop detector
                     // Round-281: this apply COMPLETED, so it is now the baseline for both guards —
                     // the S4-lite duplicate test above, and the struct version every incoming cargo
@@ -1888,6 +1895,7 @@ namespace BigAmbitionsMP
                         // apply actually COMPLETES here — never at re-ask time (fire-and-forget lost
                         // the answer whenever the owner's push deferred or skipped).
                         InteriorSync.ClearResyncOwed(payload.AddressKey);
+                        InteriorSync.HostNoteWorldApplied(payload);   // ABSENCE-HANDBACK-1 fold 2 (D1 b): a FULL apply only
                     }
                     else
                         Plugin.Logger.LogInfo($"[Patcher] baseline NOT recorded for '{payload.AddressKey}' — " +

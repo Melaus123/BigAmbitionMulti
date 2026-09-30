@@ -1650,8 +1650,64 @@ namespace BigAmbitionsMP
         /// <summary>ABSENCE-HANDBACK-1 R1 (a) / R4, HOST: does the host hold a TRUTH for this address - its F2 freeze or a stored
         /// owner / stand-in upload (both live in the stored owner copies)? Without one, all it has is its own replica, which
         /// is never handed back and never seeds a stand-in's uploads.</summary>
+        // fold 2 (D1 c): OR a mark records the host's WORLD copy of it as the absence truth (persisted, so it survives a host
+        // restart that emptied the stored copies) - that world copy then becomes the stored copy at this first use.
         internal static bool HostHoldsTruth(string addressKey)
+            => HasStoredCopy(addressKey) || HostAdoptWorldTruth(addressKey);
+
+        private static bool HasStoredCopy(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _ownerSnapshotsByAddr.TryGetValue(addressKey, out var st) && st?.Snapshot != null;
+
+        // fold 2 (D1 c): addresses whose unreadable world copy was already logged (a stand-in uploads on every change).
+        private static readonly HashSet<string> _worldTruthZeroLogged = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>fold 2 (D1 c), HOST, MAIN THREAD: no stored copy, but the mark says the host's WORLD copy of this address is
+        /// the absence truth - snapshot it, stamp it as the owner's own upload and record it as the stored copy, so the
+        /// stand-in's seed, its uploads and the hand-back run on unchanged. An absent / all-zero world read is never taken
+        /// (the no-truth rule stands).</summary>
+        private static bool HostAdoptWorldTruth(string addressKey)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey) || MergerAbsence.MarkCount == 0
+                    || !MergerAbsence.HostTruthInWorld(addressKey)) return false;
+                var snap = BuildSnapshot(addressKey);
+                if (snap == null || (snap.ItemInstances.Count == 0 && snap.InteriorDesigns.Count == 0 && snap.DirtSpots.Count == 0))
+                {
+                    if (_worldTruthZeroLogged.Add(addressKey))
+                        Plugin.Logger.LogInfo($"[Absence] '{addressKey}': the host's world copy is recorded as the absence truth, but it reads "
+                                            + $"{(snap == null ? "absent" : "all-zero")} - not taken as the stored copy.");
+                    return false;
+                }
+                _worldTruthZeroLogged.Remove(addressKey);
+                string owner = MergerAbsence.HostMarkFor(addressKey)?.OwnerPid ?? "";
+                snap.OwnerPlayerId              = owner;
+                snap.Authoritative              = true;
+                snap.ItemInstancesAuthoritative = snap.ItemInstances.Count > 0;
+                snap.SeedOrHeal                 = false;
+                _ownerSnapshotsByAddr[addressKey] = new OwnerInteriorState { OwnerPlayerId = owner, Snapshot = snap, Hash = CacheHash(snap) };
+                GameStatePatcher.ForgetInteriorBaseline(addressKey);
+                _volatileSentAtByAddr.Remove(addressKey);
+                Plugin.Logger.LogInfo($"[Absence] '{addressKey}' (for '{owner}'): no stored copy (host restart) - the host's world copy is the "
+                                    + $"recorded absence truth and is now the stored copy fp=[{Fingerprint(snap)}].");
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] world truth '{addressKey}': {ex.Message}"); return false; }
+        }
+
+        /// <summary>fold 2 (D1 b), HOST, MAIN THREAD (the apply's commit point / identical skip): the host's world now holds
+        /// its STORED copy of a marked address (an accepted stand-in upload or cargo graft, the F3 start alignment) - the mark
+        /// records that the world copy is the absence truth.</summary>
+        internal static void HostNoteWorldApplied(InteriorSnapshotPayload payload)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || payload == null || MergerAbsence.MarkCount == 0 || string.IsNullOrEmpty(payload.AddressKey)) return;
+                if (!_ownerSnapshotsByAddr.TryGetValue(payload.AddressKey, out var st) || !ReferenceEquals(st?.Snapshot, payload)) return;
+                MergerAbsence.HostNoteTruthInWorld(payload.AddressKey, "its stored copy is applied to the host's world");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] world-truth apply note: {ex.Message}"); }
+        }
 
         // R4: (what|pid|addr) -> realtime of the last stand-in refusal line (an unseeded stand-in uploads on every change).
         private static readonly Dictionary<string, float> _standInRefusalLoggedAt = new(StringComparer.OrdinalIgnoreCase);
@@ -1687,6 +1743,7 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey)) return 0;
                 int n = _ownerSnapshotsByAddr.Remove(addressKey) ? 1 : 0;
+                MergerAbsence.DevForgetTruthInWorld(addressKey);   // fold 2: no world truth either
                 _devNoFreeze.Add(addressKey);
                 Plugin.Logger.LogInfo($"[TestDrive] absence forgetcopy '{addressKey}': stored copy {(n == 1 ? "forgotten" : "absent")}; its next stand-in freeze is skipped.");
                 return n;
@@ -1757,7 +1814,7 @@ namespace BigAmbitionsMP
                 if (_devNoFreeze.Remove(addressKey))
                 {
                     Plugin.Logger.LogInfo($"[Absence] DEV: freeze of '{addressKey}' for '{ownerPid}' skipped (rig lever absence forgetcopy) - "
-                                        + $"the host holds {(HostHoldsTruth(addressKey) ? "a stored" : "no")} copy of it ({why}).");
+                                        + $"the host holds {(HasStoredCopy(addressKey) ? "a stored" : "no")} copy of it ({why}).");
                     return "";
                 }
 #endif
@@ -1779,6 +1836,7 @@ namespace BigAmbitionsMP
                 _ownerSnapshotsByAddr[addressKey] = new OwnerInteriorState { OwnerPlayerId = ownerPid ?? "", Snapshot = snap, Hash = CacheHash(snap) };
                 GameStatePatcher.ForgetInteriorBaseline(addressKey);
                 _volatileSentAtByAddr.Remove(addressKey);
+                MergerAbsence.HostNoteTruthInWorld(addressKey, "F2 freeze");   // fold 2 (D1 b)
                 string fp = Fingerprint(snap);
                 Plugin.Logger.LogInfo($"[Absence] stand-in stopped: froze '{addressKey}' for '{ownerPid}' fp=[{fp}] ({why}).");
                 return fp;
@@ -1795,12 +1853,14 @@ namespace BigAmbitionsMP
             try
             {
                 if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey)) return;
+                if (!HostHoldsTruth(addressKey)) return;   // fold 2 (D1 c): a restored world truth becomes the stored copy first
                 if (!_ownerSnapshotsByAddr.TryGetValue(addressKey, out var st) || st?.Snapshot == null) return;
                 string cacheFp = Fingerprint(st.Snapshot);
                 string liveFp  = Fingerprint(BuildSnapshot(addressKey));
                 if (cacheFp == liveFp)
                 {
                     Plugin.Logger.LogInfo($"[Absence] stand-in start '{addressKey}' for '{ownerPid}': live == stored copy fp=[{liveFp}].");
+                    MergerAbsence.HostNoteTruthInWorld(addressKey, "the host stands in with its stored copy");   // fold 2 (D1 b)
                     return;
                 }
                 Plugin.Logger.LogWarning($"[Absence] stand-in start '{addressKey}' for '{ownerPid}': live fp=[{liveFp}] differs from the stored "

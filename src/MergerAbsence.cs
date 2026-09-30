@@ -72,6 +72,12 @@ namespace BigAmbitionsMP
             /// StorePaperwork's OwnerBack guard exactly where the old mark removal did; the mark itself stays until
             /// PendingInteriors is empty too. In-memory only.</summary>
             public bool PaperworkAcked;
+            /// <summary>ABSENCE-HANDBACK-1 fold 2 (D1 b): the addresses whose HOST WORLD copy is the absence truth - an accepted
+            /// stand-in upload (or cargo graft) applied to the host's world, the F2 freeze, the host standing in with a truth
+            /// (F1/F3). PERSISTED with the mark (the world copy is in the same save), so after a host restart - which empties the
+            /// in-memory stored copies - the host still knows its world copy is the truth (InteriorSync.HostHoldsTruth). An
+            /// address leaves it when the mark's hold for it ends (hand-back acked / refused, no hand-back) or with the mark.</summary>
+            public HashSet<string> TruthInWorld = new(StringComparer.OrdinalIgnoreCase);
         }
 
         private static readonly Dictionary<string, AbsenceMark> _marks = new();   // ownerStable → mark
@@ -103,6 +109,17 @@ namespace BigAmbitionsMP
                 SinceDay     = have != null ? have.SinceDay : sinceDay,
                 LastSimulatorPid = simulatorPid,   // P3-C: who ran them, kept past r5's clear
             };
+            // fold 2 (D1 b): a re-pointed mark keeps the world-truth record of the addresses it still names.
+            try
+            {
+                if (have?.TruthInWorld != null && have.TruthInWorld.Count > 0)
+                {
+                    var nm = _marks[ownerStable];
+                    foreach (var a in have.TruthInWorld)
+                        if (nm.Addresses.Exists(x => string.Equals(x, a, StringComparison.OrdinalIgnoreCase))) nm.TruthInWorld.Add(a);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] world-truth carry-over '{ownerStable}': {ex.Message}"); }
             return true;
         }
 
@@ -209,7 +226,7 @@ namespace BigAmbitionsMP
         /// nobody here - so the mark comes back SUSPENDED and the next reconcile designates a simulator
         /// and sends the hand-over. SinceDay is the whole point of persisting it and is kept exactly.</summary>
         public static void HostRestoreMark(string ownerStable, string ownerPid, List<string> addresses, int sinceDay,
-                                          string lastSimulatorPid = "")
+                                          string lastSimulatorPid = "", List<string>? truthInWorld = null)
         {
             if (string.IsNullOrEmpty(ownerStable)) return;
             _marks[ownerStable] = new AbsenceMark
@@ -223,6 +240,18 @@ namespace BigAmbitionsMP
                 // still the truthful answer to "who ran my shops" - the toast is the only reader.
                 LastSimulatorPid = lastSimulatorPid ?? "",
             };
+            // fold 2 (D1 b): which of these addresses' host WORLD copy (restored with this save) is the absence truth.
+            try
+            {
+                var m = _marks[ownerStable];
+                foreach (var a in truthInWorld ?? new List<string>())
+                    if (!string.IsNullOrEmpty(a) && m.Addresses.Exists(x => string.Equals(x, a, StringComparison.OrdinalIgnoreCase)))
+                        m.TruthInWorld.Add(a);
+                if (m.TruthInWorld.Count > 0)
+                    Plugin.Logger.LogInfo($"[Absence] restored mark of '{m.OwnerPid}': the host's world copy is the absence truth for "
+                                        + $"{m.TruthInWorld.Count} address(es) [{string.Join(", ", m.TruthInWorld)}].");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] world-truth restore '{ownerStable}': {ex.Message}"); }
         }
 
         /// <summary>HOST: nobody in this owner's company is online, so nothing simulates (D1) and no NEW
@@ -487,6 +516,7 @@ namespace BigAmbitionsMP
                     {
                         if (InteriorSync.HostHoldsTruth(a)) { handBack.Add(a); continue; }
                         noCopy.Add(a);
+                        m.TruthInWorld.Remove(a);   // fold 2 (D1 b): no hand-back, no hold - its record ends here
                         _snapQueue.RemoveAll(q => q.returnLeg && q.pid == owner && string.Equals(q.addr, a, StringComparison.OrdinalIgnoreCase));
                         Plugin.Logger.LogInfo($"[Absence] no hand-back for '{a}': the host holds no copy - the owner's own copy stands.");
                     }
@@ -563,6 +593,9 @@ namespace BigAmbitionsMP
                 if (pick < 0) return;
                 var (addr, pid, returnLeg) = _snapQueue[pick];
                 _snapQueue.RemoveAt(pick);
+                // fold 2 (D1 c): after a host restart the persisted world truth becomes the stored copy HERE, so a stand-in's
+                // seed is served from it (authoritative) instead of the host's replica.
+                InteriorSync.HostHoldsTruth(addr);
                 if (returnLeg)
                 {
                     // B5: what the owner is handed, and the host's live copy beside it (they differ only if the host's world
@@ -593,6 +626,37 @@ namespace BigAmbitionsMP
 #if BAMP_DEV
         /// <summary>Rig lever (`absence holdreturn on|off`): hold ONLY the return-leg snapshot drain.</summary>
         internal static bool DevHoldReturn;
+#endif
+
+        /// <summary>fold 2 (D1 c), HOST: does a mark name this address AND record its host WORLD copy as the absence truth?</summary>
+        public static bool HostTruthInWorld(string addressKey)
+        {
+            var m = HostMarkFor(addressKey);
+            return m != null && m.TruthInWorld.Contains(addressKey);
+        }
+
+        /// <summary>fold 2 (D1 b), HOST, MAIN THREAD: the host's world copy of this marked address is now the absence truth -
+        /// recorded with the mark (persisted). Not once the mark's hold for it has ended (handed back and acked / refused).</summary>
+        public static void HostNoteTruthInWorld(string addressKey, string why)
+        {
+            try
+            {
+                var m = HostMarkFor(addressKey);
+                if (m == null) return;
+                if (m.ReturnSent && !m.PendingInteriors.Contains(addressKey)) return;
+                if (m.TruthInWorld.Add(addressKey))
+                    Plugin.Logger.LogInfo($"[Absence] '{addressKey}': the host's world copy is the absence truth for '{m.OwnerPid}' ({why}) - "
+                                        + "recorded with the mark.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] world-truth note '{addressKey}': {ex.Message}"); }
+        }
+
+#if BAMP_DEV
+        /// <summary>Rig lever `absence forgetcopy` (host, DEV): the host holds no truth for this address - the world record too.</summary>
+        internal static void DevForgetTruthInWorld(string addressKey)
+        {
+            try { HostMarkFor(addressKey)?.TruthInWorld.Remove(addressKey); } catch { }
+        }
 #endif
 
         /// <summary>HOST: the mark whose Addresses name this address, or null. One scan of a small table.</summary>
@@ -708,6 +772,7 @@ namespace BigAmbitionsMP
                         continue;
                     }
                     hit.PendingInteriors.Remove(addr);
+                    hit.TruthInWorld.Remove(addr);   // fold 2 (D1 b): the hold for it has ended (applied or refused)
                     if (refusedWhy != null)
                     {
                         // R2 (b): the owner REFUSED this hand-back before its commit - released exactly like an applied ack
@@ -2285,6 +2350,14 @@ namespace BigAmbitionsMP
             }
             try
             {
+                // fold 2 (D2): a NEWER return replaces the one held here for world-ready - the no-hand-back notices saved for
+                // the old one are void (the new return's own notices follow it on the same lane).
+                if (_heldReturn != null && !ReferenceEquals(_heldReturn, p) && _noHandbackHeld.Count > 0)
+                {
+                    Plugin.Logger.LogInfo($"[Absence] a newer return replaces the held one - {_noHandbackHeld.Count} no-hand-back notice(s) "
+                                        + "saved for the old one are dropped.");
+                    _noHandbackHeld.Clear();
+                }
                 bool ready = false;
                 try { ready = SaveGameManager.Current?.BuildingRegistrations != null; } catch { }
                 if (!ready)

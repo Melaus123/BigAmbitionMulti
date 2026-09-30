@@ -228,6 +228,9 @@ namespace BigAmbitionsMP
         public string LastSimulatorPid { get; set; } = "";
         public List<string> Addresses { get; set; } = new();
         public int    SinceDay     { get; set; }
+        /// <summary>ABSENCE-HANDBACK-1 fold 2 (D1 b): the addresses whose HOST WORLD copy (and so this save) holds the absence
+        /// truth. ADDITIVE - a manifest written before this field restores it empty (no world truth: today's rule).</summary>
+        public List<string> TruthInWorld { get; set; } = new();
     }
 
     /// <summary>Merger phase 4b (people) P2 - ONE in-transit transfer. The RECORD travels as TEXT
