@@ -1068,21 +1068,11 @@ namespace BigAmbitionsMP
 
             try
             {
-                // Backlog #5 — during a taxi ride the game intentionally bumps
-                // Time.timeScale to ~8× to fast-forward through the trip.  If
-                // we keep pinning timeScale to 1× the ride takes minutes of
-                // real time; the user perceives it as a lock-up.  Step out of
-                // the way entirely while LocalInTaxi is set.
-                if (TrafficSync.LocalInTaxi) return;
-
-                // The mod owns Time.timeScale.  The world runs at 1× real-time
-                // always; it stops ONLY for a deliberate manual pause or the
-                // startup load hold.  Forcing it here (after the EventSystem and
-                // the game's own Update) overrides menu / bench / bed pauses —
-                // opening a menu no longer stops time for anyone.
                 // UMBRELLA-LEAVE-1 (C6, decision 49 A): the plain game's clock is paused through the city unload (its exit
                 // menu pauses; LoadingScreen.cs:117 sets 1 only after the load), so scaled waits (a pedestrian's umbrella,
                 // AI/UmbrellaHandler.cs:57) cannot end mid-unload. This pin used to write 1 through the unload - freeze it.
+                // LEAVE-TAXI-1: read BEFORE the taxi step-aside below, so a leave during a taxi ride freezes too (the taxi's
+                // fast-forward no longer runs on through the unload).
                 bool cityUnloading = GameStateReader.CityUnloading();
                 if (!cityUnloading) _cityUnloadFreezeLogged = false;
                 else if (!_cityUnloadFreezeLogged)
@@ -1090,6 +1080,20 @@ namespace BigAmbitionsMP
                     _cityUnloadFreezeLogged = true;
                     Plugin.Logger.LogInfo("[Pause] clock frozen for the city unload (as the plain game).");
                 }
+
+                // Backlog #5 — during a taxi ride the game intentionally bumps
+                // Time.timeScale to ~8× to fast-forward through the trip.  If
+                // we keep pinning timeScale to 1× the ride takes minutes of
+                // real time; the user perceives it as a lock-up.  Step out of
+                // the way while LocalInTaxi is set — except through a city
+                // unload, which freezes below like any other.
+                if (TrafficSync.LocalInTaxi && !cityUnloading) return;
+
+                // The mod owns Time.timeScale.  The world runs at 1× real-time
+                // always; it stops ONLY for a deliberate manual pause, the
+                // startup load hold or the city unload.  Forcing it here (after the EventSystem and
+                // the game's own Update) overrides menu / bench / bed pauses —
+                // opening a menu no longer stops time for anyone.
                 bool frozen = TimeSync.ManualPaused || TimeSync.IsStartupHeld || cityUnloading;
                 Time.timeScale = frozen ? 0f : 1f;
 
@@ -4414,6 +4418,18 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[MenuUI] Save picker → host session '{name}'.");
             ShowSavePicker(false);
             _lobbyLoadMode = true;
+            // SAVED-SETTINGS-LOW-1 (d): remember the lobby's own needs tuning before the save's values replace it, so a
+            // following 'Host New Game' gets it back (RestorePreLoadSettings) - once per saved-game visit, like _ssPreLoad.
+            try
+            {
+                if (!_ssPreNeedsHas)
+                {
+                    _ssPreDrain = _hostSettings.NeedsDrainPercent; _ssPreRest = _hostSettings.RestSpeedPercent;
+                    _ssPreMorale = _hostSettings.MoraleTempoPercent; _ssPreNoEnergy = _hostSettings.DisableEnergy;
+                    _ssPreNap = _hostSettings.PowerNapAllowed; _ssPreNeedsHas = true;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] needs tuning snapshot: {ex.Message}"); }
             // Round-53: the lobby MIRRORS the save's own tuning settings (save-authoritative);
             // a pre-field manifest leaves the host's current values as the fallback.
             try
@@ -7147,6 +7163,8 @@ namespace BigAmbitionsMP
         private GameVariablesDto? _ssSeed, _ssPreLoad;
         private int _ssPreDays;
         private string _ssPreDiff = "", _ssPreSel = "";   // F3: the lobby's difficulty before a saved world was seeded
+        private bool _ssPreNeedsHas, _ssPreNoEnergy, _ssPreNap;   // SAVED-SETTINGS-LOW-1 (d): the lobby's needs tuning before a save's mirror
+        private int _ssPreDrain, _ssPreRest, _ssPreMorale;
 
         private void BuildSettingsPanel(Transform canvasRoot) => BuildSettingsPanel(canvasRoot, false);
 
@@ -7427,6 +7445,18 @@ namespace BigAmbitionsMP
                 _ssHas = false; _ssSeed = null; _ssCourses = _ssContacts = false; _ssSource = "none";
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] restore new-game settings: {ex.Message}"); }
+            try
+            {
+                if (_ssPreNeedsHas)
+                {   // SAVED-SETTINGS-LOW-1 (d): the saved game's needs tuning (OnSpLoad's mirror) never carries into a new game
+                    _ssPreNeedsHas = false;
+                    _hostSettings.NeedsDrainPercent = _ssPreDrain; _hostSettings.RestSpeedPercent = _ssPreRest;
+                    _hostSettings.MoraleTempoPercent = _ssPreMorale; _hostSettings.DisableEnergy = _ssPreNoEnergy;
+                    _hostSettings.PowerNapAllowed = _ssPreNap;
+                    Plugin.Logger.LogInfo($"[MenuUI] new-game needs tuning restored (drain {_ssPreDrain}% rest {_ssPreRest}% morale {_ssPreMorale}% power nap {_ssPreNap}).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] restore new-game needs tuning: {ex.Message}"); }
         }
 
 #if BAMP_DEV
@@ -7969,7 +7999,8 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MenuUI] load tuning apply: {ex.Message}"); }
             // SAVED-SETTINGS-1 (D3): dirty only when the host changed a flexible value from the save's own; the host applies it at
-            // world-ready (MPServer.HostApplyPendingWorldSettings), which also writes WorldSettings + the bumped rev to the manifest.
+            // world-ready (MPServer.HostApplyPendingWorldSettings); WorldSettings + the bumped rev reach the manifest only with the
+            // host's next successful save (MPSaveCoordinator.SetSessionMetadata).
             try
             {
                 MPServer.PendingWorldSettings = null; MPServer.PendingWorldSettingsSession = ""; MPServer.WorldSettingsLoadArmed = true;

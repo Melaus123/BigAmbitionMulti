@@ -3858,10 +3858,12 @@ namespace BigAmbitionsMP
                 m.TuneMoraleTempo  = MPNeedsTuning.MoralePercent;
                 m.TunePowerNap     = MPNeedsTuning.PowerNapAllowed ? 1 : 0;   // POWERNAP host gate persists with the save
                 // SAVED-SETTINGS-1: the world's live settings + their rev ride the same save moment (the next load lobby shows these).
+                // SAVED-SETTINGS-LOW-1 (a): only when the save succeeded - a failed save leaves the older world file on disk, and
+                // the manifest must keep describing THAT file's settings (the tuning stamps above are mod-only, no world-file twin).
                 try
                 {
                     var wsGv = SaveGameManager.Current?.gameVariables;
-                    if (MPServer.IsRunning && wsGv != null) { m.WorldSettings = MPServer.DtoFromGameVariables(wsGv); m.WorldSettingsRev = MPServer.WorldSettingsRev; }
+                    if (saveSucceeded && MPServer.IsRunning && wsGv != null) { m.WorldSettings = MPServer.DtoFromGameVariables(wsGv); m.WorldSettingsRev = MPServer.WorldSettingsRev; }
                 }
                 catch (Exception wsx) { Plugin.Logger.LogWarning($"[World] manifest stamp: {wsx.Message}"); }
                 // Handoff slice 1/2: store provenance — who hosted when this was written,

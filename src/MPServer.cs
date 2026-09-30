@@ -1558,6 +1558,9 @@ namespace BigAmbitionsMP
 
             // Reset lobby state for a fresh session
             IsInLobby = true;
+#if BAMP_DEV
+            DevSkipNextWorldLoadedSend = false;   // SAVED-SETTINGS-LOW-1 (c): a DEV 'wsskip' never carries into a new session
+#endif
             LobbyReset(MPConfig.PlayerId); // host is always the first player
             PlayerColours.ResetHost();   // colours r2 (MINOR-3): a new hosted world starts with an empty slot table; a LOADED world is re-seeded from its manifest by RestoreOwnershipFromManifest
             PlayerColours.ResetSession();   // 2026-09-05 colours: the session slot map dies with the session, like the roster below
@@ -1734,6 +1737,9 @@ namespace BigAmbitionsMP
         public static void Stop()
         {
             WorldSettingsRev = 0; PendingWorldSettings = null; WorldSettingsLoadArmed = false;   // SAVED-SETTINGS-1: per session
+#if BAMP_DEV
+            DevSkipNextWorldLoadedSend = false;   // SAVED-SETTINGS-LOW-1 (c): a DEV 'wsskip' never outlives its session
+#endif
             LastStartSettings = null;   // H-FRESH-1 r2: a session's start settings die with it — the next world describes its own (review F-2026-09-06-E MAJOR-1)
             // Initiator forensics: clients see our Stop as RemoteConnectionClose
             // with no clue who pulled the plug — name the caller here so the
