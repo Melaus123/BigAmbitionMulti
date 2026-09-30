@@ -1013,13 +1013,13 @@ namespace BigAmbitionsMP
         /// <summary>HOST, MAIN THREAD (ABSENCE-HANDBACK-1 F7): the RETURNED OWNER applied these hand-back interiors. Only the
         /// SENDER's identity counts (MergerAbsence.HostInteriorAck matches it against the mark's owner); a mark it clears
         /// leaves the broadcast absence table, so the state goes out straight after.</summary>
-        internal static void HostInteriorAck(string senderPid, List<string> addresses)
+        internal static void HostInteriorAck(string senderPid, List<string> addresses, string? refusedWhy = null)
         {
             try
             {
                 if (!_running || string.IsNullOrEmpty(senderPid)) return;
                 string stable = ""; try { stable = StableOfPid(senderPid) ?? ""; } catch { }
-                if (MergerAbsence.HostInteriorAck(senderPid, stable, addresses) > 0) RefreshGrantsAndBroadcast();
+                if (MergerAbsence.HostInteriorAck(senderPid, stable, addresses, refusedWhy) > 0) RefreshGrantsAndBroadcast();
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back ack from '{senderPid}': {ex.Message}"); }
         }
@@ -2601,6 +2601,23 @@ namespace BigAmbitionsMP
                         var iaAddrs = new List<string>(hv.Addresses ?? new List<string>());
                         GameStatePatcher.EnqueueOnMainThread(() => HostInteriorAck(iaPid, iaAddrs));
                     }
+                    else if (hv.Ack == MergerAbsence.RefusedAck)
+                    {
+                        // ABSENCE-HANDBACK-1 R2 (b): the owner refused that hand-back before its commit - released like an
+                        // applied ack (reason in RanByName, log only).
+                        string irPid = senderPid;
+                        string irWhy = string.IsNullOrEmpty(hv.RanByName) ? "no reason given" : hv.RanByName;
+                        if (irWhy.Length > 200) irWhy = irWhy.Substring(0, 200);
+                        var irAddrs = new List<string>(hv.Addresses ?? new List<string>());
+                        GameStatePatcher.EnqueueOnMainThread(() => HostInteriorAck(irPid, irAddrs, irWhy));
+                    }
+                    else if (hv.Ack == MergerAbsence.SeededAck)
+                    {
+                        // ABSENCE-HANDBACK-1 R4: a client stand-in applied the host's copy - its uploads may count from now on.
+                        string ssPid = senderPid;
+                        var ssAddrs = new List<string>(hv.Addresses ?? new List<string>());
+                        GameStatePatcher.EnqueueOnMainThread(() => MergerAbsence.HostNoteStandInSeeded(ssPid, ssAddrs));
+                    }
                     else if (hv.Ack == "standin-flushed")
                     {
                         string sfPid = senderPid, sfStable = hv.OwnerStable ?? "";
@@ -3187,6 +3204,8 @@ namespace BigAmbitionsMP
                                 Plugin.Logger.LogInfo($"[PriceSync] price table from '{rpSender}' for '{rp.AddressKey}' held - {rpWhy} (the hand-back carries the prices).");
                                 return;
                             }
+                            // ABSENCE-HANDBACK-1 R4: an unseeded (or copy-less) client stand-in's table is its own stale one too.
+                            if (InteriorSync.StandInRefusalLogged("price table", rpSender, rp.AddressKey, rpWhy)) return;
                             MPPriceSync.Apply(rp);
                             BroadcastRetailPrices(rp);   // relay to all + cache for join replay (Class 4)
                         });

@@ -341,6 +341,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Absence] waiting for '{simPid}''s final interior flush of {addrs.Count} address(es) of "
                                         + $"'{ownerPid}' before any snapshot of them is sent.");
                 }
+                else ForgetStandInSeeded(simPid, addrs);   // R4: no final flush comes, so its seed confirmations end here
                 HostNoteHandback(simPid, ownerStable, ownerPid, addresses);   // H-STANDINTILL-2 T5: BEFORE the local apply below
                 Plugin.Logger.LogInfo($"[Absence] '{simPid}' stops simulating '{ownerPid}' ({why}).");
                 var p = new MergerHandoverPayload
@@ -475,12 +476,32 @@ namespace BigAmbitionsMP
                 // acks its interior as applied; the host owner gets no snapshots, so nothing is pending for it.
                 m.PendingInteriors.Clear();
                 m.PaperworkAcked = false;
-                if (owner != MPConfig.PlayerId) foreach (var a in addresses) m.PendingInteriors.Add(a);
+                // ABSENCE-HANDBACK-1 R1 (a): a hand-back exists only where the host holds a TRUTH for the address - its F2
+                // freeze or a stored owner / stand-in upload. Where it holds none, all it could send is its own replica
+                // (blank or stale, stamped return-authoritative): nothing is sent, nothing is held (F4 / F9), and the owner
+                // is told so its return exception for that address closes - the owner's own copy stands.
+                var handBack = new List<string>();
+                var noCopy   = new List<string>();
+                if (owner != MPConfig.PlayerId)
+                    foreach (var a in addresses)
+                    {
+                        if (InteriorSync.HostHoldsTruth(a)) { handBack.Add(a); continue; }
+                        noCopy.Add(a);
+                        _snapQueue.RemoveAll(q => q.returnLeg && q.pid == owner && string.Equals(q.addr, a, StringComparison.OrdinalIgnoreCase));
+                        Plugin.Logger.LogInfo($"[Absence] no hand-back for '{a}': the host holds no copy - the owner's own copy stands.");
+                    }
+                foreach (var a in handBack) m.PendingInteriors.Add(a);
                 if (owner == MPConfig.PlayerId) ApplyReturn(p);          // the host is the owner: no wire, no snapshots
                 else
                 {
                     MPServer.SendToPlayer(owner, MessageEnvelope.Create(MessageType.MergerHandover, "host", p));
-                    foreach (var a in addresses)
+                    if (noCopy.Count > 0)   // after the return payload, on the same lane (the owner has opened its return set)
+                        MPServer.SendToPlayer(owner, MessageEnvelope.Create(MessageType.MergerHandover, "host", new MergerHandoverPayload
+                        {
+                            OwnerPid = owner, OwnerStable = m.OwnerStable ?? "", SimulatorPid = ReturnSentinel,
+                            Ack = NoHandbackAck, Addresses = new List<string>(noCopy),
+                        }));
+                    foreach (var a in handBack)
                     {
                         bool queued = false;
                         foreach (var q in _snapQueue)
@@ -636,6 +657,7 @@ namespace BigAmbitionsMP
                     foreach (var a in gone) _awaitFlush.Remove(a);
                     n = gone.Count;
                 }
+                ForgetStandInSeeded(senderPid, null);   // R4: its last upload is in; a later stint re-confirms
                 Plugin.Logger.LogInfo($"[Absence] stand-in '{senderPid}' flushed {delivered?.Count ?? 0} interior(s) - {n} address(es) "
                                     + "released for their snapshots.");
             }
@@ -647,6 +669,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                ForgetStandInSeeded(pid, null);   // R4: a reconnected stand-in re-confirms from its new hand-over
                 if (_awaitFlush.Count == 0 || string.IsNullOrEmpty(pid)) return;
                 var gone = new List<string>();
                 foreach (var kv in _awaitFlush) if (kv.Value.sim == pid) gone.Add(kv.Key);
@@ -662,7 +685,7 @@ namespace BigAmbitionsMP
         /// owner (by player id or stable - never anything the payload claims). Each acked address leaves PendingInteriors
         /// (its hold is released); a mark whose paperwork is acked and whose interiors are all applied is removed. Returns
         /// how many marks were cleared (the caller broadcasts on > 0).</summary>
-        public static int HostInteriorAck(string senderPid, string senderStable, List<string>? addresses)
+        public static int HostInteriorAck(string senderPid, string senderStable, List<string>? addresses, string? refusedWhy = null)
         {
             int cleared = 0;
             try
@@ -685,6 +708,15 @@ namespace BigAmbitionsMP
                         continue;
                     }
                     hit.PendingInteriors.Remove(addr);
+                    if (refusedWhy != null)
+                    {
+                        // R2 (b): the owner REFUSED this hand-back before its commit - released exactly like an applied ack
+                        // (no re-queue: the owner has closed its return exception for it), and never silent.
+                        _fpAck[addr] = (InteriorSync.FingerprintHostSend(addr), "refused", true);
+                        Plugin.Logger.LogWarning($"[Absence] hand-back of '{addr}' REFUSED by '{senderPid}' ({refusedWhy}) - hold released; "
+                                               + "the owner's copy stands. MISMATCH");
+                        continue;
+                    }
                     string hostFp = InteriorSync.FingerprintHostSend(addr);
                     string liveFp = InteriorSync.Fingerprint(addr);
                     bool mismatch = hostFp != liveFp;
@@ -754,9 +786,19 @@ namespace BigAmbitionsMP
                 var addrs = new List<string>();
                 foreach (var kv in _simHere) if (kv.Value == owner) addrs.Add(kv.Key);
                 var delivered = new List<string>();
+                int nothing = 0;
                 foreach (var a in addrs)
                 {
-                    if (InteriorSync.ForceOwnerPush(a, "stand-in hand-back", seedOrHeal: true)) delivered.Add(a);
+                    if (InteriorSync.ForceOwnerPush(a, "stand-in hand-back", seedOrHeal: true, out bool sentA))
+                    {
+                        if (sentA) delivered.Add(a);
+                        else
+                        {
+                            nothing++;   // R9: SendLocalOwnerSnapshot's "done" also covers nothing sent (no snapshot / all-zero)
+                            Plugin.Logger.LogInfo($"[Absence] stand-in hand-back of '{a}' for '{owner}': nothing to send (no readable copy, or it "
+                                                + "reads all-zero here) - the host keeps my last accepted upload of it.");
+                        }
+                    }
                     else Plugin.Logger.LogInfo($"[Absence] stand-in hand-back of '{a}' for '{owner}': left out (an item is mid-placement "
                                              + "here, or the send failed) - the host keeps my last accepted upload of it.");
                 }
@@ -767,7 +809,7 @@ namespace BigAmbitionsMP
                         Ack = "standin-flushed", Addresses = delivered,
                     }));
                 Plugin.Logger.LogInfo($"[Absence] stand-in hand-back of '{owner}': {delivered.Count}/{addrs.Count} interior(s) flushed to the "
-                                    + "host - told the host (standin-flushed).");
+                                    + $"host ({nothing} with nothing to send) - told the host (standin-flushed).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] stand-in flush for '{p?.OwnerPid}': {ex.Message}"); }
         }
@@ -790,6 +832,130 @@ namespace BigAmbitionsMP
                         }));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back ack '{addressKey}': {ex.Message}"); }
+        }
+
+        // ══ ABSENCE-HANDBACK-1 review folds (R1 a, R2 b, R4) ══════════════════════════════════════════
+        /// <summary>R1 (a), host -> the returned owner (after the return payload): these addresses get NO hand-back - the host
+        /// holds no copy of them - so the owner closes its return exception for them. Existing Addresses list.</summary>
+        public const string NoHandbackAck = "no-handback";
+        /// <summary>R2 (b), owner -> host: the hand-back of this address was refused before its commit (reason in RanByName,
+        /// log only). The host releases the hold exactly like "return-interior-applied".</summary>
+        public const string RefusedAck = "return-interior-refused";
+        /// <summary>R4, client stand-in -> host: the host's authoritative copy of this address is applied on my machine.</summary>
+        public const string SeededAck = "standin-seeded";
+
+        // R4, HOST: address -> the client stand-in that has applied the host's copy (a truth) of it. Main thread.
+        private static readonly Dictionary<string, string> _standInSeeded = new(StringComparer.OrdinalIgnoreCase);
+        // R4, STAND-IN: addresses whose seed confirmation this machine has sent (re-armed by every hand-over / drop).
+        private static readonly HashSet<string> _seedAckSent = new(StringComparer.OrdinalIgnoreCase);
+        // R1 (a), OWNER: no-hand-back notices that arrived while the return itself was held for world-ready.
+        private static readonly HashSet<string> _noHandbackHeld = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>R4, HOST: has this client stand-in applied the host's copy of the address?</summary>
+        public static bool HostStandInSeeded(string simPid, string addressKey)
+            => _standInSeeded.Count > 0 && !string.IsNullOrEmpty(simPid) && !string.IsNullOrEmpty(addressKey)
+               && _standInSeeded.TryGetValue(addressKey, out var s) && s == simPid;
+
+        private static void ForgetStandInSeeded(string simPid, HashSet<string>? addresses)
+        {
+            try
+            {
+                if (_standInSeeded.Count == 0 || string.IsNullOrEmpty(simPid)) return;
+                var gone = new List<string>();
+                foreach (var kv in _standInSeeded)
+                    if (kv.Value == simPid && (addresses == null || addresses.Contains(kv.Key))) gone.Add(kv.Key);
+                foreach (var a in gone) _standInSeeded.Remove(a);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] stand-in seed forget '{simPid}': {ex.Message}"); }
+        }
+
+        /// <summary>R4, HOST, MAIN THREAD: a client stand-in confirmed it applied the host's copy of these addresses. Counted
+        /// only from the address's CURRENT stand-in and only where the host holds a truth - with none, its uploads stay
+        /// refused and no hand-back follows (the owner's own copy stands).</summary>
+        public static void HostNoteStandInSeeded(string senderPid, List<string>? addresses)
+        {
+            try
+            {
+                foreach (var a in addresses ?? new List<string>())
+                {
+                    if (string.IsNullOrEmpty(a)) continue;
+                    var m = HostMarkFor(a);
+                    if (m == null || string.IsNullOrEmpty(senderPid) || m.SimulatorPid != senderPid)
+                    {
+                        Plugin.Logger.LogInfo($"[Absence] seed confirmation for '{a}' from '{senderPid}' names no stand-in of it - ignored.");
+                        continue;
+                    }
+                    if (!InteriorSync.HostHoldsTruth(a))
+                    {
+                        Plugin.Logger.LogInfo($"[Absence] stand-in '{senderPid}' applied a copy of '{a}', but the host holds no copy of it - its "
+                                            + "uploads of it stay refused; the owner's own copy stands.");
+                        continue;
+                    }
+                    _standInSeeded[a] = senderPid;
+                    Plugin.Logger.LogInfo($"[Absence] stand-in '{senderPid}' applied the host's copy of '{a}' - its uploads of it are accepted from now on.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] seed confirmation from '{senderPid}': {ex.Message}"); }
+        }
+
+        /// <summary>R4, CLIENT STAND-IN, MAIN THREAD (the apply's commit point / identical skip, SeedOrHeal only): an
+        /// authoritative host copy of an address I stand in for is on my machine - confirm it once per hand-over.</summary>
+        public static void NoteSeedApplied(string addressKey, bool authoritative)
+        {
+            try
+            {
+                if (MPServer.IsRunning || !MPClient.IsConnected || string.IsNullOrEmpty(addressKey) || !authoritative) return;
+                if (!_simHere.TryGetValue(addressKey, out var owner)) return;
+                if (!_seedAckSent.Add(addressKey)) return;
+                MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.MergerHandover, MPConfig.PlayerId,
+                    new MergerHandoverPayload
+                    {
+                        OwnerPid = owner ?? "", SimulatorPid = MPConfig.PlayerId,
+                        Ack = SeededAck, Addresses = new List<string> { addressKey },
+                    }));
+                Plugin.Logger.LogInfo($"[Absence] stand-in: applied the host's copy of '{addressKey}' (for '{owner}') - told the host (standin-seeded).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] seed confirmation '{addressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>R2 (b), OWNER, MAIN THREAD: my apply refused or dropped this hand-back before its commit. The return
+        /// exception for it closes (a later heal must not walk through it) and the host is told, so its hold ends; my own
+        /// copy stands.</summary>
+        public static void RefuseReturnInterior(string addressKey, string why)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(addressKey) || !_returnAddrs.Remove(addressKey)) return;
+                Plugin.Logger.LogWarning($"[Absence] hand-back of '{addressKey}' refused here ({why}) - my own copy stands; telling the host "
+                                       + "(return-interior-refused).");
+                if (MPServer.IsRunning) { MPServer.HostInteriorAck(MPConfig.PlayerId, new List<string> { addressKey }, why); return; }
+                if (MPClient.IsConnected)
+                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.MergerHandover, MPConfig.PlayerId,
+                        new MergerHandoverPayload
+                        {
+                            OwnerPid = MPConfig.PlayerId, OwnerStable = _returnStable, SimulatorPid = ReturnSentinel,
+                            Ack = RefusedAck, Addresses = new List<string> { addressKey }, RanByName = why ?? "",
+                        }));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back refusal '{addressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>R1 (a), OWNER, MAIN THREAD: the host holds no copy of these returned addresses, so no hand-back follows -
+        /// close their return exception now (kept for a return still held for world-ready).</summary>
+        private static void OwnerNoHandback(MergerHandoverPayload p)
+        {
+            try
+            {
+                if (MPServer.IsRunning || p.OwnerPid != MPConfig.PlayerId) return;
+                foreach (var a in p.Addresses ?? new List<string>())
+                {
+                    if (string.IsNullOrEmpty(a)) continue;
+                    if (_returnAddrs.Remove(a))
+                        Plugin.Logger.LogInfo($"[Absence] no hand-back for '{a}': the host holds no copy - my own copy stands.");
+                    else if (_heldReturn != null) _noHandbackHeld.Add(a);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] no-hand-back notice: {ex.Message}"); }
         }
 
         // ══ SIMULATOR SIDE (any machine, main thread) ══════════════════════════
@@ -1006,6 +1172,9 @@ namespace BigAmbitionsMP
             if (p == null) return;
             try
             {
+                if (p.Ack == NoHandbackAck) { OwnerNoHandback(p); return; }   // R1 (a): host -> returned owner, not a hand-over
+                // R4: every hand-over (and every drop) re-arms this machine's seed confirmations for its addresses.
+                foreach (var sa in p.Addresses ?? new List<string>()) if (!string.IsNullOrEmpty(sa)) _seedAckSent.Remove(sa);
                 if (p.Drop)
                 {
                     HandBackFlush(p.OwnerPid, "the host dropped the mark");   // H-STANDINTILL-2 T5: while the addresses are still ours
@@ -1306,6 +1475,7 @@ namespace BigAmbitionsMP
             // P3-C (C5): a held return payload dies with the connection - the host clears a mark only
             // after a SEND, so the next return re-sends the whole thing.
             _heldReturn = null; _heldLogged = false; _returnAddrs.Clear(); _replaced.Clear(); _lastToastKey = "";
+            _standInSeeded.Clear(); _seedAckSent.Clear(); _noHandbackHeld.Clear();   // ABSENCE-HANDBACK-1 R1 (a) / R4
             _tagInstalls = true; _returnUpsert = false;
         }
 
@@ -2142,6 +2312,13 @@ namespace BigAmbitionsMP
                 // (a) the interiors follow this message on the same lane, one per host tick.
                 _returnAddrs.Clear();
                 foreach (var a in addrs) _returnAddrs.Add(a);
+                if (_noHandbackHeld.Count > 0)   // R1 (a): the host's no-hand-back notice beat this (held) return here
+                {
+                    foreach (var a in _noHandbackHeld)
+                        if (_returnAddrs.Remove(a))
+                            Plugin.Logger.LogInfo($"[Absence] no hand-back for '{a}': the host holds no copy - my own copy stands.");
+                    _noHandbackHeld.Clear();
+                }
 
                 BusinessPaperworkPayload? bundle = null;
                 if (!string.IsNullOrEmpty(p.PaperworkJson))

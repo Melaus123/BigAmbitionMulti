@@ -1,7 +1,7 @@
 {
   "id": "T-P3-2-HANDBACK",
-  "title": "ABSENCE-HANDBACK-1 leg A (2P, host stand-in): the host's absence-time changes to the partner shop (stock take/restock, move, paint, dirt, till) come back to the returning owner exactly - fingerprints equal, no duplicated goods; race leg: the owner's own upload is held until the hand-back is applied",
-  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX). Dev build with ABSENCE-HANDBACK-1 (interiorfp / shelfput / itemnudge / pushinterior / absence fp / absence holdreturn levers). Uses the driver's drop/relaunch steps. Every lever step asserts its OK and every absence edit is premise-checked (stock and fingerprint must MOVE) before the return asserts. Ends dissolved (fixture hygiene); no save step.",
+  "title": "ABSENCE-HANDBACK-1 leg A (2P, host stand-in): the host's absence-time changes to the partner shop (stock take/restock, move, paint, dirt, till) come back to the returning owner exactly - fingerprints equal, no duplicated goods; race leg: the owner's own upload is held until the hand-back is applied; no-copy leg (R1/R2): the host holds no copy of a second shop - no hand-back, no hold, the owner's copy stands",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX). Dev build with ABSENCE-HANDBACK-1 (interiorfp / shelfput / itemnudge / pushinterior / absence fp / absence holdreturn levers). Uses the driver's drop/relaunch steps. Every lever step asserts its OK and every absence edit is premise-checked (stock and fingerprint must MOVE) before the return asserts. Ends dissolved (fixture hygiene); no save step. No-copy leg uses the `absence forgetcopy` lever (the owner's second flipped shop).",
   "instances": 2,
   "vars": {
     "clientPid": "Client1",
@@ -16,7 +16,8 @@
     "hand-back of .* acknowledged .*MISMATCH",
     "OwnerSnapshot rejected: player='Client1'",
     "owner cargo sync .* hash mismatch",
-    "\\[Absence\\] hand-back ack for .* ignored"
+    "\\[Absence\\] hand-back ack for .* ignored",
+    "hand-back of .* REFUSED by"
   ],
   "oracles_report": [
     "\\[Paperwork\\]",
@@ -101,7 +102,8 @@
       "cmd": "mergestatus",
       "expect_result": "member=True.*flipped=[1-9]",
       "capture": {
-        "clientShop": "keys=\\['([^']+)'"
+        "clientShop": "keys=\\['([^']+)'",
+        "clientShop2": "keys=\\['[^']+','([^']+)'"
       },
       "seq": 10
     },
@@ -389,22 +391,29 @@
     },
     {
       "role": "h",
+      "cmd": "absence forgetcopy ${clientShop2}",
+      "expect_result": "^OK absence forgetcopy addr='${clientShop2}'",
+      "note": "R1/R2 no-copy leg: the host forgets its stored copy of the owner's SECOND shop and skips its freeze, so it holds no truth for it at the return",
+      "seq": 44
+    },
+    {
+      "role": "h",
       "cmd": "absence holdreturn on",
       "expect_result": "^OK absence holdreturn=on",
       "note": "race leg: hold ONLY the return-leg interior drain",
-      "seq": 44
+      "seq": 45
     },
     {
       "role": "c",
       "relaunch": true,
       "note": "the absent member returns",
-      "seq": 45
+      "seq": 46
     },
     {
       "role": "c",
       "cmd": "join",
       "expect_result": "^OK",
-      "seq": 46
+      "seq": 47
     },
     {
       "role": "h",
@@ -425,16 +434,26 @@
           "role": "h",
           "regex": "\\[Absence\\] stand-in stopped: froze '${clientShop}' for '${clientPid}' fp=\\[items=[1-9]",
           "within_s": 150
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] DEV: freeze of '${clientShop2}' for '${clientPid}' skipped",
+          "within_s": 150
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] no hand-back for '${clientShop2}': the host holds no copy - the owner's own copy stands\\.",
+          "within_s": 150
         }
       ],
       "note": "P3-B: the host detects the owner's return (simulator dropped, mark kept). P3-C: the return leg fires at the owner's applying edge (after its own load) - paperwork + interiors sent, mark cleared.",
-      "seq": 47
+      "seq": 48
     },
     {
       "role": "h",
       "cmd": "mark RACE hold open",
       "expect_result": "OK MARK",
-      "seq": 48,
+      "seq": 49,
       "expect_log": [
         {
           "role": "c",
@@ -444,6 +463,11 @@
         {
           "role": "c",
           "regex": "\\[Absence\\] return toast shown to '${clientPid}'",
+          "within_s": 90
+        },
+        {
+          "role": "c",
+          "regex": "\\[Absence\\] no hand-back for '${clientShop2}': the host holds no copy - my own copy stands\\.",
           "within_s": 90
         }
       ],
@@ -461,27 +485,27 @@
         }
       ],
       "note": "race leg: the returned owner's own upload arrives while the hand-back is held - refused",
-      "seq": 49
+      "seq": 50
     },
     {
       "role": "h",
       "cmd": "stockof ${clientShop}",
       "expect_result": "items=\\[${hostAbsStock}\\]",
       "note": "race leg: the host still holds the absence stock",
-      "seq": 50
+      "seq": 51
     },
     {
       "role": "h",
       "cmd": "absence",
       "expect_result": "pendingInteriors=\\[${clientPid}:[1-9]",
       "note": "F7: the interiors are pending (held)",
-      "seq": 51
+      "seq": 52
     },
     {
       "role": "h",
       "cmd": "absence holdreturn off",
       "expect_result": "^OK absence holdreturn=off",
-      "seq": 52
+      "seq": 53
     },
     {
       "role": "h",
@@ -518,14 +542,14 @@
         }
       ],
       "note": "P3-C: the host's verb shows the last return; the owner applied it, replaced its stale copies (round-178 exception) and saw the approved toast (D17). Client lines are scanned from the client's last mark (its join). | ABSENCE-HANDBACK-1: host lines searched from the 'holdreturn off' step (since_prev_step); the client's paperwork lines moved to the RACE step (its last mark is now the pushinterior step).",
-      "seq": 53
+      "seq": 54
     },
     {
       "role": "c",
       "cmd": "absence",
       "expect_result": "replaced=\\[.+\\]",
       "note": "P3-C: the owner's verb lists the addresses the return replaced here",
-      "seq": 54
+      "seq": 55
     },
     {
       "role": "h",
@@ -535,42 +559,42 @@
         "sentFp": "sent=\\[([^\\]]+)\\]"
       },
       "note": "the hand-back sent; the ack found host copy == host live",
-      "seq": 55
+      "seq": 56
     },
     {
       "role": "c",
       "cmd": "absence fp ${clientShop}",
       "expect_result": "applied=\\[${sentFp}\\]",
       "note": "owner-applied fingerprint == the one the host sent",
-      "seq": 56,
+      "seq": 57,
       "abort_on_fail": false
     },
     {
       "role": "c",
       "cmd": "mark READ C-AFTERRETURN",
       "expect_result": ".",
-      "seq": 57
+      "seq": 58
     },
     {
       "role": "c",
       "cmd": "stockof ${clientShop}",
       "expect_result": "items=\\[${hostAbsStock}\\]",
       "note": "C-AFTERRETURN: the owner has the host's absence stock (not the pre-drop one)",
-      "seq": 58
+      "seq": 59
     },
     {
       "role": "c",
       "cmd": "dirtstate ${clientShop}",
       "expect_result": ".",
       "note": "C-AFTERRETURN",
-      "seq": 59
+      "seq": 60
     },
     {
       "role": "c",
       "cmd": "tillledger show ${clientShop}",
       "expect_result": ".",
       "note": "C-AFTERRETURN",
-      "seq": 60
+      "seq": 61
     },
     {
       "role": "c",
@@ -579,74 +603,74 @@
       "capture": {
         "cAfterFp": "fp=\\[([^\\]]+)\\]"
       },
-      "seq": 61
+      "seq": 62
     },
     {
       "role": "h",
       "cmd": "mark READ H-AFTERRETURN",
       "expect_result": ".",
-      "seq": 62
+      "seq": 63
     },
     {
       "role": "h",
       "cmd": "stockof ${clientShop}",
       "expect_result": "items=\\[${hostAbsStock}\\]",
       "note": "H-AFTERRETURN",
-      "seq": 63
-    },
-    {
-      "role": "h",
-      "cmd": "dirtstate ${clientShop}",
-      "expect_result": ".",
-      "note": "H-AFTERRETURN",
       "seq": 64
     },
     {
       "role": "h",
-      "cmd": "tillledger show ${clientShop}",
+      "cmd": "dirtstate ${clientShop}",
       "expect_result": ".",
       "note": "H-AFTERRETURN",
       "seq": 65
     },
     {
       "role": "h",
+      "cmd": "tillledger show ${clientShop}",
+      "expect_result": ".",
+      "note": "H-AFTERRETURN",
+      "seq": 66
+    },
+    {
+      "role": "h",
       "cmd": "interiorfp ${clientShop}",
       "expect_result": "fp=\\[${cAfterFp}\\]",
       "note": "both machines equal after the return",
-      "seq": 66,
+      "seq": 67,
       "abort_on_fail": false
     },
     {
       "role": "c",
       "sleep_s": 15,
-      "seq": 67
+      "seq": 68
     },
     {
       "role": "c",
       "cmd": "mark READ C-AFTERRETURN2",
       "expect_result": ".",
-      "seq": 68
+      "seq": 69
     },
     {
       "role": "c",
       "cmd": "stockof ${clientShop}",
       "expect_result": "items=\\[${hostAbsStock}\\]",
       "note": "C-AFTERRETURN2",
-      "seq": 69
+      "seq": 70
     },
     {
       "role": "c",
       "cmd": "dirtstate ${clientShop}",
       "expect_result": ".",
       "note": "C-AFTERRETURN2",
-      "seq": 70
+      "seq": 71
     },
     {
       "role": "c",
       "cmd": "tillledger show ${clientShop}",
       "expect_result": ".",
       "note": "C-AFTERRETURN2",
-      "seq": 71
+      "seq": 72
     },
     {
       "role": "c",
@@ -655,15 +679,38 @@
       "capture": {
         "cAfter2Fp": "fp=\\[([^\\]]+)\\]"
       },
-      "seq": 72
+      "seq": 73
     },
     {
       "role": "h",
       "cmd": "interiorfp ${clientShop}",
       "expect_result": "fp=\\[${cAfter2Fp}\\]",
       "note": "still equal after 15 s",
-      "seq": 73,
+      "seq": 74,
       "abort_on_fail": false
+    },
+    {
+      "role": "h",
+      "cmd": "absence fp ${clientShop2}",
+      "expect_result": "frozen=\\[\\] sent=\\[\\] .*held=0",
+      "note": "R1 no-copy leg: nothing frozen, nothing handed back, no hold on the owner's second shop",
+      "seq": 75
+    },
+    {
+      "role": "c",
+      "cmd": "absence",
+      "expect_result": "^OK absence",
+      "refute_result": "replaced=\\[[^\\]]*${clientShop2}",
+      "note": "R1 no-copy leg: the owner's second shop was NOT replaced (its own copy stands)",
+      "seq": 76
+    },
+    {
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[\\]",
+      "abort_on_fail": false,
+      "note": "R1 no-copy leg: the mark cleared (the no-copy address held nothing open)",
+      "seq": 77
     },
     {
       "role": "c",
@@ -677,19 +724,19 @@
         }
       ],
       "note": "P3-C: with the mark cleared the owner's own publish stores normally (no OwnerBack guard)",
-      "seq": 74
+      "seq": 78
     },
     {
       "role": "c",
       "cmd": "status",
       "expect_result": "role=c.*inMp=True",
-      "seq": 75
+      "seq": 79
     },
     {
       "role": "c",
       "cmd": "mergestatus",
       "expect_result": "member=True",
-      "seq": 76
+      "seq": 80
     },
     {
       "role": "c",
@@ -703,18 +750,18 @@
         }
       ],
       "note": "FIXTURE HYGIENE: end with the company dissolved so the save step never writes a merger into save1's manifest (T-P3-3 run 1 lesson)",
-      "seq": 77
+      "seq": 81
     },
     {
       "role": "h",
       "sleep_s": 3,
-      "seq": 78
+      "seq": 82
     },
     {
       "role": "both",
       "cmd": "mark TEST P3-2 END",
       "expect_result": "OK MARK",
-      "seq": 79
+      "seq": 83
     }
   ]
 }

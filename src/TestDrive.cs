@@ -3446,6 +3446,17 @@ namespace BigAmbitionsMP
                         if (abReg != null) { try { abAddr = GameStateReader.AddressKey(abReg); } catch { } }
                         return MergerAbsence.FingerprintLine(abAddr);
                     }
+                    // R1/R2 no-copy leg: `absence forgetcopy <num> <ba:street_x>` (host) forgets the stored owner copy of that
+                    // address and skips its next stand-in freeze, so the host holds NO truth for it at the owner's return.
+                    if (abArg.StartsWith("forgetcopy ", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!MPServer.IsRunning) return "ERR absence forgetcopy: host only";
+                        string fcAddr = abArg.Substring(11).Trim();
+                        var fcReg = GameStatePatcher.FindRegistration(fcAddr);
+                        if (fcReg != null) { try { fcAddr = GameStateReader.AddressKey(fcReg); } catch { } }
+                        int fcN = InteriorSync.DevForgetStoredCopy(fcAddr);
+                        return $"OK absence forgetcopy addr='{fcAddr}' forgot={fcN} nofreeze=1";
+                    }
                     if (abArg.StartsWith("holdreturn", StringComparison.OrdinalIgnoreCase))
                     {
                         if (!MPServer.IsRunning) return "ERR absence holdreturn: host only";

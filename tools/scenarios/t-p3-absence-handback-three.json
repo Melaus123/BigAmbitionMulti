@@ -19,7 +19,8 @@
     "owner dirt sync rejected: 'Client2'",
     "hand-back of .* acknowledged .*MISMATCH",
     "OwnerSnapshot rejected: player='Client1'",
-    "\\[Absence\\] hand-back ack for .* ignored"
+    "\\[Absence\\] hand-back ack for .* ignored",
+    "hand-back of .* REFUSED by"
   ],
   "oracles_report": [
     "\\[Paperwork\\]",
@@ -186,7 +187,14 @@
       "cmd": "mark client dropped",
       "expect_result": "OK MARK",
       "note": "the host designates the other client and sends the hand-over; the simulator applies it (the take-over evidence is asserted on the drop step itself: it fires in the same second as the disconnect)",
-      "seq": 19
+      "seq": 19,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] stand-in '${dPid}' applied the host's copy of '${clientShop}' - its uploads of it are accepted",
+          "within_s": 90
+        }
+      ]
     },
     {
       "role": "d",

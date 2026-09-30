@@ -1305,6 +1305,8 @@ namespace BigAmbitionsMP
                         // it - the host keeps the address held until it hears "applied" (ConsumeReturnInterior sends that).
                         if (payload.SeedOrHeal && MergerAbsence.IsReturnInterior(payload.AddressKey))
                             MergerAbsence.ConsumeReturnInterior(payload.AddressKey);
+                        // ABSENCE-HANDBACK-1 R4: a client stand-in that already holds the host's copy confirms it the same way.
+                        if (payload.SeedOrHeal) MergerAbsence.NoteSeedApplied(payload.AddressKey, payload.Authoritative);
                         NoteApplySkipped(payload.AddressKey);
                         return;
                     }
@@ -1391,6 +1393,9 @@ namespace BigAmbitionsMP
                         {
                             Plugin.Logger.LogWarning($"[Patcher] Interior apply REFUSED for '{payload.AddressKey}': an ALL-ZERO snapshot " +
                                 "(no items, designs, dirt or prices) may never replace existing content — absence of knowledge is not evidence.");
+                            // ABSENCE-HANDBACK-1 R2: a refused hand-back still answers the host, or its hold never ends.
+                            if (payload.SeedOrHeal && MergerAbsence.IsReturnInterior(payload.AddressKey))
+                                MergerAbsence.RefuseReturnInterior(payload.AddressKey, "an all-zero copy may not replace my content");
                             return;
                         }
                     }
@@ -1398,6 +1403,8 @@ namespace BigAmbitionsMP
                     if (reg == null)
                     {
                         Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: no reg for '{payload.AddressKey}'");
+                        if (payload.SeedOrHeal && MergerAbsence.IsReturnInterior(payload.AddressKey))   // R2: answer the host
+                            MergerAbsence.RefuseReturnInterior(payload.AddressKey, "no registration for it here");
                         return;
                     }
 
@@ -1843,7 +1850,11 @@ namespace BigAmbitionsMP
                     // re-sends or the re-ask is answered. A return whose host copy is EMPTY reaches here too
                     // and drains the set exactly like a full one, so the set can never be left holding an
                     // address for a much later generic heal to walk through (r1 m4).
+                    // ABSENCE-HANDBACK-1 R2: the two refusals above that can meet a hand-back (all-zero, no registration) and
+                    // the throw below now ANSWER the host ("return-interior-refused"), so its hold ends there too.
                     if (payload.SeedOrHeal) MergerAbsence.ConsumeReturnInterior(payload.AddressKey);
+                    // ABSENCE-HANDBACK-1 R4: a client stand-in confirms the host's authoritative copy is on its machine.
+                    if (payload.SeedOrHeal) MergerAbsence.NoteSeedApplied(payload.AddressKey, payload.Authoritative);
                     InteriorSync.NoteSnapshotApply(payload.AddressKey);   // round-213: re-send-loop detector
                     // Round-281: this apply COMPLETED, so it is now the baseline for both guards —
                     // the S4-lite duplicate test above, and the struct version every incoming cargo
@@ -1903,7 +1914,17 @@ namespace BigAmbitionsMP
                     TryReloadHamptonsHouseAfterApply(payload.AddressKey, reg, changedIds, removedIds,
                         movedIds, "snapshot", changedDesignUuids.Count > 0 || _layoutChanged);
                 }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}"); }
+                catch (Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[Patcher] ApplyInteriorSnapshot: {ex.Message}");
+                    // ABSENCE-HANDBACK-1 R2: a hand-back that threw before its commit (still in the return set) answers the host.
+                    try
+                    {
+                        if (payload.SeedOrHeal && MergerAbsence.IsReturnInterior(payload.AddressKey))
+                            MergerAbsence.RefuseReturnInterior(payload.AddressKey, "the apply threw: " + ex.Message);
+                    }
+                    catch { }
+                }
             });
         }
 

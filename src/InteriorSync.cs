@@ -755,6 +755,7 @@ namespace BigAmbitionsMP
                 // returned owner while the absence hand-back of this address is not applied on their machine yet.
                 if (!HostUploadVerdict(playerId, payload.AddressKey, out string upOwner, out string upWhy))
                 {
+                    if (StandInRefusalLogged("OwnerSnapshot", playerId, payload.AddressKey, upWhy)) return;   // R4
                     if (upWhy.StartsWith(HoldWhyPrefix, StringComparison.Ordinal))
                         Plugin.Logger.LogInfo($"[InteriorSync] OwnerSnapshot held: player='{playerId}' addr='{payload.AddressKey}' - {upWhy}.");
                     else
@@ -1096,6 +1097,7 @@ namespace BigAmbitionsMP
                 // push and a later routine send wrongly bypassed the host's gate).
                 snap.SeedOrHeal = seedOrHeal;
                 MPClient.SendInteriorOwnerSnapshot(snap);
+                _ownerSnapshotSends++;   // ABSENCE-HANDBACK-1 R9: lets ForceOwnerPush tell "sent" from "nothing to send"
                 if (snap.CustomerEntries != null && snap.CustomerEntries.Count > 0)
                 {   // K1 fold: recorded where it is sent
                     CustomerEntrySync.StampMark(_lastLocalOwnerSchedByAddr, addressKey, snap.CustomerEntries);   // I1 fold
@@ -1641,6 +1643,57 @@ namespace BigAmbitionsMP
         // ══ ABSENCE-HANDBACK-1 (owner-approved 2026-09-29, decision 42) ══════════════════════════════════
         /// <summary>The prefix every absence-hold refusal reason starts with (the handlers log those as a HOLD, not a rejection).</summary>
         internal const string HoldWhyPrefix = "absence hold";
+        /// <summary>ABSENCE-HANDBACK-1 R4: the prefix of a refusal of a CLIENT STAND-IN's upload - the host holds no copy of
+        /// that address to seed it from, or the stand-in has not applied the host's copy yet (its own is from its last visit).</summary>
+        internal const string StandInWhyPrefix = "absence stand-in";
+
+        /// <summary>ABSENCE-HANDBACK-1 R1 (a) / R4, HOST: does the host hold a TRUTH for this address - its F2 freeze or a stored
+        /// owner / stand-in upload (both live in the stored owner copies)? Without one, all it has is its own replica, which
+        /// is never handed back and never seeds a stand-in's uploads.</summary>
+        internal static bool HostHoldsTruth(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _ownerSnapshotsByAddr.TryGetValue(addressKey, out var st) && st?.Snapshot != null;
+
+        // R4: (what|pid|addr) -> realtime of the last stand-in refusal line (an unseeded stand-in uploads on every change).
+        private static readonly Dictionary<string, float> _standInRefusalLoggedAt = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>R4, HOST, MAIN THREAD: when `why` is a stand-in refusal, log it (once per 30 s per sender/address/channel)
+        /// and return true - the caller drops the upload. Any other reason returns false (the caller's own lines).</summary>
+        internal static bool StandInRefusalLogged(string what, string pid, string addressKey, string why)
+        {
+            if (string.IsNullOrEmpty(why) || !why.StartsWith(StandInWhyPrefix, StringComparison.Ordinal)) return false;
+            try
+            {
+                string k = $"{what}|{pid}|{addressKey}";
+                float now = UnityEngine.Time.realtimeSinceStartup;
+                if (!_standInRefusalLoggedAt.TryGetValue(k, out var t) || now - t >= 30f)
+                {
+                    _standInRefusalLoggedAt[k] = now;
+                    Plugin.Logger.LogInfo($"[Absence] {what} from stand-in '{pid}' for '{addressKey}' refused - {why} (logged once per 30 s).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] stand-in refusal log '{addressKey}': {ex.Message}"); }
+            return true;
+        }
+
+#if BAMP_DEV
+        // Rig lever `absence forgetcopy <addr>` (host): the address's next stand-in freeze is skipped (R1/R2 no-copy leg).
+        private static readonly HashSet<string> _devNoFreeze = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Rig lever (host, DEV): forget the stored owner copy of one address and skip its next stand-in freeze, so the
+        /// host holds NO truth for it at the owner's return. Returns 1 when a stored copy was forgotten.</summary>
+        internal static int DevForgetStoredCopy(string addressKey)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey)) return 0;
+                int n = _ownerSnapshotsByAddr.Remove(addressKey) ? 1 : 0;
+                _devNoFreeze.Add(addressKey);
+                Plugin.Logger.LogInfo($"[TestDrive] absence forgetcopy '{addressKey}': stored copy {(n == 1 ? "forgotten" : "absent")}; its next stand-in freeze is skipped.");
+                return n;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[TestDrive] absence forgetcopy '{addressKey}': {ex.Message}"); return 0; }
+        }
+#endif
 
         /// <summary>F4, HOST, MAIN THREAD: may `senderPid` upload `addressKey`'s interior (full / cargo / dirt), and whose
         /// interior is it? No absence mark names the address -> the recorded owner only (HostKnowsPlayerOwnsAddress, as
@@ -1664,6 +1717,13 @@ namespace BigAmbitionsMP
                     && (m.SimulatorPid == senderPid || MergerAbsence.HostAwaitsFlushFrom(senderPid!, addressKey)))
                 {
                     ownerPid = string.IsNullOrEmpty(m.OwnerPid) ? senderPid! : m.OwnerPid;
+                    // R4: only a stand-in that has APPLIED the host's copy (a truth) of this address uploads the owner's
+                    // interior - before that its copy is its own, from its last visit. With no truth on the host there is
+                    // nothing to seed it from: its uploads stay refused and no hand-back follows (the owner's copy stands).
+                    if (!HostHoldsTruth(addressKey))
+                    { why = $"{StandInWhyPrefix}: the host holds no copy of '{addressKey}' - the owner's own copy stands"; return false; }
+                    if (!MergerAbsence.HostStandInSeeded(senderPid!, addressKey))
+                    { why = $"{StandInWhyPrefix}: '{senderPid}' has not applied the host's copy of '{addressKey}' yet"; return false; }
                     return true;
                 }
                 bool isOwner = (!string.IsNullOrEmpty(m.OwnerPid) && m.OwnerPid == senderPid)
@@ -1693,6 +1753,14 @@ namespace BigAmbitionsMP
             try
             {
                 if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey)) return "";
+#if BAMP_DEV
+                if (_devNoFreeze.Remove(addressKey))
+                {
+                    Plugin.Logger.LogInfo($"[Absence] DEV: freeze of '{addressKey}' for '{ownerPid}' skipped (rig lever absence forgetcopy) - "
+                                        + $"the host holds {(HostHoldsTruth(addressKey) ? "a stored" : "no")} copy of it ({why}).");
+                    return "";
+                }
+#endif
                 var snap = BuildSnapshot(addressKey);
                 if (snap == null || (snap.ItemInstances.Count == 0 && snap.InteriorDesigns.Count == 0 && snap.DirtSpots.Count == 0))
                 {
@@ -1746,11 +1814,23 @@ namespace BigAmbitionsMP
         /// <summary>F5 (client stand-in's final flush) and the rig's `pushinterior`: one FORCED owner-style upload of this
         /// machine's live copy. False when it could not go (not a connected client, mid-placement here, or it threw).</summary>
         internal static bool ForceOwnerPush(string addressKey, string reason, bool seedOrHeal)
+            => ForceOwnerPush(addressKey, reason, seedOrHeal, out _);
+
+        // R9: counts full owner snapshots actually handed to the wire (SendLocalOwnerSnapshot). Main thread.
+        private static int _ownerSnapshotSends;
+
+        /// <summary>R9: as above, and `sent` says whether a snapshot actually went (true + !sent = nothing to send: no
+        /// readable snapshot, or an all-zero copy - SendLocalOwnerSnapshot's "done, not retry-worthy" outcomes).</summary>
+        internal static bool ForceOwnerPush(string addressKey, string reason, bool seedOrHeal, out bool sent)
         {
+            sent = false;
             try
             {
                 if (MPServer.IsRunning || !MPClient.IsConnected || string.IsNullOrEmpty(addressKey)) return false;
-                return SendLocalOwnerSnapshot(addressKey, force: true, reason: reason, seedOrHeal: seedOrHeal);
+                int before = _ownerSnapshotSends;
+                bool ok = SendLocalOwnerSnapshot(addressKey, force: true, reason: reason, seedOrHeal: seedOrHeal);
+                sent = _ownerSnapshotSends != before;
+                return ok;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] forced owner push '{addressKey}': {ex.Message}"); return false; }
         }
@@ -2409,6 +2489,7 @@ namespace BigAmbitionsMP
             {
                 if (!HostUploadVerdict(playerId, p.AddressKey, out _, out string cWhy))   // ABSENCE-HANDBACK-1 F4
                 {
+                    if (StandInRefusalLogged("owner cargo sync", playerId, p.AddressKey, cWhy)) return;   // R4
                     if (cWhy.StartsWith(HoldWhyPrefix, StringComparison.Ordinal))
                         Plugin.Logger.LogInfo($"[InteriorSync] owner cargo sync held: '{playerId}' addr='{p.AddressKey}' - {cWhy}.");
                     else
@@ -2475,6 +2556,7 @@ namespace BigAmbitionsMP
             {
                 if (!HostUploadVerdict(playerId, p.AddressKey, out _, out string dWhy))   // ABSENCE-HANDBACK-1 F4
                 {
+                    if (StandInRefusalLogged("owner dirt sync", playerId, p.AddressKey, dWhy)) return;   // R4
                     if (dWhy.StartsWith(HoldWhyPrefix, StringComparison.Ordinal))
                         Plugin.Logger.LogInfo($"[InteriorSync] owner dirt sync held: '{playerId}' addr='{p.AddressKey}' - {dWhy}.");
                     else
