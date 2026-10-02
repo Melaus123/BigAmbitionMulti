@@ -452,6 +452,7 @@ namespace BigAmbitionsMP
             // Host can attach a HUMAN reason (kick/reject/ban) as disconnect
             // data — "RemoteConnectionClose" told the user nothing (2026-06-11).
             string why = reason;
+            bool bannedInGame = false;   // BAN-PLAYERS-1 build C1 (owner decision 67 a)
             try
             {
                 if (extra != null && extra.Length > 0)
@@ -471,7 +472,7 @@ namespace BigAmbitionsMP
                     else if (tag == "BAMP:hostquit") why = "The host saved and left the session";
                     else if (tag == "BAMP:kicked") why = "KICKED by host";
                     else if (tag == "BAMP:banned") why = "You're banned from this host's games.";   // BAN-PLAYERS-1 (A6, owner-approved text 2026-10-01): refused at join
-                    else if (tag == "BAMP:bannedgame") why = "You were banned by the host.";           // BAN-PLAYERS-1 (A6): removed in game by a ban
+                    else if (tag == "BAMP:bannedgame") { why = "You were banned by the host."; bannedInGame = true; }   // BAN-PLAYERS-1 (A6): removed in game by a ban
                     else if (tag == "BAMP:identity") why = "Join refused — player identity invalid or already connected";
                     else if (tag.StartsWith("BAMP:mods")) why = ModsRefusalFromTag(tag);   // MODS-GATE-1: the host's 'Different mods: Refuse'
                     else if (tag.StartsWith("BAMP:build"))
@@ -532,14 +533,31 @@ namespace BigAmbitionsMP
                 // D25 THE BLIP RULE (user 2026-09-12): a NON-voluntary drop starts the merged-company
                 // grace. A voluntary leave/quit is not armed - it ends at the scene boundary, which
                 // resets the runtime state outright (MergerSync.ResetSceneState).
-                if (!voluntary) { try { MergerSync.ArmDropGrace(why); } catch { } }
+                // BAN-PLAYERS-1 build C1 (owner decision 67 a, 2026-10-02): a player banned in game just goes back to the main
+                // menu - no merged-company grace, no disconnect save or rejoin marker, no 'continue offline' single-player copy.
+                if (!voluntary && !bannedInGame) { try { MergerSync.ArmDropGrace(why); } catch { } }
                 // Involuntary drop while IN-GAME → the MP session is over for this
                 // client.  Freeze + notice; the player can dismiss it and keep
                 // playing offline as an SP fork.  (IL2CPP in-game check must run
                 // here on the main thread.)
                 try
                 {
-                    if (!voluntary && SaveGameManager.Current != null
+                    if (bannedInGame)
+                    {
+                        // D67: the reason line ("You were banned by the host.") is the menu's existing disconnect notice
+                        // (LastDisconnectReason, kept through the scene change - nothing clears it until the next join).
+                        if (SaveGameManager.Current != null && Helpers.PlayerHelper.PlayerController != null)
+                        {
+                            Plugin.Logger.LogWarning("[Client] Banned by the host in game - back to the main menu (no disconnect save, no rejoin marker, no merged-company grace, no offline copy).");
+                            // The game's own city exit (pause-menu Main Menu / funeral path): it joins the save threads WITHOUT
+                            // saving and flags the city unload before LoadMainMenu - calling LoadMainMenu directly skipped that
+                            // flag and the entity teardown threw on every frame at the menu (rig run T-BAN-20261002-020755).
+                            var ui = MPCanvasUI.Instance;
+                            if (ui != null && ui.isActiveAndEnabled) ui.StartCoroutine(LoadScene.LoadMainMenuFromCity());
+                            else LoadScene.LoadMainMenu(BAModAPI.ModActivationScope.City);
+                        }
+                    }
+                    else if (!voluntary && SaveGameManager.Current != null
                                    && Helpers.PlayerHelper.PlayerController != null)
                     {
                         SessionEnded = true;

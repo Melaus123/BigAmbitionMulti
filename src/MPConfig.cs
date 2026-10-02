@@ -237,6 +237,19 @@ namespace BigAmbitionsMP
             catch { return true; }
         }
 
+        /// <summary>BAN-PLAYERS-1 build C1 (F1): was this address last seen more than <paramref name="age"/> ago? An
+        /// unreadable time counts as old (it gets rewritten).</summary>
+        private static bool SeenOlderThan(string seenUtc, DateTime nowUtc, TimeSpan age)
+        {
+            try
+            {
+                if (!DateTime.TryParse(seenUtc, System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var seen)) return true;
+                return (nowUtc - seen) > age;
+            }
+            catch { return true; }
+        }
+
         private static System.Net.IPAddress? ParseIp(string ip)
         {
             try
@@ -310,10 +323,15 @@ namespace BigAmbitionsMP
                 var list = _bans;
                 var now = DateTime.UtcNow;
                 string ipN = NormalizeIp(ip);
+                // C1 (F4): the host's own public address never matches (a joiner behind the host's own router shows it) -
+                // checked here at match time too, since an entry may hold it from before MPNet.PublicIp was known.
+                if (ipN.Length > 0 && AddressKind(ParseIp(ipN)) == "own") ipN = "";
+                string steamStable = string.IsNullOrEmpty(steamId) ? "" : "steam-" + steamId;
                 foreach (var e in list)
                 {
                     if (e == null) continue;
-                    if (!string.IsNullOrEmpty(steamId) && e.SteamId == steamId) { matchedBy = "Steam id"; return e; }
+                    // C1 (F2): a ban whose stable id is 'steam-<N>' IS Steam account N - it matches a joiner vouched as N.
+                    if (!string.IsNullOrEmpty(steamId) && (e.SteamId == steamId || e.StableId == steamStable)) { matchedBy = "Steam id"; return e; }
                     if (!string.IsNullOrEmpty(stableId) && e.StableId == stableId) { matchedBy = "stable id"; return e; }
                     if (ipN.Length > 0 && e.Ips != null)
                         foreach (var a in e.Ips)
@@ -329,7 +347,10 @@ namespace BigAmbitionsMP
             foreach (var a in e.Ips)
                 if (a.Ip == ipN)
                 {
-                    if (!IpExpired(a.SeenUtc, nowUtc.AddHours(-1))) return false;   // seen within the last hour: no rewrite per retry
+                    // BAN-PLAYERS-1 build C1 (F1): refresh when the last refresh is MORE than an hour old, never otherwise (no
+                    // rewrite per retry) - the 7 days run from the last time the address was seen. Build A had this inverted:
+                    // an unexpired address was never refreshed, so it expired 7 days after it was FIRST recorded.
+                    if (!SeenOlderThan(a.SeenUtc, nowUtc, TimeSpan.FromHours(1))) return false;
                     a.SeenUtc = nowUtc.ToString("o"); return true;
                 }
             e.Ips.Add(new BanAddress { Ip = ipN, SeenUtc = nowUtc.ToString("o") });
@@ -385,6 +406,138 @@ namespace BigAmbitionsMP
             return false;
         }
 
+        /// <summary>BAN-PLAYERS-1 build C1 (F2a) - MAIN THREAD: a refused joiner's link was Steam-vouched as
+        /// <paramref name="steamId"/> and matched the entry whose stable id is 'steam-'+that id - keep the Steam id on it.
+        /// Never for any other entry: a CLAIMED stable id (or a shared address) never assigns a player a Steam id.
+        /// True when the saved list changed.</summary>
+        public static bool NoteBannedSteamId(string key, string steamId)
+        {
+            try
+            {
+                steamId = (steamId ?? "").Trim();
+                if (steamId.Length == 0) return false;
+                var list = CloneBans();
+                foreach (var e in list)
+                    if (e.Key == key)
+                    {
+                        if (!string.IsNullOrEmpty(e.SteamId) || e.StableId != "steam-" + steamId) return false;
+                        e.SteamId = steamId;
+                        _bans = list;
+                        SaveBans(list);
+                        return true;
+                    }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] NoteBannedSteamId: {ex.Message}"); }
+            return false;
+        }
+
+        private static string _ownIpSwept = "";
+        /// <summary>BAN-PLAYERS-1 build C1 (F4) - MAIN THREAD, ~1 Hz while hosting: once the host's own public address is
+        /// known, drop every recorded ban address equal to it (one can be recorded before MPNet.PublicIp is known). One
+        /// sweep per address; logged once, as a tag.</summary>
+        public static void DropOwnPublicAddress()
+        {
+            try
+            {
+                string own = NormalizeIp(MPNet.PublicIp ?? "");
+                if (own.Length == 0 || own == _ownIpSwept) return;
+                _ownIpSwept = own;
+                var list = CloneBans();
+                int n = 0;
+                foreach (var e in list) if (e.Ips != null) n += e.Ips.RemoveAll(a => a == null || NormalizeIp(a.Ip) == own);
+                if (n == 0) return;
+                _bans = list;
+                SaveBans(list);
+                Plugin.Logger.LogInfo($"[Config] Saved bans: {n} recorded address(es) equal to the host's own public address dropped ({AddressTag(own)}).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] DropOwnPublicAddress: {ex.Message}"); }
+        }
+
+        /// <summary>BAN-PLAYERS-1 build C1 (F7): a stable id / Steam id as it may reach a log - its kind plus a short keyed
+        /// hash ("steam#3fa21c", "id#09be44"; the same per-process key as AddressTag), never the id itself.</summary>
+        public static string IdTag(string id)
+        {
+            try
+            {
+                id = (id ?? "").Trim();
+                if (id.Length == 0) return "-";
+                using var h = new System.Security.Cryptography.HMACSHA256(_addrTagSalt);
+                var d = h.ComputeHash(System.Text.Encoding.UTF8.GetBytes("id|" + id));
+                bool steam = id.StartsWith("steam-", StringComparison.Ordinal) || (id.Length == 17 && ulong.TryParse(id, out _));
+                return $"{(steam ? "steam" : "id")}#{d[0]:x2}{d[1]:x2}{d[2]:x2}";
+            }
+            catch { return "id#?"; }
+        }
+
+        /// <summary>BAN-PLAYERS-1 build C1: is this a saved ban's key ("b" + 7 hex)?</summary>
+        public static bool IsBanKey(string s)
+        {
+            if (string.IsNullOrEmpty(s) || s.Length != 8 || s[0] != 'b') return false;
+            for (int i = 1; i < 8; i++) if (Uri.IsHexDigit(s[i]) == false) return false;
+            return true;
+        }
+
+        /// <summary>BAN-PLAYERS-1 build C1 (F7): one saved ban as the screens show it - NO address, no Steam id, no stable id.
+        /// <see cref="Key"/> is opaque: it is what Unban / Remove property take.</summary>
+        public sealed class BanRow
+        {
+            public string Key = "";
+            public string Name = "";
+            public int BanDay;             // game day of the ban (0 = no world was loaded)
+            public string BannedUtc = "";  // real date of the ban, ISO-8601 UTC
+            public string How = "";        // how the ban recognises them: "Steam account" or "Joined by IP"
+        }
+
+        /// <summary>BAN-PLAYERS-1 build C1 (F7): the saved bans for the screens (a fresh copy each call).</summary>
+        public static List<BanRow> BanRows()
+        {
+            var outp = new List<BanRow>();
+            try
+            {
+                foreach (var e in _bans)
+                    if (e != null)
+                        outp.Add(new BanRow
+                        {
+                            Key = e.Key, Name = e.Name, BanDay = e.BanDay, BannedUtc = e.BannedUtc,
+                            How = !string.IsNullOrEmpty(e.SteamId) || (e.StableId ?? "").StartsWith("steam-", StringComparison.Ordinal) ? "Steam account" : "Joined by IP",
+                        });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] BanRows: {ex.Message}"); }
+            return outp;
+        }
+
+#if BAMP_DEV
+        /// <summary>BAN-PLAYERS-1 build C1 DEV lever ('ban devaddr age KEY HOURS'): move every recorded address of one saved
+        /// ban back in time, as if last seen HOURS earlier. Prints no address.</summary>
+        internal static string DevAgeAddresses(string key, double hours)
+        {
+            try
+            {
+                var list = CloneBans();
+                var now = DateTime.UtcNow;
+                foreach (var e in list)
+                    if (e.Key == key)
+                    {
+                        int n = 0; double newest = double.MaxValue;
+                        foreach (var a in e.Ips)
+                        {
+                            if (a == null || !DateTime.TryParse(a.SeenUtc, System.Globalization.CultureInfo.InvariantCulture,
+                                    System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var seen)) continue;
+                            seen = seen.AddHours(-hours);
+                            a.SeenUtc = seen.ToString("o");
+                            n++;
+                            newest = Math.Min(newest, (now - seen).TotalHours);
+                        }
+                        _bans = list;
+                        SaveBans(list);
+                        return $"OK devaddr aged {n} address(es) of {key} by {hours.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)}h: newest seen {(n == 0 ? "-" : newest.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture))}h ago";
+                    }
+                return $"ERR devaddr age: no saved ban {key}";
+            }
+            catch (Exception ex) { return "ERR devaddr age: " + ex.Message; }
+        }
+#endif
+
         /// <summary>BAN-PLAYERS-1 (A4) - MAIN THREAD: remove every saved ban whose key, stable id, Steam id or name equals
         /// <paramref name="who"/> ("all" = every ban); persists. Returns how many were removed.</summary>
         public static int RemoveBan(string who)
@@ -405,7 +558,8 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] RemoveBan: {ex.Message}"); return 0; }
         }
 
-        /// <summary>BAN-PLAYERS-1: one line per saved ban for the DEV lever - never an address, only how many it holds.</summary>
+        /// <summary>BAN-PLAYERS-1: one line per saved ban for the DEV lever - never an address, only how many it holds; the
+        /// stable id only as a kind + short tag (build C1, F7).</summary>
         public static string DescribeBans()
         {
             try
@@ -414,7 +568,7 @@ namespace BigAmbitionsMP
                 var parts = new List<string>();
                 foreach (var e in list)
                     if (e != null)
-                        parts.Add($"{e.Key} '{e.Name}' stable={(string.IsNullOrEmpty(e.StableId) ? "-" : e.StableId)} steam={(string.IsNullOrEmpty(e.SteamId) ? "no" : "yes")} ips={e.Ips?.Count ?? 0} day={e.BanDay} since={(e.BannedUtc.Length >= 10 ? e.BannedUtc.Substring(0, 10) : e.BannedUtc)}");
+                        parts.Add($"{e.Key} '{e.Name}' stable={IdTag(e.StableId)} steam={(string.IsNullOrEmpty(e.SteamId) ? "no" : "yes")} ips={e.Ips?.Count ?? 0} day={e.BanDay} since={(e.BannedUtc.Length >= 10 ? e.BannedUtc.Substring(0, 10) : e.BannedUtc)}");
                 return $"n={parts.Count} [{string.Join("; ", parts)}]";
             }
             catch (Exception ex) { return "n=? (" + ex.Message + ")"; }

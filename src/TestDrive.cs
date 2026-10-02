@@ -83,6 +83,50 @@ namespace BigAmbitionsMP
         /// parks, so it is not refused.</summary>
         internal static bool RejectNextJoin;
 
+        /// <summary>BAN-PLAYERS-1 build C1 DEV levers ('ban devaddr|devsteam|devpark ...', host side). The rig joins over
+        /// loopback without Steam, so these stand in for a PUBLIC joiner address and a Steam-VOUCHED joiner id (fixed
+        /// values, never printed or logged - MPServer.JoinerIdentity reads them) and park a returning mid-game joiner for
+        /// approval. All three are cleared when a hosting session starts (MPServer.ResetJoinControl).</summary>
+        internal static volatile bool DevBanFakeAddr, DevBanFakeSteam, DevBanForcePark;
+        internal const string DevFakeAddr = "203.0.113.77";          // TEST-NET-3 documentation range - nobody's address
+        internal const string DevFakeSteam = "76561190000000077";    // below the real SteamID64 range - nobody's account
+
+        private static string DevBanLever(string ba)
+        {
+            try
+            {
+                if (!MPServer.IsRunning) return "ERR host only";
+                var p = ba.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                string what = p.Length > 0 ? p[0] : "", op = p.Length > 1 ? p[1] : "";
+                switch (what)
+                {
+                    case "devaddr":
+                        if (op == "on" || op == "off") { DevBanFakeAddr = op == "on"; return $"OK devaddr {op} ({MPConfig.AddressTag(DevFakeAddr)})"; }
+                        if (op == "add")
+                        {
+                            var e = MPConfig.AddBan("addrprobe", "", "", DevFakeAddr, 0);
+                            return e == null ? "ERR devaddr add: nothing recorded" : $"OK devaddr add key={e.Key} ({MPConfig.AddressTag(DevFakeAddr)})";
+                        }
+                        if (op == "age" && p.Length >= 4 && double.TryParse(p[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var hrs))
+                            return MPConfig.DevAgeAddresses(p[2], hrs);
+                        return "ERR usage: ban devaddr on|off|add|age <key> <hours>";
+                    case "devsteam":
+                        if (op == "on" || op == "off") { DevBanFakeSteam = op == "on"; return $"OK devsteam {op}"; }
+                        if (op == "add")
+                        {
+                            var e = MPConfig.AddBan("steamprobe", "", "steam-" + DevFakeSteam, "", 0);
+                            return e == null ? "ERR devsteam add: nothing recorded" : $"OK devsteam add key={e.Key} stable={MPConfig.IdTag(e.StableId)} steam={(string.IsNullOrEmpty(e.SteamId) ? "no" : "yes")}";
+                        }
+                        return "ERR usage: ban devsteam on|off|add";
+                    case "devpark":
+                        if (op == "on" || op == "off") { DevBanForcePark = op == "on"; return $"OK devpark {op}"; }
+                        return "ERR usage: ban devpark on|off";
+                }
+                return "ERR usage: ban devaddr|devsteam|devpark ...";
+            }
+            catch (Exception ex) { return "ERR ban dev lever: " + ex.Message; }
+        }
+
         private static void TickRejectJoin()
         {
             try
@@ -2367,6 +2411,11 @@ namespace BigAmbitionsMP
                     if (ba.StartsWith("remove ", StringComparison.Ordinal)) return MPServer.RemoveProperty(ba.Substring(7).Trim());
                     if (ba.StartsWith("held ", StringComparison.Ordinal)) return MPServer.DescribeHeld(ba.Substring(5).Trim());
                     if (ba == "forfeits") return "OK forfeits " + MPServer.DescribeForfeits();
+                    // BAN-PLAYERS-1 build C1 levers (host side, see DevBanLever):
+                    //   ban devaddr on|off|add|age <key> <hours>   a public joiner address stand-in; 'add' bans it alone; 'age' ages it
+                    //   ban devsteam on|off|add                    a Steam-vouched joiner id stand-in; 'add' bans its 'steam-' stable id
+                    //   ban devpark on|off                         a returning mid-game joiner parks for approval
+                    if (ba.StartsWith("dev", StringComparison.Ordinal)) return DevBanLever(ba);
                     if (ba.StartsWith("offline ", StringComparison.Ordinal)) return MPServer.BanOfflinePlayer(ba.Substring(8).Trim());
                     return MPServer.BanPlayer(ba);
                 }

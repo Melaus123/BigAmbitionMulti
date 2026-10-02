@@ -1,7 +1,7 @@
 {
   "id": "T-BAN",
-  "title": "BAN-PLAYERS-1 build A (lasting ban): an in-lobby DEV ban of a connected client (tag bannedgame, approved text) is saved; its rejoin is refused with tag banned (approved text) in the lobby, after a re-host, and after a host process restart; unban -> joins; in game the merged member is banned (clean leave - no paused-until-rejoin, avatar removed, buildings held, absence stand-in starts); unban -> rejoins. The rig's 127.0.0.1 is never recorded as an address (refusals match by stable id).",
-  "preconditions": "Dev build with the 'ban'/'unban' levers. Fixture save1 (host melaus, client Client1). Uses the driver's drop/relaunch steps for the host. The host's saved ban list is emptied at the start and must be empty at the end (the last 'ban list'); fixture_reset re-prepares the save the disconnect save touches. Steam joins cannot be exercised on the one-account rig.",
+  "title": "BAN-PLAYERS-1 build A (lasting ban): an in-lobby DEV ban of a connected client (tag bannedgame, approved text) is saved; its rejoin is refused with tag banned (approved text) in the lobby, after a re-host, and after a host process restart; unban -> joins; in game the merged member is banned (clean leave - no paused-until-rejoin, avatar removed, buildings held, absence stand-in starts); unban -> rejoins. The rig's 127.0.0.1 is never recorded as an address (refusals match by stable id). BUILD C1 legs: (F1) an address refreshed by a refused retry keeps matching after first-recorded + 7 days; (F2) a 'steam-N' stable-id ban refuses a joiner vouched as N and learns the Steam id; (F5) in-game ban = one leave cleanup, nothing processed after; (G1) a ban added while a join request waits refuses it at approval, and BanPlayer reaches a waiting request; (D67) the banned client goes back to the menu with no disconnect save.",
+  "preconditions": "Dev build with the 'ban'/'unban' levers. Fixture save1 (host melaus, client Client1). Uses the driver's drop/relaunch steps for the host. The host's saved ban list is emptied at the start and must be empty at the end (the last 'ban list'); fixture_reset re-prepares the save the disconnect save touches. Steam joins cannot be exercised on the one-account rig. Build C1: the DEV levers 'ban devaddr|devsteam|devpark' stand in for a public joiner address, a Steam-vouched id and a parked returning joiner (fixed values, never printed).",
   "instances": 2,
   "vars": {
     "clientPid": "Client1",
@@ -16,7 +16,12 @@
     "\\[Server\\] saved-ban (check|address note):",
     "\\[Server\\] (BanPlayer|BanOfflinePlayer|UnbanPlayer)\\(",
     "\\[Config\\] (AddBan|NoteBannedAddress|RemoveBan|BannedPlayers (load|save)):",
-    "ips=[1-9]"
+    "ips=[1-9]",
+    "Client disconnect save written",
+    "Host connection lost in-game",
+    "banned link \\d+: a second disconnect report",
+    "\\[Config\\] (NoteBannedSteamId|DropOwnPublicAddress|BanRows):",
+    "\\[Server\\] (BanParked|parked-join take|banned-link disconnect check)"
   ],
   "oracles_report": [
     "\\[Server\\] (BANNED|UNBANNED|Hello from BANNED)",
@@ -27,7 +32,12 @@
     "\\[RemotePlayer\\] Removed",
     "\\[Absence\\]",
     "left cleanly",
-    "\\[TestDrive\\] ledger"
+    "\\[TestDrive\\] ledger",
+    "\\[Server\\] banned link",
+    "\\[RemotePlayer\\] Spawned",
+    "devpark",
+    "Steam id learned",
+    "while the join request waited"
   ],
   "steps": [
     {
@@ -261,9 +271,182 @@
     },
     {
       "role": "all",
-      "cmd": "mark TEST BAN UNBAN1",
+      "cmd": "mark TEST BAN F1-ADDR",
       "expect_result": "OK MARK",
       "seq": 29
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr on",
+      "expect_result": "^OK devaddr on \\(addr:public#[0-9a-f]{6}\\)",
+      "note": "C1 DEV lever: joiners are seen at a fixed documentation-range PUBLIC address (never printed - the rig's loopback is never recorded)",
+      "seq": 30
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr add",
+      "expect_result": "^OK devaddr add key=(\\S+) \\(addr:public#[0-9a-f]{6}\\)",
+      "capture": {
+        "addrKey": "key=(\\S+)"
+      },
+      "note": "an address-only saved ban (the client's stable id is not banned)",
+      "seq": 31
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr age ${addrKey} 167",
+      "expect_result": "^OK devaddr aged 1 address\\(es\\) of ${addrKey} by 167h: newest seen 167\\.\\dh ago",
+      "note": "(F1) the address was first recorded 6 days 23 hours ago",
+      "seq": 32
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "note": "(F1) refused by address; the refused retry REFRESHES the address (last refresh > 1 h old)",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:banned' . \"You're banned from this host's games\\.",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Hello from BANNED '${clientPid}' \\(saved ban ${addrKey}, matched by address; from addr:public#[0-9a-f]{6}\\) . disconnected\\.",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] saved ban ${addrKey} \\('${clientPid}'\\): address addr:public#[0-9a-f]{6} recorded",
+          "within_s": 30
+        }
+      ],
+      "seq": 33
+    },
+    {
+      "role": "c",
+      "sleep_s": 5,
+      "seq": 34
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr age ${addrKey} 2",
+      "expect_result": "^OK devaddr aged 1 address\\(es\\) of ${addrKey} by 2h: newest seen 2\\.\\dh ago",
+      "note": "(F1) first recorded 7 days 1 hour ago, last seen 2 hours ago (build A never refreshed it: 169 h - expired)",
+      "seq": 35
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "note": "(F1) still refused by address after first-recorded + 7 days",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:banned' . \"You're banned from this host's games\\.",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Hello from BANNED '${clientPid}' \\(saved ban ${addrKey}, matched by address; from addr:public#[0-9a-f]{6}\\) . disconnected\\.",
+          "within_s": 60
+        }
+      ],
+      "seq": 36
+    },
+    {
+      "role": "c",
+      "sleep_s": 5,
+      "seq": 37
+    },
+    {
+      "role": "h",
+      "cmd": "unban ${addrKey}",
+      "expect_result": "^OK unbanned 1 left=0",
+      "seq": 38
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr off",
+      "expect_result": "^OK devaddr off",
+      "seq": 39
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BAN F2-STEAM",
+      "expect_result": "OK MARK",
+      "seq": 40
+    },
+    {
+      "role": "h",
+      "cmd": "ban devsteam add",
+      "expect_result": "^OK devsteam add key=(\\S+) stable=steam#[0-9a-f]{6} steam=no",
+      "capture": {
+        "steamKey": "key=(\\S+)"
+      },
+      "note": "(F2) a saved ban whose stable id is 'steam-<N>' and which holds no Steam id",
+      "seq": 41
+    },
+    {
+      "role": "h",
+      "cmd": "ban devsteam on",
+      "expect_result": "^OK devsteam on",
+      "note": "C1 DEV lever: joiners are Steam-vouched as N (fixed, never printed)",
+      "seq": 42
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "note": "(F2) the 'steam-N' ban refuses a joiner vouched as N, and the entry learns the Steam id",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:banned' . \"You're banned from this host's games\\.",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] Hello from BANNED '${clientPid}' \\(saved ban ${steamKey}, matched by Steam id; from addr:loopback#[0-9a-f]{6}\\) . disconnected\\.",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] saved ban ${steamKey} \\('${clientPid}'\\): Steam id learned from the refused join",
+          "within_s": 30
+        }
+      ],
+      "seq": 43
+    },
+    {
+      "role": "c",
+      "sleep_s": 5,
+      "seq": 44
+    },
+    {
+      "role": "h",
+      "cmd": "ban list",
+      "expect_result": "^OK ban list n=1 \\[${steamKey} 'steamprobe' stable=steam#[0-9a-f]{6} steam=yes ips=0 ",
+      "note": "(F2a) the Steam id was added to the matched entry; (F7) the stable id prints only as a kind + tag",
+      "seq": 45
+    },
+    {
+      "role": "h",
+      "cmd": "ban devsteam off",
+      "expect_result": "^OK devsteam off",
+      "seq": 46
+    },
+    {
+      "role": "h",
+      "cmd": "unban ${steamKey}",
+      "expect_result": "^OK unbanned 1 left=0",
+      "seq": 47
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BAN UNBAN1",
+      "expect_result": "OK MARK",
+      "seq": 48
     },
     {
       "role": "c",
@@ -276,12 +459,12 @@
           "within_s": 60
         }
       ],
-      "seq": 30
+      "seq": 49
     },
     {
       "role": "h",
       "sleep_s": 3,
-      "seq": 31
+      "seq": 50
     },
     {
       "role": "h",
@@ -299,24 +482,24 @@
           "within_s": 60
         }
       ],
-      "seq": 32
+      "seq": 51
     },
     {
       "role": "h",
       "cmd": "merge propose ${clientPid}",
       "expect_result": "OK merge propose sent",
-      "seq": 33
+      "seq": 52
     },
     {
       "role": "h",
       "sleep_s": 1,
-      "seq": 34
+      "seq": 53
     },
     {
       "role": "h",
       "cmd": "offers",
       "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]",
-      "seq": 35
+      "seq": 54
     },
     {
       "role": "c",
@@ -329,12 +512,12 @@
           "within_s": 20
         }
       ],
-      "seq": 36
+      "seq": 55
     },
     {
       "role": "h",
       "sleep_s": 3,
-      "seq": 37
+      "seq": 56
     },
     {
       "role": "h",
@@ -343,19 +526,19 @@
       "capture": {
         "clientShop": "keys=\\['([^']+)'"
       },
-      "seq": 38
+      "seq": 57
     },
     {
       "role": "h",
       "cmd": "absence",
       "expect_result": "^OK absence marks=\\[\\] simulating_here=\\[\\]",
-      "seq": 39
+      "seq": 58
     },
     {
       "role": "all",
       "cmd": "mark TEST BAN INGAME",
       "expect_result": "OK MARK",
-      "seq": 40
+      "seq": 59
     },
     {
       "role": "h",
@@ -364,12 +547,22 @@
       "capture": {
         "banKey2": "key=(\\S+)"
       },
-      "note": "(4) tag bannedgame + approved text; clean leave (no pause); avatar removed; (7) the absence path starts",
+      "note": "(4) tag bannedgame + approved text; clean leave (no pause); avatar removed; (7) the absence path starts; (F5) disconnect first - the transport's report runs the ONE leave cleanup as BannedByHost; (D67) the client goes back to the main menu with no disconnect save, rejoin marker, grace or offline copy",
       "expect_log": [
         {
           "role": "c",
           "regex": "\\[Client\\] disconnect reason tag: 'BAMP:bannedgame' . \"You were banned by the host\\.",
           "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] Banned by the host in game - back to the main menu \\(no disconnect save, no rejoin marker, no merged-company grace, no offline copy\\)\\.",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] banned link \\d+: transport reported '[^']+' - its leave cleanup runs once, as BannedByHost\\.",
+          "within_s": 10
         },
         {
           "role": "h",
@@ -397,59 +590,211 @@
           "within_s": 90
         }
       ],
-      "seq": 41
+      "seq": 60
     },
     {
       "role": "h",
       "sleep_s": 5,
-      "seq": 42
+      "seq": 61
     },
     {
       "role": "h",
       "cmd": "absence",
       "expect_result": "^OK absence marks=\\[${clientPid}->${hostPid}.*${clientShop}",
-      "seq": 43
+      "seq": 62
     },
     {
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "member=True.*flipped=[1-9]",
       "note": "the banned member stays a member; its buildings stay held/flipped",
-      "seq": 44
+      "seq": 63
     },
     {
       "role": "h",
       "cmd": "ledgerdump",
       "expect_result": "^OK \\d+ ledger",
-      "seq": 45
+      "seq": 64
     },
     {
       "role": "h",
       "cmd": "unban ${banKey2}",
       "expect_result": "^OK unbanned 1 left=0",
-      "seq": 46
+      "seq": 65
     },
     {
       "role": "c",
       "drop": true,
       "note": "the banned client is left in its own world, disconnected ('leavegame' needs a live connection) - restart it, as T-P3-2 does",
-      "seq": 47
+      "seq": 66
     },
     {
       "role": "c",
       "relaunch": true,
-      "seq": 48
+      "seq": 67
     },
     {
       "role": "c",
       "sleep_s": 20,
-      "seq": 49
+      "seq": 68
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BAN G1-PARKED",
+      "expect_result": "OK MARK",
+      "seq": 69
+    },
+    {
+      "role": "h",
+      "cmd": "ban devpark on",
+      "expect_result": "^OK devpark on",
+      "note": "C1 DEV lever: the returning client parks for approval instead of auto-accept",
+      "seq": 70
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr on",
+      "expect_result": "^OK devaddr on",
+      "seq": 71
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] devpark: returning player '${clientPid}' parked for approval",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] mid-game join request from '${clientPid}' . awaiting host approval\\.",
+          "within_s": 60
+        }
+      ],
+      "seq": 72
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 73
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr add",
+      "expect_result": "^OK devaddr add key=(\\S+)",
+      "capture": {
+        "addrKey2": "key=(\\S+)"
+      },
+      "note": "(G1) a saved ban added while the request waits (it matches the waiting joiner by address)",
+      "seq": 74
+    },
+    {
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK accepted 1 pending join",
+      "note": "(G1) the approval re-checks the saved bans and refuses",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:banned' . \"You're banned from this host's games\\.",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] join approval: '${clientPid}' is BANNED \\(saved ban ${addrKey2}, matched by address; from addr:public#[0-9a-f]{6}\\) . refused\\.",
+          "within_s": 10
+        }
+      ],
+      "seq": 75
+    },
+    {
+      "role": "c",
+      "sleep_s": 5,
+      "seq": 76
+    },
+    {
+      "role": "h",
+      "cmd": "unban ${addrKey2}",
+      "expect_result": "^OK unbanned 1 left=0",
+      "seq": 77
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr off",
+      "expect_result": "^OK devaddr off",
+      "seq": 78
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] mid-game join request from '${clientPid}' . awaiting host approval\\.",
+          "within_s": 60
+        }
+      ],
+      "seq": 79
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 80
+    },
+    {
+      "role": "h",
+      "cmd": "ban ${clientPid}",
+      "expect_result": "^OK banned parked '${clientPid}' key=(\\S+) stable=yes steam=no ip=not-recorded",
+      "capture": {
+        "banKey3": "key=(\\S+)"
+      },
+      "note": "(G1) BanPlayer reaches a waiting join request: banned from it and refused",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:banned' . \"You're banned from this host's games\\.",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Server\\] BANNED '${clientPid}' while the join request waited for approval \\(saved ban ${banKey3}:",
+          "within_s": 10
+        }
+      ],
+      "seq": 81
+    },
+    {
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK none pending",
+      "note": "(G1) the waiting request was dropped by the ban",
+      "seq": 82
+    },
+    {
+      "role": "h",
+      "cmd": "unban ${banKey3}",
+      "expect_result": "^OK unbanned 1 left=0",
+      "seq": 83
+    },
+    {
+      "role": "h",
+      "cmd": "ban devpark off",
+      "expect_result": "^OK devpark off",
+      "seq": 84
+    },
+    {
+      "role": "c",
+      "sleep_s": 5,
+      "seq": 85
     },
     {
       "role": "all",
       "cmd": "mark TEST BAN REJOIN",
       "expect_result": "OK MARK",
-      "seq": 50
+      "seq": 86
     },
     {
       "role": "c",
@@ -462,35 +807,35 @@
           "within_s": 60
         }
       ],
-      "seq": 51
+      "seq": 87
     },
     {
       "role": "h",
       "sleep_s": 5,
-      "seq": 52
+      "seq": 88
     },
     {
       "role": "h",
       "cmd": "acceptjoin",
       "expect_result": "^OK",
-      "seq": 53
+      "seq": 89
     },
     {
       "role": "c",
       "sleep_s": 60,
-      "seq": 54
+      "seq": 90
     },
     {
       "role": "h",
       "cmd": "ban list",
       "expect_result": "^OK ban list n=0 ",
-      "seq": 55
+      "seq": 91
     },
     {
       "role": "all",
       "cmd": "mark TEST BAN END",
       "expect_result": "OK MARK",
-      "seq": 56
+      "seq": 92
     }
   ]
 }
