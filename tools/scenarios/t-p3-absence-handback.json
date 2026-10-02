@@ -718,15 +718,15 @@
       "cmd": "interiorfp ${clientShop}",
       "expect_result": "^OK interiorfp",
       "capture": {
-        "cAfter2Fp": "fp=\\[([^\\]]+)\\]"
+        "cAfter2Fp": "fp=\\[([^\\]]*?) d="
       },
       "seq": 76
     },
     {
       "role": "h",
       "cmd": "interiorfp ${clientShop}",
-      "expect_result": "fp=\\[${cAfter2Fp}\\]",
-      "note": "still equal after 15 s",
+      "expect_result": "fp=\\[${cAfter2Fp} d=",
+      "note": "still equal after 15 s on items/units/structure/goods; the dirt band is compared at the ack line only - the owner's own staff may clean after the return and that reaches the host on the owner's next dirt upload (row DIRT-OWNER-AWAY-SYNC-1)",
       "seq": 77,
       "abort_on_fail": false
     },
@@ -828,21 +828,41 @@
       "seq": 89
     },
     {
-      "role": "h",
-      "cmd": "exitbuilding",
+      "role": "c",
+      "cmd": "leavegame menu",
+      "expect_result": "^OK leavegame",
+      "note": "review F1 (c7ccf25): the shop's owner goes OFFLINE while the host is still inside as a visitor",
       "abort_on_fail": false,
       "seq": 90
     },
     {
       "role": "h",
-      "sleep_s": 5,
+      "sleep_s": 10,
       "seq": 91
+    },
+    {
+      "role": "h",
+      "cmd": "basketprobe ${clientShop}",
+      "expect_result": "^OK basketprobe .*owned=False carried=(\\S+) table=\\1 shelfBefore=(\\S+) shelfAfter=\\2 ",
+      "note": "review F1: owner offline - the carried unit still wears the store price (before the fold the patch stood down and the visitor paid the cost)",
+      "seq": 92
+    },
+    {
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "seq": 93
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 94
     },
     {
       "role": "both",
       "cmd": "mark TEST P3-2 END",
       "expect_result": "OK MARK",
-      "seq": 92
+      "seq": 95
     }
   ]
 }

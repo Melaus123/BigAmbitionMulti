@@ -10930,7 +10930,9 @@ namespace BigAmbitionsMP
                     string key = GameStateReader.AddressKey(reg);
                     string owner = MPRegisterSync.CurrentShopOwner;
                     if (string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return;
-                    if (key != MPRegisterSync.CurrentShopAddress || !MPRestSync.AllPlayers().Contains(owner)) return;
+                    // Review F1 (c7ccf25): any SESSION player's shop, online or not - with an absent owner the take otherwise
+                    // carried the cost and the game's own checkout charged the visitor that cost.
+                    if (key != MPRegisterSync.CurrentShopAddress || !GameStatePatcher.IsSessionPlayerRivalId(owner)) return;
                     var stock = __instance.ItemInstance?.GetStockInstance();
                     if (stock == null || string.IsNullOrEmpty(stock.itemName)) return;
                     float t = MPRegisterSync.GetShopPriceAt(key, stock.itemName);

@@ -5090,12 +5090,12 @@ namespace BigAmbitionsMP
         /// every table-priced item "changed" on EVERY sync: 9 phantom entries per sync in the soak,
         /// native cargo callbacks fired for all of them, and S4-lite's baseline invalidated each time.
         /// PRICE-PER-UNIT-DIVERGE-1: the re-stamp is gone (cargo keeps the sender's cost), so the reason is
-        /// historical; price stays excluded here and a price-only change lands with the next full snapshot
-        /// (IdentitySig still includes price).</summary>
+        /// historical and price is compared again (review F3 of c7ccf25): a price-only change (a restock at another
+        /// cost) is a real change and goes out with the cargo sync instead of waiting for the next full snapshot.</summary>
         private static bool CargoDiffers(BigAmbitions.Items.ItemInstance live, List<CargoInstanceInfo>? incoming)
         {
-            var a = new System.Text.StringBuilder(); AppendCargoSig(a, live, includePrice: false);
-            var b = new System.Text.StringBuilder(); AppendCargoSig(b, incoming, includePrice: false);
+            var a = new System.Text.StringBuilder(); AppendCargoSig(a, live);
+            var b = new System.Text.StringBuilder(); AppendCargoSig(b, incoming);
             return !string.Equals(a.ToString(), b.ToString(), StringComparison.Ordinal);
         }
 
