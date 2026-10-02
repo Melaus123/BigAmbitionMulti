@@ -718,14 +718,15 @@
       "cmd": "interiorfp ${clientShop}",
       "expect_result": "^OK interiorfp",
       "capture": {
-        "cAfter2Fp": "fp=\\[([^\\]]*?) d="
+        "cAfter2Iu": "fp=\\[(items=\\d+ units=\\d+) dirty",
+        "cAfter2Sc": " (s=\\S+ c=\\S+) d="
       },
       "seq": 76
     },
     {
       "role": "h",
       "cmd": "interiorfp ${clientShop}",
-      "expect_result": "fp=\\[${cAfter2Fp} d=",
+      "expect_result": "fp=\\[${cAfter2Iu} dirty=\\d+ ${cAfter2Sc} d=",
       "note": "still equal after 15 s on items/units/structure/goods; the dirt band is compared at the ack line only - the owner's own staff may clean after the return and that reaches the host on the owner's next dirt upload (row DIRT-OWNER-AWAY-SYNC-1)",
       "seq": 77,
       "abort_on_fail": false
