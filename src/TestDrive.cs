@@ -4975,6 +4975,71 @@ namespace BigAmbitionsMP
 
                 // RIVALS-HOST-SWITCH-1 part 1 levers (decision 55, 2026-09-30). READ-ONLY: the rival-world health
                 // figures of THIS machine's world (HostHandoffCarry.Health - the same line the carry logs at host start).
+                // RIVALS-HOST-SWITCH-1 folds (DEV): 'rivalview n' = the size of the host's rival stats cache
+                // (ClientRivalStats; works in the menu - fold G3's session-end clear). 'rivalview chart' (client only) =
+                // folds G1/G4/G2 without the UI: the chart swap on the first living AI rival with a host business series,
+                // FillRivalState run on the swapped copies (as either chart does under 7 points), then the swap-back -
+                // savedSame=1 = this machine's saved lists are the same objects with the same points; defAgree = AI rows
+                // whose leaderboard 'defeated' flag equals the host's.
+                case "rivalview":
+                {
+                    try
+                    {
+                        string rvArg = arg.Trim().ToLowerInvariant();
+                        if (rvArg == "n") return $"OK rivalview n={GameStatePatcher.ClientRivalStats.Count}";
+                        if (rvArg != "chart") return "ERR usage: rivalview n|chart";
+                        if (SaveGameManager.Current == null) return "ERR no world loaded";
+                        if (!MPPatches.ClientOnlyRivalView) return "ERR rivalview chart: client only";
+                        int rvN = 0, rvAgree = 0, rvHostDef = 0;
+                        string rvPick = "";
+                        foreach (var kv in GameStatePatcher.ClientRivalStats)
+                        {
+                            string rid = kv.Key ?? ""; var rst = kv.Value;
+                            if (rst == null || rid.Length == 0 || GameStatePatcher.IsSessionPlayerRivalId(rid) || GameStatePatcher.ClientPlayerRoster.ContainsKey(rid)) continue;
+                            BigAmbitions.Rivals.RivalData? rrd = null;
+                            try { rrd = BigAmbitions.Rivals.RivalsHelper.GetRivalData(rid); } catch { }
+                            if (rrd == null) continue;
+                            rvN++;
+                            if (rst.IsDefeated) rvHostDef++;
+                            try { var rlb = UI.Smartphone.Apps.Rivals.RivalLeaderboard.GetRivalLeaderboardData(rrd); if (rlb != null && rlb.isDefeated == rst.IsDefeated) rvAgree++; } catch { }
+                            if (rvPick.Length == 0 && !rst.IsDefeated && (rst.BizCountHistory?.Count ?? 0) > 0) rvPick = rid;
+                        }
+                        if (rvPick.Length == 0) return $"OK rivalview chart id=- defAgree={rvAgree}/{rvN} defHost={rvHostDef}";
+                        var rps = GameStatePatcher.ClientRivalStats[rvPick];
+                        var rrs = BigAmbitions.Rivals.RivalsHelper.GetRivalState(rvPick);
+                        if (rrs == null) return $"ERR rivalview chart: no rival state for {rvPick}";
+                        var oInc = rrs.weeklyIncomeHistory; var oBiz = rrs.numberOfBusinessesHistory;
+                        string Sig()
+                        {
+                            var sb = new System.Text.StringBuilder();
+                            if (oInc != null) foreach (var p in oInc) if (p != null) sb.Append(p.Item1).Append(':').Append(p.Item2.ToString("R")).Append(',');
+                            sb.Append('|');
+                            if (oBiz != null) foreach (var p in oBiz) if (p != null) sb.Append(p.Item1).Append(':').Append(p.Item2).Append(',');
+                            return sb.ToString();
+                        }
+                        string sigBefore = Sig();
+                        MPPatches.RivalChartSwap? rw = null;
+                        int swInc = -1, swBiz = -1; bool filled = false;
+                        try
+                        {
+                            rw = MPPatches.SwapRivalChartSeries(rvPick);
+                            if (rw != null)
+                            {
+                                BigAmbitions.Rivals.RivalsHelper.FillRivalState(rvPick);
+                                filled = true;
+                                swInc = rrs.weeklyIncomeHistory?.Count ?? -1;
+                                swBiz = rrs.numberOfBusinessesHistory?.Count ?? -1;
+                            }
+                        }
+                        finally { MPPatches.RestoreRivalChartSeries(rw); }
+                        bool savedSame = ReferenceEquals(rrs.weeklyIncomeHistory, oInc) && ReferenceEquals(rrs.numberOfBusinessesHistory, oBiz) && Sig() == sigBefore;
+                        return $"OK rivalview chart id={rvPick} hostInc={rps?.IncomeHistory?.Count ?? 0} hostBiz={rps?.BizCountHistory?.Count ?? 0} swapped={(rw != null ? 1 : 0)} "
+                             + $"bizFromHost={(rw != null && rw.HostBusinesses > 0 ? 1 : 0)} filled={(filled ? 1 : 0)} swInc={swInc} swBiz={swBiz} savedSame={(savedSame ? 1 : 0)} "
+                             + $"savedInc={oInc?.Count ?? -1} savedBiz={oBiz?.Count ?? -1} defAgree={rvAgree}/{rvN} defHost={rvHostDef}";
+                    }
+                    catch (Exception rvEx) { return $"ERR rivalview: {rvEx.GetType().Name}: {rvEx.Message}"; }
+                }
+
                 case "rivalhealth":
                 {
                     try

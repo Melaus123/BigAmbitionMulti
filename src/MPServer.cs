@@ -12506,6 +12506,18 @@ namespace BigAmbitionsMP
                                     }
                                 }
                                 catch { }
+                                // RIVALS-HOST-SWITCH-1 fold G1: the AI rival's business-count history rides the EXISTING
+                                // BizCountHistory the same way (last 10 days), for the client's businesses chart.
+                                try
+                                {
+                                    if (rs.numberOfBusinessesHistory != null && !GameStatePatcher.IsSessionPlayerRivalId(id))
+                                    {
+                                        foreach (var hb in rs.numberOfBusinessesHistory)
+                                            if (hb != null) info.BizCountHistory.Add(new HistoryPointI { Day = hb.Item1, Value = hb.Item2 });
+                                        if (info.BizCountHistory.Count > 10) info.BizCountHistory.RemoveRange(0, info.BizCountHistory.Count - 10);
+                                    }
+                                }
+                                catch { }
                             }
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] GetRivalData('{id}'): {ex.Message}"); }

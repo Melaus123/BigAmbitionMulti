@@ -2833,48 +2833,118 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>D4a step 4: the AI rival's weekly-income chart on a client plots the host's series
-        /// (RivalStatsInfo.IncomeHistory, filled for AI rivals by the host's stats snapshot). The prefix swaps
-        /// rivalState.weeklyIncomeHistory for a COPY of that series for the draw only; the finalizer puts the
-        /// original list back, so the saved rivalStates never hold it (as InstallPlayerRivalStateHistory's
-        /// runtime-only series). Session players keep their installed synthetic state (untouched here).</summary>
+        /// <summary>D4a step 4 + RIVALS-HOST-SWITCH-1 folds G1/G4: on a client, BOTH series of an AI rival's chart
+        /// (rivalState.weeklyIncomeHistory and numberOfBusinessesHistory) are swapped for COPIES for the draw only - the
+        /// host's series (RivalStatsInfo.IncomeHistory / BizCountHistory, from the stats snapshot) when it sent one, else a
+        /// copy of this machine's own list. The game's FillRivalState (called by either chart when a series has fewer than
+        /// 7 points, decompile RivalsHelper.cs:360-395) writes made-up points into BOTH lists and reassigns them, so with
+        /// both swapped it only ever touches the copies; the finalizer puts both original lists back, and the saved
+        /// rivalStates never hold a host or a made-up point. Session players keep their installed synthetic state
+        /// (untouched here).</summary>
+        internal sealed class RivalChartSwap
+        {
+            public BigAmbitions.Rivals.RivalState State = null!;
+            public System.Collections.Generic.List<System.Tuple<int, float>>? OriginalIncome;
+            public System.Collections.Generic.List<System.Tuple<int, int>>? OriginalBusinesses;
+            public int HostIncome, HostBusinesses;   // points taken from the host's series (0 = a copy of this machine's own list)
+        }
+
+        /// <summary>Swap both chart series of AI rival `id` for copies (see above). Null = nothing swapped (not a
+        /// client, a session player, or no rival state). The caller MUST hand the result to RestoreRivalChartSeries.</summary>
+        internal static RivalChartSwap? SwapRivalChartSeries(string id)
+        {
+            if (!ClientOnlyRivalView || string.IsNullOrEmpty(id) || GameStatePatcher.IsSessionPlayerRivalId(id)) return null;
+            var rs = BigAmbitions.Rivals.RivalsHelper.GetRivalState(id);
+            if (rs == null) return null;
+            GameStatePatcher.ClientRivalStats.TryGetValue(id, out var s);
+            var inc = new System.Collections.Generic.List<System.Tuple<int, float>>();
+            var biz = new System.Collections.Generic.List<System.Tuple<int, int>>();
+            int hostInc = 0, hostBiz = 0;
+            if (s?.IncomeHistory != null && s.IncomeHistory.Count > 0)
+            {
+                foreach (var pt in s.IncomeHistory) if (pt != null) inc.Add(new System.Tuple<int, float>(pt.Day, pt.Value));
+                hostInc = inc.Count;
+            }
+            else if (rs.weeklyIncomeHistory != null) inc.AddRange(rs.weeklyIncomeHistory);
+            if (s?.BizCountHistory != null && s.BizCountHistory.Count > 0)
+            {
+                foreach (var pt in s.BizCountHistory) if (pt != null) biz.Add(new System.Tuple<int, int>(pt.Day, pt.Value));
+                hostBiz = biz.Count;
+            }
+            else if (rs.numberOfBusinessesHistory != null) biz.AddRange(rs.numberOfBusinessesHistory);
+            var w = new RivalChartSwap
+            {
+                State = rs, OriginalIncome = rs.weeklyIncomeHistory, OriginalBusinesses = rs.numberOfBusinessesHistory,
+                HostIncome = hostInc, HostBusinesses = hostBiz
+            };
+            rs.weeklyIncomeHistory = inc;
+            rs.numberOfBusinessesHistory = biz;
+            return w;
+        }
+
+        /// <summary>Put both original (saved) lists back after a SwapRivalChartSeries.</summary>
+        internal static void RestoreRivalChartSeries(RivalChartSwap? w)
+        {
+            if (w == null) return;
+            w.State.weeklyIncomeHistory = w.OriginalIncome!;
+            w.State.numberOfBusinessesHistory = w.OriginalBusinesses!;
+        }
+
         [HarmonyPatch(typeof(UI.Smartphone.Apps.Rivals.SelectedRivalUI), "SetChartWeeklyIncome")]
         public static class Patch_SelectedRivalUI_SetChartWeeklyIncome_ClientStats
         {
             internal static int Swaps;   // DEV readout
 
-            internal sealed class SwapBack
-            {
-                public BigAmbitions.Rivals.RivalState State = null!;
-                public System.Collections.Generic.List<System.Tuple<int, float>> Original = null!;
-            }
-
-            static void Prefix(BigAmbitions.Rivals.RivalData ____selectedRival, out SwapBack? __state)
+            static void Prefix(BigAmbitions.Rivals.RivalData ____selectedRival, out RivalChartSwap? __state)
             {
                 __state = null;
                 try
                 {
                     if (!ClientOnlyRivalView || ____selectedRival == null) return;
                     string id = ____selectedRival.id ?? "";
-                    if (id.Length == 0 || GameStatePatcher.IsSessionPlayerRivalId(id)) return;
-                    if (!GameStatePatcher.ClientRivalStats.TryGetValue(id, out var s) || s?.IncomeHistory == null || s.IncomeHistory.Count == 0) return;
-                    var rs = BigAmbitions.Rivals.RivalsHelper.GetRivalState(id);
-                    if (rs == null) return;
-                    var series = new System.Collections.Generic.List<System.Tuple<int, float>>(s.IncomeHistory.Count);
-                    foreach (var pt in s.IncomeHistory) if (pt != null) series.Add(new System.Tuple<int, float>(pt.Day, pt.Value));
-                    __state = new SwapBack { State = rs, Original = rs.weeklyIncomeHistory };
-                    rs.weeklyIncomeHistory = series;
+                    __state = SwapRivalChartSeries(id);
+                    if (__state == null) return;
                     Swaps++;
                     if (RivalOnce(_onceChart, id))
-                        Plugin.Logger.LogInfo($"[RivalStats] client: rival {id} income chart plots the host's series ({series.Count} points); this machine's saved history is put back after the draw.");
+                        Plugin.Logger.LogInfo($"[RivalStats] client: rival {id} income chart plots {(__state.HostIncome > 0 ? $"the host's series ({__state.HostIncome} points)" : "a copy of this machine's history (no host series)")}; this machine's saved histories are put back after the draw.");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalStats] chart swap: {ex.Message}"); }
             }
 
-            static void Finalizer(SwapBack? __state)
+            static void Finalizer(RivalChartSwap? __state)
             {
-                try { if (__state != null) __state.State.weeklyIncomeHistory = __state.Original; }
+                try { RestoreRivalChartSeries(__state); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalStats] chart swap-back: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>Fold G1: the businesses chart (decompile SelectedRivalUI.cs:197-207) gets the same swap - the host's
+        /// business-count series for the draw only, both saved lists put back in the finalizer.</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Rivals.SelectedRivalUI), "SetChartNumberOfBusinesses")]
+        public static class Patch_SelectedRivalUI_SetChartNumberOfBusinesses_ClientStats
+        {
+            internal static int Swaps;   // DEV readout
+
+            static void Prefix(BigAmbitions.Rivals.RivalData ____selectedRival, out RivalChartSwap? __state)
+            {
+                __state = null;
+                try
+                {
+                    if (!ClientOnlyRivalView || ____selectedRival == null) return;
+                    string id = ____selectedRival.id ?? "";
+                    __state = SwapRivalChartSeries(id);
+                    if (__state == null) return;
+                    Swaps++;
+                    if (RivalOnce(_onceChart, "b:" + id))
+                        Plugin.Logger.LogInfo($"[RivalStats] client: rival {id} businesses chart plots {(__state.HostBusinesses > 0 ? $"the host's series ({__state.HostBusinesses} points)" : "a copy of this machine's history (no host series)")}; this machine's saved histories are put back after the draw.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalStats] businesses chart swap: {ex.Message}"); }
+            }
+
+            static void Finalizer(RivalChartSwap? __state)
+            {
+                try { RestoreRivalChartSeries(__state); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalStats] businesses chart swap-back: {ex.Message}"); }
             }
         }
 
@@ -2934,6 +3004,21 @@ namespace BigAmbitionsMP
                     return false;
                 }
                 catch { return true; }
+            }
+        }
+
+        /// <summary>RIVALS-HOST-SWITCH-1 fold G3: the host's rival stats (GameStatePatcher.ClientRivalStats) belong to one
+        /// session. Leaving the city for the main menu (LoadScene.LoadMainMenuFromCity - the pause-menu exit, a ban, the DEV
+        /// leavegame lever) ends the session on this machine, and every later world is loaded from the menu, so the cache
+        /// is emptied here: a new session never shows the previous session's figures. Prefix on the iterator's stub (runs
+        /// when the coroutine is created); the original always runs.</summary>
+        [HarmonyPatch(typeof(global::UI.Load.LoadScene), nameof(global::UI.Load.LoadScene.LoadMainMenuFromCity))]
+        public static class Patch_LoadScene_LoadMainMenuFromCity_ClearRivalStats
+        {
+            static void Prefix()
+            {
+                try { GameStatePatcher.ClearClientRivalStats("left the city for the main menu"); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalStats] session-end clear: {ex.Message}"); }
             }
         }
 
@@ -3223,6 +3308,20 @@ namespace BigAmbitionsMP
                     {
                         if (!string.IsNullOrEmpty(s.Name))   lb.entryName    = s.Name;
                         if (s.WeeklyIncome != 0f)            { lb.weeklyIncome = s.WeeklyIncome; overrodeIncome = true; }
+                        // RIVALS-HOST-SWITCH-1 fold G2: the 'defeated' flag is the host's (RivalStatsInfo.IsDefeated). The native
+                        // test (decompile RivalLeaderboard.cs:103-107) read this machine's own business list BEFORE the populate
+                        // above filled it, so a living rival could show as defeated (and a host-defeated one as living).
+                        try
+                        {
+                            if (ClientOnlyRivalView && s != null && lb.isDefeated != s.IsDefeated)
+                            {
+                                bool wasDefeated = lb.isDefeated;
+                                lb.isDefeated = s.IsDefeated;
+                                if (RivalOnce(_onceDefeat, "lb:" + id))
+                                    Plugin.Logger.LogInfo($"[RivalStats] client: rival {id} leaderboard 'defeated' = the host's flag ({s.IsDefeated}); this machine's own test said {wasDefeated}.");
+                            }
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalStats] defeated flag: {ex.Message}"); }
                     }
                     // Diagnostic — log a sample of incomes flowing through.
                     // Throttled by static counter to avoid spam.

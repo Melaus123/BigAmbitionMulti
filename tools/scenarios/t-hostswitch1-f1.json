@@ -12,7 +12,8 @@
   },
   "oracles_absent": [
     "\\[Guard\\]",
-    "(?<!swallowed )NullReferenceException"
+    "(?<!swallowed )NullReferenceException",
+    "HOST HANDOFF CARRY: torn"
   ],
   "oracles_report": [
     "\\[MPSave\\] HOST HANDOFF",

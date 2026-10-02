@@ -1079,6 +1079,21 @@ namespace BigAmbitionsMP
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] ApplyRivalsStatsSnapshot: {ex.Message}"); }
             });
         }
+        /// <summary>RIVALS-HOST-SWITCH-1 fold G3: empty the host's rival stats at a session end (caller: the
+        /// leave-the-city patch in MPPatches, Patch_LoadScene_LoadMainMenuFromCity_ClearRivalStats). MAIN THREAD.</summary>
+        public static void ClearClientRivalStats(string why)
+        {
+            try
+            {
+                int n = ClientRivalStats.Count;
+                ClientRivalStats.Clear();
+                ClientBusinessIncomeByAddress.Clear();   // the two companion maps filled from the same host snapshot (fold leftover)
+                ClientRivalBusinessAddrs.Clear();
+                if (n > 0) Plugin.Logger.LogInfo($"[RivalStats] session end ({why}): cleared {n} rival stats entr{(n == 1 ? "y" : "ies")} - a new session starts without the previous session's figures.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalStats] session-end clear: {ex.Message}"); }
+        }
+
         /// <summary>Re-Load an OPEN rivals leaderboard so a state change is reflected without
         /// closing the app. We CHECK activeInHierarchy explicitly - Load() on a hidden/uninitialized
         /// RivalLeaderboard can dereference null serialized fields and crash the process natively.
@@ -1166,17 +1181,11 @@ namespace BigAmbitionsMP
                 if (rd.ownedRetailOfficeBusinesses != null) rd.ownedRetailOfficeBusinesses.Clear();
 
                 System.Collections.Generic.HashSet<string>? syncedAddrs = null;
-                System.Collections.Generic.Dictionary<string, float>? syncedIncome = null;
                 if (ClientRivalStats.TryGetValue(id, out var stat) && stat.Businesses != null && stat.Businesses.Count > 0)
                 {
-                    syncedAddrs  = new System.Collections.Generic.HashSet<string>();
-                    syncedIncome = new System.Collections.Generic.Dictionary<string, float>();
+                    syncedAddrs = new System.Collections.Generic.HashSet<string>();
                     foreach (var b in stat.Businesses)
-                        if (!string.IsNullOrEmpty(b.AddressKey))
-                        {
-                            syncedAddrs.Add(b.AddressKey);
-                            syncedIncome[b.AddressKey] = b.WeeklyIncome;
-                        }
+                        if (!string.IsNullOrEmpty(b.AddressKey)) syncedAddrs.Add(b.AddressKey);
                 }
 
                 var gi = SaveGameManager.Current;

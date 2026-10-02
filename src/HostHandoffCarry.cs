@@ -108,7 +108,7 @@ namespace BigAmbitionsMP
                 {
                     Mode = "torn";
                     MPSaveCoordinator.LastHostCarry = "mode=torn (exception DURING the commit - the world may be partly carried)";
-                    Plugin.Logger.LogError($"[MPSave] HOST HANDOFF CARRY: none — the carry threw DURING its commit ({ex.GetType().Name}: {ex.Message}); the world-only state may be PARTLY carried from the previous host's copy. {ex}");
+                    Plugin.Logger.LogError($"[MPSave] HOST HANDOFF CARRY: torn — the carry threw DURING its commit ({ex.GetType().Name}: {ex.Message}); the world-only state may be PARTLY carried from the previous host's copy. {ex}");
                 }
                 else
                     Plugin.Logger.LogWarning($"[MPSave] HOST HANDOFF CARRY: the carry was committed (mode={Mode}) but its report threw ({ex.GetType().Name}: {ex.Message}).");

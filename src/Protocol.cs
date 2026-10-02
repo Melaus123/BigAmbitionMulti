@@ -3916,9 +3916,10 @@ namespace BigAmbitionsMP
         /// business).  Drives both the detail-view breakdown income override and
         /// the leaderboard business-count reconciliation on the client.</summary>
         public List<RivalBusinessInfo> Businesses { get; set; } = new();
-        /// <summary>Real per-day series (players only) — installed as the
-        /// synthetic row's RivalState so the detail-view graphs plot truth
-        /// instead of the flat/random backfill.</summary>
+        /// <summary>Real per-day series (players and AI rivals, last 10 days) —
+        /// for a player installed as the synthetic row's RivalState; for an AI
+        /// rival swapped in on a client for the chart draw only (never saved),
+        /// so the detail-view graphs plot truth instead of the flat/random backfill.</summary>
         public List<HistoryPointF> IncomeHistory   { get; set; } = new();
         public List<HistoryPointI> BizCountHistory { get; set; } = new();
     }

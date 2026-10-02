@@ -14,7 +14,8 @@
     "\\[Guard\\]",
     "(?<!swallowed )NullReferenceException",
     "HOST HANDOFF CARRY: none",
-    "HOST HANDOFF CARRY order check: [0-9]+ hourly/daily pass\\(es\\) already ran"
+    "HOST HANDOFF CARRY order check: [0-9]+ hourly/daily pass\\(es\\) already ran",
+    "HOST HANDOFF CARRY: torn"
   ],
   "oracles_report": [
     "\\[MPSave\\] HOST HANDOFF",
@@ -22,7 +23,8 @@
     "DefeatRival",
     "\\[Rest\\] skip GOAL reached",
     "skipped on client",
-    "\\[RivalStats\\] client"
+    "\\[RivalStats\\] client",
+    "\\[RivalStats\\] session end"
   ],
   "steps": [
     {
@@ -129,6 +131,26 @@
       "seq": 10
     },
     {
+      "role": "c",
+      "cmd": "rivalattn report",
+      "expect_result": "^OK rivalattn report sent",
+      "note": "fold G3 setup: the client's self-report - the host answers with its stats snapshot (ClientRivalStats fills)",
+      "seq": 11
+    },
+    {
+      "role": "c",
+      "sleep_s": 8,
+      "note": "the snapshot arrives",
+      "seq": 12
+    },
+    {
+      "role": "c",
+      "cmd": "rivalview n",
+      "expect_result": "^OK rivalview n=[1-9][0-9]*$",
+      "note": "fold G3: the client holds the host's stats before it leaves",
+      "seq": 13
+    },
+    {
       "role": "h",
       "cmd": "save",
       "expect_result": "^OK",
@@ -140,61 +162,68 @@
         }
       ],
       "note": "the coordinated save: both copies land at the same moment and the host's .hsg is mirrored into c's store",
-      "seq": 11
+      "seq": 14
     },
     {
       "role": "h",
       "sleep_s": 15,
-      "seq": 12
+      "seq": 15
     },
     {
       "role": "c",
       "cmd": "leavegame menu",
       "expect_result": "^OK leavegame menu",
-      "seq": 13
+      "seq": 16
     },
     {
       "role": "c",
       "sleep_s": 10,
-      "seq": 14
-    },
-    {
-      "role": "h",
-      "drop": true,
-      "seq": 15
-    },
-    {
-      "role": "c",
-      "drop": true,
-      "seq": 16
-    },
-    {
-      "role": "h",
-      "relaunch": true,
       "seq": 17
     },
     {
       "role": "c",
-      "relaunch": true,
+      "cmd": "rivalview n",
+      "expect_result": "^OK rivalview n=0$",
+      "note": "FOLD G3: leaving the city emptied the host's rival stats on this machine",
       "seq": 18
     },
     {
       "role": "h",
-      "sleep_s": 20,
+      "drop": true,
       "seq": 19
+    },
+    {
+      "role": "c",
+      "drop": true,
+      "seq": 20
+    },
+    {
+      "role": "h",
+      "relaunch": true,
+      "seq": 21
+    },
+    {
+      "role": "c",
+      "relaunch": true,
+      "seq": 22
+    },
+    {
+      "role": "h",
+      "sleep_s": 20,
+      "seq": 23
     },
     {
       "role": "c",
       "cmd": "host",
       "expect_result": "^OK",
       "note": "ROLE SWAP: the former client hosts",
-      "seq": 20
+      "seq": 24
     },
     {
       "role": "h",
       "cmd": "join",
       "expect_result": "^OK",
-      "seq": 21
+      "seq": 25
     },
     {
       "role": "c",
@@ -233,30 +262,30 @@
         }
       ],
       "note": "THE CARRY (design D2/D6 steps 4-5) + the DEV order assert (D2 step 2: the loaded world's first hourly pass ran after the carry): mode=full from the previous host; conflicts=0; keptPlayer = the ledger's player shops (= keptLedger); the carry-time health equals the step-9 baseline (aiRun, ident7, nonZeroIncome, nsDue, histFlat, specialDefeated)",
-      "seq": 22
+      "seq": 26
     },
     {
       "role": "both",
       "cmd": "mark TEST T-HOSTSWITCH1 CARRIED",
       "expect_result": "OK MARK",
-      "seq": 23
+      "seq": 27
     },
     {
       "role": "c",
       "sleep_s": 20,
-      "seq": 24
+      "seq": 28
     },
     {
       "role": "c",
       "cmd": "status",
       "expect_result": "settled=True",
-      "seq": 25
+      "seq": 29
     },
     {
       "role": "h",
       "cmd": "status",
       "expect_result": "settled=True",
-      "seq": 26
+      "seq": 30
     },
     {
       "role": "h",
@@ -268,14 +297,14 @@
         "hAi": "aiRun=(\\d+)"
       },
       "note": "PART 2: the client's ident7 at join (its loaded copy) - the end check prints ident7Delta against it",
-      "seq": 27
+      "seq": 31
     },
     {
       "role": "c",
       "cmd": "hostcarry",
       "expect_result": "^OK hostcarry next=on last='mode=full from=${hostStable} ",
       "note": "the bug-report stamp (MPSaveCoordinator.LastHostCarry)",
-      "seq": 28
+      "seq": 32
     },
     {
       "role": "c",
@@ -295,37 +324,37 @@
         "sNeg7": "neg7=(\\d+)",
         "sEmpty": "empty=(\\d+)"
       },
-      "seq": 29
+      "seq": 33
     },
     {
       "role": "c",
       "cmd": "exitbuilding",
       "abort_on_fail": false,
       "note": "report-only: the skip is taken outdoors",
-      "seq": 30
+      "seq": 34
     },
     {
       "role": "h",
       "cmd": "exitbuilding",
       "abort_on_fail": false,
-      "seq": 31
+      "seq": 35
     },
     {
       "role": "c",
       "sleep_s": 8,
-      "seq": 32
+      "seq": 36
     },
     {
       "role": "both",
       "cmd": "skiprate 300",
       "expect_result": "^OK skiprate",
-      "seq": 33
+      "seq": 37
     },
     {
       "role": "c",
       "cmd": "skipvote +120h",
       "expect_result": "^OK skipvote goal=",
-      "seq": 34
+      "seq": 38
     },
     {
       "role": "h",
@@ -344,31 +373,31 @@
         }
       ],
       "note": "SKIP LEG 1 of 2 (+120 game-hours)",
-      "seq": 35
+      "seq": 39
     },
     {
       "role": "c",
       "sleep_s": 10,
-      "seq": 36
+      "seq": 40
     },
     {
       "role": "both",
       "cmd": "skipvote off",
       "expect_result": "^OK skipvote goal=-",
-      "seq": 37
+      "seq": 41
     },
     {
       "role": "c",
       "cmd": "skipstate",
       "abort_on_fail": false,
       "note": "report: the clock after the leg",
-      "seq": 38
+      "seq": 42
     },
     {
       "role": "c",
       "cmd": "skipvote +120h",
       "expect_result": "^OK skipvote goal=",
-      "seq": 39
+      "seq": 43
     },
     {
       "role": "h",
@@ -387,31 +416,31 @@
         }
       ],
       "note": "SKIP LEG 2 of 2 (+120 game-hours)",
-      "seq": 40
+      "seq": 44
     },
     {
       "role": "c",
       "sleep_s": 10,
-      "seq": 41
+      "seq": 45
     },
     {
       "role": "both",
       "cmd": "skipvote off",
       "expect_result": "^OK skipvote goal=-",
-      "seq": 42
+      "seq": 46
     },
     {
       "role": "c",
       "cmd": "skipstate",
       "abort_on_fail": false,
       "note": "report: the clock after the leg",
-      "seq": 43
+      "seq": 47
     },
     {
       "role": "c",
       "sleep_s": 30,
       "note": "the last day's queued valuation updates drain",
-      "seq": 44
+      "seq": 48
     },
     {
       "role": "c",
@@ -432,7 +461,7 @@
       },
       "note": "10 days later, on the HOST: nonZeroIncome >= 95% of aiRun (nzPct); aiRun / specialDefeated are compared with T-HOSTSWITCH1-CTRL in the report",
       "expect_result": "^OK rivalhealth day=5[4-9] .*nzPct=(9[5-9]|100)\\.[0-9] ",
-      "seq": 45
+      "seq": 49
     },
     {
       "role": "c",
@@ -442,7 +471,7 @@
         "eDefeats": "defeats=(\\d+)"
       },
       "note": "DefeatRuns on the host (compare with the control)",
-      "seq": 46
+      "seq": 50
     },
     {
       "role": "h",
@@ -450,13 +479,13 @@
       "expect_result": "^OK rivalattn report sent",
       "abort_on_fail": false,
       "note": "the client's self-report: the host answers with a fresh stats snapshot (ClientRivalStats)",
-      "seq": 47
+      "seq": 51
     },
     {
       "role": "h",
       "sleep_s": 8,
       "note": "the snapshot arrives",
-      "seq": 48
+      "seq": 52
     },
     {
       "role": "h",
@@ -464,7 +493,7 @@
       "expect_result": "^OK rows=",
       "abort_on_fail": false,
       "note": "the leaderboard data path on the client (native GetRivalLeaderboardData: the WeeklyIncome getter, the native defeat test, the populate that used to write the fake series)",
-      "seq": 49
+      "seq": 53
     },
     {
       "role": "h",
@@ -475,7 +504,7 @@
       },
       "abort_on_fail": false,
       "note": "PART 2 (D4b): DefeatRival never runs on the client (the guard logs 'skipped on client'; DefeatRuns stays 0)",
-      "seq": 50
+      "seq": 54
     },
     {
       "role": "h",
@@ -499,13 +528,20 @@
       },
       "note": "PART 2 (D4a) on the CLIENT h: ident7 not grown since join (ident7Delta <= 0), every AI rival with a host stats entry reads WeeklyIncome from it (cWkFromStats = cStats > 0), RivalsHelper.RunDaily skipped (cRunDailySkips > 0)",
       "expect_result": "^OK rivalhealth day=.* ident7Delta=(0|-[0-9]+) cStats=([1-9][0-9]*) cWkFromStats=\\2 cWkServed=[1-9][0-9]* cChartSwaps=[0-9]+ cDefeatSkips=[0-9]+ cRunDailySkips=[1-9][0-9]*$",
-      "seq": 51
+      "seq": 55
+    },
+    {
+      "role": "h",
+      "cmd": "rivalview chart",
+      "expect_result": "^OK rivalview chart id=\\S+ hostInc=[1-9][0-9]* hostBiz=[1-9][0-9]* swapped=1 bizFromHost=1 filled=1 swInc=7 swBiz=7 savedSame=1 .*defAgree=([1-9][0-9]*)/\\1 defHost=",
+      "note": "FOLDS G1/G4/G2 on the CLIENT h (no UI): the host sends the AI business-count series (hostBiz), the chart swap takes it (bizFromHost), FillRivalState run during the swap touches only the copies (savedSame=1: the saved lists are the same objects with the same points), and every AI leaderboard row's 'defeated' flag equals the host's (defAgree n/n)",
+      "seq": 56
     },
     {
       "role": "both",
       "cmd": "mark TEST T-HOSTSWITCH1 END",
       "expect_result": "OK MARK",
-      "seq": 52
+      "seq": 57
     }
   ]
 }
