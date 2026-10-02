@@ -3858,7 +3858,7 @@ namespace BigAmbitionsMP
                 if (!_running) return "ERR not hosting";
                 if (string.IsNullOrEmpty(playerId) || playerId == MPConfig.PlayerId) return "ERR not a remote player";
                 var link = PeerForPlayer(playerId);
-                if (link == null) return BanParked(playerId, "") ?? $"ERR '{playerId}' is not connected (use the offline ban)";
+                if (link == null) return BanParked(playerId, StableOfPid(playerId)) ?? $"ERR '{playerId}' is not connected (use the offline ban)";   // C1 re-check c4: a waiting join is matched by stable id only
                 string stable = StableOfPid(playerId);
                 JoinerIdentity(link, out var steam, out var ip);
                 var e = MPConfig.AddBan(playerId, steam, stable, ip, GameDayNow());
@@ -3866,6 +3866,16 @@ namespace BigAmbitionsMP
                 bool ipKept = MPConfig.IsRecordableIp(ip);
                 Plugin.Logger.LogInfo($"[Server] BANNED '{playerId}' (saved ban {e.Key}: stable id {(stable.Length > 0 ? "yes" : "no")}, Steam id {(steam.Length > 0 ? "yes" : "no")}, address {(ipKept ? "recorded" : "not recorded")} {MPConfig.AddressTag(ip)}) - lasts until unbanned.");
                 _banLinks[link.Id] = 0;   // C1 (F5): before the close - from here nothing this link sends is processed
+                // C1 re-check c1: the link may have left on the network thread between PeerForPlayer and the mark - its one
+                // disconnect report already ran, so nothing would ever clear the mark and a recycled LiteNetLib peer number
+                // would inherit it. Gone already = mark removed, no close, no second cleanup (the saved ban stands).
+                if (!_clients.ContainsKey(link))
+                {
+                    _banLinks.TryRemove(link.Id, out _);
+                    Plugin.Logger.LogInfo($"[Server] banned link {link.Id} had already left before it was marked - mark removed (its leave cleanup already ran).");
+                    foreach (var (pp, _) in TakeParked(stable)) { try { pp.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:banned")); } catch { } }
+                    return $"OK banned '{playerId}' key={e.Key} stable={(stable.Length > 0 ? "yes" : "no")} steam={(steam.Length > 0 ? "yes" : "no")} ip={(ipKept ? "recorded" : "not-recorded")} ({MPConfig.AddressTag(ip)}) (already left)";
+                }
                 try { link.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:bannedgame")); } catch { }
                 if (link is SteamLink)
                 {
@@ -3875,20 +3885,22 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Server] banned link {link.Id} is a Steam link - the host's own close is not reported back, so its leave cleanup runs from the ban.");
                     OnPeerDisconnected(link, "ban (Steam reports no host close)");
                 }
-                foreach (var (pp, _) in TakeParked(playerId, stable)) { try { pp.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:banned")); } catch { } }   // C1 (G1): a second connection waiting for approval
+                foreach (var (pp, _) in TakeParked(stable)) { try { pp.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:banned")); } catch { } }   // C1 (G1): a second connection waiting for approval
                 return $"OK banned '{playerId}' key={e.Key} stable={(stable.Length > 0 ? "yes" : "no")} steam={(steam.Length > 0 ? "yes" : "no")} ip={(ipKept ? "recorded" : "not-recorded")} ({MPConfig.AddressTag(ip)})";
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BanPlayer('{playerId}'): {ex.Message}"); return "ERR " + ex.Message; }
         }
 
         /// <summary>BAN-PLAYERS-1 build C1 (G1) - MAIN THREAD: take every join request waiting for the host's approval from
-        /// this player (by name or stable id) out of the queue.</summary>
-        private static List<(MPLink peer, HelloPayload hello)> TakeParked(string pid, string stable)
+        /// this player out of the queue - matched by STABLE ID ONLY (C1 re-check c4: a display name is not an identity; two
+        /// players may share one, and a name match would refuse the wrong person).</summary>
+        private static List<(MPLink peer, HelloPayload hello)> TakeParked(string stable)
         {
             var outp = new List<(MPLink peer, HelloPayload hello)>();
             try
             {
-                pid ??= ""; stable ??= "";
+                stable ??= "";
+                if (stable.Length == 0) return outp;
                 var ids = new List<int>();
                 lock (_pendingJoins)
                 {
@@ -3896,7 +3908,7 @@ namespace BigAmbitionsMP
                     {
                         var h = kv.Value.hello;
                         if (h == null) continue;
-                        if ((pid.Length > 0 && h.PlayerId == pid) || (stable.Length > 0 && h.StableId == stable)) { ids.Add(kv.Key); outp.Add(kv.Value); }
+                        if (h.StableId == stable) { ids.Add(kv.Key); outp.Add(kv.Value); }
                     }
                     foreach (var id in ids) _pendingJoins.Remove(id);
                 }
@@ -3908,12 +3920,12 @@ namespace BigAmbitionsMP
 
         /// <summary>BAN-PLAYERS-1 build C1 (G1) - MAIN THREAD: ban a player whose join request is waiting for approval (not in
         /// the game yet): the saved ban is recorded from that request and every request of theirs is refused with
-        /// 'BAMP:banned'. Null when nothing of theirs is waiting.</summary>
+        /// 'BAMP:banned'. Null when nothing of theirs is waiting. Matched by the stable id only (C1 re-check c4).</summary>
         private static string? BanParked(string pid, string stableHint)
         {
             try
             {
-                var parked = TakeParked(pid, stableHint);
+                var parked = TakeParked(stableHint);
                 if (parked.Count == 0) return null;
                 var (peer, hello) = parked[0];
                 JoinerIdentity(peer, out var steam, out var ip);
@@ -3960,7 +3972,7 @@ namespace BigAmbitionsMP
                 if (e == null) return $"ERR nothing identifies '{who}' - not banned";
                 Plugin.Logger.LogInfo($"[Server] BANNED offline player '{pid}' (saved ban {e.Key}: stable id yes, Steam id {(string.IsNullOrEmpty(steam) ? "no" : "yes")}) - lasts until unbanned.");
                 int refused = 0;
-                foreach (var (pp, _) in TakeParked(pid, stable)) { refused++; try { pp.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:banned")); } catch { } }
+                foreach (var (pp, _) in TakeParked(stable)) { refused++; try { pp.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:banned")); } catch { } }
                 if (refused > 0) Plugin.Logger.LogInfo($"[Server] '{pid}': {refused} join request(s) waiting for approval refused by the ban.");
                 return $"OK banned offline '{pid}' key={e.Key} stable=yes steam={(string.IsNullOrEmpty(steam) ? "no" : "yes")}";
             }

@@ -782,6 +782,7 @@ namespace BigAmbitionsMP
             MPOffers.HostTick();         // round-196: re-send unacked business-transfer finalizes (5s)
             MPTakeover.Tick();           // round-204b: expire an unanswered takeover offer (6s — older host)
             MPClient.TickWorldReadyGate();   // round-205: recurring readiness check (content bar + deadline)
+            MPClient.TickBanExit();          // BAN-PLAYERS-1 C1 re-check c2/c3: an in-game ban's exit waits out a load
             MPFrameRhythm.Tick();            // round-207: frame-rhythm capture (oscillation shape/cadence/beat match)
             MPPerf.End("Pre.B", _sub);
             _sub = MPPerf.Begin();
@@ -840,6 +841,7 @@ namespace BigAmbitionsMP
             _sub = MPPerf.Begin(); TickOverlayWatchdog(); MPPerf.End("F.OverW", _sub);      // stuck loading screen over a live world → force-dismiss
             _sub = MPPerf.Begin(); TickJoinDialog(); MPPerf.End("F.JoinD", _sub);           // Phase 5 — connect-dialog input (when open)
             _sub = MPPerf.Begin(); TickLobbyWindow(); MPPerf.End("F.Lobby", _sub);          // Phase 5 — lobby window input (when open)
+            TickBanUi();                                                                     // BAN-PLAYERS-1 C2: ban follow-up + 'REMOVED FROM GAME'
             _sub = MPPerf.Begin(); TickSavePicker(); MPPerf.End("F.SaveP", _sub);           // Phase 5 — save-picker input (when open)
             Patch_ReportBugButton_ModTakeover.TickRetry();   // round-209: recycle retry until success (1s; flag-gated once done)
             MPPerf.End("PreTick", _pre);   // round-98: close the pre-block umbrella
@@ -4526,7 +4528,7 @@ namespace BigAmbitionsMP
         private sealed class LRow
         {
             public GameObject go = null!; public TextMeshProUGUI star = null!, name = null!, ageTxt = null!;
-            public LField cash = null!, age = null!; public LBtn kick = null!;
+            public LField cash = null!, age = null!; public LBtn kick = null!, ban = null!;
         }
 
         // ── kit: sprites (generated once, white, tinted by Image.color) ──
@@ -5080,7 +5082,7 @@ namespace BigAmbitionsMP
                 _lwMain = main;
                 var m = main.go.transform;
                 LText(m, "Player", 12f, L_HDR, 34f, 64f, 200f, 15f, TextAlignmentOptions.Left, true, true, 7f);
-                _lwHdrCash = LText(m, "Starting money", 12f, L_HDR, 304f, 64f, 150f, 15f, TextAlignmentOptions.Left, true, true, 7f);
+                _lwHdrCash = LText(m, "Starting money", 12f, L_HDR, 262f, 64f, 150f, 15f, TextAlignmentOptions.Left, true, true, 7f);
                 _lwHdrAge  = LText(m, "Age", 12f, L_HDR, 456f, 64f, 80f, 15f, TextAlignmentOptions.Left, true, true, 7f);
                 var list = MakeGO("List", m);
                 _rtLwList = list.GetComponent<RectTransform>();
@@ -5095,10 +5097,13 @@ namespace BigAmbitionsMP
                     r.star   = LText(bg.transform, "★", 15f, L_STAR, 12f, 0f, 20f, LW_ROW_H, TextAlignmentOptions.Left);
                     r.name   = LText(bg.transform, "", 16f, C_WHITE, 37f, 0f, 233f, LW_ROW_H, TextAlignmentOptions.Left, true);
                     r.name.overflowMode = TextOverflowModes.Ellipsis;   // review item 12: a long name stops at its column
-                    r.cash   = LMakeField(bg.transform, "Cash", 282f, LW_ROW_CTL_Y, 130f, 30f);
-                    r.age    = LMakeField(bg.transform, "Age", 434f, LW_ROW_CTL_Y, 64f, 30f);
-                    r.ageTxt = LText(bg.transform, "", 15f, C_WHITE, 444f, 0f, 70f, LW_ROW_H, TextAlignmentOptions.Left);
-                    r.kick   = LButton(bg.transform, "BAMP_Kick" + s, "Kick", 526f, LW_ROW_CTL_Y, 72f, 30f, 3, 12f);
+                    // BAN-PLAYERS-1 C2 (B5, approved mock-up): columns name | money 240 | age 388 | Kick 480 + Ban 548 (60 wide, 8 apart).
+                    r.cash   = LMakeField(bg.transform, "Cash", 240f, LW_ROW_CTL_Y, 130f, 30f);
+                    r.age    = LMakeField(bg.transform, "Age", 388f, LW_ROW_CTL_Y, 64f, 30f);
+                    r.ageTxt = LText(bg.transform, "", 15f, C_WHITE, 398f, 0f, 70f, LW_ROW_H, TextAlignmentOptions.Left);
+                    r.kick   = LButton(bg.transform, "BAMP_Kick" + s, "Kick", 480f, LW_ROW_CTL_Y, 60f, 30f, 3, 12f);
+                    r.ban    = LButton(bg.transform, "BAMP_Ban" + s, "Ban", 548f, LW_ROW_CTL_Y, 60f, 30f, 0, 12f);
+                    LRedline(r.ban);
                     _lwRows[s] = r;
                 }
                 var track = LImg(m, "Track", L_TRACK, LRoundSprite(false), 3f);
@@ -5128,6 +5133,10 @@ namespace BigAmbitionsMP
                 _lwModsLbl     = LText(st, "Different mods", 13f, L_MUTED, 16f, 102f, 128f, 36f, TextAlignmentOptions.Left, true);
                 _lwModsAllowB  = LButton(st, "BAMP_ModsAllow",  "Allow",  150f, 102f, 100f, 36f, 0, 13f);
                 _lwModsRefuseB = LButton(st, "BAMP_ModsRefuse", "Refuse", 258f, 102f, 104f, 36f, 0, 13f);
+                // BAN-PLAYERS-1 C2 (B5): 'Banned players' + 'Edit ({n})' (opens the Banned players window); LobbyLayout places it.
+                _lwBannedLbl = LText(st, "Banned players", 13f, L_MUTED, 16f, 148f, 200f, 32f, TextAlignmentOptions.Left, true);
+                _lwBannedB   = LButton(st, "BAMP_BannedEdit", "Edit (0)", 264f, 148f, 100f, 32f, 0, 12f);
+                _lwBannedN = -1;
                 _lwSavedLbl = LText(st, "", 15f, C_WHITE, 16f, 56f, 348f, 20f, TextAlignmentOptions.Left);
                 _lwSavedLbl.overflowMode = TextOverflowModes.Ellipsis;   // review item 12: a long save name stops at the box
 
@@ -5440,6 +5449,7 @@ namespace BigAmbitionsMP
         {
 #if BAMP_DEV
             if (DevLobby == 6) return DevModsReason();
+            if (DevLobby == 7) return "You're banned from this host's games.";   // BAN-PLAYERS-1 C2: B6b at any window size (the real text: MPClient tag BAMP:banned)
             if (DevLobby == 5) return "No host answered at that address. If your friend is on Steam, right-click their name and choose Join Game. Direct IP needs the host's public address and port 7777 opened on their router.";
 #endif
             string? f = MPClient.FriendlyDisconnectReason;
@@ -5501,14 +5511,14 @@ namespace BigAmbitionsMP
             // Player table columns (row-relative): name | Starting money 282 | Age 434 (joiner 526) | Kick 526.
             LShowGO(_lwHdrCash != null ? _lwHdrCash.gameObject : null, host && newGame);
             LShowGO(_lwHdrAge != null ? _lwHdrAge.gameObject : null, newGame);
-            if (_lwHdrAge != null) LPos(_lwHdrAge.rectTransform, host ? 456f : 548f, 64f, 80f, 15f);
-            float nameW = host && newGame ? 233f : 477f;
+            if (_lwHdrAge != null) LPos(_lwHdrAge.rectTransform, host ? 410f : 548f, 64f, 80f, 15f);
+            float nameW = host ? (newGame ? 191f : 431f) : 477f;   // BAN-PLAYERS-1 C2 (B5): the host's rows end at Kick + Ban
             for (int s = 0; s < LW_SLOTS; s++)
             {
                 var r = _lwRows[s];
                 if (r == null) continue;
                 LPos(r.name.rectTransform, 37f, 0f, nameW, LW_ROW_H);
-                LPos(r.age.rt, host ? 434f : 526f, LW_ROW_CTL_Y, 64f, 30f);
+                LPos(r.age.rt, host ? 388f : 526f, LW_ROW_CTL_Y, 64f, 30f);
             }
             // Right column (380 wide at x 678).
             LShowGO(_rtLwSettings != null ? _rtLwSettings.gameObject : null, host);
@@ -5517,7 +5527,10 @@ namespace BigAmbitionsMP
             // MODS-GATE-1: the 'Different mods' row sits 10 under Difficulty (new game) or the save name (saved game); the
             // section grows by that row, and Invite follows it (_lwInviteTop below).
             float modsY = newGame ? 102f : 86f;
-            float sh = modsY + 36f + 14f;
+            float banY = modsY + 36f + 10f;   // BAN-PLAYERS-1 C2 (B5): the 'Banned players' row under it
+            if (_lwBannedLbl != null) LPos(_lwBannedLbl.rectTransform, 16f, banY, 200f, 32f);
+            if (_lwBannedB != null) LPos(_lwBannedB.rt, 380f - 16f - 100f, banY, 100f, 32f);
+            float sh = banY + 32f + 14f;
             if (_rtLwSettings != null) LPos(_rtLwSettings, 678f, 64f, 380f, sh);
             LShow(_lwMoreB, newGame); LShow(_lwSaveSetB, !newGame);
             LShowGO(_lwDiffLbl != null ? _lwDiffLbl.gameObject : null, newGame);
@@ -5618,6 +5631,7 @@ namespace BigAmbitionsMP
                 if (ageField && _lwRowAgeFocus != pi) LFieldText(r.age, DisplayAgeFor(nm, true, baseAge).ToString(), false);
                 if (ageText) LSetText(r.ageTxt, DisplayAgeFor(nm, false, baseAge).ToString());
                 LShow(r.kick, host && pi > 0);   // never on the host's own row
+                LShow(r.ban, host && pi > 0);    // BAN-PLAYERS-1 C2 (B5): beside Kick, never on the host's own row
                 LFieldState(r.cash, false, _lwRowCashFocus == pi);
                 LFieldState(r.age, false, _lwRowAgeFocus == pi);
             }
@@ -5936,7 +5950,7 @@ namespace BigAmbitionsMP
         private bool _btnDiagLogged;
         private void TickLobbyWindow()
         {
-            if (_lobbyWindow == null || !_lobbyWindow.activeSelf) { _btnDiagLogged = false; return; }
+            if (_lobbyWindow == null || !_lobbyWindow.activeSelf) { _btnDiagLogged = false; if (_bpInLobby) BpClose("lobby closed"); return; }
             try { TickLobbyCore(); }
             catch (Exception ex)
             {
@@ -5970,6 +5984,8 @@ namespace BigAmbitionsMP
             var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
             if (Input.GetKeyDown(KeyCode.Escape)) { LwEscape(); return; }   // review item 4
             if (_lwPortOpen) { TickPortPopup(mp); return; }   // the popup owns the mouse and keys while open
+            if (BpOpen && _bpInLobby) { BpWheel(mp); if (Input.GetMouseButtonDown(0)) BpClick(mp); return; }   // BAN-PLAYERS-1 C2: so do the ban popups
+            LwBannedCount();
             bool click = Input.GetMouseButtonDown(0);
             if (_lwCard == 1) { if (click && LHit(_lwConnCancelB, mp)) OnLobbyLeave(); return; }
             if (_lwCard == 2)
@@ -6009,6 +6025,8 @@ namespace BigAmbitionsMP
                 if (LHit(_lwLeaveB, mp)) { OnLobbyLeave(); return; }
                 if (host)
                 {
+                    if (LwBanRowHit(mp, roster, rn)) return;                    // BAN-PLAYERS-1 C2 (B5): asks first (B2)
+                    if (LHit(_lwBannedB, mp)) { BpOpenList(true); return; }      // B5 'Edit ({n})' -> B3
                     for (int s = 0; s < LW_SLOTS; s++)
                     {
                         var r = _lwRows[s];
@@ -6092,7 +6110,8 @@ namespace BigAmbitionsMP
         private string LwEscape()
         {
             string r;
-            if (_lwPortOpen) { Plugin.Logger.LogInfo("[MenuUI] Hosting port popup → cancel (Escape)"); ClosePortPopup(); r = "port popup cancel"; }
+            if (BpOpen && _bpInLobby) { Plugin.Logger.LogInfo("[MenuUI] ban popup → back / close (Escape)"); BpEscape(); r = "ban popup"; }
+            else if (_lwPortOpen) { Plugin.Logger.LogInfo("[MenuUI] Hosting port popup → cancel (Escape)"); ClosePortPopup(); r = "port popup cancel"; }
             else if (_lwCard == 1) { Plugin.Logger.LogInfo("[MenuUI] Connecting → cancel (Escape)"); OnLobbyLeave(); r = "connecting cancel"; }
             else if (_lwCard == 2) { Plugin.Logger.LogInfo("[MenuUI] Couldn't join → back (Escape)"); OnFailBack(); r = "couldn't join back"; }
             else r = "lobby: ignored";
@@ -6246,7 +6265,7 @@ namespace BigAmbitionsMP
                         DevFill(1, 1, 0); _devBusyA = 7777; _devBusyB = 7778; RefreshLobbyWindow();
                         return $"fake host lobby + busy line, Hosting port popup open={OpenPortPopup()}";
                     case "connecting":  DevFill(4, 0, 0); return "fake connecting";
-                    case "failed":      DevFill(arg == "mods" ? 6 : 5, 0, 0); return arg == "mods" ? "fake couldn't join (mods)" : "fake couldn't join";
+                    case "failed":      DevFill(arg == "mods" ? 6 : arg == "banned" ? 7 : 5, 0, 0); return arg == "mods" ? "fake couldn't join (mods)" : arg == "banned" ? "fake couldn't join (banned)" : "fake couldn't join";
                     case "modsgate":
                     {   // MODS-GATE-1: 'allow' / 'refuse' = the buttons' own click path; no argument = read the state
                         if (arg == "allow") SetModsGate(false);

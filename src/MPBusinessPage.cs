@@ -197,6 +197,8 @@ namespace BigAmbitionsMP
             _bizTipDevHold = false;
 #endif
             _hub = null; _hubRT = null; _hubNative = false; _bizRoot = null; _mergerConfirmGO = null;
+            if (!_bpInLobby) { _bpRoot = null; _bpHostT = null; _bpMeasure = null; _bpMode = 0; _bpHits.Clear(); }   // BAN-PLAYERS-1 C2: died with the page
+            _bizBanBtn = null; _bizBannedBtn = null; _bizBanHost = false; _bizBannedN = -1;
             _bizFocus = 0; _hubUiHover = false; _bizSel = ""; _hubRepayArm = "";
             _bizSelGO = null; _bizLeftPane = null; _bizTabBadgeHost = null; _bizLeftFor = new Vector2(-1f, -1f);
         }
@@ -230,6 +232,7 @@ namespace BigAmbitionsMP
                     if (_bizFocus != 0) CommitHubInputs();
                     BizSyncSelection();
                     if (_mergerConfirmGO != null && _mergerConfirmGO.activeSelf) _mergerConfirmGO.SetActive(false);
+                    if (!_bpInLobby) BpClose("page closed");   // BAN-PLAYERS-1 C2
                     return;
                 }
                 if (!_hubNative) BizFitWindow();
@@ -258,6 +261,7 @@ namespace BigAmbitionsMP
                 var mp = new Vector2(Input.mousePosition.x, Input.mousePosition.y);
                 _hubUiHover = _hubNative ? _bizFocus != 0 : (HubHit(_hubRT, mp) || _bizFocus != 0);
                 BizTickMergeTip(mp);
+                if (BpOpen && !_bpInLobby) BpWheel(mp);   // BAN-PLAYERS-1 C2: B3's list scrolls with the wheel
                 if (!Input.GetMouseButtonDown(0)) return;
                 BizClick(mp);
             }
@@ -268,6 +272,8 @@ namespace BigAmbitionsMP
 
         private void BizClick(Vector2 mp)
         {
+            // BAN-PLAYERS-1 C2: an open ban popup owns every click.
+            if (BpOpen && !_bpInLobby) { BpClick(mp); return; }
             // Merger confirm popup swallows every click while open: Confirm executes, anything else closes without acting.
             if (_mergerConfirmGO != null && _mergerConfirmGO.activeSelf)
             {
@@ -301,6 +307,9 @@ namespace BigAmbitionsMP
             if (!_hubNative && BHit(_bizCloseRT, mp)) { _hubVisible = false; return; }
             for (int i = 0; i < 5; i++)
                 if (BHit(_bizTabRT[i], mp)) { if (_hubTab != i) { _hubTab = i; _bizDirty = true; } return; }
+            // BAN-PLAYERS-1 C2 (B1): host only; before the cards (the button sits under the list).
+            if (_bizBanBtn != null && BHit(_bizBanBtn.rt, mp)) { BizBanClick(); return; }
+            if (_bizBannedBtn != null && BHit(_bizBannedBtn.rt, mp)) { BizHideMergeTip(); BpOpenList(false); return; }
             foreach (var (rt, key) in _bizCardHits)
             {
                 if (!BHit(_bizCardsVp, mp) || !BHit(rt, mp)) continue;
@@ -506,6 +515,7 @@ namespace BigAmbitionsMP
                     _bizSelGO = null;
                 }
                 if (_mergerConfirmGO != null && _mergerConfirmGO.activeSelf) _mergerConfirmGO.SetActive(false);
+                if (!_bpInLobby) BpClose("link lost");   // BAN-PLAYERS-1 C2: no full-screen ban popup left behind
                 BizHideMergeTip();
             }
             catch (Exception ex) { BizErr("link lost", ex); }
@@ -765,7 +775,7 @@ namespace BigAmbitionsMP
                 if (p.Incoming > 0) BBadge(card, p.Incoming, 470f - 16f, 39f - 11f);
                 _bizCardHits.Add((card, p.Key));
             }
-            _bizCardsContent.sizeDelta = new Vector2(0f, Mathf.Max(B_CARDSH, _bizPls.Count * B_CARDPITCH) * BK);
+            _bizCardsContent.sizeDelta = new Vector2(0f, Mathf.Max(_bizBanHost ? BP_CARDS_HOST : B_CARDSH, _bizPls.Count * B_CARDPITCH) * BK);
         }
 
         private void BizBuildHeader()
@@ -795,6 +805,7 @@ namespace BigAmbitionsMP
                 else { label = "Propose merger"; _bizMergeAct = 8; }
                 _bizMergePid = pl;
             }
+            float hdrRight = BizBanPlace(p);   // BAN-PLAYERS-1 C2 (B1): 'Ban' right-most, the merger button to its left
             if (_bizMergeBtn != null)
             {
                 _bizMergeBtn.go.SetActive(label != "");
@@ -802,7 +813,7 @@ namespace BigAmbitionsMP
                 {
                     _bizMergeBtn.lbl.text = label;
                     float w = BMeasure(label, 13f, true) + 32f;
-                    BPos(_bizMergeBtn.rt, 1221f - 26f - w, 31f, w, 32f);
+                    BPos(_bizMergeBtn.rt, hdrRight - w, 31f, w, 32f);
                 }
             }
         }
@@ -828,6 +839,7 @@ namespace BigAmbitionsMP
                 }
                 BSetKind(_bizGiftBtn, gift ? 0 : 5);
                 BSetKind(_bizLoanBtn, loan ? 1 : 5);
+                BizBannedRefresh();   // BAN-PLAYERS-1 C2 (B1)
             }
             catch (Exception ex) { BizErr("header buttons", ex); }
         }
@@ -1212,6 +1224,9 @@ namespace BigAmbitionsMP
                 BText(_bizLeftPane, "Players", 26f, Color.white, PX(35f), PY(164f), 420f, 40f, TextAlignmentOptions.Left);
                 // The list viewport is padded 12 px left / 8 px right around the cards (which keep their place): shadows show.
                 (_bizCardsVp, _bizCardsContent) = BScroll(_bizLeftPane, PX(21f) - 12f, PY(228f), 486f + 20f, B_CARDSH, PX(515f), PY(238f), B_CARDSH - 18f, 30f);
+                // BAN-PLAYERS-1 C2 (B1): host only, the bottom of the Players pane (BizBannedRefresh shows it and shortens the list).
+                _bizBannedBtn = BButton(_bizLeftPane, "Banned players (0)", 3, PX(25f), PY(912f), 50f, 470f, 15f);
+                _bizBannedBtn.go.SetActive(false); _bizBannedN = -1; _bizBanHost = false;
                 var split = LImg(root, "Splitter", B_SPLIT, null, 0f);
                 BPos(split.rectTransform, PX(587f), PY(128f), 2f, 855f);
 
@@ -1225,6 +1240,9 @@ namespace BigAmbitionsMP
                 _bizHdrSub = BText(hc, "", 14f, B_GREY, 92f, 51f, 760f, 20f, TextAlignmentOptions.Left);
                 _bizMergeBtn = BButton(hc, "Propose merger", 3, 1221f - 26f - 150f, 31f, 32f, 150f);
                 _bizMergeBtn.go.SetActive(false);
+                _bizBanBtn = BButton(hc, "Ban", 3, 1221f - 26f - 70f, 31f, 32f, 70f);   // BAN-PLAYERS-1 C2 (B1): host only, placed by BizBanPlace
+                BizRedline(_bizBanBtn);
+                _bizBanBtn.go.SetActive(false);
                 BPos(LImg(hc, "Divider", B_DIV, null, 0f).rectTransform, 26f, 88f, 1169f, 1f);
                 BText(hc, "Amount", 12f, B_GREY, 26f, 104f, 190f, 18f, TextAlignmentOptions.Left, true, true, 6f);
                 BText(hc, "Interest", 12f, B_GREY, 234f, 104f, 100f, 18f, TextAlignmentOptions.Left, true, true, 6f);
@@ -1468,6 +1486,702 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { BizErr("ShowMergerConfirm", ex); }
         }
+
+        // ══ BAN-PLAYERS-1 build C2: the host's ban screens (owner-approved mock-ups v2, 2026-10-01) ══
+        // B1 the Business page's red-outlined 'Ban' (header card) + 'Banned players ({n})' (left pane); B2/B2b 'BAN PLAYER';
+        // B3 'BANNED PLAYERS'; B4 'REMOVE PROPERTY' - one popup kit in the merger popup's frame, hosted by the Business page
+        // (page units, its camera) or the lobby window (lobby units). Built on open / on a change - never per frame; clicks
+        // go through the host's own hit-test dispatch. B6a 'REMOVED FROM GAME' over the main menu for a player banned in game.
+        // Every call is the committed MPServer entry point (BanPlayer / BanOfflinePlayer / UnbanPlayer / BanList / RemoveProperty).
+        private const string BP_RELEASE = "Their businesses, homes, warehouses, vehicles and items are removed, and their buildings go back on the market. This can't be undone.";
+        private static readonly Color BP_DIM = new Color(10f / 255f, 14f / 255f, 18f / 255f, 0.5f), BP_CARD = new Color(60f / 255f, 69f / 255f, 79f / 255f, 0.97f);
+        private static readonly Color BP_WARN = LC(0xF5A25D), BP_REDLINE = LC(0xE2434B), BP_LREDTXT = LC(0xFFAAA6), BP_LREDLINE = LC(0xE2615E);
+        private static readonly Color BP_LREDBG = new Color(35f / 255f, 41f / 255f, 48f / 255f, 0.35f), BP_SUB = new Color(1f, 1f, 1f, 0.62f);
+        private const int BP_ROWS = 6;            // rows shown at once in B3; the wheel scrolls the rest
+        private const float BP_CARDS_HOST = 672f; // the Players list's height above 'Banned players' (mock-up 228..900, button at 912)
+
+        private BBtn? _bizBanBtn, _bizBannedBtn;
+        private int _bizBannedN = -1;
+        private bool _bizBanHost;
+        private TextMeshProUGUI? _lwBannedLbl;
+        private LBtn? _lwBannedB;
+        private int _lwBannedN = -1;
+
+        private GameObject? _bpRoot;
+        private Transform? _bpHostT;
+        private TextMeshProUGUI? _bpMeasure;
+        private float _bpU = 1f;
+        private Camera? _bpCam;
+        private bool _bpInLobby;
+        private int _bpMode;                      // 0 closed, 1 B2 ban confirm, 2 B3 list, 3 B4 remove confirm over B3
+        private bool _bpTick;
+        private string _bpPid = "", _bpWho = "", _bpName = ""; private bool _bpOnline;
+        private string _bpRemKey = "", _bpRemName = "";
+        private int _bpScroll, _bpRowCount, _bpErrs;
+        private RectTransform? _bpCardA, _bpCardB, _bpListCard;
+        // act: 1 cancel, 2 ban, 3 tick box, 4 close, 5 unban, 6 remove property, 7 remove-cancel, 8 remove
+        private readonly List<(RectTransform rt, int act, string key, string name)> _bpHits = new();
+        private string _bpPendKey = "", _bpPendPid = ""; private float _bpPendSince, _bpPendNext;
+        private static bool _banNoticeArmed;
+        private GameObject? _bnRoot; private LBtn? _bnOk;
+
+        internal bool BpOpen => _bpMode != 0 && _bpRoot != null;
+
+        private void BpErr(string where, Exception ex)
+        {
+            if (_bpErrs++ < 8) Plugin.Logger.LogWarning($"[BanUI] {where}: {ex.Message}");
+        }
+
+        /// <summary>B6a: the banned player's machine arms the 'REMOVED FROM GAME' box; it shows over the main menu (MPClient).</summary>
+        internal static void NoteBannedInGame() { _banNoticeArmed = true; }
+
+        /// <summary>Property removal is possible only on the host with a world loaded (MPServer.RemoveProperty's own refusal) -
+        /// so the lobby shows no tick box and a greyed 'Remove property'.</summary>
+        private bool BpCanRemove() => !_bpInLobby && MPServer.IsRunning && SaveGameManager.Current != null;
+
+        private void BpEnsureRoot(Transform host, float u, Camera? cam, bool lobby)
+        {
+            if (_bpRoot != null && _bpHostT == host) { _bpU = u; _bpCam = cam; _bpInLobby = lobby; return; }
+            if (_bpRoot != null) { try { UnityEngine.Object.Destroy(_bpRoot); } catch { } }
+            _bpRoot = MakeGO("BAMP_BanPopup", host);
+            LStretch(_bpRoot.GetComponent<RectTransform>(), -8000f, -8000f, -8000f, -8000f);   // dims and blocks the whole screen
+            var blk = _bpRoot.AddComponent<Image>(); blk.color = BP_DIM;
+            _bpRoot.AddComponent<Canvas>();
+            _bpRoot.AddComponent<GraphicRaycaster>();
+            _bpMeasure = MakeLabel(_bpRoot.transform, "", 10, Color.clear, 0f, 0f, 10f, 10f, TextAlignmentOptions.Left);
+            ApplyFont(_bpMeasure); _bpMeasure.richText = false; _bpMeasure.raycastTarget = false;
+            _bpMeasure.textWrappingMode = TextWrappingModes.NoWrap;
+            _bpHostT = host; _bpU = u; _bpCam = cam; _bpInLobby = lobby;
+            _bpRoot.SetActive(false);
+        }
+
+        private bool BpAt(bool lobby)
+        {
+            if (lobby) { if (_lobbyWindow == null) return false; BpEnsureRoot(_lobbyWindow.transform, LS, null, true); }
+            else { if (_hub == null) return false; BpEnsureRoot(_hub.transform, BK, _hubCam, false); }
+            return _bpRoot != null;
+        }
+
+        private void BpShow(int mode)
+        {
+            if (_bpRoot == null) return;
+            _bpMode = mode;
+            _bpRoot.SetActive(true);
+            _bpRoot.transform.SetAsLastSibling();
+            var ov = _bpRoot.GetComponent<Canvas>();   // above the whole menu (as the merger popup)
+            var pc = _bpRoot.transform.parent != null ? _bpRoot.transform.parent.GetComponentInParent<Canvas>() : null;
+            if (ov != null)
+            {
+                ov.overrideSorting = true;
+                if (pc != null) { ov.sortingLayerID = pc.rootCanvas.sortingLayerID; ov.sortingOrder = Mathf.Min(pc.rootCanvas.sortingOrder + 100, 32767); }
+            }
+            BpRebuild();
+        }
+
+        /// <summary>B2: the host's Ban (Business page header card or a lobby row).</summary>
+        internal void BpOpenBan(bool lobby, string pid, string who, string name, bool online)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || !BpAt(lobby)) return;
+                _bpPid = pid ?? ""; _bpWho = who ?? ""; _bpName = string.IsNullOrEmpty(name) ? B_UNKNOWN : name; _bpOnline = online; _bpTick = false;
+                Plugin.Logger.LogInfo($"[BanUI] 'Ban player' opened for '{_bpName}' ({(lobby ? "lobby" : "Business page")}, {(online ? "connected" : "not connected")}).");
+                BpShow(1);
+            }
+            catch (Exception ex) { BpErr("open ban", ex); }
+        }
+
+        /// <summary>B3: 'Banned players ({n})' (Business page) or the lobby's 'Edit ({n})'.</summary>
+        internal void BpOpenList(bool lobby)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || !BpAt(lobby)) return;
+                _bpScroll = 0;
+                Plugin.Logger.LogInfo($"[BanUI] 'Banned players' opened ({(lobby ? "lobby" : "Business page")}, {MPConfig.BannedPlayers.Count} saved ban(s)).");
+                BpShow(2);
+            }
+            catch (Exception ex) { BpErr("open list", ex); }
+        }
+
+        internal void BpClose(string why)
+        {
+            if (_bpMode == 0) return;
+            _bpMode = 0; _bpHits.Clear();
+            try { if (_bpRoot != null) _bpRoot.SetActive(false); } catch { }
+            Plugin.Logger.LogInfo($"[BanUI] popup closed ({why}).");
+        }
+
+        /// <summary>Escape: B4 goes back to B3; B2 / B3 close.</summary>
+        internal void BpEscape()
+        {
+            if (_bpMode == 3) { _bpMode = 2; BpRebuild(); }
+            else BpClose("Escape");
+            ConsumeEscape();
+        }
+
+        private void BpRebuild()
+        {
+            if (_bpRoot == null) return;
+            try
+            {
+                var t = _bpRoot.transform;
+                for (int i = t.childCount - 1; i >= 0; i--)
+                {
+                    var c = t.GetChild(i);
+                    if (_bpMeasure != null && c == _bpMeasure.transform) continue;
+                    UnityEngine.Object.Destroy(c.gameObject);
+                }
+                _bpHits.Clear(); _bpCardA = null; _bpCardB = null; _bpListCard = null;
+                if (_bpMode == 1) _bpCardA = BpBuildBan();
+                else if (_bpMode >= 2)
+                {
+                    _bpListCard = BpBuildList();
+                    if (_bpMode == 3)
+                    {
+                        var d = LImg(t, "Dim", BP_DIM, null, 0f);
+                        LStretch(d.rectTransform, -8000f, -8000f, -8000f, -8000f);
+                        _bpCardB = BpBuildRemove();
+                    }
+                }
+            }
+            catch (Exception ex) { BpErr("rebuild", ex); }
+        }
+
+        // ── kit (mock-up px in; _bpU = page units on the Business page, lobby units in the lobby) ──
+        private void BpPos(RectTransform rt, float x, float y, float w, float h) => SetAnchored(rt, x * _bpU, -y * _bpU, w * _bpU, h * _bpU);
+        private void BpSize(RectTransform card, float w, float h) => card.sizeDelta = new Vector2(w * _bpU, h * _bpU);
+
+        private TextMeshProUGUI BpText(Transform p, string s, float px, Color c, float x, float y, float w, float h, TextAlignmentOptions al,
+            bool bold = false, bool caps = false, float sp = 0f, bool wrap = false)
+        {
+            var t = MakeLabel(p, "", 10, c, x * _bpU, -y * _bpU, w * _bpU, h * _bpU, al);
+            ApplyFont(t);
+            t.richText = false;
+            t.fontSize = px * _bpU;
+            t.fontStyle = (bold ? FontStyles.Bold : FontStyles.Normal) | (caps ? FontStyles.UpperCase : FontStyles.Normal);
+            t.characterSpacing = sp;
+            t.textWrappingMode = wrap ? TextWrappingModes.Normal : TextWrappingModes.NoWrap;
+            t.overflowMode = wrap ? TextOverflowModes.Overflow : TextOverflowModes.Ellipsis;
+            t.raycastTarget = false;
+            t.text = s;
+            return t;
+        }
+
+        private float BpTextH(TextMeshProUGUI t, float w) => t.GetPreferredValues(t.text, w * _bpU, 0f).y / _bpU;
+
+        private float BpMeasure(string s, float px)
+        {
+            if (_bpMeasure == null) return s.Length * px * 0.7f;
+            _bpMeasure.fontSize = px * _bpU;
+            _bpMeasure.fontStyle = FontStyles.Bold;
+            _bpMeasure.characterSpacing = 3f;
+            return _bpMeasure.GetPreferredValues(s.ToUpperInvariant()).x / _bpU;
+        }
+
+        private RectTransform BpCard(string name, string title, float w)
+        {
+            var card = MakeGO(name, _bpRoot!.transform);
+            var rt = card.GetComponent<RectTransform>();
+            rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = Vector2.zero;
+            float u = _bpU;
+            var sh = LImg(card.transform, "Shadow", new Color(0f, 0f, 0f, 0.45f), LShadowSprite(), 0f);
+            sh.pixelsPerUnitMultiplier = 1f;
+            LStretch(sh.rectTransform, -24f * u, -30f * u, -24f * u, -18f * u);
+            LStretch(LImg(card.transform, "Body", BP_CARD, LRoundSprite(false), 4f * u).rectTransform, 0f, 0f, 0f, 0f);
+            var bar = LImg(card.transform, "Bar", L_BAR, LRoundSprite(false), 4f * u).rectTransform;
+            bar.anchorMin = new Vector2(0f, 1f); bar.anchorMax = Vector2.one; bar.pivot = new Vector2(0.5f, 1f);
+            bar.sizeDelta = new Vector2(0f, 44f * u); bar.anchoredPosition = Vector2.zero;
+            var low = LImg(bar, "Low", L_BAR, null, 0f).rectTransform;   // squares the bar's bottom corners
+            low.anchorMin = Vector2.zero; low.anchorMax = new Vector2(1f, 0f); low.pivot = new Vector2(0.5f, 0f);
+            low.sizeDelta = new Vector2(0f, 8f * u); low.anchoredPosition = Vector2.zero;
+            BpText(card.transform, title, 17f, L_BARTXT, 18f, 0f, w - 36f, 44f, TextAlignmentOptions.Left, true, true, 8f);
+            return rt;
+        }
+
+        /// <summary>The lobby popups' button: flat kind colour (0 grey, 1 blue, 3 red, 4 greyed), thin light outline, bold
+        /// UPPERCASE label. act != 0 registers it for the popup's click dispatch.</summary>
+        private RectTransform BpButton(Transform p, string label, int kind, float x, float y, float w, float h, float fs, int act, string key = "", string name = "")
+        {
+            float u = _bpU;
+            var img = LImg(p, "BAMP_BanBtn", L_BTN[Mathf.Clamp(kind, 0, 4)], LRoundSprite(false), 3f * u);
+            var rt = img.rectTransform;
+            BpPos(rt, x, y, w, h);
+            LStretch(LImg(img.transform, "Line", new Color(1f, 1f, 1f, kind == 4 ? 0.10f : kind == 0 ? 0.28f : 0.22f), LRoundSprite(true), 3f * u).rectTransform, 0f, 0f, 0f, 0f);
+            var t = BpText(img.transform, label, fs, kind == 4 ? L_DISTXT : Color.white, 0f, 0f, w, h, TextAlignmentOptions.Center, true, true, 3f);
+            var trt = t.rectTransform; trt.anchorMin = Vector2.zero; trt.anchorMax = Vector2.one; trt.offsetMin = trt.offsetMax = Vector2.zero;
+            if (act != 0) _bpHits.Add((rt, act, key, name));
+            return rt;
+        }
+
+        /// <summary>The tick mark (mock-up: a 16 px check stroke in the 24 px white box) from two rotated strokes.</summary>
+        private void BpCheck(RectTransform box)
+        {
+            void Seg(float mx, float my, float len, float ang)
+            {
+                var s = LImg(box, "Tick", B_INK, null, 0f).rectTransform;
+                s.anchorMin = s.anchorMax = new Vector2(0f, 1f); s.pivot = new Vector2(0.5f, 0.5f);
+                s.anchoredPosition = new Vector2(mx * _bpU, -my * _bpU);
+                s.sizeDelta = new Vector2(len * _bpU, 2.4f * _bpU);
+                s.localEulerAngles = new Vector3(0f, 0f, ang);
+            }
+            Seg(8.83f, 13.83f, 6.4f, -45f);
+            Seg(13.5f, 12.17f, 10.2f, 45f);
+        }
+
+        /// <summary>B2 / B2b 'BAN PLAYER' (approved wording).</summary>
+        private RectTransform BpBuildBan()
+        {
+            const float W = 620f, TW = W - 52f;
+            var card = BpCard("BanConfirm", "BAN PLAYER", W);
+            var ct = card.transform;
+            var body = BpText(ct, $"Ban {_bpName}? They're removed now and can't join your games until you unban them.", 15f, L_PARA, 26f, 64f, TW, 20f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+            float th = BpTextH(body, TW);
+            BpPos(body.rectTransform, 26f, 64f, TW, th + 2f);
+            float y = 64f + th + 16f;
+            if (BpCanRemove())
+            {
+                var row = MakeGO("TickRow", ct).GetComponent<RectTransform>();   // the whole row is the tick box's click target
+                BpPos(row, 26f, y, TW, 24f);
+                var box = LImg(row, "Box", Color.white, LRoundSprite(false), 4f * _bpU);
+                BpPos(box.rectTransform, 0f, 0f, 24f, 24f);
+                if (_bpTick) BpCheck(box.rectTransform);
+                BpText(row, "Also remove everything they own", 15f, Color.white, 36f, 0f, TW - 36f, 24f, TextAlignmentOptions.Left);
+                _bpHits.Add((row, 3, "", ""));
+                y += 24f;
+                if (_bpTick)
+                {
+                    var warn = BpText(ct, BP_RELEASE, 14f, BP_WARN, 62f, y + 10f, TW - 36f, 20f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+                    float wh = BpTextH(warn, TW - 36f);
+                    BpPos(warn.rectTransform, 62f, y + 10f, TW - 36f, wh + 2f);
+                    y += 10f + wh;
+                }
+                y += 16f;
+            }
+            float by = y + 8f;
+            BpButton(ct, "Cancel", 0, W - 26f - 130f - 12f - 130f, by, 130f, 40f, 15f, 1);
+            BpButton(ct, "Ban", 3, W - 26f - 130f, by, 130f, 40f, 15f, 2);
+            BpSize(card, W, by + 40f + 22f);
+            return card;
+        }
+
+        /// <summary>B3 'BANNED PLAYERS': one row per saved ban (name, ban day, how recognised - never an id or address).</summary>
+        private RectTransform BpBuildList()
+        {
+            const float W = 860f, RW = W - 52f, RH = 66f, RG = 8f;
+            var card = BpCard("BannedList", "BANNED PLAYERS", W);
+            var ct = card.transform;
+            var rows = MPServer.BanList();
+            _bpRowCount = rows.Count;
+            _bpScroll = Mathf.Clamp(_bpScroll, 0, Math.Max(0, rows.Count - BP_ROWS));
+            bool canRemove = BpCanRemove();
+            float y = 64f;
+            if (rows.Count == 0)
+            {
+                BpText(ct, "No one is banned.", 15f, B_MUTED, 26f, y, RW, 22f, TextAlignmentOptions.Left);
+                y += 22f;
+            }
+            else
+            {
+                int shown = Math.Min(BP_ROWS, rows.Count - _bpScroll);
+                float rw = BpMeasure("Remove property", 13f) + 32f;
+                float ux = RW - 14f - 110f, rx = ux - 14f - rw;
+                for (int i = 0; i < shown; i++)
+                {
+                    var r = rows[_bpScroll + i];
+                    string nm = string.IsNullOrEmpty(r.Name) ? B_UNKNOWN : r.Name;
+                    var bg = LImg(ct, "Row", L_ROW, LRoundSprite(false), 3f * _bpU);
+                    BpPos(bg.rectTransform, 26f, y, RW, RH);
+                    LStretch(LImg(bg.transform, "Line", L_ROWLINE, LRoundSprite(true), 3f * _bpU).rectTransform, 0f, 0f, 0f, 0f);
+                    var av = LImg(bg.transform, "Avatar", (Color)CwColour(nm), LRoundSprite(false), 20f * _bpU);
+                    BpPos(av.rectTransform, 14f, 13f, 40f, 40f);
+                    BpText(av.transform, BLetter(nm), 16f, B_AVTXT, 0f, 0f, 40f, 40f, TextAlignmentOptions.Center, true);
+                    BpText(bg.transform, nm, 16f, Color.white, 68f, 11f, rx - 14f - 68f, 22f, TextAlignmentOptions.Left, true);
+                    BpText(bg.transform, $"Banned on day {r.BanDay} · {r.How}", 13f, BP_SUB, 68f, 36f, rx - 14f - 68f, 18f, TextAlignmentOptions.Left);
+                    BpButton(bg.transform, "Remove property", canRemove ? 0 : 4, rx, 15f, rw, 36f, 13f, 6, r.Key, nm);
+                    BpButton(bg.transform, "Unban", 1, ux, 15f, 110f, 36f, 13f, 5, r.Key, nm);
+                    y += RH + (i < shown - 1 ? RG : 0f);
+                }
+            }
+            float dy = y + 16f + 6f;
+            BpPos(LImg(ct, "Divider", L_DIVIDER, null, 0f).rectTransform, 26f, dy, RW, 1f);
+            float by = dy + 1f + 16f + 8f;
+            BpButton(ct, "Close", 0, W - 26f - 130f, by, 130f, 40f, 15f, 4);
+            BpSize(card, W, by + 40f + 22f);
+            return card;
+        }
+
+        /// <summary>B4 'REMOVE PROPERTY' over B3 (approved wording).</summary>
+        private RectTransform BpBuildRemove()
+        {
+            const float W = 620f, TW = W - 52f;
+            var card = BpCard("RemoveConfirm", "REMOVE PROPERTY", W);
+            var ct = card.transform;
+            var body = BpText(ct, $"Remove everything {_bpRemName} owns? {BP_RELEASE}", 15f, L_PARA, 26f, 64f, TW, 20f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+            float th = BpTextH(body, TW);
+            BpPos(body.rectTransform, 26f, 64f, TW, th + 2f);
+            float by = 64f + th + 16f + 8f;
+            BpButton(ct, "Cancel", 0, W - 26f - 130f - 12f - 130f, by, 130f, 40f, 15f, 7);
+            BpButton(ct, "Remove", 3, W - 26f - 130f, by, 130f, 40f, 15f, 8);
+            BpSize(card, W, by + 40f + 22f);
+            return card;
+        }
+
+        private bool BpHit(RectTransform? rt, Vector2 mp)
+        {
+            if (rt == null || !rt.gameObject.activeInHierarchy) return false;
+            if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(rt, mp, _bpCam, out var local)) return false;
+            return rt.rect.Contains(local);
+        }
+
+        /// <summary>Every click while a ban popup is open (the popup owns the mouse): a button acts; a click elsewhere on the
+        /// top card does nothing; outside it = Cancel / Close (B4 goes back to B3).</summary>
+        internal void BpClick(Vector2 mp)
+        {
+            try
+            {
+                if (_bpMode == 0) return;
+                for (int i = 0; i < _bpHits.Count; i++)
+                {
+                    var (rt, act, key, name) = _bpHits[i];
+                    if (_bpMode == 3 && act != 7 && act != 8) continue;   // B3 sits under B4's dim
+                    if (!BpHit(rt, mp)) continue;
+                    BpAct(act, key, name);
+                    return;
+                }
+                var top = _bpMode == 1 ? _bpCardA : _bpMode == 3 ? _bpCardB : _bpListCard;
+                if (top != null && BpHit(top, mp)) return;
+                if (_bpMode == 3) { _bpMode = 2; BpRebuild(); }
+                else BpClose("clicked outside");
+            }
+            catch (Exception ex) { BpErr("click", ex); }
+        }
+
+        private void BpAct(int act, string key, string name)
+        {
+            switch (act)
+            {
+                case 1: BpClose("Cancel"); break;
+                case 2: BpDoBan(); break;
+                case 3: _bpTick = !_bpTick; BpRebuild(); break;
+                case 4: BpClose("Close"); break;
+                case 5:
+                {
+                    string r = MPServer.UnbanPlayer(key);
+                    Plugin.Logger.LogInfo($"[BanUI] Unban '{name}' -> {r}");
+                    _bizDirty = true;
+                    BpRebuild();
+                    break;
+                }
+                case 6:
+                    if (!BpCanRemove()) { Plugin.Logger.LogInfo($"[BanUI] 'Remove property' for '{name}' is not available here (no world loaded) - nothing done."); break; }
+                    _bpRemKey = key; _bpRemName = name; _bpMode = 3; BpRebuild();
+                    break;
+                case 7: _bpMode = 2; BpRebuild(); break;
+                case 8:
+                {
+                    string r = MPServer.RemoveProperty(_bpRemKey);
+                    Plugin.Logger.LogInfo($"[BanUI] Remove property of '{_bpRemName}' -> {r}");
+                    _bizDirty = true;
+                    _bpMode = 2; BpRebuild();
+                    break;
+                }
+            }
+        }
+
+        /// <summary>B2's 'Ban': BanPlayer for a connected player, else BanOfflinePlayer. Ticked: the property goes AFTER the
+        /// player is off the host (BanPlayer disconnects first; RemoveProperty refuses a connected player) - TickBanUi.</summary>
+        private void BpDoBan()
+        {
+            string res = _bpOnline ? MPServer.BanPlayer(_bpPid) : MPServer.BanOfflinePlayer(_bpWho);
+            bool ok = res.StartsWith("OK", StringComparison.Ordinal);
+            Plugin.Logger.LogInfo($"[BanUI] Ban '{_bpName}' ({(_bpOnline ? "connected" : "not connected")}{(_bpTick ? ", also remove everything they own" : "")}) -> {res}");
+            if (ok && _bpTick)
+            {
+                string key = "";
+                int k = res.IndexOf(" key=", StringComparison.Ordinal);
+                if (k >= 0) { int e = res.IndexOf(' ', k + 5); key = e < 0 ? res.Substring(k + 5) : res.Substring(k + 5, e - k - 5); }
+                if (key.Length > 0) { _bpPendKey = key; _bpPendPid = _bpOnline ? _bpPid : ""; _bpPendSince = Time.unscaledTime; _bpPendNext = 0f; }
+                else Plugin.Logger.LogWarning("[BanUI] the ban gave no key - property not removed (Remove property in Banned players can do it).");
+            }
+            _bizDirty = true;
+            BpClose("Ban");
+        }
+
+        internal void BpWheel(Vector2 mp)
+        {
+            float w = Input.mouseScrollDelta.y;
+            if (w == 0f || _bpMode != 2 || _bpRowCount <= BP_ROWS || !BpHit(_bpListCard, mp)) return;
+            int ns = Mathf.Clamp(_bpScroll + (w > 0f ? -1 : 1), 0, _bpRowCount - BP_ROWS);
+            if (ns != _bpScroll) { _bpScroll = ns; BpRebuild(); }
+        }
+
+        /// <summary>Every frame (MPCanvasUI.Update): the pending 'also remove everything' of a ban (twice a second, once the
+        /// player is off the host; 20 s at most, then RemoveProperty's own refusal is logged) and the B6a notice.</summary>
+        private void TickBanUi()
+        {
+            try
+            {
+                if (_bpPendKey.Length > 0 && Time.unscaledTime >= _bpPendNext)
+                {
+                    _bpPendNext = Time.unscaledTime + 0.5f;
+                    if (!MPServer.IsRunning) { Plugin.Logger.LogWarning("[BanUI] not hosting any more - the property removal of the ban was not done."); _bpPendKey = ""; _bpPendPid = ""; }
+                    else if (_bpPendPid.Length > 0 && MPServer.IsOnlinePid(_bpPendPid) && Time.unscaledTime - _bpPendSince < 20f) { }
+                    else
+                    {
+                        string key = _bpPendKey; _bpPendKey = ""; _bpPendPid = "";
+                        string r = MPServer.RemoveProperty(key);
+                        Plugin.Logger.LogInfo($"[BanUI] ban with 'Also remove everything they own': remove property -> {r}");
+                        _bizDirty = true;
+                    }
+                }
+                if (_banNoticeArmed || _bnRoot != null) BnTick();
+            }
+            catch (Exception ex) { _bpPendKey = ""; BpErr("tick", ex); }
+        }
+
+        // ── B6a: 'REMOVED FROM GAME' over the main menu (the lobby's card style, as the Couldn't join card) ──
+        private void BnTick()
+        {
+            if (_bnRoot == null)
+            {
+                if (_canvasGO == null || IsInGame() || IsLoadingOverlayUp() || MPClient.BanExitPending) return;
+                if (InstanceBehavior<global::MainMenuController>.Instance == null) return;   // over the main menu only
+                BnBuild();
+                return;
+            }
+            bool ok = Input.GetMouseButtonDown(0) && _bnOk != null && RectHit(_bnOk.rt, new Vector2(Input.mousePosition.x, Input.mousePosition.y));
+            bool key = Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter) || Input.GetKeyDown(KeyCode.Escape);
+            if (ok || key)
+            {
+                if (key) ConsumeEscape();
+                BnDismiss(ok ? "OK" : "key");
+            }
+        }
+
+        private void BnBuild()
+        {
+            try
+            {
+                _bnRoot = LMakeRoot("BAMP_BanNotice");
+                _bnRoot.transform.SetAsLastSibling();
+                const float W = 440f;
+                var card = LMakeCard(_bnRoot.transform, "Notice", "REMOVED FROM GAME", W, 165f);
+                LText(card.go.transform, "You were banned by the host.", 15f, C_WHITE, 22f, 64f, W - 44f, 24f, TextAlignmentOptions.TopLeft, false, false, 0f, true);
+                _bnOk = LButton(card.go.transform, "BAMP_BanNoticeOk", "OK", (W - 140f) / 2f, 103f, 140f, 42f, 1, 15f);
+                Plugin.Logger.LogInfo("[BanUI] 'REMOVED FROM GAME' shown over the main menu.");
+            }
+            catch (Exception ex)
+            {
+                BpErr("notice", ex);
+                _banNoticeArmed = false;
+                try { if (_bnRoot != null) UnityEngine.Object.Destroy(_bnRoot); } catch { }
+                _bnRoot = null; _bnOk = null;
+            }
+        }
+
+        private void BnDismiss(string how)
+        {
+            _banNoticeArmed = false;
+            try { if (_bnRoot != null) UnityEngine.Object.Destroy(_bnRoot); } catch { }
+            _bnRoot = null; _bnOk = null;
+            Plugin.Logger.LogInfo($"[BanUI] 'REMOVED FROM GAME' dismissed ({how}).");
+        }
+
+        // ── B1 on the Business page ──
+        /// <summary>The red-outlined Ban on the white header card: white fill, red outline (two thin rings = the mock-up's
+        /// 2 px), red label. Kind 9 = never re-skinned by BSetKind.</summary>
+        private static void BizRedline(BBtn b)
+        {
+            b.kind = 9;
+            b.img.sprite = LRoundSprite(false); b.img.type = Image.Type.Sliced; b.img.pixelsPerUnitMultiplier = 10f / (3f * BK); b.img.color = Color.white;
+            LStretch(LImg(b.go.transform, "Line", BP_REDLINE, LRoundSprite(true), 3f * BK).rectTransform, 0f, 0f, 0f, 0f);
+            LStretch(LImg(b.go.transform, "Line2", BP_REDLINE, LRoundSprite(true), 3f * BK).rectTransform, 0.9f, 0.9f, 0.9f, 0.9f);
+            b.lbl.color = BP_REDLINE;
+            b.lbl.transform.SetAsLastSibling();
+        }
+
+        /// <summary>The lobby row's Ban: the Kick button's shape, dark see-through fill, red outline, light red label.</summary>
+        private static void LRedline(LBtn b)
+        {
+            b.kind = 9;
+            try
+            {
+                if (b.img != null) b.img.color = BP_LREDBG;
+                if (b.line != null) b.line.color = BP_LREDLINE;
+                var l2 = LImg(b.go.transform, "Line2", BP_LREDLINE, LRoundSprite(true), 3f);
+                LStretch(l2.rectTransform, 1f, 1f, 1f, 1f);
+                l2.transform.SetSiblingIndex(1);
+                if (b.lbl != null) b.lbl.color = BP_LREDTXT;
+            }
+            catch { }
+        }
+
+        /// <summary>Header card: host only, another player's card (never the host's own - the page never lists it), online or
+        /// offline. Returns the right edge left for 'Propose merger' (12 px gap, as the mock-up).</summary>
+        private float BizBanPlace(BizPl? p)
+        {
+            float right = 1221f - 26f;
+            try
+            {
+                if (_bizBanBtn == null) return right;
+                bool show = MPServer.IsRunning && p != null && (p.Pid.Length > 0 || p.Handle.Length > 0) && p.Pid != MPConfig.PlayerId;
+                if (_bizBanBtn.go.activeSelf != show) _bizBanBtn.go.SetActive(show);
+                if (!show) return right;
+                float w = BMeasure("Ban", 13f, true) + 32f;
+                BPos(_bizBanBtn.rt, right - w, 31f, w, 32f);
+                return right - w - 12f;
+            }
+            catch (Exception ex) { BizErr("ban button", ex); return right; }
+        }
+
+        private void BizBanClick()
+        {
+            var p = BizSelected();
+            if (p == null || !MPServer.IsRunning) return;
+            BizHideMergeTip();
+            string who = p.Pid.Length > 0 ? p.Pid : p.Handle;
+            BpOpenBan(false, p.Pid, who, p.Name, p.Online && p.Pid.Length > 0);
+        }
+
+        /// <summary>'Banned players ({n})' under the Players list (host only); the list stops 12 px above it for the host.</summary>
+        private void BizBannedRefresh()
+        {
+            try
+            {
+                bool host = MPServer.IsRunning;
+                if (_bizBannedBtn != null)
+                {
+                    if (_bizBannedBtn.go.activeSelf != host) _bizBannedBtn.go.SetActive(host);
+                    int n = host ? MPConfig.BannedPlayers.Count : -1;
+                    if (n != _bizBannedN) { _bizBannedN = n; if (host) _bizBannedBtn.lbl.text = $"Banned players ({n})"; }
+                }
+                if (host != _bizBanHost && _bizCardsVp != null)
+                {
+                    _bizBanHost = host;
+                    float vh = host ? BP_CARDS_HOST : B_CARDSH;
+                    _bizCardsVp.sizeDelta = new Vector2(_bizCardsVp.sizeDelta.x, vh * BK);
+                    var bar = _bizLeftPane != null ? _bizLeftPane.Find("Bar") as RectTransform : null;
+                    if (bar != null) bar.sizeDelta = new Vector2(bar.sizeDelta.x, (vh - 18f) * BK);
+                    _bizDirty = true;
+                }
+            }
+            catch (Exception ex) { BizErr("banned button", ex); }
+        }
+
+        // ── B5 in the lobby ──
+        private bool LwBanRowHit(Vector2 mp, IReadOnlyList<string>? roster, int rn)
+        {
+            for (int s = 0; s < LW_SLOTS; s++)
+            {
+                var r = _lwRows[s];
+                if (r == null || !LHit(r.ban, mp)) continue;
+                int pi = _lwScroll + s;
+                if (roster != null && pi < rn && !string.IsNullOrEmpty(roster[pi]))
+                {
+                    Plugin.Logger.LogInfo($"[MenuUI] Ban → '{roster[pi]}' (asks first)");
+                    BpOpenBan(true, roster[pi], roster[pi], roster[pi], true);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        private void LwBannedCount()
+        {
+            int n = MPConfig.BannedPlayers.Count;
+            if (n == _lwBannedN || _lwBannedB == null || _lwBannedB.lbl == null) return;
+            _lwBannedN = n;
+            _lwBannedB.lbl.text = $"Edit ({n})";
+        }
+
+#if BAMP_DEV
+        private static Vector2 DevCentre(RectTransform rt, Camera? cam) => RectTransformUtility.WorldToScreenPoint(cam, rt.TransformPoint(rt.rect.center));
+
+        private string BpState()
+            => $"mode={_bpMode} lobby={_bpInLobby} tick={_bpTick} rows={_bpRowCount} hits={_bpHits.Count} pending={(_bpPendKey.Length > 0)} notice={(_bnRoot != null)} armed={_banNoticeArmed}"
+             + $" hubBan={(_bizBanBtn != null && _bizBanBtn.go.activeInHierarchy)} banned='{(_bizBannedBtn != null && _bizBannedBtn.go.activeInHierarchy ? _bizBannedBtn.lbl.text : "")}'"
+             + $" edit='{(_lwBannedB != null && _lwBannedB.lbl != null && _lwBannedB.go.activeInHierarchy ? _lwBannedB.lbl.text : "")}' bans={MPConfig.BannedPlayers.Count}";
+
+        /// <summary>DEV 'banui' lever: drives the ban screens through their own click paths (a virtual click at the
+        /// control's centre, through the same hit tests a mouse click takes).</summary>
+        internal string DevBanUi(string arg)
+        {
+            try
+            {
+                string a = (arg ?? "").Trim();
+                int sp = a.IndexOf(' ');
+                string verb = (sp < 0 ? a : a.Substring(0, sp)).ToLowerInvariant();
+                string rest = sp < 0 ? "" : a.Substring(sp + 1).Trim();
+                switch (verb)
+                {
+                    case "":
+                    case "state": return "OK banui state: " + BpState();
+                    case "hubban":
+                    {
+                        if (!_hubVisible || _bizRoot == null) return "ERR banui hubban: the Business page is not open";
+                        BizPl? hit = null;
+                        foreach (var p in _bizPls) if (p.Pid == rest || p.Name == rest) { hit = p; break; }
+                        if (hit == null) return $"ERR banui hubban: no card for '{rest}'";
+                        if (_bizSel != hit.Key) { _bizSel = hit.Key; BizRebuild(); }
+                        if (_bizBanBtn == null || !_bizBanBtn.go.activeInHierarchy) return "ERR banui hubban: no Ban button on that card " + BpState();
+                        BizClick(DevCentre(_bizBanBtn.rt, _hubCam));
+                        return "OK banui hubban: " + BpState();
+                    }
+                    case "hubbanned":
+                        if (_bizBannedBtn == null || !_bizBannedBtn.go.activeInHierarchy) return "ERR banui hubbanned: no Banned players button " + BpState();
+                        BizClick(DevCentre(_bizBannedBtn.rt, _hubCam));
+                        return "OK banui hubbanned: " + BpState();
+                    case "lobbyban":
+                    {
+                        var roster = LwPlayers(true);
+                        int rn = roster != null ? roster.Count : 0;
+                        for (int s = 0; s < LW_SLOTS; s++)
+                        {
+                            int pi = _lwScroll + s; var r = _lwRows[s];
+                            if (r == null || roster == null || pi >= rn || roster[pi] != rest) continue;
+                            if (!r.ban.go.activeInHierarchy) return "ERR banui lobbyban: that row's Ban is hidden";
+                            return LwBanRowHit(DevCentre(r.ban.rt, null), roster, rn) ? "OK banui lobbyban: " + BpState() : "ERR banui lobbyban: missed " + BpState();
+                        }
+                        return $"ERR banui lobbyban: no visible row for '{rest}'";
+                    }
+                    case "lobbyedit":
+                        if (_lwBannedB == null || !_lwBannedB.go.activeInHierarchy) return "ERR banui lobbyedit: no Edit button";
+                        if (!LHit(_lwBannedB, DevCentre(_lwBannedB.rt, null))) return "ERR banui lobbyedit: missed";
+                        BpOpenList(true);
+                        return "OK banui lobbyedit: " + BpState();
+                    case "press":
+                    {
+                        var tk = rest.Split(' ');
+                        string nm = tk.Length > 0 ? tk[0].ToLowerInvariant() : "";
+                        int idx = tk.Length > 1 && int.TryParse(tk[1], out var ii) ? ii : 0;
+                        int act = nm == "cancel" ? 1 : nm == "ban" ? 2 : nm == "tick" ? 3 : nm == "close" ? 4 : nm == "unban" ? 5
+                                : nm == "remove" ? 6 : nm == "removecancel" ? 7 : nm == "removeok" ? 8 : 0;
+                        if (act == 0) return "ERR usage: banui press <cancel|ban|tick|close|unban|remove|removecancel|removeok> [row]";
+                        int seen = 0;
+                        foreach (var h in _bpHits)
+                        {
+                            if (h.act != act) continue;
+                            if (seen++ != idx) continue;
+                            BpClick(DevCentre(h.rt, _bpCam));
+                            return $"OK banui press {nm}: " + BpState();
+                        }
+                        return $"ERR banui press {nm}: not on screen " + BpState();
+                    }
+                    case "notice": NoteBannedInGame(); return "OK banui notice armed (shown over the main menu) " + BpState();
+                    case "noticeok":
+                        if (_bnOk == null) return "ERR banui noticeok: no notice shown";
+                        if (!RectHit(_bnOk.rt, DevCentre(_bnOk.rt, null))) return "ERR banui noticeok: missed";
+                        BnDismiss("OK");
+                        return "OK banui noticeok";
+                    case "close": BpClose("dev"); return "OK banui close " + BpState();
+                }
+                return "ERR usage: banui <state|hubban <pid>|hubbanned|lobbyban <pid>|lobbyedit|press <name> [row]|notice|noticeok|close>";
+            }
+            catch (Exception ex) { return "ERR banui: " + ex.Message; }
+        }
+#endif
 
         // ══ kit (mock-up px in, page units out) ══
 

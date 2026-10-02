@@ -124,13 +124,15 @@ namespace BigAmbitionsMP
             //   midnight      → '-recover', one fixed slot — mirrors vanilla's "Recover Midnight".
             //   disconnect    → '-disconnect', a roster checkpoint carrying the member who just
             //                   left (see carry-forward below) — MP-specific, no native analog.
+            //   forfeit       → the auto rotation too (BAN-PLAYERS-1 re-check R5): the host's immediate save after a
+            //                   ban's property removal is a system save, never the player's own manual slot.
             // _activeSessionName stays on the manual base; suffixes never stack. Always derive
             // from the CLEAN base (strip any drifted sibling suffix) so names never compound
             // ('-auto-disconnect') and the lineage resolves together in carry-forward + load.
             string cleanBase = StripAutoSuffix(session);
             string autoSuffix = reason == "disconnect" ? "-disconnect"
                               : reason == "midnight"   ? "-recover"
-                              : (reason == "autosave" || reason == "join") ? NextAutoSlotSuffix(cleanBase)
+                              : (reason == "autosave" || reason == "join" || reason == "forfeit") ? NextAutoSlotSuffix(cleanBase)
                               : "";
             bool isAutomatic = autoSuffix.Length > 0;
             session = cleanBase + autoSuffix;

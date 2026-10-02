@@ -3165,6 +3165,8 @@ namespace BigAmbitionsMP
                     return "OK wsskip armed";
                 }
 
+                case "banui":    // BAN-PLAYERS-1 build C2 (DEV): drive the host's ban screens through their own click paths
+                    return MPCanvasUI.Instance != null ? MPCanvasUI.Instance.DevBanUi(arg) : "ERR banui: no MPCanvasUI";
                 case "uiview":   // DEV (2026-09-28): open the game's OWN main-menu screens for palette screenshots
                     return UiView(arg);
                 case "screenshot":

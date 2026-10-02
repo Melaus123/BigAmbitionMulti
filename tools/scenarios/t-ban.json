@@ -1,6 +1,6 @@
 {
   "id": "T-BAN",
-  "title": "BAN-PLAYERS-1 build A (lasting ban): an in-lobby DEV ban of a connected client (tag bannedgame, approved text) is saved; its rejoin is refused with tag banned (approved text) in the lobby, after a re-host, and after a host process restart; unban -> joins; in game the merged member is banned (clean leave - no paused-until-rejoin, avatar removed, buildings held, absence stand-in starts); unban -> rejoins. The rig's 127.0.0.1 is never recorded as an address (refusals match by stable id). BUILD C1 legs: (F1) an address refreshed by a refused retry keeps matching after first-recorded + 7 days; (F2) a 'steam-N' stable-id ban refuses a joiner vouched as N and learns the Steam id; (F5) in-game ban = one leave cleanup, nothing processed after; (G1) a ban added while a join request waits refuses it at approval, and BanPlayer reaches a waiting request; (D67) the banned client goes back to the menu with no disconnect save.",
+  "title": "BAN-PLAYERS-1 build A (lasting ban): an in-lobby DEV ban of a connected client (tag bannedgame, approved text) is saved; its rejoin is refused with tag banned (approved text) in the lobby, after a re-host, and after a host process restart; unban -> joins; in game the merged member is banned (clean leave - no paused-until-rejoin, avatar removed, buildings held, absence stand-in starts); unban -> rejoins. The rig's 127.0.0.1 is never recorded as an address (refusals match by stable id). BUILD C1 legs: (F1) an address refreshed by a refused retry keeps matching after first-recorded + 7 days; (F2) a 'steam-N' stable-id ban refuses a joiner vouched as N and learns the Steam id; (F5) in-game ban = one leave cleanup, nothing processed after; (G1) a ban added while a join request waits refuses it at approval, and BanPlayer reaches a waiting request; (D67) the banned client goes back to the menu with no disconnect save. BUILD C2 legs: (UI-TICK) the Business page's Ban with 'Also remove everything they own' through the real buttons (banned, back to the menu with 'REMOVED FROM GAME', property released); (UI-UNBAN) Unban from Banned players; (UI-REMOVE) Remove property from Banned players for an offline banned player; (C2-LOADING) a ban while the joiner loads waits for the load.",
   "preconditions": "Dev build with the 'ban'/'unban' levers. Fixture save1 (host melaus, client Client1). Uses the driver's drop/relaunch steps for the host. The host's saved ban list is emptied at the start and must be empty at the end (the last 'ban list'); fixture_reset re-prepares the save the disconnect save touches. Steam joins cannot be exercised on the one-account rig. Build C1: the DEV levers 'ban devaddr|devsteam|devpark' stand in for a public joiner address, a Steam-vouched id and a parked returning joiner (fixed values, never printed).",
   "instances": 2,
   "vars": {
@@ -21,7 +21,11 @@
     "Host connection lost in-game",
     "banned link \\d+: a second disconnect report",
     "\\[Config\\] (NoteBannedSteamId|DropOwnPublicAddress|BanRows):",
-    "\\[Server\\] (BanParked|parked-join take|banned-link disconnect check)"
+    "\\[Server\\] (BanParked|parked-join take|banned-link disconnect check)",
+    "\\[BanUI\\] (open ban|open list|rebuild|click|tick|notice): ",
+    "\\[Client\\] banned: (city exit|HideOverlays):",
+    "\\[Forfeit\\] own property get-out check:",
+    "\\[Hub\\] (TickHubWindow|rebuild|ban button|banned button):"
   ],
   "oracles_report": [
     "\\[Server\\] (BANNED|UNBANNED|Hello from BANNED)",
@@ -37,7 +41,10 @@
     "\\[RemotePlayer\\] Spawned",
     "devpark",
     "Steam id learned",
-    "while the join request waited"
+    "while the join request waited",
+    "\\[BanUI\\]",
+    "\\[Client\\] banned",
+    "\\[Forfeit\\] REMOVED"
   ],
   "steps": [
     {
@@ -826,16 +833,365 @@
       "seq": 90
     },
     {
+      "role": "all",
+      "cmd": "mark TEST BAN UI-TICK",
+      "expect_result": "OK MARK",
+      "seq": 91
+    },
+    {
+      "role": "h",
+      "cmd": "hubview offers",
+      "expect_result": "^OK hubview offers",
+      "seq": 92
+    },
+    {
+      "role": "h",
+      "sleep_s": 4,
+      "seq": 93
+    },
+    {
+      "role": "h",
+      "cmd": "banui hubban ${clientPid}",
+      "expect_result": "^OK banui hubban: mode=1 ",
+      "seq": 94
+    },
+    {
+      "role": "h",
+      "cmd": "banui press tick",
+      "expect_result": "^OK banui press tick: mode=1 lobby=False tick=True",
+      "seq": 95
+    },
+    {
+      "role": "h",
+      "cmd": "banui press ban",
+      "expect_result": "^OK banui press ban: mode=0 ",
+      "note": "UI-TICK: the Business page's Ban (B1) -> B2 tick box (B2b) -> Ban: the connected client is banned first, its property is removed once it is off the host",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BanUI\\] Ban '[^']+' \\(connected, also remove everything they own\\) -> OK banned '${clientPid}' key=b[0-9a-f]{7}",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] Banned by the host in game - back to the main menu",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BanUI\\] ban with 'Also remove everything they own': remove property -> OK removed '${clientPid}' key=\\S+ rented=[1-9]",
+          "within_s": 40
+        },
+        {
+          "role": "c",
+          "regex": "\\[BanUI\\] 'REMOVED FROM GAME' shown over the main menu\\.",
+          "within_s": 240
+        }
+      ],
+      "seq": 96
+    },
+    {
+      "role": "c",
+      "sleep_s": 3,
+      "seq": 97
+    },
+    {
+      "role": "c",
+      "cmd": "screenshot ban-B6a-client",
+      "expect_result": "^OK screenshot",
+      "seq": 98
+    },
+    {
+      "role": "c",
+      "cmd": "banui noticeok",
+      "expect_result": "^OK banui noticeok",
+      "seq": 99
+    },
+    {
+      "role": "h",
+      "cmd": "bldgstate ${clientShop}",
+      "expect_result": "^OK bldg .* rented=False forRent=True ",
+      "note": "the shop the banned client rented is released on the host",
+      "seq": 100
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:banned' . \"You're banned from this host's games\\.",
+          "within_s": 60
+        }
+      ],
+      "seq": 101
+    },
+    {
+      "role": "c",
+      "sleep_s": 4,
+      "seq": 102
+    },
+    {
+      "role": "c",
+      "cmd": "screenshot ban-B6b-client",
+      "expect_result": "^OK screenshot",
+      "note": "B6b: the real 'Couldn't join' card on the refused client",
+      "seq": 103
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BAN UI-UNBAN",
+      "expect_result": "OK MARK",
+      "seq": 104
+    },
+    {
+      "role": "h",
+      "cmd": "banui hubbanned",
+      "expect_result": "^OK banui hubbanned: mode=2 lobby=False tick=\\w+ rows=1 ",
+      "seq": 105
+    },
+    {
+      "role": "h",
+      "cmd": "banui press unban 0",
+      "expect_result": "^OK banui press unban: mode=2 .*rows=0 ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BanUI\\] Unban '${clientPid}' -> OK unbanned 1 left=0",
+          "within_s": 10
+        }
+      ],
+      "seq": 106
+    },
+    {
+      "role": "h",
+      "cmd": "banui press close",
+      "expect_result": "^OK banui press close: mode=0 ",
+      "seq": 107
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "(returning player '${clientPid}' auto-accepted|mid-game join request from '${clientPid}')",
+          "within_s": 60
+        }
+      ],
+      "seq": 108
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 109
+    },
+    {
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "seq": 110
+    },
+    {
+      "role": "c",
+      "sleep_s": 60,
+      "seq": 111
+    },
+    {
+      "role": "c",
+      "cmd": "rent ${clientShop}",
+      "expect_result": "^OK RentBuilding invoked",
+      "note": "the client rents its released shop again, so B4 has something to remove",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Forfeit\\] '${clientShop}' rented again by '${clientPid}'",
+          "within_s": 30
+        }
+      ],
+      "abort_on_fail": false,
+      "seq": 112
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 113
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BAN UI-REMOVE",
+      "expect_result": "OK MARK",
+      "seq": 114
+    },
+    {
+      "role": "h",
+      "cmd": "hubview offers",
+      "expect_result": "^OK hubview offers",
+      "seq": 115
+    },
+    {
+      "role": "h",
+      "sleep_s": 4,
+      "seq": 116
+    },
+    {
+      "role": "h",
+      "cmd": "banui hubban ${clientPid}",
+      "expect_result": "^OK banui hubban: mode=1 ",
+      "seq": 117
+    },
+    {
+      "role": "h",
+      "cmd": "banui press ban",
+      "expect_result": "^OK banui press ban: mode=0 ",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BanUI\\] Ban '[^']+' \\(connected\\) -> OK banned '${clientPid}'",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] Banned by the host in game - back to the main menu",
+          "within_s": 30
+        }
+      ],
+      "seq": 118
+    },
+    {
+      "role": "h",
+      "sleep_s": 10,
+      "seq": 119
+    },
+    {
+      "role": "h",
+      "cmd": "banui hubbanned",
+      "expect_result": "^OK banui hubbanned: mode=2 .*rows=1 ",
+      "seq": 120
+    },
+    {
+      "role": "h",
+      "cmd": "banui press remove 0",
+      "expect_result": "^OK banui press remove: mode=3 ",
+      "seq": 121
+    },
+    {
+      "role": "h",
+      "cmd": "banui press removeok",
+      "expect_result": "^OK banui press removeok: mode=2 ",
+      "note": "B3 'Remove property' -> B4 'Remove' for an OFFLINE banned player",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BanUI\\] Remove property of '${clientPid}' -> OK removed '${clientPid}' key=\\S+ rented=[1-9]",
+          "within_s": 15
+        }
+      ],
+      "seq": 122
+    },
+    {
+      "role": "h",
+      "cmd": "banui press unban 0",
+      "expect_result": "^OK banui press unban: mode=2 .*rows=0 ",
+      "seq": 123
+    },
+    {
+      "role": "h",
+      "cmd": "banui press close",
+      "expect_result": "^OK banui press close: mode=0 ",
+      "seq": 124
+    },
+    {
+      "role": "c",
+      "sleep_s": 20,
+      "seq": 125
+    },
+    {
+      "role": "c",
+      "cmd": "banui noticeok",
+      "expect_result": "^OK banui noticeok",
+      "abort_on_fail": false,
+      "seq": 126
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BAN C2-LOADING",
+      "expect_result": "OK MARK",
+      "seq": 127
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "(returning player '${clientPid}' auto-accepted|mid-game join request from '${clientPid}')",
+          "within_s": 60
+        }
+      ],
+      "seq": 128
+    },
+    {
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "seq": 129
+    },
+    {
+      "role": "h",
+      "sleep_s": 6,
+      "seq": 130
+    },
+    {
+      "role": "h",
+      "cmd": "ban ${clientPid}",
+      "expect_result": "^OK banned '${clientPid}'",
+      "note": "c2: a ban while the joiner's load is in flight - the exit waits for the load (soft: the timing may miss the loading screen)",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:bannedgame'",
+          "within_s": 150
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] banned while the game is loading - the exit to the main menu waits for the load to finish\\.",
+          "within_s": 150
+        },
+        {
+          "role": "c",
+          "regex": "\\[Client\\] banned: leaving the city for the main menu",
+          "within_s": 300
+        }
+      ],
+      "abort_on_fail": false,
+      "seq": 131
+    },
+    {
+      "role": "c",
+      "sleep_s": 90,
+      "seq": 132
+    },
+    {
+      "role": "h",
+      "cmd": "unban all",
+      "expect_result": "^OK unbanned \\d+ left=0",
+      "seq": 133
+    },
+    {
       "role": "h",
       "cmd": "ban list",
       "expect_result": "^OK ban list n=0 ",
-      "seq": 91
+      "seq": 134
     },
     {
       "role": "all",
       "cmd": "mark TEST BAN END",
       "expect_result": "OK MARK",
-      "seq": 92
+      "seq": 135
     }
   ]
 }

@@ -7390,17 +7390,19 @@ namespace BigAmbitionsMP
         /// A notice held by a session that has since ended is discarded (it belongs to that host's world).</summary>
         internal static void TickHeldForfeits()
         {
-            if (_heldForfeits.Count == 0 && _ownerWaitingExit.Count == 0) return;
+            if (_heldForfeits.Count == 0 && _ownerWaitingExit.Count == 0 && _ownerWaitingVehicle.Count == 0) return;
             try
             {
                 if (!MPClient.IsConnected)
                 {
-                    Plugin.Logger.LogInfo($"[Forfeit] {_heldForfeits.Count + _ownerWaitingExit.Count} held notice(s) discarded - the session ended before this world settled.");
+                    Plugin.Logger.LogInfo($"[Forfeit] {_heldForfeits.Count + _ownerWaitingExit.Count + _ownerWaitingVehicle.Count} held notice(s) discarded - the session ended before this world settled.");
                     _heldForfeits.Clear();
                     _ownerWaitingExit.Clear();
+                    _ownerWaitingVehicle.Clear(); _forfeitVehWaitId = "";
                     try { GlobalEvents.onExitBuilding -= OnOwnerExitedBuilding; } catch { }
                     return;
                 }
+                if (_ownerWaitingVehicle.Count > 0) TickOwnerVehicleExit();   // R3: the get-out finishes a frame after ExitVehicle
                 if (_heldForfeits.Count == 0) return;
                 if (!MPWorldReady.IsSettled || SaveGameManager.Current == null) return;
                 var held = new List<PropertyForfeitPayload>(_heldForfeits);
@@ -7582,6 +7584,13 @@ namespace BigAmbitionsMP
         private static readonly List<KeyValuePair<PropertyForfeitInfo, string>> _ownerWaitingExit = new();
         private static string _forfeitExitedVehicleId = "";   // the vehicle the player was just taken out of (its live controller goes with it)
         private static string _forfeitKeepVehicleId = "";     // a vehicle the player could not be taken out of (kept this time, logged)
+        // R3 (re-check of 6586fc3): owner entries waiting for the game to finish the get-out. CarController.ExitVehicle places
+        // the player on walkable ground ONE FRAME LATER using the car (decompile CarController.cs:584-591) and gets back in
+        // when no spot is found - so the car is deleted only once the game's own state says the player is out of it.
+        private static readonly List<KeyValuePair<PropertyForfeitInfo, string>> _ownerWaitingVehicle = new();
+        private static string _forfeitVehWaitId = "";         // the vehicle the get-out was started on
+        private static int _forfeitVehWaitFrame;              // the frame ExitVehicle ran
+        private static string _forfeitCarryExited = "", _forfeitCarryKeep = "";   // the outcome handed to the re-applied entries
 
         /// <summary>L3 - OWNER SIDE, MAIN THREAD. Native refuses its own lease end while the player is inside that building
         /// (BizManPresentation.TerminateContract, decompile :599). Inside a forfeited building: the player is walked out with
@@ -7591,7 +7600,8 @@ namespace BigAmbitionsMP
         /// first, so the vehicle is never deleted under the player.</summary>
         private static bool OwnerMustLeaveFirst(PropertyForfeitInfo e, string why)
         {
-            _forfeitExitedVehicleId = ""; _forfeitKeepVehicleId = "";
+            _forfeitExitedVehicleId = _forfeitCarryExited; _forfeitKeepVehicleId = _forfeitCarryKeep;   // R3: a finished get-out's outcome
+            _forfeitCarryExited = ""; _forfeitCarryKeep = "";
             try
             {
                 var set = new HashSet<string>(StringComparer.Ordinal);
@@ -7619,16 +7629,20 @@ namespace BigAmbitionsMP
                 }
                 VehicleInstance? cur = null; try { cur = VehicleHelper.GetCurrentVehicle(); } catch { }
                 string vAddr = ""; try { if (cur != null) vAddr = GameStateReader.AddressKey(cur.Address); } catch { }
-                if (cur != null && vAddr.Length > 0 && set.Contains(vAddr))
+                string curVid = ""; try { if (cur != null) curVid = cur.id ?? ""; } catch { }
+                if (cur != null && vAddr.Length > 0 && set.Contains(vAddr) && !(curVid.Length > 0 && curVid == _forfeitKeepVehicleId))
                 {
-                    string vid = ""; try { vid = cur.id ?? ""; } catch { }
+                    string vid = curVid;
                     try
                     {
                         var vc = VehicleHelper.GetCurrentVehicleBase();
                         if (vc == null) throw new InvalidOperationException("no live controller for the current vehicle");
                         vc.ExitVehicle();
-                        _forfeitExitedVehicleId = vid;
-                        Plugin.Logger.LogInfo($"[Forfeit] own property: the player was DRIVING a vehicle kept at forfeited '{vAddr}' - taken out with the game's own get-out before the removal.");
+                        // R3: held until the game has the player out (TickOwnerVehicleExit) - the car is not deleted this frame.
+                        _ownerWaitingVehicle.Add(new KeyValuePair<PropertyForfeitInfo, string>(e, why));
+                        _forfeitVehWaitId = vid; _forfeitVehWaitFrame = UnityEngine.Time.frameCount;
+                        Plugin.Logger.LogInfo($"[Forfeit] own property: the player was DRIVING a vehicle kept at forfeited '{vAddr}' - the game's own get-out started; the removal applies once the game has the player out of it.");
+                        return true;
                     }
                     catch (Exception ex)
                     {
@@ -7639,6 +7653,35 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own property: leave-first check: {ex.Message}"); }
             return false;
+        }
+
+        /// <summary>R3 (re-check of 6586fc3) - CLIENT, MAIN THREAD, every frame while a get-out is pending (TickHeldForfeits).
+        /// From the second frame after ExitVehicle (its walkable-ground step runs one frame later) the game's own current
+        /// vehicle is read: none / another = the player is out (the car goes, with its live object); still that car = the
+        /// game found no place to put the player and got back in - the car is kept this time, as when the get-out throws.</summary>
+        private static void TickOwnerVehicleExit()
+        {
+            try
+            {
+                if (UnityEngine.Time.frameCount < _forfeitVehWaitFrame + 2) return;
+                VehicleInstance? cur = null; try { cur = VehicleHelper.GetCurrentVehicle(); } catch { }
+                string curId = ""; try { if (cur != null) curId = cur.id ?? ""; } catch { }
+                string vid = _forfeitVehWaitId;
+                bool refused = vid.Length > 0 && curId == vid;
+                var list = new List<KeyValuePair<PropertyForfeitInfo, string>>(_ownerWaitingVehicle);
+                _ownerWaitingVehicle.Clear(); _forfeitVehWaitId = "";
+                if (refused) Plugin.Logger.LogWarning($"[Forfeit] own property: the game refused the get-out (no place to stand found - the player is back in the vehicle) - that vehicle is kept this time.");
+                else Plugin.Logger.LogInfo($"[Forfeit] own property: the game has the player out of the vehicle - applying {list.Count} held notice(s).");
+                if (SaveGameManager.Current == null) { Plugin.Logger.LogInfo("[Forfeit] own property: no world loaded any more - the held notice(s) are discarded."); return; }
+                foreach (var kv in list)
+                {
+                    _forfeitCarryExited = refused ? "" : vid; _forfeitCarryKeep = refused ? vid : "";
+                    try { OwnerApplyForfeit(kv.Key, kv.Value); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own property after the get-out: {ex.Message}"); }
+                }
+                _forfeitCarryExited = ""; _forfeitCarryKeep = "";
+            }
+            catch (Exception ex) { _ownerWaitingVehicle.Clear(); _forfeitVehWaitId = ""; Plugin.Logger.LogWarning($"[Forfeit] own property get-out check: {ex.Message}"); }
         }
 
         /// <summary>L3: the game's exit-completed event (any thread the game raises it on) - the held owner entries apply on

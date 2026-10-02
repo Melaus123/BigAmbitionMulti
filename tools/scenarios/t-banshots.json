@@ -1,0 +1,362 @@
+{
+  "id": "T-BANSHOTS",
+  "title": "BAN-PLAYERS-1 build C2 screenshots: B6a/B6b (DEV views over the main menu), B5 lobby + B2/B3 over the lobby, B1/B2/B2b/B3 (2 rows and empty)/B4 on the Business page, all opened through the screens' own click paths. Run at 1920x1080 (window key) and 1280x720 (BAMP_RIG_WINDOW).",
+  "preconditions": "Dev build with the 'banui' lever. Fixture save1 (host melaus, client Client1). Two DEV saved bans (devaddr = 'Joined by IP', devsteam = 'Steam account') make B3's two rows; both are unbanned through B3 itself.",
+  "instances": 2,
+  "window": "1920x1080",
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[BanUI\\] (open ban|open list|rebuild|click|tick|notice): ",
+    "\\[Hub\\] (TickHubWindow|rebuild|ban button|banned button):",
+    "\\[MenuUI\\] lobby (tick|refresh):"
+  ],
+  "oracles_report": [
+    "\\[BanUI\\]",
+    "\\[TestDrive\\] screenshot"
+  ],
+  "steps": [
+    {
+      "role": "all",
+      "cmd": "mark TEST BANSHOTS START",
+      "expect_result": "OK MARK",
+      "seq": 1
+    },
+    {
+      "role": "h",
+      "cmd": "unban all",
+      "expect_result": "^OK unbanned \\d+ left=0",
+      "seq": 2
+    },
+    {
+      "role": "h",
+      "cmd": "banui notice",
+      "expect_result": "^OK banui notice armed",
+      "seq": 3
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 4
+    },
+    {
+      "role": "h",
+      "cmd": "banui state",
+      "expect_result": "^OK banui state: .*notice=True",
+      "seq": 5
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B6a",
+      "expect_result": "^OK screenshot",
+      "seq": 6
+    },
+    {
+      "role": "h",
+      "cmd": "banui noticeok",
+      "expect_result": "^OK banui noticeok",
+      "seq": 7
+    },
+    {
+      "role": "h",
+      "cmd": "uiview failed banned",
+      "expect_result": "fake couldn't join \\(banned\\)",
+      "seq": 8
+    },
+    {
+      "role": "h",
+      "sleep_s": 2,
+      "seq": 9
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B6b",
+      "expect_result": "^OK screenshot",
+      "seq": 10
+    },
+    {
+      "role": "h",
+      "cmd": "uiview leave",
+      "expect_result": "^OK uiview leave",
+      "seq": 11
+    },
+    {
+      "role": "h",
+      "cmd": "uiview host",
+      "expect_result": "server=True",
+      "seq": 12,
+      "note": "the real host lobby window (OnMpHostNew)"
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr on",
+      "expect_result": "^OK devaddr on",
+      "seq": 13
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr add",
+      "expect_result": "^OK devaddr add key=",
+      "seq": 14
+    },
+    {
+      "role": "h",
+      "cmd": "ban devaddr off",
+      "expect_result": "^OK devaddr off",
+      "seq": 15
+    },
+    {
+      "role": "h",
+      "cmd": "ban devsteam add",
+      "expect_result": "^OK devsteam add key=",
+      "seq": 16
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] '${clientPid}' joined lobby\\.",
+          "within_s": 60
+        }
+      ],
+      "seq": 17
+    },
+    {
+      "role": "h",
+      "sleep_s": 4,
+      "seq": 18
+    },
+    {
+      "role": "h",
+      "cmd": "banui state",
+      "expect_result": "^OK banui state: .*edit='Edit \\(2\\)'",
+      "seq": 19
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B5",
+      "expect_result": "^OK screenshot",
+      "seq": 20
+    },
+    {
+      "role": "h",
+      "cmd": "banui lobbyban ${clientPid}",
+      "expect_result": "^OK banui lobbyban: mode=1 lobby=True",
+      "seq": 21
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 22
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B2-lobby",
+      "expect_result": "^OK screenshot",
+      "seq": 23
+    },
+    {
+      "role": "h",
+      "cmd": "banui press cancel",
+      "expect_result": "^OK banui press cancel: mode=0 ",
+      "seq": 24
+    },
+    {
+      "role": "h",
+      "cmd": "banui lobbyedit",
+      "expect_result": "^OK banui lobbyedit: mode=2 lobby=True tick=False rows=2 ",
+      "seq": 25
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 26
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B3-lobby",
+      "expect_result": "^OK screenshot",
+      "seq": 27
+    },
+    {
+      "role": "h",
+      "cmd": "banui press close",
+      "expect_result": "^OK banui press close: mode=0 ",
+      "seq": 28
+    },
+    {
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ],
+      "seq": 29
+    },
+    {
+      "role": "h",
+      "sleep_s": 30,
+      "seq": 30
+    },
+    {
+      "role": "h",
+      "cmd": "hubview offers",
+      "expect_result": "^OK hubview offers",
+      "seq": 31
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 32
+    },
+    {
+      "role": "h",
+      "cmd": "banui state",
+      "expect_result": "^OK banui state: .*hubBan=True banned='Banned players \\(2\\)'",
+      "seq": 33
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B1",
+      "expect_result": "^OK screenshot",
+      "seq": 34
+    },
+    {
+      "role": "h",
+      "cmd": "banui hubban ${clientPid}",
+      "expect_result": "^OK banui hubban: mode=1 lobby=False",
+      "seq": 35
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 36
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B2",
+      "expect_result": "^OK screenshot",
+      "seq": 37
+    },
+    {
+      "role": "h",
+      "cmd": "banui press tick",
+      "expect_result": "^OK banui press tick: mode=1 lobby=False tick=True",
+      "seq": 38
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 39
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B2b",
+      "expect_result": "^OK screenshot",
+      "seq": 40
+    },
+    {
+      "role": "h",
+      "cmd": "banui press cancel",
+      "expect_result": "^OK banui press cancel: mode=0 ",
+      "seq": 41
+    },
+    {
+      "role": "h",
+      "cmd": "banui hubbanned",
+      "expect_result": "^OK banui hubbanned: mode=2 lobby=False tick=\\w+ rows=2 ",
+      "seq": 42
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 43
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B3",
+      "expect_result": "^OK screenshot",
+      "seq": 44
+    },
+    {
+      "role": "h",
+      "cmd": "banui press remove 0",
+      "expect_result": "^OK banui press remove: mode=3 ",
+      "seq": 45
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 46
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B4",
+      "expect_result": "^OK screenshot",
+      "seq": 47
+    },
+    {
+      "role": "h",
+      "cmd": "banui press removecancel",
+      "expect_result": "^OK banui press removecancel: mode=2 ",
+      "seq": 48
+    },
+    {
+      "role": "h",
+      "cmd": "banui press unban 0",
+      "expect_result": "^OK banui press unban: mode=2 .*rows=1 ",
+      "seq": 49
+    },
+    {
+      "role": "h",
+      "cmd": "banui press unban 0",
+      "expect_result": "^OK banui press unban: mode=2 .*rows=0 ",
+      "seq": 50
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 51
+    },
+    {
+      "role": "h",
+      "cmd": "screenshot ban-B3-empty",
+      "expect_result": "^OK screenshot",
+      "seq": 52
+    },
+    {
+      "role": "h",
+      "cmd": "banui press close",
+      "expect_result": "^OK banui press close: mode=0 ",
+      "seq": 53
+    },
+    {
+      "role": "h",
+      "cmd": "ban list",
+      "expect_result": "^OK ban list n=0",
+      "seq": 54
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BANSHOTS END",
+      "expect_result": "OK MARK",
+      "seq": 55
+    }
+  ]
+}
