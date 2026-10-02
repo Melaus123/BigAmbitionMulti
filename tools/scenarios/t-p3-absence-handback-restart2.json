@@ -415,6 +415,11 @@
           "role": "h",
           "regex": "'${dPid}' acked the hand-over of '${clientPid}': \\d+ addr, [1-9]\\d* staff",
           "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] stand-in '${dPid}' applied the host's copy of '${clientShop}' - its uploads of it are accepted",
+          "within_s": 300
         }
       ],
       "seq": 41,
@@ -430,15 +435,8 @@
       "role": "d",
       "cmd": "absence",
       "expect_result": "^OK absence marks=\\[${clientPid}->${dPid}: .*\\] simulating_here=\\[.*${clientShop}",
-      "note": "the stand-in holds the restored mark | ABSENT-OWNER-GATES-1 (C4): and has applied the host's copy of the shop (seed confirmed) before it works there",
-      "seq": 43,
-      "expect_log": [
-        {
-          "role": "h",
-          "regex": "\\[Absence\\] stand-in '${dPid}' applied the host's copy of '${clientShop}' - its uploads of it are accepted",
-          "within_s": 180
-        }
-      ]
+      "note": "the stand-in holds the restored mark | ABSENT-OWNER-GATES-1 (C4): and has applied the host's copy of the shop (seed confirmed) before it works there (the seed-confirmed host line arrives during the hostload step - checked there)",
+      "seq": 43
     },
     {
       "role": "h",

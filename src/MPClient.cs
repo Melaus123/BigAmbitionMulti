@@ -1644,6 +1644,9 @@ namespace BigAmbitionsMP
             }
             IsInLobby = false;
             SendPhaseReport("Loading", "intent: start-game (fence)");   // round-276b: intents name themselves
+            // ABSENT-OWNER-GATES-1 G1 (review fold): a hand-over held in the lobby predates this start - it belongs to a world the
+            // host started before (one whose load failed back to the lobby). Same main-thread queue as the hold, so it runs after it.
+            try { GameStatePatcher.EnqueueOnMainThread(() => MergerAbsence.DiscardHeldHandovers("the host started a world from its lobby after it was sent")); } catch { }
             var  sp              = env.GetPayload<StartGamePayload>();
             if (sp != null && sp.LoadGen != 0) ServedLoadGen = sp.LoadGen;   // round-284 load ticket (0 = older host)
             var  newGameSettings = sp?.Settings ?? MPServer.Preset("Normal");

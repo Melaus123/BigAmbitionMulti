@@ -1232,7 +1232,8 @@ namespace BigAmbitionsMP
             RequestResendIfInstallsLost();     // r4 F3
         }
 
-        private static readonly HashSet<string> _resendAsked = new();   // ownerPid, F3: log once until served
+        private static readonly HashSet<string> _resendAsked = new();   // "ownerPid|address" (G3): ONE re-ask per hand-over
+        private static readonly HashSet<string> _resendStopped = new();   // G3: the 'stopped asking' line, once per key per hand-over
 
         // ── ABSENT-OWNER-GATES-1 (C4): a hand-over that arrives before this machine's world is ready ──
         // After a host restart the hand-over reached the stand-in in the LOBBY and was applied before its world existed:
@@ -1240,6 +1241,25 @@ namespace BigAmbitionsMP
         // resend net never fired. The LATEST payload per owner is held here and applied when the world settles (the
         // MPWorldReady settled edge, read by Tick); a drop for that owner cancels it. MAIN THREAD (like every table here).
         private static readonly Dictionary<string, MergerHandoverPayload> _heldHandover = new(StringComparer.Ordinal);
+        // ABSENT-OWNER-GATES-1 G1 (review fold): the load each held hand-over belongs to - this machine's served load ticket
+        // (MPClient.ServedLoadGen; 0 before any load was served on this connection) when it was held. A held hand-over is
+        // discarded when this machine settles in a DIFFERENT served load, and every held one is discarded when the host starts
+        // a world from its lobby after it was sent (DiscardHeldHandovers, from MPClient.HandleStartGame). Before, a hand-over
+        // from a world whose load failed back to the lobby was applied onto the same addresses of the next world. MAIN THREAD.
+        private static readonly Dictionary<string, int> _heldLoadGen = new(StringComparer.Ordinal);
+        /// <summary>G1: the host started a world from its lobby - every held hand-over predates that world. Main thread.
+        /// If the host still names this machine as a stand-in there, the resend net asks for the hand-over again.</summary>
+        public static void DiscardHeldHandovers(string why)
+        {
+            try
+            {
+                if (_heldHandover.Count == 0) return;
+                foreach (var h in _heldHandover.Values)
+                    Plugin.Logger.LogInfo($"[Absence] held hand-over for '{h?.OwnerPid}' discarded - {why}.");
+                _heldHandover.Clear(); _heldLoadGen.Clear();
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] discard held hand-overs: {ex.Message}"); }
+        }
         private static string HeldKey(MergerHandoverPayload p)
             => !string.IsNullOrEmpty(p?.OwnerStable) ? p!.OwnerStable : (p?.OwnerPid ?? "");
         private static bool HeldFor(string ownerPid, string ownerStable)
@@ -1269,7 +1289,7 @@ namespace BigAmbitionsMP
                 }
                 foreach (var k in gone)
                 {
-                    _heldHandover.Remove(k);
+                    _heldHandover.Remove(k); _heldLoadGen.Remove(k);
                     Plugin.Logger.LogInfo($"[Absence] held hand-over for '{drop.OwnerPid}' cancelled - the host dropped the mark before this world was ready.");
                 }
             }
@@ -1281,11 +1301,21 @@ namespace BigAmbitionsMP
             try
             {
                 if (_heldHandover.Count == 0 || !MPWorldReady.IsSettled) return;
-                var held = new List<MergerHandoverPayload>(_heldHandover.Values);
+                var held = new List<KeyValuePair<string, MergerHandoverPayload>>(_heldHandover);
                 _heldHandover.Clear();
-                foreach (var h in held)
+                var gens = new Dictionary<string, int>(_heldLoadGen, StringComparer.Ordinal);
+                _heldLoadGen.Clear();
+                int nowGen = 0; try { nowGen = MPServer.IsRunning ? 0 : MPClient.ServedLoadGen; } catch { }
+                foreach (var kv in held)
                 {
+                    var h = kv.Value;
                     if (h == null) continue;
+                    // G1: held during one served load, settling in another - not this world's hand-over.
+                    if (gens.TryGetValue(kv.Key, out int g) && g != 0 && g != nowGen)
+                    {
+                        Plugin.Logger.LogInfo($"[Absence] held hand-over for '{h.OwnerPid}' discarded - it arrived during load {g}, this world is load {nowGen}.");
+                        continue;
+                    }
                     Plugin.Logger.LogInfo($"[Absence] this world is ready - applying the held hand-over for '{h.OwnerPid}'.");
                     ApplyHandover(h);
                 }
@@ -1310,24 +1340,34 @@ namespace BigAmbitionsMP
                 {
                     if (a == null || a.SimulatorPid != MPConfig.PlayerId) continue;
                     if (HeldFor(a.OwnerPid ?? "", a.OwnerStable ?? "")) continue;   // ABSENT-OWNER-GATES-1 (C4): applied at the settled edge
-                    bool lost = false;
+                    bool lost = false; string lostAddr = "";
                     // ABSENT-OWNER-GATES-1 (C4): 'simulated here' with NO building registration in a ready world is lost
                     // too (a hand-over applied before the world existed took nothing over).
                     bool settled = false; try { settled = MPWorldReady.IsSettled; } catch { }
                     foreach (var addr in a.Addresses ?? new List<string>())
                     {
                         if (string.IsNullOrEmpty(addr)) continue;
-                        if (!SimulatesHere(addr)) { lost = true; break; }
-                        if (settled && GameStatePatcher.FindRegistration(addr) == null) { lost = true; break; }
+                        if (!SimulatesHere(addr)) { lost = true; lostAddr = addr; break; }
+                        if (settled && GameStatePatcher.FindRegistration(addr) == null) { lost = true; lostAddr = addr; break; }
                     }
-                    if (!lost) { _resendAsked.Remove(a.OwnerPid ?? ""); continue; }
-                    if (_resendAsked.Add(a.OwnerPid ?? ""))
-                        Plugin.Logger.LogInfo($"[Absence] installs for '{a.OwnerPid}' are gone here (scene churn) - "
-                                            + "asking the host to re-send the hand-over.");
+                    if (!lost) continue;
+                    // ABSENT-OWNER-GATES-1 G3 (review fold): ONE re-ask per (owner, address) per hand-over - a stand-in that
+                    // truly has no registration for a mark address re-asked every 10 s forever. The next applied hand-over
+                    // (ApplyHandover) re-arms it; until then one line says the asking stopped.
+                    string rk = (a.OwnerPid ?? "") + "|" + lostAddr;
+                    if (!_resendAsked.Add(rk))
+                    {
+                        if (_resendStopped.Add(rk))
+                            Plugin.Logger.LogWarning($"[Absence] '{lostAddr}' for '{a.OwnerPid}' is still not running here after one re-send request - "
+                                                   + "not asking again until the next hand-over.");
+                        continue;
+                    }
+                    Plugin.Logger.LogInfo($"[Absence] installs for '{a.OwnerPid}' are gone here (scene churn) - "
+                                        + "asking the host to re-send the hand-over.");
                     MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.MergerHandover, MPConfig.PlayerId,
                         new MergerHandoverPayload
                         {
-                            OwnerPid = a.OwnerPid, OwnerStable = a.OwnerStable,
+                            OwnerPid = a.OwnerPid, OwnerStable = a.OwnerStable ?? "",   // G4: the nullable warning ed9b3bd's '?? ""' test raised
                             SimulatorPid = MPConfig.PlayerId, Ack = "resend",
                         }));
                 }
@@ -1372,6 +1412,8 @@ namespace BigAmbitionsMP
                     string hk = HeldKey(p);
                     bool first = !_heldHandover.ContainsKey(hk);
                     _heldHandover[hk] = p;
+                    int hg = 0; try { hg = MPServer.IsRunning ? 0 : MPClient.ServedLoadGen; } catch { }
+                    _heldLoadGen[hk] = hg;   // G1: the load this hand-over belongs to
                     if (first) Plugin.Logger.LogInfo($"[Absence] hand-over for '{p.OwnerPid}' held until this world is ready.");
                     return;
                 }
@@ -1432,7 +1474,9 @@ namespace BigAmbitionsMP
                 // so the game's own per-business alert pass for these addresses is asked only now.
                 try { TaskMirror.RegenerateStandIn(owner, p.Addresses); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] alert regeneration: {ex.Message}"); }
 
-                _resendAsked.Remove(owner);   // r4 F3: served - a later loss may ask (and log) again
+                // r4 F3 / G3: served - a later loss may ask (and log) once again
+                _resendAsked.RemoveWhere(k => k.StartsWith(owner + "|", StringComparison.Ordinal));
+                _resendStopped.RemoveWhere(k => k.StartsWith(owner + "|", StringComparison.Ordinal));
 
                 // The ack rides the SAME type back (no second message type): the host logs delivery.
                 if (MPClient.IsConnected && !MPServer.IsRunning)
@@ -1657,12 +1701,12 @@ namespace BigAmbitionsMP
             RememberHeld();   // H-STANDINTILL-2 T1: BEFORE the undo empties _simHere
             try { UndoLocalAll("session/scene reset"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] reset undo: {ex.Message}"); }
             _simHere.Clear(); _known.Clear(); _promotedStaff.Clear(); _installed.Clear();
-            _snapQueue.Clear(); _idWarned.Clear(); _fieldWarned.Clear(); _resendAsked.Clear();
+            _snapQueue.Clear(); _idWarned.Clear(); _fieldWarned.Clear(); _resendAsked.Clear(); _resendStopped.Clear();
             // P3-C (C5): a held return payload dies with the connection - the host clears a mark only
             // after a SEND, so the next return re-sends the whole thing.
             _heldReturn = null; _heldLogged = false; _returnAddrs.Clear(); _replaced.Clear(); _lastToastKey = "";
             _standInSeeded.Clear(); _seedAckSent.Clear(); _noHandbackHeld.Clear();   // ABSENCE-HANDBACK-1 R1 (a) / R4
-            _heldHandover.Clear();   // ABSENT-OWNER-GATES-1 (C4): dies with the session - the host re-sends on the next designation
+            _heldHandover.Clear(); _heldLoadGen.Clear();   // ABSENT-OWNER-GATES-1 (C4): dies with the session - the host re-sends on the next designation
             _tagInstalls = true; _returnUpsert = false;
         }
 

@@ -5555,6 +5555,8 @@ namespace BigAmbitionsMP
                 if (p == null) return;
                 string? ownerPid = HelperRouteOwner(p.AddressKey, p.PlayerId, senderPid, MessageType.HelperOrderForward, onMain, () => HandleHelperOrderCore(p, senderPid, true));
                 if (ownerPid == null) return;
+                ownerPid = AbsentOwnerDeliveryTarget("helper sale", p.AddressKey, ownerPid, senderPid);   // ABSENT-OWNER-GATES-1 G2
+                if (ownerPid.Length == 0) return;   // logged
                 if (ownerPid == MPConfig.PlayerId)
                     GameStatePatcher.EnqueueOnMainThread(() => CustomerEntrySync.OwnerAdoptForwardedOrder(p));
                 else
@@ -5651,7 +5653,9 @@ namespace BigAmbitionsMP
                 }
                 else
                 {
-                    SendHubTo(ownerPid, MessageType.BuildingInteriorDelta, p);   // the owner adopts the same ops
+                    string iTarget = AbsentOwnerDeliveryTarget("interior edit", p.AddressKey, ownerPid, senderPid);   // ABSENT-OWNER-GATES-1 G2
+                    if (iTarget.Length > 0 && iTarget != MPConfig.PlayerId)
+                        SendHubTo(iTarget, MessageType.BuildingInteriorDelta, p);   // the owner (or the absent owner's stand-in) adopts the same ops
                     GameStatePatcher.EnqueueOnMainThread(() =>
                     {
                         if (senderPid != MPConfig.PlayerId)   // host-as-guest already made the edit natively; re-applying is idempotent but pointless
@@ -5683,7 +5687,11 @@ namespace BigAmbitionsMP
                 if (ownerPid == MPConfig.PlayerId)
                     GameStatePatcher.EnqueueOnMainThread(() => HelperCleaning.Apply(payload));
                 else
-                    SendHubTo(ownerPid, MessageType.BuildingDirtEdit, payload);   // the owner's machine adopts it
+                {
+                    string cTarget = AbsentOwnerDeliveryTarget("cleaning report", payload.AddressKey, ownerPid, senderPid);   // ABSENT-OWNER-GATES-1 G2
+                    if (cTarget == MPConfig.PlayerId) GameStatePatcher.EnqueueOnMainThread(() => HelperCleaning.Apply(payload));
+                    else if (cTarget.Length > 0) SendHubTo(cTarget, MessageType.BuildingDirtEdit, payload);   // the owner's machine (or its stand-in) adopts it
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Cleaning] HandleBuildingDirtEdit: {ex.Message}"); }
         }
@@ -9027,6 +9035,32 @@ namespace BigAmbitionsMP
             catch { }
             Plugin.Logger.LogWarning($"[Merger] route for '{addressKey}' refused: owner '{ownerPid}' offline and nobody simulating");
             return "";
+        }
+
+        /// <summary>ABSENT-OWNER-GATES-1 G2 (review fold): where a helper sale, an interior edit or a cleaning report goes. An
+        /// ONLINE owner (or the host, or no owner) is returned as it is; an ABSENT owner's report goes to the stand-in simulating
+        /// that owner (RouteTargetFor - the storage route's answer), which logs when nobody can take it (""). A stand-in that sent
+        /// the report itself already has it: "" (logged once per kind and address). The absent branch runs on the main thread
+        /// (an absent owner is only trusted through the gate's main-thread decision).</summary>
+        private static readonly HashSet<string> _absentDeliveryLogged = new(StringComparer.OrdinalIgnoreCase);
+        private static string AbsentOwnerDeliveryTarget(string kind, string addressKey, string ownerId, string senderPid)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(ownerId) || ownerId == MPConfig.PlayerId || IsOnlinePid(ownerId)) return ownerId ?? "";
+                string t = RouteTargetFor(addressKey ?? "", ownerId);   // logs the refusal when nobody can take it
+                if (t.Length == 0) return "";
+                if (t == senderPid)
+                {
+                    if (_absentDeliveryLogged.Add(kind + "|" + addressKey + "|self"))
+                        Plugin.Logger.LogInfo($"[Merger] {kind} for absent owner '{ownerId}' at '{addressKey}' came from its stand-in '{t}' - not sent back.");
+                    return "";
+                }
+                if (_absentDeliveryLogged.Add(kind + "|" + addressKey + "|" + t))
+                    Plugin.Logger.LogInfo($"[Merger] {kind} for absent owner '{ownerId}' at '{addressKey}' routed to the stand-in '{t}'.");
+                return t;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] {kind} route for '{addressKey}': {ex.Message}"); return ""; }
         }
 
         /// <summary>W3-0 r1 (F7): an ASK — session open/close, sales history, work info, valuation — is answered
