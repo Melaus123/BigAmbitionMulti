@@ -1,7 +1,7 @@
 {
-  "id": "T-P3-HB-R",
-  "title": "ABSENCE-HANDBACK-1 fold 2 (D1) restart leg (3P, client stand-in): as leg B up to the stand-in's accepted absence work (the host records its world copy as the absence truth); then the host SAVES, the stand-in leaves, the host RESTARTS and reloads with the OWNER rejoining first: the restored mark carries TruthInWorld, the host's world copy becomes the stored copy, and the owner is handed back exactly the stand-in's absence stock (fingerprints equal) - the owner's OTHER shops (never in TruthInWorld) keep today's no-copy rule (report-only oracle)",
-  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX) plus role d (Client2, joins as a NEW player - charconfirm armed before hostload), as T-P3-3. The newcomer has no businesses, so Client2 is the stand-in by the longest-online rule (the host is not a member).  ONE mid-run host save into the rig's own save copy (fixture_reset re-prepares it before every run); ends dissolved. The stand-in stays away after the restart: with it online the reconcile drops the restored mark (an offline owner's addresses do not resolve after a restart - reported leftover).",
+  "id": "T-P3-HB-R3",
+  "title": "ABSENCE-RESTART-DROP-1 negative leg: after the restored mark survives the reload (stand-in online), the stand-in leaves the company (a real dissolve) and the mark is dropped",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX) plus role d (Client2, joins as a NEW player - charconfirm armed before hostload), as T-P3-3. The newcomer has no businesses, so Client2 is the stand-in by the longest-online rule (the host is not a member).  ONE mid-run host save into the rig's own save copy (fixture_reset re-prepares it before every run); ends dissolved.",
   "instances": 3,
   "vars": {
     "clientPid": "Client1",
@@ -17,7 +17,8 @@
     "hand-back of .* acknowledged .*MISMATCH",
     "OwnerSnapshot rejected: player='Client1'",
     "\\[Absence\\] hand-back ack for .* ignored",
-    "hand-back of .* REFUSED by"
+    "hand-back of .* REFUSED by",
+    "simulating '.*' for ''"
   ],
   "oracles_report": [
     "\\[Paperwork\\]",
@@ -321,8 +322,15 @@
     {
       "role": "h",
       "drop": true,
-      "note": "HOST RESTART during the absence",
-      "seq": 34
+      "note": "HOST RESTART during the absence (QUIT-CRASH-UNPATCH-1: the quit leaves the patches in place)",
+      "seq": 34,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Plugin\\] unload on quit - patches left in place",
+          "within_s": 5
+        }
+      ]
     },
     {
       "role": "h",
@@ -341,16 +349,29 @@
       "seq": 37
     },
     {
-      "role": "c",
-      "relaunch": true,
-      "note": "the absent owner returns (first, into the restarted host)",
+      "role": "d",
+      "drop": true,
+      "note": "the stand-in (at the menu) restarts too",
+      "expect_log": [
+        {
+          "role": "d",
+          "regex": "\\[BAMP\\] \\[Plugin\\] unload on quit - patches left in place",
+          "within_s": 5
+        }
+      ],
       "seq": 38
     },
     {
-      "role": "c",
+      "role": "d",
+      "relaunch": true,
+      "seq": 39
+    },
+    {
+      "role": "d",
       "cmd": "join",
       "expect_result": "^OK",
-      "seq": 39
+      "note": "ABSENCE-RESTART-DROP-1: the stand-in is online BEFORE the host's load; the owner stays away",
+      "seq": 40
     },
     {
       "role": "h",
@@ -364,6 +385,16 @@
         },
         {
           "role": "h",
+          "regex": "\\[Absence\\] hand-over of '${clientPid}' \\(\\d+ addresses.*-> '${dPid}'",
+          "within_s": 300
+        },
+        {
+          "role": "d",
+          "regex": "\\[Absence\\] simulating '${clientShop}' for '${clientPid}'",
+          "within_s": 300
+        },
+        {
+          "role": "h",
           "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
           "within_s": 300
         },
@@ -373,129 +404,60 @@
           "within_s": 60
         }
       ],
-      "seq": 40
+      "seq": 41,
+      "note": "the restored mark survives the reconcile with the stand-in online and is handed over to it (C1-C3)"
     },
     {
-      "role": "h",
-      "cmd": "mark TEST P3-HB-R RETURN",
+      "role": "all",
+      "cmd": "mark TEST P3-HB-R3 RESTORED",
       "expect_result": "OK MARK",
-      "expect_log": [
-        {
-          "role": "h",
-          "regex": "\\[Absence\\] owner '${clientPid}' returned",
-          "within_s": 150,
-          "since_prev_step": true
-        },
-        {
-          "role": "h",
-          "regex": "\\[Absence\\] '${clientShop}' \\(for '${clientPid}'\\): no stored copy \\(host restart\\) - the host's world copy is the recorded absence truth",
-          "within_s": 150,
-          "since_prev_step": true
-        },
-        {
-          "role": "h",
-          "regex": "\\[Absence\\] return to '${clientPid}'",
-          "within_s": 150,
-          "since_prev_step": true
-        },
-        {
-          "role": "h",
-          "regex": "\\[Absence\\] hand-back '${clientShop}' -> '${clientPid}' sent=\\[items=[1-9]",
-          "within_s": 180,
-          "since_prev_step": true
-        }
-      ],
-      "seq": 41
+      "seq": 42
+    },
+    {
+      "role": "d",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[${clientPid}->${dPid}: .*\\] simulating_here=\\[.*${clientShop}",
+      "note": "the stand-in holds the restored mark",
+      "seq": 43
     },
     {
       "role": "h",
       "cmd": "absence",
-      "expect_result": "returned=\\[.+\\]",
-      "expect_log": [
-        {
-          "role": "c",
-          "regex": "\\[Absence\\] return applied: \\d+ address",
-          "within_s": 90
-        },
-        {
-          "role": "c",
-          "regex": "\\[Absence\\] hand-back applied '${clientShop}' fp=\\[items=[1-9]",
-          "within_s": 90
-        },
-        {
-          "role": "h",
-          "regex": "\\[Absence\\] hand-back of '${clientShop}' acknowledged by '${clientPid}' - hold released",
-          "within_s": 90,
-          "since_prev_step": true
-        },
-        {
-          "role": "h",
-          "regex": "\\[Absence\\] return of '${clientPid}' acknowledged - mark cleared",
-          "within_s": 120,
-          "since_prev_step": true
-        }
-      ],
-      "seq": 42
-    },
-    {
-      "role": "h",
-      "cmd": "absence fp ${clientShop}",
-      "expect_result": "^OK absence fp .*sent=\\[items=[1-9].*mismatch=0 held=0",
-      "capture": {
-        "sentFp": "sent=\\[([^\\]]+)\\]"
-      },
-      "seq": 43
-    },
-    {
-      "role": "c",
-      "cmd": "absence fp ${clientShop}",
-      "expect_result": "applied=\\[${sentFp}\\]",
-      "note": "owner-applied fingerprint == the one the host sent",
-      "abort_on_fail": false,
+      "expect_result": "^OK absence marks=\\[${clientPid}->${dPid}( ownerBack=\\d)?: .*\\] simulating_here=\\[\\]",
+      "note": "the host keeps the restored mark",
       "seq": 44
     },
     {
-      "role": "c",
-      "cmd": "stockof ${clientShop}",
-      "expect_result": "items=\\[${dAbsStock}\\]",
-      "note": "the owner has the stand-in's (pre-restart) absence stock, from the host's saved world copy",
-      "abort_on_fail": false,
-      "seq": 45
-    },
-    {
-      "role": "c",
-      "cmd": "interiorfp ${clientShop}",
-      "expect_result": "^OK interiorfp",
-      "capture": {
-        "cFp": "fp=\\[([^\\]]+)\\]"
-      },
-      "seq": 46
-    },
-    {
-      "role": "h",
-      "cmd": "interiorfp ${clientShop}",
-      "expect_result": "fp=\\[${cFp}\\]",
-      "note": "host == owner after the return",
-      "abort_on_fail": false,
-      "seq": 47
-    },
-    {
-      "role": "c",
+      "role": "d",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
-      "note": "FIXTURE HYGIENE: the pair dissolves",
-      "seq": 48
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] mark for '${clientPid}' dropped \\((company dissolved|the company that made this stand-in was cancelled)",
+          "within_s": 40
+        }
+      ],
+      "note": "NEGATIVE: a REAL dissolve still drops the restored mark (and is the fixture hygiene)",
+      "seq": 45
     },
     {
       "role": "h",
       "sleep_s": 3,
-      "seq": 49
+      "seq": 46
     },
     {
       "role": "h",
-      "cmd": "mark TEST P3-HB-R END",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[\\]",
+      "note": "no mark left",
+      "seq": 47
+    },
+    {
+      "role": "h",
+      "cmd": "mark TEST P3-HB-R3 END",
       "expect_result": "OK MARK",
-      "seq": 50
+      "seq": 48
     }
   ]
 }

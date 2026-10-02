@@ -96,14 +96,15 @@ namespace BigAmbitionsMP
             addresses ??= new List<string>();
             if (_marks.TryGetValue(ownerStable, out var have)
                 && have.SimulatorPid == simulatorPid && SameSet(have.Addresses, addresses))
-            { have.OwnerPid = ownerPid ?? have.OwnerPid; have.OwnerBack = false; have.ReturnSent = false;   // r2 F4: absent again
+            { have.OwnerPid = string.IsNullOrEmpty(ownerPid) ? have.OwnerPid : ownerPid;   // ABSENCE-RESTART-DROP-1 (C3): "" never blanks a known pid
+              have.OwnerBack = false; have.ReturnSent = false;   // r2 F4: absent again
               have.PendingInteriors.Clear(); have.PaperworkAcked = false;                                  // F7: a void return holds nothing
               have.LastSimulatorPid = simulatorPid; return false; }
 
             _marks[ownerStable] = new AbsenceMark
             {
                 OwnerStable  = ownerStable,
-                OwnerPid     = ownerPid ?? "",
+                OwnerPid     = !string.IsNullOrEmpty(ownerPid) ? ownerPid : (have?.OwnerPid ?? ""),   // C3: a re-pointed mark keeps its known pid
                 SimulatorPid = simulatorPid,
                 Addresses    = new List<string>(addresses),
                 SinceDay     = have != null ? have.SinceDay : sinceDay,
@@ -773,6 +774,19 @@ namespace BigAmbitionsMP
                     }
                     hit.PendingInteriors.Remove(addr);
                     hit.TruthInWorld.Remove(addr);   // fold 2 (D1 b): the hold for it has ended (applied or refused)
+                    // ABSENCE-RESTART-DROP-1 E2b: a hand-back RE-QUEUED by the owner's own upload (HostRequeueHandback) is void
+                    // once this address is acked or refused - left queued it went out again after the mark had cleared.
+                    try
+                    {
+                        string hbOwner = hit.OwnerPid ?? "";
+                        string hbAddr = addr;
+                        int dq = _snapQueue.RemoveAll(q => q.returnLeg && string.Equals(q.addr, hbAddr, StringComparison.OrdinalIgnoreCase)
+                                                           && ((hbOwner.Length > 0 && q.pid == hbOwner) || q.pid == senderPid));
+                        if (dq > 0)
+                            Plugin.Logger.LogInfo($"[Absence] queued hand-back of '{addr}' for '{senderPid}' dropped: that address is "
+                                                + $"{(refusedWhy != null ? "refused" : "acknowledged")} ({dq} queued).");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back queue clean-up '{addr}': {ex.Message}"); }
                     if (refusedWhy != null)
                     {
                         // R2 (b): the owner REFUSED this hand-back before its commit - released exactly like an applied ack

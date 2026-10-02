@@ -1280,9 +1280,10 @@ namespace BigAmbitionsMP
                 {
                     // Success needs no local action — the owner's interior push re-renders the shelf.
                     if (!res.Ok)
-                        PassengerHud.Toast(res.Reason == "full" ? "No storage room for the current stock."
+                        PassengerHud.Toast(HeldOr(res.Reason,
+                                           res.Reason == "full" ? "No storage room for the current stock."
                                          : res.Reason == "occupied" ? "That machine is already loaded."
-                                         : res.Reason == "denied" ? "No access." : "Couldn't change the stock.");
+                                         : res.Reason == "denied" ? "No access." : "Couldn't change the stock."));
                 }
                 // OpMarkPaid: mirrors are Silent by construction — nothing ever reaches here.
             }
@@ -1439,7 +1440,7 @@ namespace BigAmbitionsMP
             // ── building-only ctx routes (moved verbatim) ──
             if (res.Ctx == "stacksell" || res.Ctx == "stackdiscard")
             {
-                if (!res.Ok) { PassengerHud.Toast(res.Reason == "locked" ? "Vehicle locked." : res.Reason == "denied" ? "No access." : "Already gone."); return; }   // reason-mapped (H-SELL-3 r5, review r4 C3)
+                if (!res.Ok) { PassengerHud.Toast(HeldOr(res.Reason, res.Reason == "locked" ? "Vehicle locked." : res.Reason == "denied" ? "No access." : "Already gone.")); return; }   // reason-mapped (H-SELL-3 r5, review r4 C3; R3 'busy')
                 if (res.Ctx == "stacksell")
                 {
                     try
@@ -1466,9 +1467,10 @@ namespace BigAmbitionsMP
             {
                 if (!res.Ok)
                 {
-                    PassengerHud.Toast(res.Reason == "unsellable" ? "That can't be sold right now."   // user-approved wording 2026-09-05 (review r1 MAJOR-1/MINOR-7)
+                    PassengerHud.Toast(HeldOr(res.Reason,
+                                       res.Reason == "unsellable" ? "That can't be sold right now."   // user-approved wording 2026-09-05 (review r1 MAJOR-1/MINOR-7)
                                      : res.Reason == "denied"     ? "No access."
-                                     :                              "Already gone.");
+                                     :                              "Already gone."));
                     Plugin.Logger.LogInfo($"[BStore] itemsell refused ({res.Reason}) for {res.ItemId} on '{res.AddressKey}' — nothing credited.");
                     return;
                 }
@@ -1492,7 +1494,7 @@ namespace BigAmbitionsMP
             // nested-free by design, which is exactly why bundles needed their own route).
             if (res.Ctx == "bundlesell" || res.Ctx == "bundlediscard")
             {
-                if (!res.Ok) { PassengerHud.Toast(res.Reason == "locked" ? "Vehicle locked." : res.Reason == "denied" ? "No access." : "Already gone."); return; }   // reason-mapped (H-SELL-3 r5, review r4 C3)
+                if (!res.Ok) { PassengerHud.Toast(HeldOr(res.Reason, res.Reason == "locked" ? "Vehicle locked." : res.Reason == "denied" ? "No access." : "Already gone.")); return; }   // reason-mapped (H-SELL-3 r5, review r4 C3; R3 'busy')
                 if (res.Ctx == "bundlesell")
                 {
                     try
@@ -1527,10 +1529,11 @@ namespace BigAmbitionsMP
             // ever produces its own subset, so the mapping is verbatim for both) ──
             if (!res.Ok)
             {
-                PassengerHud.Toast(res.Reason == "locked" ? "Vehicle locked."
+                PassengerHud.Toast(HeldOr(res.Reason,
+                                   res.Reason == "locked" ? "Vehicle locked."
                                  : res.Reason == "full"   ? "No room."
                                  : res.Reason == "denied" ? "No access."
-                                 :                          "Already taken.");
+                                 :                          "Already taken."));
                 return;
             }
             var ci = new CargoInstance(res.ItemName, res.Amount, res.PricePerUnit, res.Paid);
@@ -1630,13 +1633,24 @@ namespace BigAmbitionsMP
             PassengerHud.Toast("No room to carry that.");
         }
 
+        /// <summary>ABSENCE-HANDBACK-1 R3 (owner decision 50 A, 2026-09-29): the owner-approved text for a storage action the
+        /// F9 hand-back hold refused (Reason "busy" - the shop is held for seconds while a returning owner's hand-back is
+        /// applied). Every other reason keeps its own text. The toast is logged with the refusal (the HUD does not log).</summary>
+        private const string HeldForHandbackText = "Not available right now. Try again in a moment.";
+        private static string HeldOr(string? reason, string otherwise)
+        {
+            if (reason != "busy") return otherwise;
+            try { Plugin.Logger.LogInfo($"[BStore] storage action refused 'busy' (shop held for an absence hand-back) - toast: \"{HeldForHandbackText}\""); } catch { }
+            return HeldForHandbackText;
+        }
+
         private static void OnPlaceReduceResult(StorageResPayload res)
         {
             // Round-49 slice 2: the owner reduced one furniture unit off the delivery spot —
             // start the native placement from the click-time captured cargo. Any local failure
             // gives the unit back so the owner's holder is made whole (risk R9).
             var pc = _pendingPlace; _pendingPlace = null;
-            if (!res.Ok) { PassengerHud.Toast("Already gone."); return; }
+            if (!res.Ok) { PassengerHud.Toast(HeldOr(res.Reason, "Already gone.")); return; }   // R3: reason-mapped for 'busy' only
             if (pc == null || pc.itemName != res.ItemName)
             {
                 BuildingStorageSync.RequestPut(res.AddressKey, res.ItemId, res.ItemName, 1, res.Paid, res.PricePerUnit, "return");
@@ -1669,7 +1683,7 @@ namespace BigAmbitionsMP
             // Round-49 slice 4: the owner's storage lost the packed hand truck/flatbed — spawn
             // it HERE as the HELPER'S OWN vehicle (user ruling 2026-07-21) with the same native
             // call the owner's unpack runs; the regular local-vehicle sync picks it up.
-            if (!res.Ok) { PassengerHud.Toast("Already gone."); return; }
+            if (!res.Ok) { PassengerHud.Toast(HeldOr(res.Reason, "Already gone.")); return; }   // R3: reason-mapped for 'busy' only
             string vt = "";
             try { vt = ItemsGetter.GetByName(res.ItemName)?.vehicleType ?? ""; } catch { }
             if (string.IsNullOrEmpty(vt))
@@ -1733,9 +1747,10 @@ namespace BigAmbitionsMP
             {
                 // Union of both channels' put-failure toasts ("mixed" is building-only; the vehicle
                 // owner never produces it — mapping is verbatim for both).
-                PassengerHud.Toast(res.Reason == "full"  ? "Storage full."
+                PassengerHud.Toast(HeldOr(res.Reason,
+                                   res.Reason == "full"  ? "Storage full."
                                  : res.Reason == "mixed" ? "Can't mix with the stock already loaded."
-                                 : "Couldn't store.");
+                                 : "Couldn't store."));
                 // RISK R4 — the four round-37b conditions VERBATIM: our replica said the cargo FITS
                 // yet the owner says FULL — proof the replica diverged. Building container only (a
                 // vehicle ghost's cargo is Clear+rebuilt every fleet packet — no baseline to drift).

@@ -938,7 +938,12 @@ namespace BigAmbitionsMP
                             }
                         }
                         catch { sameSim = false; }
-                        if (MergerAbsence.HostSetMark(stable, pid, sim, addrs, day))
+                        // ABSENCE-RESTART-DROP-1 (C2): an owner who has not connected since a host restart has no pid this
+                        // session (PidOfStable is "" - StableIdByPlayer is filled at Hello), so the mark keeps the owner's
+                        // pid it was saved with; the stand-in files the owner's work under it.
+                        string markPid = pid;
+                        try { if (string.IsNullOrEmpty(markPid) && had != null) markPid = had.OwnerPid ?? ""; } catch { markPid = pid; }
+                        if (MergerAbsence.HostSetMark(stable, markPid, sim, addrs, day))
                         {
                             if (!string.IsNullOrEmpty(wasSim) && wasSim != sim)
                                 MergerAbsence.HostSendDrop(wasSim, stable, pid, wasAddrs, $"re-designated to '{sim}'");
@@ -1101,8 +1106,16 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(stable)) return list;
             foreach (var kv in BuildingOwners)
             {
-                string s = kv.Value == "host" ? MPConfig.StableId
-                         : StableIdByPlayer.TryGetValue(kv.Value, out var os) ? (os ?? "") : "";
+                // ABSENCE-RESTART-DROP-1 (C1): after a load an absent owner's entry is RESERVED under their STABLE id
+                // (RestoreOwnershipFromManifest, 'reserved (absent owner)'), which StableIdByPlayer (pid -> stable, filled
+                // at Hello) cannot map - so a restored mark found no addresses and the reconcile's dead sweep dropped it
+                // (SinceDay and all). A value that IS the stable id asked about now counts (the H-MERGEROWNFLIP-1 rule of
+                // the company broadcast).
+                string v = kv.Value ?? "";
+                string s = v == "host" ? MPConfig.StableId
+                         : StableIdByPlayer.TryGetValue(v, out var os) ? (os ?? "")
+                         : v == stable ? stable
+                         : "";
                 if (!string.IsNullOrEmpty(s) && s == stable) list.Add(kv.Key);
             }
             list.Sort(StringComparer.OrdinalIgnoreCase);

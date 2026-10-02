@@ -506,11 +506,32 @@ namespace BigAmbitionsMP
             return Task.CompletedTask;
         }
 
+        /// <summary>QUIT-CRASH-UNPATCH-1: is the game's mod loader inside its application-quit unload? Its private
+        /// ModLifecycleLoader.IsShuttingDown is set ONLY there (UnloadAllScopesAsync, reached only from Application.quitting)
+        /// and cleared when it finishes. Unreadable (a renamed field) -> false, the old unpatching behaviour.</summary>
+        private static bool LoaderShuttingDown()
+        {
+            try
+            {
+                var f = HarmonyLib.AccessTools.Field(typeof(global::BigAmbitions.ModsInternal.ModLifecycleLoader), "IsShuttingDown");
+                if (f == null) { Plugin.Logger.LogWarning("[Plugin] unload: the mod loader's quitting state is not readable - unpatching as before."); return false; }
+                return f.GetValue(null) is bool b && b;
+            }
+            catch (Exception ex) { try { Plugin.Logger.LogWarning($"[Plugin] unload: quitting state: {ex.Message}"); } catch { } return false; }
+        }
+
         public override Task OnUnloadAsync()
         {
             try { MPPatches.ExitBuildingNotifier.Uninstall(); } catch { }
             try { MPBugReport.MarkCleanShutdown(); } catch { }
-            try { _harmony?.UnpatchAll(_harmony.Id); } catch { }
+            // QUIT-CRASH-UNPATCH-1: on an APPLICATION QUIT the game's mod loader unloads every mod from its
+            // Application.quitting handler (ModLifecycleLoader.OnApplicationQuitting -> UnloadAllScopesAsync, which sets its
+            // own IsShuttingDown first), and UnpatchAll there crashed the quitting process natively. The process is
+            // exiting, so the patches are left in place; a real mod unload (the mods panel) still unpatches.
+            bool appQuitting = false;
+            try { appQuitting = LoaderShuttingDown(); } catch { appQuitting = false; }
+            if (appQuitting) { try { Plugin.Logger.LogInfo("[Plugin] unload on quit - patches left in place (the process is exiting)."); } catch { } }
+            else try { _harmony?.UnpatchAll(_harmony.Id); } catch { }
             try { MPServer.Stop(); } catch { }
             try { MPClient.Disconnect(); } catch { }
             if (_uiHost != null) UnityEngine.Object.Destroy(_uiHost);
