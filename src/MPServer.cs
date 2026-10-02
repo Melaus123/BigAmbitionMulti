@@ -3844,6 +3844,8 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] saved-ban check: {ex.Message}"); return false; }
         }
 
+        private static bool _banOfflineFallback;   // K4: BanPlayer -> BanOfflinePlayer fallback in progress (main thread only)
+
         /// <summary>BAN-PLAYERS-1 (A4; build C1 F5/G1) - MAIN THREAD. Ban a CONNECTED player: record the saved ban from what
         /// the host knows of that link (Steam-vouched id / public address) and that player (stable id); mark the link as
         /// banned (nothing it sends is processed any more) and disconnect it FIRST with 'BAMP:bannedgame'. The transport's
@@ -3858,7 +3860,22 @@ namespace BigAmbitionsMP
                 if (!_running) return "ERR not hosting";
                 if (string.IsNullOrEmpty(playerId) || playerId == MPConfig.PlayerId) return "ERR not a remote player";
                 var link = PeerForPlayer(playerId);
-                if (link == null) return BanParked(playerId, StableOfPid(playerId)) ?? $"ERR '{playerId}' is not connected (use the offline ban)";   // C1 re-check c4: a waiting join is matched by stable id only
+                if (link == null)
+                {
+                    var parked = BanParked(playerId, StableOfPid(playerId));   // C1 re-check c4: a waiting join is matched by stable id only
+                    if (parked != null) return parked;
+                    // C2 review fold K4: the player left a moment ago (a card or lobby row still showing them online) - they
+                    // get the offline ban instead of nobody being banned, as BanOfflinePlayer already redirects the other way.
+                    // The guard stops a loop should the two ever disagree about whether the player is connected.
+                    if (_banOfflineFallback) return $"ERR '{playerId}' is not connected (use the offline ban)";
+                    _banOfflineFallback = true;
+                    try
+                    {
+                        Plugin.Logger.LogInfo($"[Server] '{playerId}' is not connected any more - banned as an offline player.");
+                        return BanOfflinePlayer(playerId);
+                    }
+                    finally { _banOfflineFallback = false; }
+                }
                 string stable = StableOfPid(playerId);
                 JoinerIdentity(link, out var steam, out var ip);
                 var e = MPConfig.AddBan(playerId, steam, stable, ip, GameDayNow());
@@ -3946,6 +3963,7 @@ namespace BigAmbitionsMP
         /// waiting for approval is refused (C1, G1).</summary>
         public static string BanOfflinePlayer(string who)
         {
+            // (K4: BanPlayer falls back here for a player who has just left; _banOfflineFallback guards the round trip.)
             try
             {
                 who = (who ?? "").Trim();

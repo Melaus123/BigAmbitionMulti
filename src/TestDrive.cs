@@ -23,6 +23,7 @@ namespace BigAmbitionsMP
     internal static class TestDrive
     {
         private static float _nextPoll;
+        private static bool _banWinArmed;   // t-ban K2: log once when the next join load starts with the main menu still up
         private static string? _dir;
         private static bool _armedLogged;
 
@@ -211,8 +212,22 @@ namespace BigAmbitionsMP
             catch (Exception ex) { _ceEmptyUntil = -1f; Plugin.Logger.LogWarning($"[TestDrive] custevict empty wait: {ex.Message}"); }
         }
 
+        /// <summary>t-ban K2 (every frame while armed): in the first part of a join load - the game's loading flag set while the
+        /// main menu's object is still alive - log whether a ban landing at that moment arms the exit to the main menu.</summary>
+        private static void BanWindowProbe()
+        {
+            try
+            {
+                if (!MPClient.DevInJoinLoadWindow(out var st)) return;
+                _banWinArmed = false;
+                Plugin.Logger.LogInfo($"[TestDrive] ban-exit window probe: the join load has started with the main menu still up ({st}) -> a ban landing now {(MPClient.BanExitApplies() ? "arms" : "does NOT arm")} the exit to the main menu.");
+            }
+            catch (Exception ex) { _banWinArmed = false; Plugin.Logger.LogWarning($"[TestDrive] ban-exit window probe: {ex.Message}"); }
+        }
+
         internal static void Tick()
         {
+            if (_banWinArmed) BanWindowProbe();
             if (UnityEngine.Time.unscaledTime < _nextPoll) return;
             _nextPoll = UnityEngine.Time.unscaledTime + 0.5f;
             try
@@ -3165,6 +3180,9 @@ namespace BigAmbitionsMP
                     return "OK wsskip armed";
                 }
 
+                case "banwindow":   // BAN-PLAYERS-1 C2 fold K2 (DEV, client): probe the first part of the next join load
+                    _banWinArmed = true;
+                    return "OK banwindow armed (logs once when the next join load starts with the main menu still up)";
                 case "banui":    // BAN-PLAYERS-1 build C2 (DEV): drive the host's ban screens through their own click paths
                     return MPCanvasUI.Instance != null ? MPCanvasUI.Instance.DevBanUi(arg) : "ERR banui: no MPCanvasUI";
                 case "uiview":   // DEV (2026-09-28): open the game's OWN main-menu screens for palette screenshots

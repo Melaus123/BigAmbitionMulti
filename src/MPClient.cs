@@ -547,9 +547,9 @@ namespace BigAmbitionsMP
                         // D67: the reason line ("You were banned by the host.") is the menu's existing disconnect notice
                         // (LastDisconnectReason, kept through the scene change - nothing clears it until the next join); build
                         // C2 shows it over the main menu as the 'REMOVED FROM GAME' box (MPCanvasUI.NoteBannedInGame).
-                        bool inCity = SaveGameManager.Current != null && Helpers.PlayerHelper.PlayerController != null;
-                        // In the city, or on the way into it (anywhere but the main menu itself): a lobby ban stays on the menu.
-                        if (inCity || InstanceBehavior<MainMenuController>.Instance == null)
+                        // In the city, or on the way into it (anywhere but the main menu itself, including the first part of a
+                        // join load while the menu scene is still up - K2): a lobby ban stays on the menu.
+                        if (BanExitApplies())
                         {
                             Plugin.Logger.LogWarning("[Client] Banned by the host in game - back to the main menu (no disconnect save, no rejoin marker, no merged-company grace, no offline copy).");
                             _banExitPending = true; _banExitWaitLogged = false; _banExitUiLogged = false;
@@ -578,6 +578,31 @@ namespace BigAmbitionsMP
         private static int _banExitWaitWhy = -1;   // the last logged reason the exit is waiting (logged on change only)
         internal static bool BanExitPending => _banExitPending;
 
+        /// <summary>K2 (C2 review fold): a ban in game - or on the way into the city - arms the exit to the main menu. The main
+        /// menu's object stays alive for the first part of a join load (the loading screen fades in and the game's own mod
+        /// scope unloads before the menu scene goes - LoadingScreen.cs:90-104), so the menu being there is not enough to call
+        /// it a lobby ban: a load in flight (the game's loading flag, or its loading screen up) arms the exit too, and
+        /// TickBanExit decides when it can run. A lobby ban (the menu up, no load) stays on the menu.</summary>
+        internal static bool BanExitApplies()
+        {
+            bool inCity = SaveGameManager.Current != null && Helpers.PlayerHelper.PlayerController != null;
+            if (inCity || InstanceBehavior<MainMenuController>.Instance == null) return true;
+            return LoadScene.isLoading || MPCanvasUI.IsLoadingOverlayUp();
+        }
+
+#if BAMP_DEV
+        /// <summary>DEV (t-ban K2 probe): true in the first part of a join load - the game's loading flag set, the main menu's
+        /// object still alive, the city not live yet.</summary>
+        internal static bool DevInJoinLoadWindow(out string state)
+        {
+            bool menu = InstanceBehavior<MainMenuController>.Instance != null;
+            bool inCity = SaveGameManager.Current != null && Helpers.PlayerHelper.PlayerController != null;
+            bool loading = LoadScene.isLoading;
+            state = $"main menu up {menu}, loading flag {loading}, loading screen up {MPCanvasUI.IsLoadingOverlayUp()}, city live {inCity}";
+            return menu && loading && !inCity;
+        }
+#endif
+
         /// <summary>MAIN THREAD, every frame (MPCanvasUI.Update) while an in-game ban's exit is pending. c2: a ban that lands
         /// while the game's loading screen is up waits for the load to finish - the city live and the loading screen gone
         /// (starting the city exit during a load left the city stuck 'unloading' with no notice). c3: the exit is the game's own pause-menu path (MiniMenu.OpenMainMenu,
@@ -589,23 +614,31 @@ namespace BigAmbitionsMP
             if (!_banExitPending) return;
             try
             {
-                // The load is judged finished by what is on screen, not by LoadScene.isLoading alone: a ban that lands while the
-                // joiner loads into the city left that flag set after the load (rig run T-BAN-20261002-040143: the exit then
-                // waited forever and the player stayed in the city as a solo game). Finished = the city is live (save + player)
-                // and the game's loading screen is gone (MPCanvasUI.IsLoadingOverlayUp - the LoadingScreen object and its fade).
+                // The load is finished when the city is live (save + player), the game's loading screen is gone
+                // (MPCanvasUI.IsLoadingOverlayUp - the LoadingScreen object and its fade) AND the game has cleared its own
+                // loading flag (LoadingScreen.cs:118, before its fade-out): the game's LoadScenes ignores any load while that
+                // flag is set (LoadScene.cs:58), so the exit waits for it - the mod never clears it (K3, C2 review fold: the
+                // flag is the game's; T-BAN-20261002-041718 shows the game clearing it itself after a ban during a join load).
                 bool inCity = SaveGameManager.Current != null && Helpers.PlayerHelper.PlayerController != null;
                 bool overlay = MPCanvasUI.IsLoadingOverlayUp();
-                if (!inCity && InstanceBehavior<MainMenuController>.Instance != null && !overlay)
+                bool loading = LoadScene.isLoading;
+                if (!inCity && InstanceBehavior<MainMenuController>.Instance != null && !overlay && !loading)
                 {
                     _banExitPending = false;
                     Plugin.Logger.LogInfo("[Client] banned: already at the main menu - no city exit needed.");
                     return;
                 }
-                int why = !inCity ? 1 : overlay ? 2 : 0;
+                int why = !inCity ? 1 : overlay ? 2 : loading ? 3 : 0;
                 if (why != 0)
                 {
                     if (!_banExitWaitLogged) { _banExitWaitLogged = true; Plugin.Logger.LogInfo("[Client] banned while the game is loading - the exit to the main menu waits for the load to finish."); }
-                    if (why != _banExitWaitWhy) { _banExitWaitWhy = why; Plugin.Logger.LogInfo($"[Client] banned: exit waiting - {(why == 1 ? "the city is not live yet" : "the loading screen is still up")} (loading flag {LoadScene.isLoading})."); }
+                    if (why != _banExitWaitWhy)
+                    {
+                        _banExitWaitWhy = why;
+                        string w = why == 1 ? "the city is not live yet" : why == 2 ? "the loading screen is still up"
+                                 : "the game's loading flag is still set with the city live and no loading screen up - waiting for the game to clear it";
+                        Plugin.Logger.LogInfo($"[Client] banned: exit waiting - {w} (loading flag {loading}).");
+                    }
                     return;
                 }
                 var ui = MPCanvasUI.Instance;
@@ -613,13 +646,6 @@ namespace BigAmbitionsMP
                 {
                     if (!_banExitUiLogged) { _banExitUiLogged = true; Plugin.Logger.LogWarning("[Client] banned: no live UI host to run the game's city exit yet - waiting (never the direct LoadMainMenu)."); }
                     return;
-                }
-                if (LoadScene.isLoading)
-                {
-                    // The city is live and no loading screen is up, so no load is in flight - a set flag is left over, and it
-                    // would make the game's own LoadScenes ignore the exit (LoadScene.cs:58) and leave the city half-unloaded.
-                    LoadScene.isLoading = false;
-                    Plugin.Logger.LogWarning("[Client] banned: the game's loading flag was still set after the load finished (no loading screen up) - cleared so the game's own exit can run.");
                 }
                 _banExitPending = false; _banExitWaitWhy = -1;
                 try { InstanceBehavior<Player.HUD.ItemInfoOverlays.OverlayManager>.Instance?.HideOverlays(); }

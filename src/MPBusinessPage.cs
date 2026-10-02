@@ -1521,6 +1521,10 @@ namespace BigAmbitionsMP
         private RectTransform? _bpCardA, _bpCardB, _bpListCard;
         // act: 1 cancel, 2 ban, 3 tick box, 4 close, 5 unban, 6 remove property, 7 remove-cancel, 8 remove
         private readonly List<(RectTransform rt, int act, string key, string name)> _bpHits = new();
+        // K1 (C2 review fold): clicks are ignored for 0.5 s after the popup opens or changes (a row set rebuilt, B4 opened
+        // over B3, the tick box) - the second half of a double-click must never act on what the first one put under it
+        // (the next row's Unban, B4's red 'Remove'). The 'Pay all' guard (BizRepayTooSoon) is the model.
+        private float _bpGuardAt = -10f; private int _bpGuardLogs;
         private string _bpPendKey = "", _bpPendPid = ""; private float _bpPendSince, _bpPendNext;
         private static bool _banNoticeArmed;
         private GameObject? _bnRoot; private LBtn? _bnOk;
@@ -1623,6 +1627,7 @@ namespace BigAmbitionsMP
         private void BpRebuild()
         {
             if (_bpRoot == null) return;
+            _bpGuardAt = Time.unscaledTime;   // K1: a new set of buttons is under the mouse - the double-click guard restarts
             try
             {
                 var t = _bpRoot.transform;
@@ -1842,6 +1847,12 @@ namespace BigAmbitionsMP
             try
             {
                 if (_bpMode == 0) return;
+                if (Time.unscaledTime - _bpGuardAt < 0.5f)
+                {
+                    // K1: the second half of a double-click (or a click the instant the popup changed) - nothing acts.
+                    if (_bpGuardLogs++ < 20) Plugin.Logger.LogInfo("[BanUI] click ignored - within 0.5 s of the popup opening or changing (the second half of a double-click).");
+                    return;
+                }
                 for (int i = 0; i < _bpHits.Count; i++)
                 {
                     var (rt, act, key, name) = _bpHits[i];
@@ -1902,7 +1913,17 @@ namespace BigAmbitionsMP
                 string key = "";
                 int k = res.IndexOf(" key=", StringComparison.Ordinal);
                 if (k >= 0) { int e = res.IndexOf(' ', k + 5); key = e < 0 ? res.Substring(k + 5) : res.Substring(k + 5, e - k - 5); }
-                if (key.Length > 0) { _bpPendKey = key; _bpPendPid = _bpOnline ? _bpPid : ""; _bpPendSince = Time.unscaledTime; _bpPendNext = 0f; }
+                // K5: the card's player id is ALWAYS recorded (an offline card whose player has just reconnected is banned
+                // through BanPlayer - MPServer.BanOfflinePlayer redirects - and RemoveProperty refuses while the link is listed),
+                // so the removal waits for the leave exactly as for an online ban. A card with no player id takes it from the
+                // ban's own answer ("OK banned [offline|parked] '<pid>' key=...").
+                string pp = _bpPid;
+                if (pp.Length == 0)
+                {
+                    int q1 = res.IndexOf('\''), q2 = q1 >= 0 ? res.IndexOf('\'', q1 + 1) : -1;
+                    if (q2 > q1 + 1) pp = res.Substring(q1 + 1, q2 - q1 - 1);
+                }
+                if (key.Length > 0) { _bpPendKey = key; _bpPendPid = pp; _bpPendSince = Time.unscaledTime; _bpPendNext = 0f; }
                 else Plugin.Logger.LogWarning("[BanUI] the ban gave no key - property not removed (Remove property in Banned players can do it).");
             }
             _bizDirty = true;
@@ -2152,22 +2173,25 @@ namespace BigAmbitionsMP
                         BpOpenList(true);
                         return "OK banui lobbyedit: " + BpState();
                     case "press":
+                    case "dblpress":   // K1: both halves of a double-click at the same point (same frame = inside the guard)
                     {
                         var tk = rest.Split(' ');
                         string nm = tk.Length > 0 ? tk[0].ToLowerInvariant() : "";
                         int idx = tk.Length > 1 && int.TryParse(tk[1], out var ii) ? ii : 0;
                         int act = nm == "cancel" ? 1 : nm == "ban" ? 2 : nm == "tick" ? 3 : nm == "close" ? 4 : nm == "unban" ? 5
                                 : nm == "remove" ? 6 : nm == "removecancel" ? 7 : nm == "removeok" ? 8 : 0;
-                        if (act == 0) return "ERR usage: banui press <cancel|ban|tick|close|unban|remove|removecancel|removeok> [row]";
+                        if (act == 0) return "ERR usage: banui press|dblpress <cancel|ban|tick|close|unban|remove|removecancel|removeok> [row]";
                         int seen = 0;
                         foreach (var h in _bpHits)
                         {
                             if (h.act != act) continue;
                             if (seen++ != idx) continue;
-                            BpClick(DevCentre(h.rt, _bpCam));
-                            return $"OK banui press {nm}: " + BpState();
+                            var pt = DevCentre(h.rt, _bpCam);
+                            BpClick(pt);
+                            if (verb == "dblpress") BpClick(pt);
+                            return $"OK banui {verb} {nm}: " + BpState();
                         }
-                        return $"ERR banui press {nm}: not on screen " + BpState();
+                        return $"ERR banui {verb} {nm}: not on screen " + BpState();
                     }
                     case "notice": NoteBannedInGame(); return "OK banui notice armed (shown over the main menu) " + BpState();
                     case "noticeok":
@@ -2177,7 +2201,7 @@ namespace BigAmbitionsMP
                         return "OK banui noticeok";
                     case "close": BpClose("dev"); return "OK banui close " + BpState();
                 }
-                return "ERR usage: banui <state|hubban <pid>|hubbanned|lobbyban <pid>|lobbyedit|press <name> [row]|notice|noticeok|close>";
+                return "ERR usage: banui <state|hubban <pid>|hubbanned|lobbyban <pid>|lobbyedit|press <name> [row]|dblpress <name> [row]|notice|noticeok|close>";
             }
             catch (Exception ex) { return "ERR banui: " + ex.Message; }
         }
