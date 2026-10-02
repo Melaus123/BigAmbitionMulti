@@ -1,0 +1,45 @@
+{
+  "id": "T-ORACLEPROBE",
+  "title": "RIG-ORACLE-CLOSED-1 probe of the TEST TOOL, not the mod. EXPECTED RESULT: FAIL, on exactly one oracle row naming the client's drop snapshot (c-drop-1-Player-instance2.log:<line>). The client logs a unique mark, is closed (drop) and relaunched; its log truncates on relaunch, so that mark exists ONLY in the drop snapshot. A PASS means oracles_absent no longer sees closed instances.",
+  "preconditions": "Nothing loaded: both instances stay in the main menu. Fixture save1 is reset by regress.py but never loaded.",
+  "instances": 2,
+  "vars": {
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "ORACLEPROBE-DROPPED-ONLY"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "c",
+      "cmd": "mark ORACLEPROBE-DROPPED-ONLY",
+      "expect_result": "OK MARK",
+      "note": "the line the oracle must find - written only by the instance about to be closed"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "drop": true,
+      "note": "close the client; the rig snapshots its log"
+    },
+    {
+      "seq": 3,
+      "role": "c",
+      "relaunch": true,
+      "note": "the relaunch truncates Player-instance2.log - the mark survives only in the snapshot"
+    },
+    {
+      "seq": 4,
+      "role": "c",
+      "cmd": "mark ORACLEPROBE-RELAUNCHED",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "mark ORACLEPROBE-END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

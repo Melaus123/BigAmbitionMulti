@@ -205,6 +205,40 @@ def read_text_from(path, offset=0):
     return read_bytes_shared(path, offset).decode("utf-8", "replace")
 
 
+_LINEBREAK = re.compile(r"\r\n|\r|\n")
+
+
+def log_lines(path, start_off=0):
+    """(file line number of the first line, lines) of `path` from byte `start_off` on. Numbers count from
+    the top of the FILE, so an oracle hit can be opened straight from the report. Breaks are \r\n, \n AND a
+    lone \r (Unity logs carry some), the same count an editor or Select-String shows."""
+    data = read_bytes_shared(path, 0)
+    start_off = min(max(int(start_off or 0), 0), len(data))
+    head = data[:start_off].decode("utf-8", "replace")
+    return (len(_LINEBREAK.findall(head)) + 1,
+            _LINEBREAK.split(data[start_off:].decode("utf-8", "replace")))
+
+
+def absent_rows(patterns, sources):
+    """RIG-ORACLE-CLOSED-1: oracles_absent over EVERY source log - one FAIL row per (pattern, file) with
+    hits, naming the file and the first hit's line (plus the next line numbers). sources are
+    (path, start byte, role, file name shown in the report); each file is read once."""
+    texts = [(role, name) + log_lines(path, off) for path, off, role, name in sources]
+    rows = []
+    for pat in patterns:
+        rx = re.compile(pat)
+        for role, name, first, lines in texts:
+            hits = [(first + i, l.strip()[:200]) for i, l in enumerate(lines) if rx.search(l)]
+            if not hits:
+                continue
+            more = ""
+            if len(hits) > 1:
+                more = " (lines %s%s)" % (",".join(str(n) for n, _ in hits[:8]), ",..." if len(hits) > 8 else "")
+            rows.append(("FAIL", "%s: /%s/ x%d -> %s:%d: %s%s" % (ROLE_NAME.get(role, role), pat, len(hits), name,
+                                                                 hits[0][0], hits[0][1], more)))
+    return rows
+
+
 def log_size(path):
     try:
         return os.path.getsize(path)
@@ -507,7 +541,8 @@ class Run:
         self.run_start_off = {r: 0 for r in ROLES}
         self.flicked = {r: False for r in ROLES}
         self.down = set()                            # roles DROPPED right now (D3: all/both skip them)
-        self.drops = 0                               # drop counter -> <role>-drop-<k>.log
+        self.drops = 0                               # drop counter -> <role>-drop-<k>-<log name>.log
+        self.snaps = []                              # (path, run-start byte, role) of every drop snapshot: oracles_absent scans them
         self.drop_off = {r: 0 for r in ROLES}        # each role's log size at its drop
         self.drop_head = {r: b"" for r in ROLES}     # log head at drop: truncated-or-appended test
         self.launch_t = None
@@ -758,11 +793,14 @@ class Run:
         self.drop_off[role] = log_size(LOGS[role])
         data = read_bytes_shared(LOGS[role], 0)
         self.drop_head[role] = data[:RELAUNCH_PROBE]
-        snap = os.path.join(self.rundir, "%s-drop-%d.log" % (role, self.drops))
+        # RIG-ORACLE-CLOSED-1: the name carries the log's own name (c-drop-1-Player-instance2.log) so the
+        # per-log exception / patch-failure summary in tools/regress.py ('*Player*.log') counts it too.
+        snap = os.path.join(self.rundir, "%s-drop-%d-%s" % (role, self.drops, os.path.basename(LOGS[role])))
         try:
             os.makedirs(self.rundir, exist_ok=True)
             with open(snap, "wb") as f:
                 f.write(data)
+            self.snaps.append((snap, self.run_start_off[role], role))
         except OSError as e:
             self.notes.append("drop step %d: could not snapshot the %s log: %s" % (seq, ROLE_NAME[role], e))
         self.down.add(role)
@@ -941,12 +979,7 @@ class Run:
                         if re.search(pat, l)]
                 out.append(("REPORT", "%s: present /%s/ x%d -> %s" % (ROLE_NAME[role], pat, len(hits), hits[0]))
                            if hits else ("FAIL", "%s: /%s/ never appeared (oracles_present)" % (ROLE_NAME[role], pat)))
-        for pat in self.sc.get("oracles_absent") or []:
-            for role in self.active:
-                hits = [l.strip()[:200] for l in read_text_from(LOGS[role], self.run_start_off[role]).splitlines()
-                        if re.search(pat, l)]
-                if hits:
-                    out.append(("FAIL", "%s: /%s/ x%d -> %s" % (ROLE_NAME[role], pat, len(hits), hits[0])))
+        out += absent_rows(self.sc.get("oracles_absent") or [], self.oracle_sources())
         for pat in self.sc.get("oracles_report") or []:
             for role in self.active:
                 hits = [l.strip()[:200] for l in read_text_from(LOGS[role], self.run_start_off[role]).splitlines()
@@ -954,6 +987,23 @@ class Run:
                 if hits:
                     out.append(("REPORT", "%s: /%s/ x%d -> %s" % (ROLE_NAME[role], pat, len(hits), hits[0])))
         return out
+
+    def oracle_sources(self):
+        """RIG-ORACLE-CLOSED-1: every instance log THIS run produced - each drop snapshot (an instance closed
+        mid-run), scanned from that role's run start, plus the live log of every active role. A role still
+        dropped at the end is skipped only while its log is byte-identical to its snapshot (a failed relaunch
+        that wrote a new log is still scanned). pre-launch-*.log copies are NOT sources: arm_channel copies
+        them BEFORE launch(), so every byte in them belongs to the PREVIOUS run."""
+        src = [(p, off, role, os.path.basename(p)) for p, off, role in self.snaps]
+        for role in self.active:
+            off = self.run_start_off[role]
+            if role in self.down:
+                if (log_size(LOGS[role]) == self.drop_off[role]
+                        and read_bytes_shared(LOGS[role], 0)[:RELAUNCH_PROBE] == self.drop_head[role]):
+                    continue
+                off = self.relaunch_offset(role)
+            src.append((LOGS[role], off, role, "%s-%s" % (ROLE_NAME[role], os.path.basename(LOGS[role]))))
+        return src
 
     # ---- report
     def write_report(self, passed, total, oracle_rows, blocked=None):
@@ -1143,8 +1193,29 @@ def selftest():
             fails.append(label)
         print("  %-28s %s (accepted=%s want=%s)%s" % (label, "PASS" if got == want else "FAIL", got, want,
                                                       ("  <- " + why) if why else ""))
+    print("  -- oracles_absent: every source file, hit names file:line, scan starts at the run's own byte --")
+    import tempfile
+    td = tempfile.mkdtemp(prefix="rigrun-selftest-")
+    try:
+        snap, live = os.path.join(td, "c-drop-1-Player-instance2.log"), os.path.join(td, "Player-instance2.log")
+        prev = b"PREVIOUS RUN NullReferenceException\r\n"
+        with open(snap, "wb") as f:
+            f.write(prev + b"boot\r\nNullReferenceException: flood\r\nok\rNullReferenceException: again\r\n")
+        with open(live, "wb") as f:
+            f.write(b"fresh\nquiet\n")
+        got = absent_rows(["NullReferenceException", "never-there"],
+                          [(snap, len(prev), "c", "c-drop-1-Player-instance2.log"),
+                           (live, 0, "c", "client-Player-instance2.log")])
+        want = [("FAIL", "client: /NullReferenceException/ x2 -> c-drop-1-Player-instance2.log:3: "
+                         "NullReferenceException: flood (lines 3,5)")]
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    if got != want:
+        fails.append("oracle sources")
+    print("  %-28s %s%s" % ("closed-instance snapshot", "PASS" if got == want else "FAIL", ("" if got == want else
+                                                                                         "  got %r" % (got,))))
     print("SELFTEST: %s (%d check groups, %d failed)" % ("PASS" if not fails else "FAIL - " + ", ".join(fails),
-                                                         len(SELFTESTS) + len(LOGTESTS) + len(SHAPETESTS) + 2,
+                                                         len(SELFTESTS) + len(LOGTESTS) + len(SHAPETESTS) + 3,
                                                          len(fails)))
     return 0 if not fails else 1
 
