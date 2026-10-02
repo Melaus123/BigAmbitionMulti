@@ -71,6 +71,18 @@ namespace BigAmbitionsMP
             return "";
         }
 
+        /// <summary>ABSENT-OWNER-GATES-1 (decision 56), HOST, MAIN THREAD: are two StableIds members of ONE stored group?
+        /// Reads the host's store only (StableId space, manifest-persisted) - never the runtime pid map, so it answers for
+        /// a member who has not connected this session, and a merger-flipped display never changes it. Distinct or equal
+        /// ids both count when they share a group; an id in no group (a dissolved company, a removed member) is false.</summary>
+        public static bool SameStoreGroup(string stableA, string stableB)
+        {
+            if (string.IsNullOrEmpty(stableA) || string.IsNullOrEmpty(stableB)) return false;
+            foreach (var kv in _groups)
+                if (kv.Value != null && kv.Value.Contains(stableA) && kv.Value.Contains(stableB)) return true;
+            return false;
+        }
+
         /// <summary>Add a member to a group ("" mints a fresh group). Returns the group id used.</summary>
         public static string StoreAdd(string groupId, string stable)
         {

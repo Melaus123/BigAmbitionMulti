@@ -572,6 +572,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                if (_heldHandover.Count > 0) ReleaseHeldHandovers();   // ABSENT-OWNER-GATES-1 (C4): the world-settled edge
                 if (_heldReturn != null)
                 {
                     bool ready = false;
@@ -977,6 +978,34 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] seed confirmation from '{senderPid}': {ex.Message}"); }
         }
 
+        /// <summary>ABSENT-OWNER-GATES-1 (C4), HOST, MAIN THREAD, on a client stand-in's hand-over ack: every address of
+        /// that mark the stand-in has not confirmed (R4 seed) gets its interior snapshot queued again (set-like, paced by
+        /// Tick). A stand-in that held the hand-over until its world was ready received the first seeds before it simulated
+        /// those shops, so it never confirmed them and its uploads stayed refused. One log line per ack that re-queues.</summary>
+        public static void HostRequeueUnseeded(string simPid, string ownerStable)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || string.IsNullOrEmpty(simPid) || simPid == MPConfig.PlayerId || string.IsNullOrEmpty(ownerStable)) return;
+                if (!_marks.TryGetValue(ownerStable, out var m) || m == null || m.SimulatorPid != simPid || m.Addresses == null) return;
+                int n = 0;
+                foreach (var a in m.Addresses)
+                {
+                    if (string.IsNullOrEmpty(a) || HostStandInSeeded(simPid, a)) continue;
+                    bool queued = false;
+                    foreach (var q in _snapQueue)
+                        if (q.pid == simPid && string.Equals(q.addr, a, StringComparison.OrdinalIgnoreCase)) { queued = true; break; }
+                    if (queued) continue;
+                    _snapQueue.Add((a, simPid, false));
+                    n++;
+                }
+                if (n > 0)
+                    Plugin.Logger.LogInfo($"[Absence] '{simPid}' applied the hand-over of '{m.OwnerPid}': {n} address(es) it has not confirmed "
+                                        + "the host's copy of - their snapshots are queued again.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] re-queue unseeded: {ex.Message}"); }
+        }
+
         /// <summary>R4, CLIENT STAND-IN, MAIN THREAD (the apply's commit point / identical skip, SeedOrHeal only): an
         /// authoritative host copy of an address I stand in for is on my machine - confirm it once per hand-over.</summary>
         public static void NoteSeedApplied(string addressKey, bool authoritative)
@@ -1205,6 +1234,65 @@ namespace BigAmbitionsMP
 
         private static readonly HashSet<string> _resendAsked = new();   // ownerPid, F3: log once until served
 
+        // ── ABSENT-OWNER-GATES-1 (C4): a hand-over that arrives before this machine's world is ready ──
+        // After a host restart the hand-over reached the stand-in in the LOBBY and was applied before its world existed:
+        // no registrations, so no staff, lists or till were taken over, yet the shops were recorded as simulated and the
+        // resend net never fired. The LATEST payload per owner is held here and applied when the world settles (the
+        // MPWorldReady settled edge, read by Tick); a drop for that owner cancels it. MAIN THREAD (like every table here).
+        private static readonly Dictionary<string, MergerHandoverPayload> _heldHandover = new(StringComparer.Ordinal);
+        private static string HeldKey(MergerHandoverPayload p)
+            => !string.IsNullOrEmpty(p?.OwnerStable) ? p!.OwnerStable : (p?.OwnerPid ?? "");
+        private static bool HeldFor(string ownerPid, string ownerStable)
+        {
+            foreach (var kv in _heldHandover)
+            {
+                var h = kv.Value;
+                if (h == null) continue;
+                if (!string.IsNullOrEmpty(ownerStable) && h.OwnerStable == ownerStable) return true;
+                if (!string.IsNullOrEmpty(ownerPid) && h.OwnerPid == ownerPid) return true;
+            }
+            return false;
+        }
+        private static void CancelHeld(MergerHandoverPayload drop)
+        {
+            try
+            {
+                if (_heldHandover.Count == 0 || drop == null) return;
+                var gone = new List<string>();
+                foreach (var kv in _heldHandover)
+                {
+                    var h = kv.Value;
+                    if (h == null
+                        || (!string.IsNullOrEmpty(drop.OwnerStable) && h.OwnerStable == drop.OwnerStable)
+                        || (!string.IsNullOrEmpty(drop.OwnerPid) && h.OwnerPid == drop.OwnerPid))
+                        gone.Add(kv.Key);
+                }
+                foreach (var k in gone)
+                {
+                    _heldHandover.Remove(k);
+                    Plugin.Logger.LogInfo($"[Absence] held hand-over for '{drop.OwnerPid}' cancelled - the host dropped the mark before this world was ready.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] cancel held hand-over: {ex.Message}"); }
+        }
+        /// <summary>The settled edge: apply every held hand-over once the world is ready. Called from Tick.</summary>
+        private static void ReleaseHeldHandovers()
+        {
+            try
+            {
+                if (_heldHandover.Count == 0 || !MPWorldReady.IsSettled) return;
+                var held = new List<MergerHandoverPayload>(_heldHandover.Values);
+                _heldHandover.Clear();
+                foreach (var h in held)
+                {
+                    if (h == null) continue;
+                    Plugin.Logger.LogInfo($"[Absence] this world is ready - applying the held hand-over for '{h.OwnerPid}'.");
+                    ApplyHandover(h);
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] release held hand-overs: {ex.Message}"); }
+        }
+
         /// <summary>r4 F3 (C3): a CLIENT simulator whose SCENE reloaded without disconnecting still holds
         /// the host's mark but has lost every local install, and the host's own re-seed only covers the
         /// case where the HOST is the simulator - so that machine ran nothing for the absent owner and
@@ -1221,9 +1309,17 @@ namespace BigAmbitionsMP
                 foreach (var a in _known)
                 {
                     if (a == null || a.SimulatorPid != MPConfig.PlayerId) continue;
+                    if (HeldFor(a.OwnerPid ?? "", a.OwnerStable ?? "")) continue;   // ABSENT-OWNER-GATES-1 (C4): applied at the settled edge
                     bool lost = false;
+                    // ABSENT-OWNER-GATES-1 (C4): 'simulated here' with NO building registration in a ready world is lost
+                    // too (a hand-over applied before the world existed took nothing over).
+                    bool settled = false; try { settled = MPWorldReady.IsSettled; } catch { }
                     foreach (var addr in a.Addresses ?? new List<string>())
-                        if (!string.IsNullOrEmpty(addr) && !SimulatesHere(addr)) { lost = true; break; }
+                    {
+                        if (string.IsNullOrEmpty(addr)) continue;
+                        if (!SimulatesHere(addr)) { lost = true; break; }
+                        if (settled && GameStatePatcher.FindRegistration(addr) == null) { lost = true; break; }
+                    }
                     if (!lost) { _resendAsked.Remove(a.OwnerPid ?? ""); continue; }
                     if (_resendAsked.Add(a.OwnerPid ?? ""))
                         Plugin.Logger.LogInfo($"[Absence] installs for '{a.OwnerPid}' are gone here (scene churn) - "
@@ -1256,6 +1352,7 @@ namespace BigAmbitionsMP
                 foreach (var sa in p.Addresses ?? new List<string>()) if (!string.IsNullOrEmpty(sa)) _seedAckSent.Remove(sa);
                 if (p.Drop)
                 {
+                    CancelHeld(p);   // ABSENT-OWNER-GATES-1 (C4)
                     HandBackFlush(p.OwnerPid, "the host dropped the mark");   // H-STANDINTILL-2 T5: while the addresses are still ours
                     // ABSENCE-HANDBACK-1 F2 / F5: the INTERIORS go back too, while the addresses are still ours. The HOST
                     // freezes its live world into its stored copy (the hand-back source); a CLIENT stand-in uploads each one
@@ -1268,6 +1365,16 @@ namespace BigAmbitionsMP
                 }
                 if (!string.IsNullOrEmpty(p.SimulatorPid) && p.SimulatorPid != MPConfig.PlayerId)
                 { Plugin.Logger.LogWarning($"[Absence] hand-over addressed to '{p.SimulatorPid}' arrived here - ignored."); return; }
+                // ABSENT-OWNER-GATES-1 (C4): before this machine's world is ready (a lobby, a load) nothing can be taken over -
+                // keep the LATEST payload for this owner and apply it at the settled edge (Tick -> ReleaseHeldHandovers).
+                if (!MPWorldReady.IsSettled)
+                {
+                    string hk = HeldKey(p);
+                    bool first = !_heldHandover.ContainsKey(hk);
+                    _heldHandover[hk] = p;
+                    if (first) Plugin.Logger.LogInfo($"[Absence] hand-over for '{p.OwnerPid}' held until this world is ready.");
+                    return;
+                }
 
                 BusinessPaperworkPayload bundle = null;
                 bool bundleUnreadable = false;   // H-STANDINTILL-2 T3: a PARSE FAILURE is not 'the owner has no till'
@@ -1555,6 +1662,7 @@ namespace BigAmbitionsMP
             // after a SEND, so the next return re-sends the whole thing.
             _heldReturn = null; _heldLogged = false; _returnAddrs.Clear(); _replaced.Clear(); _lastToastKey = "";
             _standInSeeded.Clear(); _seedAckSent.Clear(); _noHandbackHeld.Clear();   // ABSENCE-HANDBACK-1 R1 (a) / R4
+            _heldHandover.Clear();   // ABSENT-OWNER-GATES-1 (C4): dies with the session - the host re-sends on the next designation
             _tagInstalls = true; _returnUpsert = false;
         }
 

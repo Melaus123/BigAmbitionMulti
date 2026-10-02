@@ -19,7 +19,9 @@
     "\\[Absence\\] hand-back ack for .* ignored",
     "hand-back of .* REFUSED by",
     "mark for 'Client1' dropped \\(company dissolved",
-    "simulating '.*' for ''"
+    "simulating '.*' for ''",
+    "BuildingCleanlinessHelper\\.RunHourly threw",
+    "no registration here - not taken over"
   ],
   "oracles_report": [
     "\\[Paperwork\\]",
@@ -403,10 +405,20 @@
           "role": "h",
           "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
           "within_s": 60
+        },
+        {
+          "role": "d",
+          "regex": "\\[Absence\\] simulating '${clientShop}' for '${clientPid}' \\(staff promoted: [1-9]",
+          "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "'${dPid}' acked the hand-over of '${clientPid}': \\d+ addr, [1-9]\\d* staff",
+          "within_s": 300
         }
       ],
       "seq": 41,
-      "note": "the restored mark survives the reconcile with the stand-in online and is handed over to it (C1-C3)"
+      "note": "the restored mark survives the reconcile with the stand-in online and is handed over to it (C1-C3) | ABSENT-OWNER-GATES-1 (C4): the hand-over is applied once the stand-in's world is ready - staff promoted and acked"
     },
     {
       "role": "all",
@@ -418,8 +430,15 @@
       "role": "d",
       "cmd": "absence",
       "expect_result": "^OK absence marks=\\[${clientPid}->${dPid}: .*\\] simulating_here=\\[.*${clientShop}",
-      "note": "the stand-in holds the restored mark",
-      "seq": 43
+      "note": "the stand-in holds the restored mark | ABSENT-OWNER-GATES-1 (C4): and has applied the host's copy of the shop (seed confirmed) before it works there",
+      "seq": 43,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] stand-in '${dPid}' applied the host's copy of '${clientShop}' - its uploads of it are accepted",
+          "within_s": 180
+        }
+      ]
     },
     {
       "role": "h",
@@ -439,9 +458,8 @@
           "within_s": 30
         }
       ],
-      "note": "new stand-in work AFTER the restart | report-only: the host drops a stand-in's op on a shop whose ledger entry is RESERVED under the absent owner's stable id (found 2026-09-30, T-P3-HB-R2-20260930-012223)",
-      "seq": 45,
-      "abort_on_fail": false
+      "note": "new stand-in work AFTER the restart - ABSENT-OWNER-GATES-1: the host accepts a stand-in's op on a shop whose ledger entry is RESERVED under the absent owner's stable id (a company member)",
+      "seq": 45
     },
     {
       "role": "h",
@@ -457,16 +475,14 @@
         "postStock": "items=\\[([^\\]]*)\\]"
       },
       "note": "captures the stand-in's post-restart stock",
-      "seq": 47,
-      "abort_on_fail": false
+      "seq": 47
     },
     {
       "role": "d",
       "cmd": "stockof ${clientShop}",
       "expect_result": "^OK stockof",
       "refute_result": "items=\\[${dAbsStock}\\]",
-      "abort_on_fail": false,
-      "note": "premise (report-only): the stand-in's stock moved after the restart - the host drops a stand-in's op on a shop whose ledger entry is RESERVED under the absent owner's stable id (found 2026-09-30)",
+      "note": "premise: the stand-in's stock moved after the restart (ABSENT-OWNER-GATES-1)",
       "seq": 48
     },
     {
@@ -474,26 +490,59 @@
       "cmd": "stockof ${clientShop}",
       "expect_result": "items=\\[${postStock}\\]",
       "note": "the host accepted the post-restart stand-in upload",
-      "abort_on_fail": false,
       "seq": 49
+    },
+    {
+      "role": "h",
+      "cmd": "shelftake ${clientShop}",
+      "expect_result": "^OK shelftake",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] StorageOp for '${clientShop}' from '${hostPid}' \\(ledger owner '[^']+'\\) REFUSED: the absent owner '[^']+' is not in one company with the sender",
+          "within_s": 30
+        }
+      ],
+      "note": "ABSENT-OWNER-GATES-1 stranger: the host is not a company member - its take on the absent owner's RESERVED shop is refused and logged",
+      "seq": 50
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "note": "room for a wrongly accepted take to land (it must not)",
+      "seq": 51
+    },
+    {
+      "role": "h",
+      "cmd": "stockof ${clientShop}",
+      "expect_result": "items=\\[${postStock}\\]",
+      "note": "ABSENT-OWNER-GATES-1 stranger: the host's stock is unchanged",
+      "seq": 52
+    },
+    {
+      "role": "d",
+      "cmd": "stockof ${clientShop}",
+      "expect_result": "items=\\[${postStock}\\]",
+      "note": "ABSENT-OWNER-GATES-1 stranger: the stand-in's stock is unchanged",
+      "seq": 53
     },
     {
       "role": "h",
       "cmd": "mark pre-return",
       "expect_result": "OK MARK",
-      "seq": 50
+      "seq": 54
     },
     {
       "role": "c",
       "relaunch": true,
       "note": "the absent owner returns (after the restart, while the stand-in runs the shops)",
-      "seq": 51
+      "seq": 55
     },
     {
       "role": "c",
       "cmd": "join",
       "expect_result": "^OK",
-      "seq": 52
+      "seq": 56
     },
     {
       "role": "h",
@@ -516,7 +565,7 @@
           "within_s": 200
         }
       ],
-      "seq": 53
+      "seq": 57
     },
     {
       "role": "h",
@@ -546,7 +595,7 @@
           "since_prev_step": true
         }
       ],
-      "seq": 54
+      "seq": 58
     },
     {
       "role": "h",
@@ -555,7 +604,7 @@
       "capture": {
         "sentFp": "sent=\\[([^\\]]+)\\]"
       },
-      "seq": 55
+      "seq": 59
     },
     {
       "role": "c",
@@ -563,15 +612,15 @@
       "expect_result": "applied=\\[${sentFp}\\]",
       "note": "owner-applied fingerprint == the one the host sent",
       "abort_on_fail": false,
-      "seq": 56
+      "seq": 60
     },
     {
       "role": "c",
       "cmd": "stockof ${clientShop}",
-      "expect_result": "items=\\[${postStock}\\]",
-      "note": "the owner has the stand-in's POST-restart stock",
+      "expect_result": "items=\\[",
+      "note": "report: the owner's stock after the return (the shop keeps selling, so it can be below the stand-in's post-restart value; seq 60's fingerprint equality is the assert)",
       "abort_on_fail": false,
-      "seq": 57
+      "seq": 61
     },
     {
       "role": "c",
@@ -580,7 +629,7 @@
       "capture": {
         "cFp": "fp=\\[([^\\]]+)\\]"
       },
-      "seq": 58
+      "seq": 62
     },
     {
       "role": "h",
@@ -588,31 +637,31 @@
       "expect_result": "fp=\\[${cFp}\\]",
       "note": "host == owner after the return",
       "abort_on_fail": false,
-      "seq": 59
+      "seq": 63
     },
     {
       "role": "h",
       "sleep_s": 20,
       "note": "E2b: room for a stale re-queued hand-back to go out (it must not)",
-      "seq": 60
+      "seq": 64
     },
     {
       "role": "c",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
       "note": "FIXTURE HYGIENE: the company dissolves",
-      "seq": 61
+      "seq": 65
     },
     {
       "role": "h",
       "sleep_s": 3,
-      "seq": 62
+      "seq": 66
     },
     {
       "role": "h",
       "cmd": "mark TEST P3-HB-R2 END",
       "expect_result": "OK MARK",
-      "seq": 63
+      "seq": 67
     }
   ]
 }

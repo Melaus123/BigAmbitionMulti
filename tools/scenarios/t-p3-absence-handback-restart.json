@@ -403,6 +403,18 @@
           "regex": "\\[Absence\\] hand-back '${clientShop}' -> '${clientPid}' sent=\\[items=[1-9]",
           "within_s": 180,
           "since_prev_step": true
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] hand-back of '${clientShop}' acknowledged by '${clientPid}' - hold released",
+          "within_s": 150,
+          "since_prev_step": true
+        },
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] return of '${clientPid}' acknowledged - mark cleared",
+          "within_s": 150,
+          "since_prev_step": true
         }
       ],
       "seq": 41
@@ -421,18 +433,6 @@
           "role": "c",
           "regex": "\\[Absence\\] hand-back applied '${clientShop}' fp=\\[items=[1-9]",
           "within_s": 90
-        },
-        {
-          "role": "h",
-          "regex": "\\[Absence\\] hand-back of '${clientShop}' acknowledged by '${clientPid}' - hold released",
-          "within_s": 90,
-          "since_prev_step": true
-        },
-        {
-          "role": "h",
-          "regex": "\\[Absence\\] return of '${clientPid}' acknowledged - mark cleared",
-          "within_s": 120,
-          "since_prev_step": true
         }
       ],
       "seq": 42

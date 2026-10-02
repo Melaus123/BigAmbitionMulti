@@ -946,7 +946,7 @@ namespace BigAmbitionsMP
                         if (MergerAbsence.HostSetMark(stable, markPid, sim, addrs, day))
                         {
                             if (!string.IsNullOrEmpty(wasSim) && wasSim != sim)
-                                MergerAbsence.HostSendDrop(wasSim, stable, pid, wasAddrs, $"re-designated to '{sim}'");
+                                MergerAbsence.HostSendDrop(wasSim, stable, markPid, wasAddrs, $"re-designated to '{sim}'");   // ABSENT-OWNER-GATES-1 C3: the pid the old stand-in filed the owner under
                             if (MergerAbsence.Marks.TryGetValue(stable, out var mk)) MergerAbsence.SendHandover(mk, sameSim);
                         }
                         else if (sim == MPConfig.PlayerId && !MergerAbsence.SimulatesHere(addrs[0])
@@ -2652,7 +2652,13 @@ namespace BigAmbitionsMP
                         GameStatePatcher.EnqueueOnMainThread(() => MergerAbsence.HostStandInFlushed(sfPid, sfStable, sfAddrs));
                     }
                     else if (!string.IsNullOrEmpty(hv.Ack))
+                    {
                         Plugin.Logger.LogInfo($"[Absence] '{senderPid}' acked the hand-over of '{hv.OwnerPid}': {hv.Ack}.");
+                        // ABSENT-OWNER-GATES-1 (C4): a stand-in that held the hand-over until its world was ready got the
+                        // interior seeds BEFORE it simulated those shops, so it never confirmed them; re-queue the unseeded ones.
+                        string raPid = senderPid, raStable = hv.OwnerStable ?? "";
+                        GameStatePatcher.EnqueueOnMainThread(() => MergerAbsence.HostRequeueUnseeded(raPid, raStable));
+                    }
                     break;
                 }
 
@@ -3373,12 +3379,21 @@ namespace BigAmbitionsMP
                     bool dutyAllowed = SenderOwns(rc.Address, senderPid);
                     if (!dutyAllowed && !string.IsNullOrEmpty(rc.Address))
                     {
-                        string dOwner = (BuildingOwners.TryGetValue(rc.Address, out var dg) && !string.IsNullOrEmpty(dg)) ? dg
-                                      : (BuildingRealEstateOwners.TryGetValue(rc.Address, out var dr) ? dr : "");
-                        string dOwnerPid = (dOwner == "host") ? MPConfig.PlayerId : dOwner;
-                        dutyAllowed = !string.IsNullOrEmpty(dOwnerPid)
-                                      && (GrantSync.IsGranted(GrantKind.Housing, dOwnerPid, senderPid)
-                                       || GrantSync.IsGranted(GrantKind.Business, dOwnerPid, senderPid));
+                        // ABSENT-OWNER-GATES-1: one owner/member check; an owner value only the main thread can judge (a
+                        // reserved stable id) re-runs the gate and the apply there.
+                        var rcM = rc; var envM = env; bool stampedM = rcStamped; string sM = senderPid;
+                        if (!ResolveForGate(ShopLedgerValue(rc.Address, true), false, () =>
+                            {
+                                try
+                                {
+                                    if (!ShopGate("RegisterCashier", rcM.Address, ResolveOwnerValue(ShopLedgerValue(rcM.Address, true)), sM, GrantHousingOrBusiness, out _)) return;
+                                    MPRegisterSync.Apply(rcM);
+                                    Broadcast(stampedM ? MessageEnvelope.Create(MessageType.RegisterCashier, rcM.PlayerId, rcM) : envM);
+                                }
+                                catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] RegisterCashier (main): {ex.Message}"); }
+                            }, out var dRef)) break;
+                        if (!ShopGate("RegisterCashier", rc.Address, dRef, senderPid, GrantHousingOrBusiness, out _)) break;
+                        dutyAllowed = true;
                     }
                     if (!dutyAllowed)
                     {
@@ -4649,7 +4664,9 @@ namespace BigAmbitionsMP
         /// accessor directly; a BUILDING whose owner is OFFLINE → RouteStorageOpForAbsentOwner on the
         /// main thread (the machine standing in for that owner applies it; H-MERGERSTOCK-2 follow-up);
         /// else forward to the owner's machine.</summary>
-        public static void HandleStorageOp(StorageOpPayload req, string senderPid)
+        public static void HandleStorageOp(StorageOpPayload req, string senderPid) => HandleStorageOpCore(req, senderPid, false);
+
+        private static void HandleStorageOpCore(StorageOpPayload req, string senderPid, bool onMain)
         {
             try
             {
@@ -4669,16 +4686,11 @@ namespace BigAmbitionsMP
                 else
                 {
                     if (string.IsNullOrEmpty(req.AddressKey)) return;
-                    string owner = (BuildingOwners.TryGetValue(req.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
-                                 : (BuildingRealEstateOwners.TryGetValue(req.AddressKey, out var r) ? r : "");
-                    if (string.IsNullOrEmpty(owner)) return;
-                    ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;   // resolve the host sentinel
-                    // Grant gate — Housing OR Business, matching the authoritative check in OwnerApply:
-                    // the Housing-only pre-filter silently dropped every cargo op from a business-only
-                    // helper (round-38e relay/apply drift).
-                    if (ownerPid != req.PlayerId
-                        && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, req.PlayerId)
-                        && !GrantSync.IsGranted(GrantKind.Business, ownerPid, req.PlayerId)) return;
+                    // ABSENT-OWNER-GATES-1: the one owner/member check (owner, member - a reserved entry by stored group -
+                    // or a Housing/Business grant from a live owner, matching OwnerApply); every refusal is logged.
+                    if (!ResolveForGate(ShopLedgerValue(req.AddressKey, true), onMain, () => HandleStorageOpCore(req, senderPid, true), out var sRef)) return;
+                    if (!ShopGate("StorageOp", req.AddressKey, sRef, req.PlayerId, GrantHousingOrBusiness, out _)) return;
+                    ownerPid = sRef.Id;   // a reserved owner keys on its stable id: offline -> RouteStorageOpForAbsentOwner below
                 }
                 if (ownerPid == MPConfig.PlayerId)
                 {
@@ -4838,12 +4850,14 @@ namespace BigAmbitionsMP
 
         /// <summary>Round-39f: a helper's machine hosted an NPC sale — route the paid order to the
         /// building owner (or adopt directly when the host owns it). Same routing shape as HandleStorageOp's building branch.</summary>
-        public static void HandleHelperOrder(HelperOrderPayload p, string senderPid)
+        public static void HandleHelperOrder(HelperOrderPayload p, string senderPid) => HandleHelperOrderCore(p, senderPid, false);
+
+        private static void HandleHelperOrderCore(HelperOrderPayload p, string senderPid, bool onMain)
         {
             try
             {
                 if (p == null) return;
-                string? ownerPid = HelperRouteOwner(p.AddressKey, p.PlayerId, senderPid, MessageType.HelperOrderForward);
+                string? ownerPid = HelperRouteOwner(p.AddressKey, p.PlayerId, senderPid, MessageType.HelperOrderForward, onMain, () => HandleHelperOrderCore(p, senderPid, true));
                 if (ownerPid == null) return;
                 if (ownerPid == MPConfig.PlayerId)
                     GameStatePatcher.EnqueueOnMainThread(() => CustomerEntrySync.OwnerAdoptForwardedOrder(p));
@@ -4856,23 +4870,21 @@ namespace BigAmbitionsMP
         /// <summary>The helper-to-owner route shared by a helper-hosted sale (142) and an unsold walk-out (220, H-HANDOFF-1
         /// R1): the sender check, the building's owner (tenant, else real-estate owner) and the Housing/Business grant gate
         /// (permitted guests = owner parity). Null = drop.</summary>
-        private static string? HelperRouteOwner(string addressKey, string playerId, string senderPid, MessageType type)
+        private static string? HelperRouteOwner(string addressKey, string playerId, string senderPid, MessageType type, bool onMain, Action reenter)
         {
             if (string.IsNullOrEmpty(addressKey)) return null;
             if (!SenderIs(playerId, senderPid, type)) return null;
-            string owner = (BuildingOwners.TryGetValue(addressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
-                         : (BuildingRealEstateOwners.TryGetValue(addressKey, out var r) ? r : "");
-            if (string.IsNullOrEmpty(owner)) return null;
-            string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
-            if (ownerPid != playerId
-                && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, playerId)
-                && !GrantSync.IsGranted(GrantKind.Business, ownerPid, playerId)) return null;   // grant gate
-            return ownerPid;
+            // ABSENT-OWNER-GATES-1: the one owner/member check; no owner and every refusal are logged (were silent).
+            if (!ResolveForGate(ShopLedgerValue(addressKey, true), onMain, reenter, out var hRef)) return null;   // decided on the main thread
+            if (!ShopGate(type.ToString(), addressKey, hRef, playerId, GrantHousingOrBusiness, out _)) return null;
+            return hRef.Id;
         }
 
         /// <summary>H-HANDOFF-1 R1: a visit walked out unsold on a partner's machine - to the shop's owner, who puts back
         /// on its shelves what the game's own Leave would have returned (or adopt directly when the host owns it).</summary>
-        public static void HandleCustomerUnsoldLeave(CustomerUnsoldLeavePayload p, string senderPid)
+        public static void HandleCustomerUnsoldLeave(CustomerUnsoldLeavePayload p, string senderPid) => HandleCustomerUnsoldLeaveCore(p, senderPid, false);
+
+        private static void HandleCustomerUnsoldLeaveCore(CustomerUnsoldLeavePayload p, string senderPid, bool onMain)
         {
             try
             {
@@ -4880,7 +4892,7 @@ namespace BigAmbitionsMP
                 // L3 (review of 95cf5e1): bounded - an id over 128 chars is dropped, at most 64 lines ride along.
                 if (p.EntryId.Length > 128) { Plugin.Logger.LogInfo($"[Stock] unsold walk-out from {senderPid}: an id over 128 chars - dropped."); return; }
                 if (p.Items != null && p.Items.Count > 64) p.Items = p.Items.GetRange(0, 64);
-                string? ownerPid = HelperRouteOwner(p.AddressKey, p.PlayerId, senderPid, MessageType.CustomerUnsoldLeave);
+                string? ownerPid = HelperRouteOwner(p.AddressKey, p.PlayerId, senderPid, MessageType.CustomerUnsoldLeave, onMain, () => HandleCustomerUnsoldLeaveCore(p, senderPid, true));
                 if (ownerPid == null) return;
                 if (ownerPid == MPConfig.PlayerId)
                     GameStatePatcher.EnqueueOnMainThread(() => CustomerHandoff.OnUnsoldLeave(p));
@@ -4910,7 +4922,9 @@ namespace BigAmbitionsMP
         /// the host's owner cache, and relay to subscribers minus the sender.
         /// TRAP 1 (design): every apply is enqueued UNKEYED — the "interior:"+addr key is
         /// newest-wins full-state coalescing, and a superseded delta is a LOST EDIT.</summary>
-        public static void HandleBuildingInteriorDelta(InteriorEditDeltaPayload p, string senderPid)
+        public static void HandleBuildingInteriorDelta(InteriorEditDeltaPayload p, string senderPid) => HandleBuildingInteriorDeltaCore(p, senderPid, false);
+
+        private static void HandleBuildingInteriorDeltaCore(InteriorEditDeltaPayload p, string senderPid, bool onMain)
         {
             try
             {
@@ -4922,17 +4936,15 @@ namespace BigAmbitionsMP
                     || ((p.Ops?.Count ?? 0) == 0 && (p.Designs?.Count ?? 0) == 0)) return;
                 p.Ops ??= new System.Collections.Generic.List<InteriorItemOp>();   // ops-less payloads pass the guard; downstream loops must not NRE
                 p.Designs ??= new System.Collections.Generic.List<InteriorDesignInfo>();
-                string owner = (BuildingOwners.TryGetValue(p.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
-                             : (BuildingRealEstateOwners.TryGetValue(p.AddressKey, out var r) ? r : "");
+                string owner = ShopLedgerValue(p.AddressKey, true);
                 // Review MAJOR-N: these refusals must be LOUD — the sender's baseline already
                 // advanced, so a silently dropped delta is permanent divergence with no recurrence.
                 if (string.IsNullOrEmpty(owner))
                 { Plugin.Logger.LogWarning($"[Housing] interior delta for '{p.AddressKey}' from '{senderPid}' DROPPED — no recorded owner; the sender's edit is not conveyed."); return; }
-                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
-                if (ownerPid != senderPid
-                    && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, senderPid)
-                    && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[Housing] interior delta for '{p.AddressKey}' from '{senderPid}' DROPPED — no grant from '{ownerPid}'; the sender's edit is not conveyed."); return; }
+                // ABSENT-OWNER-GATES-1: the one owner/member check (logged refusal, throttled).
+                if (!ResolveForGate(owner, onMain, () => HandleBuildingInteriorDeltaCore(p, senderPid, true), out var iRef)) return;
+                if (!ShopGate("BuildingInteriorDelta", p.AddressKey, iRef, senderPid, GrantHousingOrBusiness, out _)) return;
+                string ownerPid = iRef.Id;
                 if (ownerPid == MPConfig.PlayerId)
                 {
                     GameStatePatcher.EnqueueOnMainThread(() =>
@@ -4961,22 +4973,17 @@ namespace BigAmbitionsMP
         /// dirtiness, so unlike an interior payload it cannot bring anything else with it.</summary>
         private static bool _buildGateFallbackLogged;   // one line per host process (review HIGH-1)
 
-        public static void HandleBuildingDirtEdit(DirtEditPayload payload, string senderPid)
+        public static void HandleBuildingDirtEdit(DirtEditPayload payload, string senderPid) => HandleBuildingDirtEditCore(payload, senderPid, false);
+
+        private static void HandleBuildingDirtEditCore(DirtEditPayload payload, string senderPid, bool onMain)
         {
             try
             {
                 if (payload == null || string.IsNullOrEmpty(payload.AddressKey) || payload.Spots.Count == 0) return;
-                string owner = (BuildingOwners.TryGetValue(payload.AddressKey, out var o) && !string.IsNullOrEmpty(o)) ? o
-                             : (BuildingRealEstateOwners.TryGetValue(payload.AddressKey, out var r) ? r : "");
-                if (string.IsNullOrEmpty(owner)) return;
-                string ownerPid = (owner == "host") ? MPConfig.PlayerId : owner;
-                if (ownerPid != senderPid
-                    && !GrantSync.IsGranted(GrantKind.Housing, ownerPid, senderPid)
-                    && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
-                {
-                    Plugin.Logger.LogWarning($"[Cleaning] dirt edit for '{payload.AddressKey}' from '{senderPid}' — no grant from '{ownerPid}' — dropped.");
-                    return;
-                }
+                // ABSENT-OWNER-GATES-1: the one owner/member check; no owner and every refusal are logged (throttled).
+                if (!ResolveForGate(ShopLedgerValue(payload.AddressKey, true), onMain, () => HandleBuildingDirtEditCore(payload, senderPid, true), out var cRef)) return;
+                if (!ShopGate("BuildingDirtEdit", payload.AddressKey, cRef, senderPid, GrantHousingOrBusiness, out _)) return;
+                string ownerPid = cRef.Id;
                 if (ownerPid == MPConfig.PlayerId)
                     GameStatePatcher.EnqueueOnMainThread(() => HelperCleaning.Apply(payload));
                 else
@@ -7950,15 +7957,16 @@ namespace BigAmbitionsMP
                 if (string.IsNullOrEmpty(p.AddressKey)) return;
                 if (!BuildingOwners.TryGetValue(p.AddressKey, out var owner) || string.IsNullOrEmpty(owner))
                 { Plugin.Logger.LogWarning($"[MergerStaff] employee edit for unowned '{p.AddressKey}' — dropped."); return; }
-                string ownerPid = owner == "host" ? MPConfig.PlayerId : owner;
-                if (ownerPid != senderPid && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[MergerStaff] employee edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no access, dropped."); return; }
+                // ABSENT-OWNER-GATES-1: the one owner/member check (a reserved owner resolves by stored group).
+                var eRef = ResolveOwnerValue(owner);
+                if (!ShopGate("MergerEmployeeEdit", p.AddressKey, eRef, senderPid, p.Action == "fire" ? null : GrantBusiness, out bool eMember)) return;
+                string ownerPid = eRef.Id;
                 // J2 (user ruling 2026-09-12): helpers never fire, members may. GrantSync.IsGranted UNIONS a
                 // direct Business grant with merger membership, so a permissions helper would otherwise pass the
                 // gate above for every action - including "fire" (MergerEmployeeSync.cs:43). Firing is the one op
                 // reserved to the owner himself or a co-member of the same company; assign/adopt/transfer stay on
                 // the union, because those are exactly what helpers and members share.
-                if (p.Action == "fire" && ownerPid != senderPid && !MergerSync.MergedRuntime(ownerPid, senderPid))
+                if (p.Action == "fire" && ownerPid != senderPid && !eMember)
                 { Plugin.Logger.LogWarning($"[MergerStaff] fire by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — a business helper may not fire the owner's staff; only a company member may. Dropped."); return; }
                 // W3-0 r1 (F6): the fifth write route joins the other four — an offline owner's edit goes to
                 // the machine simulating them (MergerEmployeeSync.ApplyOnOwner already accepts SimulatesHere),
@@ -8143,6 +8151,147 @@ namespace BigAmbitionsMP
             return owner == "host" ? MPConfig.PlayerId : owner;
         }
 
+        // ── ABSENT-OWNER-GATES-1 (decision 56): ONE host owner/member check ─────────────────────────────────────
+        // After a host restart an absent owner's shops sit in the ledger under the owner's STABLE id (a RESERVED entry,
+        // re-keyed only at that owner's own Hello), which neither MergedRuntime nor GrantSync (PlayerId space, players
+        // connected this session) can answer for. Every gate below resolves the ledger value through here instead. The
+        // saved display name of an absence mark (mark.OwnerPid) is NEVER read: a newcomer may bind any name at Hello.
+        // Flip-proof: only the host's own ledger, the absence-mark keys and the MergerSync store are read.
+        internal enum ShopOwnerKind { None, Live, Reserved, Unknown }
+
+        internal readonly struct ShopOwnerRef
+        {
+            public readonly ShopOwnerKind Kind;
+            public readonly string Pid;      // Live: the player id ("" otherwise)
+            public readonly string Stable;   // Live: that player's stable id ("" when unknown); Reserved: the ledger value
+            public readonly string Raw;      // the ledger value as stored
+            public ShopOwnerRef(ShopOwnerKind kind, string pid, string stable, string raw)
+            { Kind = kind; Pid = pid ?? ""; Stable = stable ?? ""; Raw = raw ?? ""; }
+            /// <summary>What the downstream route code keys on: the pid of a live owner, the STABLE id of a reserved one
+            /// (exactly what SharedShopOwnerPid hands back for it), "" for none/unknown.</summary>
+            public string Id => Kind == ShopOwnerKind.Live ? Pid : Kind == ShopOwnerKind.Reserved ? Stable : "";
+        }
+
+        /// <summary>The ledger value of an address: the tenant ledger first, then (when asked) the property owner - the
+        /// order the storage/helper/interior/cleaning gates always read. "" = none.</summary>
+        private static string ShopLedgerValue(string addressKey, bool withPropertyOwner)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return "";
+            if (BuildingOwners.TryGetValue(addressKey, out var o) && !string.IsNullOrEmpty(o)) return o;
+            if (withPropertyOwner && BuildingRealEstateOwners.TryGetValue(addressKey, out var r) && !string.IsNullOrEmpty(r)) return r;
+            return "";
+        }
+
+        /// <summary>ANY THREAD: the part of the resolution that needs only concurrent state. "host" / the host's pid = the
+        /// host; a pid StableIdByPlayer knows = that player (today's answer). Anything else sets <paramref name="needsMain"/>:
+        /// the reserved test reads main-thread tables (the absence marks, the group store).</summary>
+        private static ShopOwnerRef ResolveOwnerLive(string raw, out bool needsMain)
+        {
+            needsMain = false;
+            if (string.IsNullOrEmpty(raw)) return new ShopOwnerRef(ShopOwnerKind.None, "", "", "");
+            if (raw == "host" || raw == MPConfig.PlayerId) return new ShopOwnerRef(ShopOwnerKind.Live, MPConfig.PlayerId, MPConfig.StableId, raw);
+            if (StableIdByPlayer.TryGetValue(raw, out var st) && !string.IsNullOrEmpty(st)) return new ShopOwnerRef(ShopOwnerKind.Live, raw, st, raw);
+            needsMain = true;
+            return new ShopOwnerRef(ShopOwnerKind.Unknown, "", "", raw);
+        }
+
+        /// <summary>MAIN THREAD: the full resolution. Beyond ResolveOwnerLive, a STABLE id is accepted ONLY when it is a
+        /// key of the absence marks or a member of a stored group (RESERVED); anything else is UNKNOWN and every gate
+        /// refuses it.</summary>
+        private static ShopOwnerRef ResolveOwnerValue(string raw)
+        {
+            var o = ResolveOwnerLive(raw, out bool needsMain);
+            if (!needsMain) return o;
+            try
+            {
+                if (MergerAbsence.Marks.ContainsKey(raw) || MergerSync.GroupOfStable(raw).Length > 0)
+                    return new ShopOwnerRef(ShopOwnerKind.Reserved, "", raw, raw);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Gate] owner resolve '{raw}': {ex.Message}"); }
+            return o;
+        }
+
+        /// <summary>For a gate that runs on the POLL thread: resolve there when concurrent state answers; otherwise queue
+        /// <paramref name="reenter"/> (the same handler, onMain: true) on the main thread and return false (the caller
+        /// returns - the main-thread run decides and logs).</summary>
+        private static bool ResolveForGate(string raw, bool onMain, Action reenter, out ShopOwnerRef o)
+        {
+            if (onMain) { o = ResolveOwnerValue(raw); return true; }
+            o = ResolveOwnerLive(raw, out bool needsMain);
+            if (!needsMain) return true;
+            GameStatePatcher.EnqueueOnMainThread(reenter);
+            return false;
+        }
+
+        // The live-entry direct-grant tests the gates used (merger membership is tested separately in MayActOnShop, so
+        // these read the grant TABLE only - together they equal today's GrantSync.IsGranted union).
+        private static bool GrantHousingOrBusiness(string ownerPid, string actorPid)
+            => GrantSync.IsGrantedDirect(GrantKind.Housing, ownerPid, actorPid) || GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, actorPid);
+        private static bool GrantBusiness(string ownerPid, string actorPid)
+            => GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, actorPid);
+
+        /// <summary>MAIN THREAD for a reserved owner. May <paramref name="actorPid"/> act on a shop of <paramref name="o"/>?
+        /// OWNER: the actor's stable id is the owner's (a live owner: the same pid). MEMBER: live entry - MergedRuntime as
+        /// today; reserved entry - SameStoreGroup(owner stable, actor stable). DIRECT GRANT: live entries only, and only
+        /// when <paramref name="directGrant"/> is given (null = a membership-only action). False carries the reason.</summary>
+        private static bool MayActOnShop(in ShopOwnerRef o, string actorPid, Func<string, string, bool>? directGrant, out bool member, out string reason)
+        {
+            member = false; reason = "";
+            try
+            {
+                if (string.IsNullOrEmpty(actorPid)) { reason = "no sender"; return false; }
+                switch (o.Kind)
+                {
+                    case ShopOwnerKind.None:
+                        reason = "no owner on record"; return false;
+                    case ShopOwnerKind.Unknown:
+                        reason = $"the ledger names '{o.Raw}', who is neither a player known this session nor an absent or company member"; return false;
+                    case ShopOwnerKind.Live:
+                        if (o.Pid == actorPid) return true;
+                        if (MergerSync.MergedRuntime(o.Pid, actorPid)) { member = true; return true; }
+                        if (directGrant != null && directGrant(o.Pid, actorPid)) return true;
+                        reason = directGrant == null
+                            ? $"not the owner '{o.Pid}' and not a company member (membership-only action)"
+                            : $"not the owner '{o.Pid}', not a company member and no permission from them";
+                        return false;
+                    case ShopOwnerKind.Reserved:
+                        string actorStable = StableOfPid(actorPid);
+                        if (actorStable.Length > 0 && actorStable == o.Stable) return true;
+                        if (MergerSync.SameStoreGroup(o.Stable, actorStable)) { member = true; return true; }
+                        reason = $"the absent owner '{o.Stable}' is not in one company with the sender (a direct grant does not count for an absent owner)";
+                        return false;
+                }
+                reason = "unresolved owner"; return false;
+            }
+            catch (Exception ex) { reason = $"check failed: {ex.Message}"; return false; }
+        }
+
+        /// <summary>MayActOnShop plus the ONE throttled refusal line (LogRejectThrottled: kind + address, 5 min).</summary>
+        private static bool ShopGate(string kind, string addressKey, in ShopOwnerRef o, string actorPid, Func<string, string, bool>? directGrant, out bool member)
+        {
+            if (MayActOnShop(o, actorPid, directGrant, out member, out var why)) return true;
+            LogRejectThrottled(kind, addressKey ?? "", $"from '{actorPid}' (ledger owner '{o.Raw}') REFUSED: {why}");
+            return false;
+        }
+
+        /// <summary>MAIN THREAD: ShopGate for an owner value a gate already holds (SharedShopOwnerPid's answer, or a
+        /// payload-named owner).</summary>
+        private static bool ShopGateFor(string kind, string addressKey, string ownerValue, string actorPid, Func<string, string, bool>? directGrant, out bool member)
+            => ShopGate(kind, addressKey, ResolveOwnerValue(ownerValue), actorPid, directGrant, out member);
+
+        /// <summary>MAIN THREAD: do two resolved owners belong to ONE company? The same owner; two live owners merged at
+        /// runtime (today); otherwise the stored groups by stable id. None/unknown never match.</summary>
+        private static bool SameCompanyOwners(in ShopOwnerRef a, in ShopOwnerRef b)
+        {
+            bool aOk = a.Kind == ShopOwnerKind.Live || a.Kind == ShopOwnerKind.Reserved;
+            bool bOk = b.Kind == ShopOwnerKind.Live || b.Kind == ShopOwnerKind.Reserved;
+            if (!aOk || !bOk) return false;
+            if (a.Stable.Length > 0 && a.Stable == b.Stable) return true;
+            if (a.Kind == ShopOwnerKind.Live && b.Kind == ShopOwnerKind.Live)
+                return a.Pid == b.Pid || MergerSync.MergedRuntime(a.Pid, b.Pid);
+            return MergerSync.SameStoreGroup(a.Stable, b.Stable);
+        }
+
         /// <summary>MERGER PHASE 2 WAVE 3 (W3-0): WHERE a routed WRITE for this address must be delivered.
         /// The ledger owner when that player is ONLINE; else, while they are away, the machine simulating
         /// their businesses (its lifted copy IS the live state, and its owner-style pushes/publishes carry
@@ -8161,6 +8310,10 @@ namespace BigAmbitionsMP
                 // StableIdByPlayer survives a departure (it is not an online test, :5881), which is exactly
                 // why it still answers for the absent owner the marks are keyed by.
                 string stable = StableIdByPlayer.TryGetValue(ownerPid, out var s) && !string.IsNullOrEmpty(s) ? s : ownerPid;
+                // ABSENT-OWNER-GATES-1: a RESERVED ledger value IS the stable id - the owner is online when the pid known
+                // for that stable this session is.
+                string spid = PidOfStable(stable);
+                if (spid.Length > 0 && spid != ownerPid && IsOnlinePid(spid)) return spid;
                 if (MergerAbsence.Marks.TryGetValue(stable, out var mark) && mark != null
                     && !string.IsNullOrEmpty(mark.SimulatorPid) && IsOnlinePid(mark.SimulatorPid))
                     return mark.SimulatorPid;
@@ -8233,8 +8386,7 @@ namespace BigAmbitionsMP
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] schedule edit for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
                 if (ownerPid == senderPid) return;   // an owner's own edits never route
-                if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid) && !MergerSync.MergedRuntime(ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[SharedShop] schedule edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission or merger membership, dropped."); return; }
+                if (!ShopGateFor("SharedScheduleEdit", p.AddressKey, ownerPid, senderPid, GrantBusiness, out _)) return;   // ABSENT-OWNER-GATES-1
                 string starget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0: owner, else their simulator, else refuse
                 if (starget.Length == 0 || starget == senderPid) return;
                 if (starget == MPConfig.PlayerId) SharedShopSchedule.ApplyOnOwner(p);
@@ -8261,8 +8413,7 @@ namespace BigAmbitionsMP
                     case "open":
                     case "close":
                         if (ownerPid == senderPid) return;   // the owner has no session with themself
-                        if (!GrantSync.IsGrantedDirect(GrantKind.Business, ownerPid, senderPid) && !MergerSync.MergedRuntime(ownerPid, senderPid))
-                        { Plugin.Logger.LogWarning($"[SharedShop] session '{p.Action}' by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission or merger membership, dropped."); return; }
+                        if (!ShopGateFor("ScheduleSession", p.AddressKey, ownerPid, senderPid, GrantBusiness, out _)) return;   // ABSENT-OWNER-GATES-1
                         if (!AskOwnerOnline("session", p.AddressKey, senderPid, ownerPid)) return;   // W3-0 r1 (F7)
                         target = ownerPid;
                         break;
@@ -8438,8 +8589,7 @@ namespace BigAmbitionsMP
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] staff edit for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
                 if (ownerPid == senderPid) return;
-                if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 3 (W3-1): UNION — direct grant or merger membership
-                { Plugin.Logger.LogWarning($"[SharedShop] staff edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission and not a company member, dropped."); return; }
+                if (!ShopGateFor("SharedStaffEdit", p.AddressKey, ownerPid, senderPid, GrantBusiness, out _)) return;   // ABSENT-OWNER-GATES-1 (UNION: grant or membership)
                 string ftarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
                 if (ftarget.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] staff edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — nobody runs that address right now (owner offline, no stand-in), dropped."); return; }
                 if (ftarget == senderPid) return;
@@ -8534,8 +8684,9 @@ namespace BigAmbitionsMP
                 if (p.Action == "claim-plan" || p.Action == "release-plan")
                 {
                     string oOwner = p.OwnerPid ?? "";
-                    if (oOwner.Length == 0 || (oOwner != senderPid && !MergerSync.MergedRuntime(oOwner, senderPid)))
-                    { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' by '{senderPid}' for offer '{id}' names '{oOwner}', who is not in that company - dropped."); return; }
+                    string oWhy = "names nobody";
+                    if (oOwner.Length == 0 || (oOwner != senderPid && !MayActOnShop(ResolveOwnerValue(oOwner), senderPid, null, out _, out oWhy)))   // ABSENT-OWNER-GATES-1
+                    { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' by '{senderPid}' for offer '{id}' names '{oOwner}', who is not in that company ({oWhy}) - dropped."); return; }
                     if (p.Action == "release-plan")
                     {
                         if (!_candidateClaims.TryGetValue(id, out var ocur) || ocur.pid != senderPid)
@@ -8565,8 +8716,8 @@ namespace BigAmbitionsMP
                 string ownerPid = OwnerOfCandidate(id);
                 if (ownerPid.Length == 0)
                 { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' by '{senderPid}' for '{id}' - no member lists that candidate, dropped."); return; }
-                if (ownerPid != senderPid && !MergerSync.MergedRuntime(ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' by '{senderPid}' for '{id}' (of '{ownerPid}') - not in that company, dropped."); return; }
+                if (ownerPid != senderPid && !MayActOnShop(ResolveOwnerValue(ownerPid), senderPid, null, out _, out var cWhy))   // ABSENT-OWNER-GATES-1
+                { Plugin.Logger.LogWarning($"[Candidates] '{p.Action}' by '{senderPid}' for '{id}' (of '{ownerPid}') - not in that company ({cWhy}), dropped."); return; }
 
                 if (p.Action == "claim")
                 {
@@ -8772,8 +8923,8 @@ namespace BigAmbitionsMP
                 string owner = p.OwnerPid ?? "";
                 if (owner.Length == 0)
                 { Plugin.Logger.LogWarning($"[Messages] '{p.Action}' from '{senderPid}' names no owner - dropped."); HostRefusePress(p, senderPid, "unknown"); return; }
-                if (owner != senderPid && !MergerSync.MergedRuntime(owner, senderPid))
-                { Plugin.Logger.LogWarning($"[Messages] '{p.Action}' by '{senderPid}' for a message of '{owner}' - not in that company, dropped."); HostRefusePress(p, senderPid, "unknown"); return; }
+                if (owner != senderPid && !MayActOnShop(ResolveOwnerValue(owner), senderPid, null, out _, out var mWhy))   // ABSENT-OWNER-GATES-1
+                { Plugin.Logger.LogWarning($"[Messages] '{p.Action}' by '{senderPid}' for a message of '{owner}' - not in that company ({mWhy}), dropped."); HostRefusePress(p, senderPid, "unknown"); return; }
 
                 if (p.Action == "press")
                 {
@@ -8997,16 +9148,18 @@ namespace BigAmbitionsMP
                     if (!BuildingOwners.TryGetValue(to, out var toRaw) || string.IsNullOrEmpty(toRaw))
                     { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{to}' is not a registered business here."); return; }
                     string toOwner = toRaw == "host" ? MPConfig.PlayerId : toRaw;
-                    if (toOwner != senderPid && !GrantSync.IsGranted(GrantKind.Business, toOwner, senderPid))
-                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{senderPid}' does not hold the destination '{to}'."); return; }
+                    string tWhy = "";
+                    if (toOwner != senderPid && !MayActOnShop(ResolveOwnerValue(toOwner), senderPid, GrantBusiness, out _, out tWhy))   // ABSENT-OWNER-GATES-1
+                    { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{senderPid}' does not hold the destination '{to}' ({tWhy})."); return; }
                     string src = senderPid;
                     if (from.Length > 0)
                     {
                         if (!BuildingOwners.TryGetValue(from, out var fo) || string.IsNullOrEmpty(fo))
                         { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{from}' is not a registered business here."); return; }
                         string fromOwner = fo == "host" ? MPConfig.PlayerId : fo;
-                        if (fromOwner != senderPid && !GrantSync.IsGranted(GrantKind.Business, fromOwner, senderPid))
-                        { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{senderPid}' does not hold the source '{from}'."); return; }
+                        string fWhy = "";
+                        if (fromOwner != senderPid && !MayActOnShop(ResolveOwnerValue(fromOwner), senderPid, GrantBusiness, out _, out fWhy))   // ABSENT-OWNER-GATES-1
+                        { Plugin.Logger.LogWarning($"[Transfer] {tid}: refused: '{senderPid}' does not hold the source '{from}' ({fWhy})."); return; }
                         src = RouteTargetFor(from, fromOwner);
                     }
                     else
@@ -9651,12 +9804,13 @@ namespace BigAmbitionsMP
         {
             try
             {
-                string owner = SharedShopOwnerPid(destKey);
-                if (owner.Length == 0) return false;
-                if (!(owner == senderPid || MergerSync.MergedRuntime(owner, senderPid))) return false;
-                string src = SharedShopOwnerPid(sourceKey);
-                if (src.Length == 0) return false;
-                return src == owner || MergerSync.MergedRuntime(src, owner);
+                // ABSENT-OWNER-GATES-1: membership-only (no grant step); a reserved end resolves by stored group.
+                var dRef = ResolveOwnerValue(SharedShopOwnerPid(destKey));
+                if (!ShopGate("CargoTransfer", destKey, dRef, senderPid, null, out _)) return false;
+                var sRef = ResolveOwnerValue(SharedShopOwnerPid(sourceKey));
+                if (SameCompanyOwners(sRef, dRef)) return true;
+                LogRejectThrottled("CargoTransfer", sourceKey, $"from '{senderPid}': the source (ledger owner '{sRef.Raw}') and the destination '{destKey}' (ledger owner '{dRef.Raw}') are not one company");
+                return false;
             }
             catch { return false; }
         }
@@ -9705,9 +9859,8 @@ namespace BigAmbitionsMP
         {
             try
             {
-                string owner = SharedShopOwnerPid(destKey);
-                if (owner.Length == 0) return false;
-                return owner == senderPid || MergerSync.MergedRuntime(owner, senderPid);
+                // ABSENT-OWNER-GATES-1: membership-only (no grant step); a reserved end resolves by stored group.
+                return ShopGateFor("ImportTransfer", destKey, SharedShopOwnerPid(destKey), senderPid, null, out _);
             }
             catch { return false; }
         }
@@ -10301,8 +10454,7 @@ namespace BigAmbitionsMP
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0) { Plugin.Logger.LogWarning($"[SharedShop] price edit for unowned '{p.AddressKey}' from '{senderPid}' — dropped."); return; }
                 if (ownerPid == senderPid) return;
-                if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[SharedShop] price edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no Business permission and not a company member, dropped."); return; }
+                if (!ShopGateFor("SharedPriceEdit", p.AddressKey, ownerPid, senderPid, GrantBusiness, out _)) return;   // ABSENT-OWNER-GATES-1
                 string ptarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0 retrofit: an offline owner no longer swallows the edit
                 if (ptarget.Length == 0 || ptarget == senderPid) return;
                 if (ptarget == MPConfig.PlayerId) SharedShopPrices.ApplyOnOwner(p);
@@ -10324,8 +10476,7 @@ namespace BigAmbitionsMP
                 if (p.Action == "request")
                 {
                     if (ownerPid == senderPid) return;
-                    if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 2: UNION — direct grant or merger membership
-                    { Plugin.Logger.LogWarning($"[SharedShop] sales-history request by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
+                    if (!ShopGateFor("SharedSalesHistory", p.AddressKey, ownerPid, senderPid, GrantBusiness, out _)) return;   // ABSENT-OWNER-GATES-1
                     if (!AskOwnerOnline("sales-history", p.AddressKey, senderPid, ownerPid)) return;   // W3-0 r1 (F7)
                     if (ownerPid == MPConfig.PlayerId) SharedShopPrices.HandleSalesHistory(p);
                     else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedSalesHistory, "host", p));
@@ -10389,9 +10540,8 @@ namespace BigAmbitionsMP
                 if (p.Action == "request")
                 {
                     if (ownerPid == senderPid) return;
-                    if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 2: UNION — direct grant or merger membership
-                    { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
-                    if (!SharedWorkAddressAllowed(p.AddressKey, MergerSync.MergedRuntime(ownerPid, senderPid)))
+                    if (!ShopGateFor("SharedWorkInfo", p.AddressKey, ownerPid, senderPid, GrantBusiness, out bool wiMember)) return;   // ABSENT-OWNER-GATES-1
+                    if (!SharedWorkAddressAllowed(p.AddressKey, wiMember))
                     { Plugin.Logger.LogWarning($"[SharedShop] work-info request by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                     // MERGER PHASE 2 WAVE 4 r2 (D21): the SELL-ALL QUOTE is not a tab snapshot. It must be
                     // answered by the machine that HOLDS the stock (the owner, or its absence stand-in), not
@@ -10399,7 +10549,7 @@ namespace BigAmbitionsMP
                     // keeps a permission helper away from the owner's inventory.
                     if (p.Tab == "sellquote")
                     {
-                        if (!MergerSync.MergedRuntime(ownerPid, senderPid))
+                        if (!wiMember)   // ABSENT-OWNER-GATES-1: membership by the one check (stored group for a reserved owner)
                         { Plugin.Logger.LogWarning($"[Merger] sell-all quote by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
                         string qtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0: owner online → owner, else its simulator
                         if (qtarget.Length == 0)
@@ -10425,7 +10575,7 @@ namespace BigAmbitionsMP
                     if (senderPid != wrunner && !(senderPid == MPConfig.PlayerId && p.Tab == "mergerack"))
                     { Plugin.Logger.LogWarning($"[SharedShop] work snapshot for '{p.AddressKey}' from '{senderPid}', which is not the machine running it ('{(wrunner.Length > 0 ? wrunner : "nobody")}'; ledger owner '{ownerPid}') — dropped."); return; }
                     if (string.IsNullOrEmpty(p.ToPid)) return;
-                    if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, p.ToPid)) return;   // wave 2: UNION
+                    if (!ShopGateFor("SharedWorkInfo snapshot", p.AddressKey, ownerPid, p.ToPid, GrantBusiness, out _)) return;   // wave 2: UNION; ABSENT-OWNER-GATES-1 (was silent)
                     if (p.ToPid == MPConfig.PlayerId) SharedShopWorkTabs.HandleWorkInfo(p);
                     else SendToPid(p.ToPid, MessageEnvelope.Create(MessageType.SharedWorkInfo, "host", p));
                 }
@@ -10469,8 +10619,7 @@ namespace BigAmbitionsMP
                 }
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
                 if (ownerPid.Length == 0 || ownerPid == senderPid) return;
-                if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))   // wave 3 (W3-1): UNION — direct grant or merger membership
-                { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' on '{p.AddressKey}' — no Business permission and not a company member, dropped."); return; }
+                if (!ShopGateFor("SharedWorkEdit", p.AddressKey, ownerPid, senderPid, GrantBusiness, out bool weMember)) return;   // ABSENT-OWNER-GATES-1 (UNION: grant or membership)
                 // MERGER PHASE 2 WAVE 4 (V2): the three PARITY routes ride this envelope as new Ops (rule 5 -
                 // one new MessageType in the whole wave, and it went to the display copies). They are gated on
                 // MEMBERSHIP ONLY, never on a bare Business grant: a permission helper gets today's behaviour
@@ -10485,7 +10634,7 @@ namespace BigAmbitionsMP
                 bool w4 = p.Op == "mergercontract" || p.Op == "mergersellall" || p.Op == "mergerplan"
                        || p.Op == "mergerplanedit" || p.Op == "mergerterminate" || p.Op == "mergershutdown"
                        || p.Op == "mergercampaign";   // H-MERGERHIRE-1: the recruitment booking rides the same gate
-                if (w4 && !MergerSync.MergedRuntime(ownerPid, senderPid))
+                if (w4 && !weMember)
                 { Plugin.Logger.LogWarning($"[Merger] {p.Op} by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
                 // 4c part 2a (E4): the host SERIALISES plan edits per plan id. A second leg carrying a
                 // (plan id, seq, op) already seen is a resend and is dropped here, so a member that pressed
@@ -10523,7 +10672,7 @@ namespace BigAmbitionsMP
                 // TENANCY and on the BUSINESS itself, not on a work tab, and every other gate still holds:
                 // the membership check above, RouteTargetFor below, and the runner's own refusals.
                 bool skipAddrGate = p.Op == "mergerplan" || p.Op == "mergerterminate" || p.Op == "mergershutdown";
-                if (!skipAddrGate && !SharedWorkAddressAllowed(p.AddressKey, MergerSync.MergedRuntime(ownerPid, senderPid)))
+                if (!skipAddrGate && !SharedWorkAddressAllowed(p.AddressKey, weMember))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                 string wtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
                 if (wtarget.Length == 0)
@@ -11016,12 +11165,14 @@ namespace BigAmbitionsMP
             why = "";
             if (plan == null) return false;
             string first = "", firstKey = "";
+            ShopOwnerRef firstRef = default;
             foreach (var key in PlanEndKeys(plan))
             {
                 if (!BuildingOwners.TryGetValue(key, out var o) || string.IsNullOrEmpty(o)) continue;
                 string pid = o == "host" ? MPConfig.PlayerId : o;
-                if (first.Length == 0) { first = pid; firstKey = key; continue; }
-                if (pid != first && !MergerSync.MergedRuntime(pid, first))
+                var r = ResolveOwnerValue(o);   // ABSENT-OWNER-GATES-1: a reserved end resolves by stored group
+                if (first.Length == 0) { first = pid; firstKey = key; firstRef = r; continue; }
+                if (pid != first && !SameCompanyOwners(r, firstRef))
                 { why = $"'{firstKey}' is run by '{first}' and '{key}' by '{pid}', who are not in one company"; return true; }
             }
             return false;
