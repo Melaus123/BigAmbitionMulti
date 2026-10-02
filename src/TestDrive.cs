@@ -91,6 +91,37 @@ namespace BigAmbitionsMP
         internal const string DevFakeAddr = "203.0.113.77";          // TEST-NET-3 documentation range - nobody's address
         internal const string DevFakeSteam = "76561190000000077";    // below the real SteamID64 range - nobody's account
 
+        private static string DevForfeitStateLever(string ba)
+        {
+            try
+            {
+                if (!MPServer.IsRunning) return "ERR host only";
+                var p = ba.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (p.Length < 2) return "ERR usage: ban devghost <street#> <street> <pid> | ban devai <street#> <street>";
+                bool ghost = p[0] == "devghost";
+                // An address key holds a space ('29 ba:street_x'): the pid is the LAST word for devghost.
+                string pid = ghost && p.Length >= 3 ? p[p.Length - 1] : "";
+                string addr = string.Join(" ", p, 1, p.Length - 1 - (ghost && p.Length >= 3 ? 1 : 0));
+                var reg = GameStatePatcher.FindRegistration(addr);
+                if (reg == null) return $"ERR no registration for '{addr}'";
+                if (ghost)
+                {
+                    if (pid.Length == 0) return "ERR usage: ban devghost <addr> <pid>";
+                    reg.AvailableForRent = false;
+                    reg.businessOwnerRivalId = pid;
+                    reg.BusinessName = "DevGhost";
+                    Plugin.Logger.LogInfo($"[TestDrive] ban devghost '{addr}': the host's copy now carries a stale tenancy of '{pid}' (DEV).");
+                    return $"OK devghost '{addr}' tenant={pid}";
+                }
+                reg.AvailableForRent = false;
+                reg.businessOwnerRivalId = "";
+                reg.BusinessName = "DevAI";
+                Plugin.Logger.LogInfo($"[TestDrive] ban devai '{addr}': an AI business now runs in the host's copy (DEV).");
+                return $"OK devai '{addr}'";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
         private static string DevBanLever(string ba)
         {
             try
@@ -2415,6 +2446,12 @@ namespace BigAmbitionsMP
                     //   ban devaddr on|off|add|age <key> <hours>   a public joiner address stand-in; 'add' bans it alone; 'age' ages it
                     //   ban devsteam on|off|add                    a Steam-vouched joiner id stand-in; 'add' bans its 'steam-' stable id
                     //   ban devpark on|off                         a returning mid-game joiner parks for approval
+                    // BAN-PLAYERS-1 build B review-fold levers (host side, the host's OWN copy only, no money, no ledger):
+                    //   ban devghost <addr> <pid>   a stale player tenancy on a released address (what a member offline at the
+                    //                               removal still holds in its copy) - the F3 world-load re-apply must release it
+                    //   ban devai <addr>            an AI business moved into a released address (no tenant mark) - the F2
+                    //                               replay must stop sending that address
+                    if (ba.StartsWith("devghost ", StringComparison.Ordinal) || ba.StartsWith("devai ", StringComparison.Ordinal)) return DevForfeitStateLever(ba);
                     if (ba.StartsWith("dev", StringComparison.Ordinal)) return DevBanLever(ba);
                     if (ba.StartsWith("offline ", StringComparison.Ordinal)) return MPServer.BanOfflinePlayer(ba.Substring(8).Trim());
                     return MPServer.BanPlayer(ba);

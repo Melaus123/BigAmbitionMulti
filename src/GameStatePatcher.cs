@@ -7390,15 +7390,18 @@ namespace BigAmbitionsMP
         /// A notice held by a session that has since ended is discarded (it belongs to that host's world).</summary>
         internal static void TickHeldForfeits()
         {
-            if (_heldForfeits.Count == 0) return;
+            if (_heldForfeits.Count == 0 && _ownerWaitingExit.Count == 0) return;
             try
             {
                 if (!MPClient.IsConnected)
                 {
-                    Plugin.Logger.LogInfo($"[Forfeit] {_heldForfeits.Count} held notice(s) discarded - the session ended before this world settled.");
+                    Plugin.Logger.LogInfo($"[Forfeit] {_heldForfeits.Count + _ownerWaitingExit.Count} held notice(s) discarded - the session ended before this world settled.");
                     _heldForfeits.Clear();
+                    _ownerWaitingExit.Clear();
+                    try { GlobalEvents.onExitBuilding -= OnOwnerExitedBuilding; } catch { }
                     return;
                 }
+                if (_heldForfeits.Count == 0) return;
                 if (!MPWorldReady.IsSettled || SaveGameManager.Current == null) return;
                 var held = new List<PropertyForfeitPayload>(_heldForfeits);
                 _heldForfeits.Clear();
@@ -7437,7 +7440,9 @@ namespace BigAmbitionsMP
                 var reg = FindRegistration(addr);
                 if (reg == null) { Plugin.Logger.LogWarning($"[Forfeit] host '{addr}': no registration - ledgers released, world copy untouched."); return; }
                 bool flipped = MergerFlip.IsFlipped(addr);
-                if (flipped) MergerFlip.ParkRunnerIfFlipped(addr, "");   // the flip's OFF edge (keys already left the company) restores an EMPTY tenant mark
+                // F5 (review of b625534): only where the banned player was the TENANT - on a bought-only address the flip is a
+                // company partner's tenancy, and parking it empty would blank that partner's saved tenant mark.
+                if (flipped && rented) MergerFlip.ParkRunnerIfFlipped(addr, "");   // the flip's OFF edge (keys already left the company) restores an EMPTY tenant mark
                 if (rented) MakeRegVacant(reg);
                 bool listed = false;
                 if (bought)
@@ -7458,7 +7463,7 @@ namespace BigAmbitionsMP
                 string what = (rented ? "back on the for-rent market" : "")
                             + (rented && bought ? "; " : "")
                             + (bought ? (listed ? "back on the sale market as unowned" : "deed freed (listing failed)") : "");
-                Plugin.Logger.LogInfo($"[Forfeit] host '{addr}' released (owner '{ownerName}'): {what}; {items} item(s) cleared from the host's copy{(flipped ? "; company flip parked empty" : "")}.");
+                Plugin.Logger.LogInfo($"[Forfeit] host '{addr}' released (owner '{ownerName}'): {what}; {items} item(s) cleared from the host's copy{(flipped && rented ? "; company flip parked empty" : "")}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] host '{addr}': {ex.Message}"); }
         }
@@ -7480,14 +7485,17 @@ namespace BigAmbitionsMP
                     bool clear = e.Cleared != null && e.Cleared.Contains(addr);
                     bool ownRent = false; try { ownRent = MergerFlip.TrulyMine(reg); } catch { }
                     bool ownDeed = false; try { ownDeed = reg.BuildingOwnedByPlayer; } catch { }
-                    if (ownRent || ownDeed)
+                    // F1 (review of b625534): a DEED held here stops only the deed-side work - when the banned player RENTED
+                    // a building this machine's player owns, the banned tenancy (name, type, furniture, stock) is still cleared.
+                    if (ownRent || (ownDeed && !rented))
                     {
                         skipped++;
                         Plugin.Logger.LogWarning($"[Forfeit] viewer '{addr}' REFUSED - this machine's own player {(ownRent ? "rents" : "owns")} it; a forfeit of '{e.OwnerName}' never touches another player's holding.");
                         continue;
                     }
+                    if (ownDeed) Plugin.Logger.LogInfo($"[Forfeit] viewer '{addr}' - this machine's own player owns the building - the deed is left alone; the banned tenancy is cleared.");
                     bool flipped = MergerFlip.IsFlipped(addr);
-                    if (flipped) MergerFlip.ParkRunnerIfFlipped(addr, "");   // the flip's OFF edge restores an EMPTY tenant mark
+                    if (flipped && rented) MergerFlip.ParkRunnerIfFlipped(addr, "");   // F5: only where the banned player was the tenant; the flip's OFF edge restores an EMPTY tenant mark
                     if (rented)
                     {
                         // The vacate notify's own writes (ApplyBuildingVacated): tenant off, name/type cleared, for rent.
@@ -7501,7 +7509,7 @@ namespace BigAmbitionsMP
                     if (clear) ClearForfeitContents(reg, addr, false, out items, out veh);
                     RefreshForfeitPoi(reg);
                     done++; itemsAll += items;
-                    Plugin.Logger.LogInfo($"[Forfeit] viewer '{addr}' released ({(rented ? "rented" : "bought")}{(flipped ? ", company flip parked empty" : "")}): {items} item(s) cleared from this copy.");
+                    Plugin.Logger.LogInfo($"[Forfeit] viewer '{addr}' released ({(rented ? "rented" : "bought")}{(flipped && rented ? ", company flip parked empty" : "")}): {items} item(s) cleared from this copy.");
                 }
                 catch (Exception ex) { skipped++; Plugin.Logger.LogWarning($"[Forfeit] viewer '{addr}': {ex.Message}"); }
             }
@@ -7519,9 +7527,11 @@ namespace BigAmbitionsMP
         {
             var gi = SaveGameManager.Current;
             if (gi == null) { Plugin.Logger.LogWarning("[Forfeit] own property: no world loaded - nothing applied."); return; }
+            if (OwnerMustLeaveFirst(e, why)) return;   // L3: inside a forfeited building - applied when the game's own exit completes
             float before = 0f; try { before = gi.Money; } catch { }
             int leases = 0, deeds = 0, already = 0, items = 0, veh = 0;
-            foreach (var addr in e.Rented ?? new List<string>())
+            var rentedList = e.Rented ?? new List<string>();
+            foreach (var addr in rentedList)
             {
                 try
                 {
@@ -7540,18 +7550,154 @@ namespace BigAmbitionsMP
                 {
                     var reg = FindRegistration(addr);
                     if (reg == null) { Plugin.Logger.LogWarning($"[Forfeit] own building '{addr}': no registration here - skipped."); continue; }
+                    bool clear = e.Cleared != null && e.Cleared.Contains(addr);
+                    // F7 (review of b625534): rented on THIS machine although the host's rent list does not name it - that
+                    // local lease ends too (the same no-payout lease end), so RentedByPlayer does not stay true here.
+                    if (!rentedList.Contains(addr))
+                    {
+                        bool rentedLocal = false; try { rentedLocal = reg.RentedByPlayer && !MergerFlip.IsFlipped(addr); } catch { }
+                        if (rentedLocal)
+                        {
+                            OwnerEndLeaseNoPayout(reg, addr, out var i3, out var v3);
+                            leases++; items += i3; veh += v3;
+                            clear = false;   // the lease end already cleared the contents
+                            Plugin.Logger.LogInfo($"[Forfeit] own building '{addr}': also rented on this machine though the host's rent list does not name it - that local lease ended too, no payout.");
+                        }
+                    }
                     bool ownedHere = false; try { ownedHere = reg.BuildingOwnedByPlayer; } catch { }
                     if (!ownedHere) { already++; Plugin.Logger.LogInfo($"[Forfeit] own building '{addr}': not owned on this machine - nothing to give up."); continue; }
-                    bool clear = e.Cleared != null && e.Cleared.Contains(addr);
                     OwnerGiveUpBuilding(reg, addr, clear, out var i2, out var v2);
                     deeds++; items += i2; veh += v2;
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own building '{addr}': {ex.Message}"); }
             }
+            _forfeitExitedVehicleId = ""; _forfeitKeepVehicleId = "";
             float after = before; try { after = gi.Money; } catch { }
             if (leases + deeds > 0) { try { SaveGameManager.MarkChange(); } catch { } }
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             Plugin.Logger.LogInfo($"[Forfeit] OWN property removed by the host's ban (day {e.Day}, {why}): {leases} lease(s) ended, {deeds} bought building(s) given up, {already} already released; {items} item(s) and {veh} vehicle(s) removed; no payout - money before={before.ToString("F2", inv)} after={after.ToString("F2", inv)}.");
+        }
+
+        // L3 (review leftover): owner entries waiting for the player to be outside a forfeited building.
+        private static readonly List<KeyValuePair<PropertyForfeitInfo, string>> _ownerWaitingExit = new();
+        private static string _forfeitExitedVehicleId = "";   // the vehicle the player was just taken out of (its live controller goes with it)
+        private static string _forfeitKeepVehicleId = "";     // a vehicle the player could not be taken out of (kept this time, logged)
+
+        /// <summary>L3 - OWNER SIDE, MAIN THREAD. Native refuses its own lease end while the player is inside that building
+        /// (BizManPresentation.TerminateContract, decompile :599). Inside a forfeited building: the player is walked out with
+        /// the game's own exit (BuildingManager.ExitFromBuilding(0), as CityManager/GameManager call it) and the entry is
+        /// applied on the game's own exit-completed event (GlobalEvents.onExitBuilding) - true = held. Driving a vehicle kept
+        /// at a forfeited address: the game's own get-out (the current vehicle's ExitVehicle, as RescueBarrier calls it) runs
+        /// first, so the vehicle is never deleted under the player.</summary>
+        private static bool OwnerMustLeaveFirst(PropertyForfeitInfo e, string why)
+        {
+            _forfeitExitedVehicleId = ""; _forfeitKeepVehicleId = "";
+            try
+            {
+                var set = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var a in e.Rented ?? new List<string>()) set.Add(a);
+                foreach (var a in e.Bought ?? new List<string>()) set.Add(a);
+                if (set.Count == 0) return false;
+                string inside = "";
+                try
+                {
+                    if (BuildingManager.IsInsideBuilding)
+                    {
+                        var b = InstanceBehavior<BuildingManager>.Instance?.building;
+                        if (b != null) inside = GameStateReader.AddressKey(b.Address);
+                    }
+                }
+                catch { }
+                if (inside.Length > 0 && set.Contains(inside))
+                {
+                    _ownerWaitingExit.Add(new KeyValuePair<PropertyForfeitInfo, string>(e, why));
+                    try { GlobalEvents.onExitBuilding -= OnOwnerExitedBuilding; } catch { }
+                    GlobalEvents.onExitBuilding += OnOwnerExitedBuilding;
+                    InstanceBehavior<BuildingManager>.Instance!.ExitFromBuilding(0);   // non-null: IsInsideBuilding above read it
+                    Plugin.Logger.LogInfo($"[Forfeit] own property: the player is INSIDE forfeited '{inside}' - walked out with the game's own exit; the removal applies when the exit completes.");
+                    return true;
+                }
+                VehicleInstance? cur = null; try { cur = VehicleHelper.GetCurrentVehicle(); } catch { }
+                string vAddr = ""; try { if (cur != null) vAddr = GameStateReader.AddressKey(cur.Address); } catch { }
+                if (cur != null && vAddr.Length > 0 && set.Contains(vAddr))
+                {
+                    string vid = ""; try { vid = cur.id ?? ""; } catch { }
+                    try
+                    {
+                        var vc = VehicleHelper.GetCurrentVehicleBase();
+                        if (vc == null) throw new InvalidOperationException("no live controller for the current vehicle");
+                        vc.ExitVehicle();
+                        _forfeitExitedVehicleId = vid;
+                        Plugin.Logger.LogInfo($"[Forfeit] own property: the player was DRIVING a vehicle kept at forfeited '{vAddr}' - taken out with the game's own get-out before the removal.");
+                    }
+                    catch (Exception ex)
+                    {
+                        _forfeitKeepVehicleId = vid;
+                        Plugin.Logger.LogWarning($"[Forfeit] own property: the player is driving a vehicle kept at forfeited '{vAddr}' and could not be taken out ({ex.Message}) - that vehicle is kept this time.");
+                    }
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own property: leave-first check: {ex.Message}"); }
+            return false;
+        }
+
+        /// <summary>L3: the game's exit-completed event (any thread the game raises it on) - the held owner entries apply on
+        /// the main thread.</summary>
+        private static void OnOwnerExitedBuilding(Address _)
+        {
+            try { EnqueueOnMainThread(ReleaseOwnerWaitingExit); } catch { }
+        }
+
+        private static void ReleaseOwnerWaitingExit()
+        {
+            try
+            {
+                if (_ownerWaitingExit.Count == 0) return;
+                var list = new List<KeyValuePair<PropertyForfeitInfo, string>>(_ownerWaitingExit);
+                _ownerWaitingExit.Clear();
+                try { GlobalEvents.onExitBuilding -= OnOwnerExitedBuilding; } catch { }
+                if (!MPClient.IsConnected || SaveGameManager.Current == null)
+                {
+                    Plugin.Logger.LogInfo($"[Forfeit] {list.Count} own-property notice(s) waiting for the exit discarded - the session ended.");
+                    return;
+                }
+                Plugin.Logger.LogInfo($"[Forfeit] own property: the exit completed - applying {list.Count} held notice(s).");
+                foreach (var kv in list)
+                {
+                    try { OwnerApplyForfeit(kv.Key, kv.Value); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own property after the exit: {ex.Message}"); }
+                }
+                try { HamptonsAccess.RefreshAllBlockers(); }
+                catch (Exception ex) { HamptonsAccess.WarnOnce("Forfeit/hamptons-refresh", ex); }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own property exit release: {ex.Message}"); }
+        }
+
+        /// <summary>F8 (review of b625534) - OWNER SIDE: a Hamptons house that is no longer the player's (no lease, no deed
+        /// here) gets the vacated-interior clear (HamptonsAccess.ClearVacatedInterior - it refuses while the house is still
+        /// the player's, so it runs after the records go) and the game's own 'house sold' visual step
+        /// (CityHamptonsHouseController.OnBuildingSold, decompile :135-145).</summary>
+        private static void OwnerHamptonsReleased(BuildingRegistration reg, string addr)
+        {
+            try
+            {
+                bool hamptons = false; try { hamptons = reg.BuildingCached != null && reg.BuildingCached.IsHamptonsHouse(); } catch { }
+                if (!hamptons) return;
+                bool stillMine = false; try { stillMine = reg.RentedByPlayer || reg.BuildingOwnedByPlayer; } catch { }
+                if (stillMine) return;   // a lease end of a house still owned here: the give-up that follows does this
+                _forfeitClearing = true;
+                try { ClearHamptonsInteriorOnTenancyEnd(addr, "property forfeited (own)"); }
+                finally { _forfeitClearing = false; }
+                bool sold = false;
+                try
+                {
+                    var ctl = InstanceBehavior<CityManager>.Instance?.FindCityBuildingController(reg.Address) as CityHamptonsHouseController;
+                    if (ctl != null) { ctl.OnBuildingSold(); sold = true; }
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own house '{addr}': OnBuildingSold: {ex.Message}"); }
+                Plugin.Logger.LogInfo($"[Forfeit] own house '{addr}': Hamptons interior cleared{(sold ? "; the game's house-sold step ran" : " (no city controller loaded)")}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own house '{addr}': {ex.Message}"); }
         }
 
         /// <summary>B4: native's lease end for one building, without the payouts. A business is shut down first with the
@@ -7600,6 +7746,7 @@ namespace BigAmbitionsMP
             }
             catch { }
             try { GameEvent.Invoke("ba:gameevent_rentedbuilding"); } catch { }
+            OwnerHamptonsReleased(reg, addr);   // F8
             Plugin.Logger.LogInfo($"[Forfeit] own lease '{addr}' ENDED ({(residential ? "home" : (name.Length > 0 ? $"business '{name}' shut down, staff unassigned" : "no business"))}): {items} item(s) and {vehicles} vehicle(s) removed, NO refund.");
         }
 
@@ -7617,6 +7764,7 @@ namespace BigAmbitionsMP
             try { records = gi.realEstate.RemoveAll(x => x != null && x.address == a); } catch { }
             RefreshForfeitPoi(reg);
             try { RealEstateHelper.AddNoHomeModifierIfNeeded(); } catch { }
+            OwnerHamptonsReleased(reg, addr);   // F8
             Plugin.Logger.LogInfo($"[Forfeit] own building '{addr}' GIVEN UP: {records} ownership record(s) and {listings} own sale listing(s) removed; {items} item(s) and {vehicles} vehicle(s) removed; NO sale price.");
         }
 
@@ -7630,10 +7778,17 @@ namespace BigAmbitionsMP
             items = 0; vehicles = 0;
             bool hamptons = false; try { hamptons = reg.BuildingCached != null && reg.BuildingCached.IsHamptonsHouse(); } catch { }
             try { items = reg.itemInstances?.Count ?? 0; } catch { }
-            if (hamptons && !ownerSide) ClearHamptonsInteriorOnTenancyEnd(addr, "property forfeited");
-            var list = new List<BigAmbitions.Items.ItemInstance>();
-            try { if (reg.itemInstances != null) foreach (var ii in reg.itemInstances.Values) if (ii != null) list.Add(ii); } catch { }
-            foreach (var ii in list) { try { reg.RemoveItemInstanceFromBuilding(ii); } catch { } }
+            // F9 (review of b625534): a machine holding keys / helper access to this building would forward one 'item
+            // removed' per cleared item (HousingPatches guest-removal forward) - suppressed while the forfeit clears.
+            _forfeitClearing = true;
+            try
+            {
+                if (hamptons && !ownerSide) ClearHamptonsInteriorOnTenancyEnd(addr, "property forfeited");   // owner side: OwnerHamptonsReleased (F8)
+                var list = new List<BigAmbitions.Items.ItemInstance>();
+                try { if (reg.itemInstances != null) foreach (var ii in reg.itemInstances.Values) if (ii != null) list.Add(ii); } catch { }
+                foreach (var ii in list) { try { reg.RemoveItemInstanceFromBuilding(ii); } catch { } }
+            }
+            finally { _forfeitClearing = false; }
             if (ownerSide)
             {
                 var vl = new List<VehicleInstance>();
@@ -7648,8 +7803,11 @@ namespace BigAmbitionsMP
                 {
                     try
                     {
+                        string vid = ""; try { vid = v.id ?? ""; } catch { }
+                        if (vid.Length > 0 && vid == _forfeitKeepVehicleId) { Plugin.Logger.LogWarning($"[Forfeit] '{addr}': the vehicle the player could not leave is kept this time."); continue; }
                         VehicleController? vc = null;
                         if (hamptons) { try { if (v.VehicleType.IsMotorVehicle) vc = VehicleHelper.GetVehicleController(v); } catch { } }
+                        if (vid.Length > 0 && vid == _forfeitExitedVehicleId) { try { vc = VehicleHelper.GetVehicleController(v); } catch { } }   // L3: the car just left stands in the street - its object goes too
                         v.Delete(vc);
                         vehicles++;
                     }
@@ -7658,6 +7816,59 @@ namespace BigAmbitionsMP
             }
             ForgetInteriorBaselines(addr);
             try { TryRefreshActiveInteriorIfMatches(addr); } catch { }
+        }
+
+        /// <summary>F9: true while a forfeit clears a building's items on this machine (HousingPatches reads it).</summary>
+        private static bool _forfeitClearing;
+        internal static bool ForfeitClearing => _forfeitClearing;
+
+        /// <summary>Is this id an AI rival of this world (a rivalStates row) - never a session player?</summary>
+        internal static bool IsAiRivalId(string? id)
+        {
+            if (string.IsNullOrEmpty(id)) return false;
+            try
+            {
+                if (IsSessionPlayerRivalId(id)) return false;
+                var rs = SaveGameManager.Current?.rivalStates;
+                if (rs != null) foreach (var r in rs) if ((r?.rivalId?.ToString() ?? "") == id) return true;
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>F2/F4 (review of b625534): the TENANCY side of an address on THIS machine's copy - 0 = free (no player
+        /// lease here, no business name, no tenant mark); 1 = a stale player tenancy (a non-AI tenant mark, or an off-market
+        /// shell with no business) the ledger does not back; 2 = held here (this machine's player rents it, or an AI business
+        /// runs it); -1 = no registration. MAIN THREAD.</summary>
+        internal static int ForfeitTenancyState(string addr)
+        {
+            try
+            {
+                var reg = FindRegistration(addr);
+                if (reg == null) return -1;
+                if (reg.RentedByPlayer) return 2;
+                string tid = ""; try { tid = reg.businessOwnerRivalId?.ToString() ?? ""; } catch { }
+                if (tid.Length > 0) return IsAiRivalId(tid) ? 2 : 1;
+                if (!string.IsNullOrEmpty(reg.BusinessName)) return 2;   // an AI business without a rival id
+                return reg.AvailableForRent ? 0 : 1;
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>F2/F3: the DEED side of an address on THIS machine's copy - 0 = free; 1 = a stale non-AI owner mark;
+        /// 2 = held here (this machine's player owns it, or an AI rival bought it); -1 = no registration. MAIN THREAD.</summary>
+        internal static int ForfeitDeedState(string addr)
+        {
+            try
+            {
+                var reg = FindRegistration(addr);
+                if (reg == null) return -1;
+                if (reg.BuildingOwnedByPlayer) return 2;
+                string oid = ""; try { oid = reg.buildingOwnerRivalId?.ToString() ?? ""; } catch { }
+                if (oid.Length > 0) return IsAiRivalId(oid) ? 2 : 1;
+                return 0;
+            }
+            catch { return -1; }
         }
 
         private static void RefreshForfeitPoi(BuildingRegistration reg)
@@ -7712,6 +7923,10 @@ namespace BigAmbitionsMP
                 if (gi?.BuildingRegistrations == null) return;
                 if (MPServer.IsRunning)
                 {
+                    // BAN-PLAYERS-1 F3 (review of b625534): the host's world load - the forfeit record (restored with the
+                    // ledgers, after the rivals carry) is re-applied to the host's OWN copy, so a member who was offline at
+                    // the removal and now hosts does not keep the banned tenancy in its world.
+                    if (reason == "world-ready") { try { MPServer.HostReapplyForfeitsAtLoad(reason); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] world-load re-apply: {ex.Message}"); } }
                     // ROUND-156 (#2) — LEDGER BOOTSTRAP.  The reflect protection below only covers
                     // buildings the ledger knows; a host's rentals from BEFORE the session existed
                     // never got entries (the benched round-113 gap), leaving a PREVIOUS host's own

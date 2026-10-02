@@ -4000,13 +4000,14 @@ namespace BigAmbitionsMP
         private static readonly object _forfeitLock = new();
         private static readonly List<MpForfeitEntry> _forfeits = new();
         private static readonly HashSet<string> _forfeitRefusalLogged = new();
+        private static readonly HashSet<string> _forfeitReplayStopLogged = new();   // F2: an address no longer replayed - logged once
 
         private static void ResetForfeits(string why)
         {
             try
             {
                 int n;
-                lock (_forfeitLock) { n = _forfeits.Count; _forfeits.Clear(); _forfeitRefusalLogged.Clear(); }
+                lock (_forfeitLock) { n = _forfeits.Count; _forfeits.Clear(); _forfeitRefusalLogged.Clear(); _forfeitReplayStopLogged.Clear(); }
                 if (n > 0) Plugin.Logger.LogInfo($"[Forfeit] record cleared ({n} entr(ies); {why}).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] reset: {ex.Message}"); }
@@ -4043,6 +4044,7 @@ namespace BigAmbitionsMP
                 {
                     _forfeits.Clear();
                     _forfeitRefusalLogged.Clear();
+                    _forfeitReplayStopLogged.Clear();
                     if (m?.Forfeits != null)
                         foreach (var f in m.Forfeits)
                         {
@@ -4211,10 +4213,13 @@ namespace BigAmbitionsMP
             try
             {
                 who = (who ?? "").Trim();
-                if (!_running) { Plugin.Logger.LogWarning($"[Forfeit] remove property of '{who}' REFUSED: not hosting."); return "ERR not hosting"; }
-                if (SaveGameManager.Current == null) { Plugin.Logger.LogWarning($"[Forfeit] remove property of '{who}' REFUSED: no world loaded."); return "ERR no world loaded"; }
+                // L4 (build C1 leftover): 'who' may be a Steam id or a stable id - a refusal names only a ban key as given,
+                // anything else as its kind + short tag (MPConfig.IdTag).
+                string shownWho = MPConfig.IsBanKey(who) ? who : MPConfig.IdTag(who);
+                if (!_running) { Plugin.Logger.LogWarning($"[Forfeit] remove property of {shownWho} REFUSED: not hosting."); return "ERR not hosting"; }
+                if (SaveGameManager.Current == null) { Plugin.Logger.LogWarning($"[Forfeit] remove property of {shownWho} REFUSED: no world loaded."); return "ERR no world loaded"; }
                 var e = FindBanEntry(who);
-                if (e == null) { Plugin.Logger.LogWarning($"[Forfeit] remove property of '{who}' REFUSED: not on the saved ban list (property is removed only from a banned player)."); return $"ERR '{who}' is not on the saved ban list"; }
+                if (e == null) { Plugin.Logger.LogWarning($"[Forfeit] remove property of {shownWho} REFUSED: not on the saved ban list (property is removed only from a banned player)."); return $"ERR {shownWho} is not on the saved ban list"; }
                 string stable = e.StableId ?? "";
                 if (stable.Length == 0) { Plugin.Logger.LogWarning($"[Forfeit] remove property of '{e.Name}' REFUSED: the saved ban {e.Key} has no stable id - nothing in the ledgers can be matched."); return $"ERR ban {e.Key} has no stable id"; }
                 if (stable == MPConfig.StableId) return "ERR that is the host";
@@ -4254,9 +4259,14 @@ namespace BigAmbitionsMP
                 // (3) the ledgers - the one exception to H-STANDINLEASE-1 (a BANNED player only).
                 foreach (var a in rented) BuildingOwners.TryRemove(a, out _);
                 foreach (var a in bought) BuildingRealEstateOwners.TryRemove(a, out _);
+                // F4 (review of b625534): a BOUGHT address loses only its deed (back on the market as an unowned building with
+                // its current tenant). Contents / for-rent are cleared where the banned player was also the tenant (it is in
+                // 'rented') - or where nobody at all is: no player in the ledger and no business or AI tenant on the host's
+                // copy (an empty shell the banned player owned goes back on the rent market as before).
                 var cleared = new List<string>(rented);
                 foreach (var a in bought)
-                    if (!cleared.Contains(a) && !(BuildingOwners.TryGetValue(a, out var tnt) && !string.IsNullOrEmpty(tnt))) cleared.Add(a);
+                    if (!cleared.Contains(a) && !(BuildingOwners.TryGetValue(a, out var tnt) && !string.IsNullOrEmpty(tnt))
+                        && (uint)GameStatePatcher.ForfeitTenancyState(a) <= 1u) cleared.Add(a);   // 0 = free, 1 = an empty shell (-1 = no registration, 2 = held)
 
                 // (4) the company sharing update BEFORE any empty notice: on a member's machine a partner shop reads
                 // 'rented by me' (the merger flip) until its key leaves the company's building list.
@@ -4276,14 +4286,22 @@ namespace BigAmbitionsMP
                 RefreshBuildingAccess();   // housing/business grants on those buildings no longer open anything
 
                 Plugin.Logger.LogInfo($"[Forfeit] REMOVED the property of banned '{name}' (saved ban {e.Key}): {rented.Count} rented + {bought.Count} bought address(es) released on the host and sent to {_clients.Count} connected machine(s); contents cleared at {cleared.Count}; absence mark {(hadMark ? "dropped" : "none")}; no money moved; recorded for day {day}. Addresses: {string.Join(" | ", all)}");
+                // F10 (review of b625534): a crash before the next host save would roll the property back while the ban stays -
+                // the existing coordinated host save runs now.
+                try { MPSaveCoordinator.HostSaveNow("forfeit"); }
+                catch (Exception sx) { Plugin.Logger.LogWarning($"[Forfeit] host save after the removal: {sx.Message}"); }
                 return $"OK removed '{name}' key={e.Key} rented={rented.Count} bought={bought.Count} cleared={cleared.Count} mark={(hadMark ? "dropped" : "none")} addrs=[{string.Join("|", all)}]";
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] RemoveProperty('{who}'): {ex.Message}"); return "ERR " + ex.Message; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] RemoveProperty({(MPConfig.IsBanKey(who ?? "") ? who : MPConfig.IdTag(who ?? ""))}): {ex.Message}"); return "ERR " + ex.Message; }
         }
 
         /// <summary>B4 - HOST, MAIN THREAD, at a joiner's world-ready re-send: the forfeit record. The joiner's OWN entry goes
-        /// whole (its machine ends whatever it still holds locally); another owner's entry goes only for addresses nobody
-        /// holds now (a later tenant's building is never cleared on a viewer).</summary>
+        /// whole (its machine ends whatever it still holds locally). Another owner's entry goes only for addresses the
+        /// HOST's own copy still shows released (F2, review of b625534): a forfeited lease while no player rents it (F1: a
+        /// deed holder does not count) and the host's copy has no tenant, business or AI tenant; a forfeited deed while no
+        /// player owns it and the host's copy has no owner (player or AI). Once anything moved in, the host's normal state
+        /// sync is the truth and that address is no longer replayed (logged once). Contents are cleared only where the
+        /// tenancy is free on the host's copy (F4).</summary>
         private static void SendForfeitsTo(string pid, string why)
         {
             try
@@ -4291,23 +4309,88 @@ namespace BigAmbitionsMP
                 string myStable = StableOfPid(pid);
                 var pay = new PropertyForfeitPayload { Why = why };
                 int own = 0, addrs = 0;
-                lock (_forfeitLock)
-                    foreach (var f in _forfeits)
+                var stopped = new List<string>();
+                foreach (var f in SnapshotForfeits())
+                {
+                    bool mine = !string.IsNullOrEmpty(myStable) && f.StableId == myStable;
+                    var info = new PropertyForfeitInfo { OwnerStable = f.StableId, OwnerName = f.Name, Day = f.Day };
+                    foreach (var a in f.Rented)
                     {
-                        bool mine = !string.IsNullOrEmpty(myStable) && f.StableId == myStable;
-                        var info = new PropertyForfeitInfo { OwnerStable = f.StableId, OwnerName = f.Name, Day = f.Day };
-                        foreach (var a in f.Rented) if (mine || !HeldByAnyone(a)) { info.Rented.Add(a); info.Cleared.Add(a); }
-                        foreach (var a in f.Bought) if (mine || !HeldByAnyone(a)) { info.Bought.Add(a); if (!info.Cleared.Contains(a)) info.Cleared.Add(a); }
-                        if (info.Rented.Count + info.Bought.Count == 0) continue;
-                        if (mine) own++;
-                        addrs += info.Rented.Count + info.Bought.Count;
-                        pay.Entries.Add(info);
+                        bool free = !(BuildingOwners.TryGetValue(a, out var o) && !string.IsNullOrEmpty(o))
+                                    && GameStatePatcher.ForfeitTenancyState(a) == 0;
+                        if (mine || free) { info.Rented.Add(a); info.Cleared.Add(a); }
+                        else stopped.Add(a + " (lease)");
                     }
+                    foreach (var a in f.Bought)
+                    {
+                        bool free = !(BuildingRealEstateOwners.TryGetValue(a, out var d) && !string.IsNullOrEmpty(d))
+                                    && GameStatePatcher.ForfeitDeedState(a) == 0;
+                        if (!(mine || free)) { stopped.Add(a + " (deed)"); continue; }
+                        info.Bought.Add(a);
+                        if (!info.Cleared.Contains(a) && (f.Rented.Contains(a) || GameStatePatcher.ForfeitTenancyState(a) == 0)) info.Cleared.Add(a);
+                    }
+                    if (info.Rented.Count + info.Bought.Count == 0) continue;
+                    if (mine) own++;
+                    addrs += info.Rented.Count + info.Bought.Count;
+                    pay.Entries.Add(info);
+                }
+                foreach (var st in stopped)
+                {
+                    bool first; lock (_forfeitLock) first = _forfeitReplayStopLogged.Add(st);
+                    if (first) Plugin.Logger.LogInfo($"[Forfeit] replay: '{st}' is no longer replayed - the host's copy is held again (a player, a business or a new owner moved in); the host's normal state sync is the truth there. (Logged once per address.)");
+                }
                 if (pay.Entries.Count == 0) return;
                 SendToPlayer(pid, MessageEnvelope.Create(MessageType.PropertyForfeit, "host", pay));
                 Plugin.Logger.LogInfo($"[Forfeit] record sent to '{pid}' ({why}): {pay.Entries.Count} entr(ies), {addrs} address(es){(own > 0 ? " - including that player's OWN forfeited property" : "")}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] send to '{pid}': {ex.Message}"); }
+        }
+
+        /// <summary>F3 (review of b625534) - HOST, MAIN THREAD, at the host's world load (the world-ready ledger->world
+        /// translation, after the ledger + forfeit restore and the rivals carry): the forfeit record is re-applied to the
+        /// host's OWN copy. A member who was offline at the removal and now hosts loads its own copy with the banned tenancy
+        /// still in it; every forfeited address the ledgers show released and that no player / AI holds in this copy, but
+        /// whose copy still carries a stale player tenancy or deed mark, is released again (HostApplyForfeit is idempotent).</summary>
+        internal static void HostReapplyForfeitsAtLoad(string why)
+        {
+            try
+            {
+                if (!_running || SaveGameManager.Current == null) return;
+                var snap = SnapshotForfeits();
+                if (snap.Count == 0) return;
+                int reapplied = 0, already = 0, held = 0, missing = 0;
+                var done = new List<string>();
+                foreach (var f in snap)
+                {
+                    var all = new List<string>(f.Rented); foreach (var a in f.Bought) if (!all.Contains(a)) all.Add(a);
+                    foreach (var a in all)
+                    {
+                        try
+                        {
+                            bool inR = f.Rented.Contains(a), inB = f.Bought.Contains(a);
+                            bool rentLedgered = BuildingOwners.TryGetValue(a, out var o) && !string.IsNullOrEmpty(o);
+                            bool deedLedgered = BuildingRealEstateOwners.TryGetValue(a, out var d) && !string.IsNullOrEmpty(d);
+                            int t = GameStatePatcher.ForfeitTenancyState(a);
+                            int dd = GameStatePatcher.ForfeitDeedState(a);
+                            if (t < 0 || dd < 0) { missing++; continue; }
+                            bool rentPart = inR && !rentLedgered && t == 1;
+                            bool deedPart = inB && !deedLedgered && dd == 1;
+                            if (!rentPart && !deedPart)
+                            {
+                                if ((inR && (rentLedgered || t == 2)) || (inB && (deedLedgered || dd == 2))) held++; else already++;
+                                continue;
+                            }
+                            bool clear = rentPart || t == 0;
+                            GameStatePatcher.HostApplyForfeit(a, rentPart, deedPart, clear, string.IsNullOrEmpty(f.Name) ? f.StableId : f.Name);
+                            reapplied++; done.Add(a);
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] world load re-apply '{a}': {ex.Message}"); }
+                    }
+                }
+                Plugin.Logger.LogInfo($"[Forfeit] world load ({why}): reapplied={reapplied} already={already} held={held} missing={missing} - the forfeit record re-applied to the host's own copy{(done.Count > 0 ? " at " + string.Join(" | ", done) : "")}.");
+                if (reapplied > 0) { try { SaveGameManager.MarkChange(); } catch { } }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] world load re-apply: {ex.Message}"); }
         }
 
         /// <summary>The Hello binds this connection's identity for the whole
@@ -5988,6 +6071,11 @@ namespace BigAmbitionsMP
                 // the baseline captured at the join send (SendBusinessDeltaTo handles the
                 // vanished-business / no-baseline / over-cap fallbacks to the full table).
                 string bizLine = SendBusinessDeltaTo(peer, bsnap, PerBusinessSigs(bsnap));
+                // BAN-PLAYERS-1 build B (B4): the forfeit record, after this joiner's load. F6 (review of b625534): BEFORE the
+                // live for-sale list below - the banned player's own give-up drops every listing at its address, and that
+                // list (applied after it on the same main-thread queue; ApplyBuildingsForSale clears and rebuilds) restores
+                // the host's fresh unowned listing.
+                SendForfeitsTo(pid, "world-ready re-send");
                 // v9: a daily for-sale flip that landed in this joiner's load-window drop
                 // list has no other re-cover until the NEXT in-game day — ship the live list.
                 var fsList = BusinessSync.CurrentForSaleList();
@@ -6002,7 +6090,6 @@ namespace BigAmbitionsMP
                 }
                 int duty = MPRegisterSync.SendDutyStateTo(pid);
                 MPTakeover.HostHealUnfurnishedShopsFor(pid);   // round-204d: claimed-but-unfurnished takeover shops
-                SendForfeitsTo(pid, "world-ready re-send");   // BAN-PLAYERS-1 build B (B4): the forfeit record, after this joiner's load
                 Plugin.Logger.LogInfo($"[Server] World-ready re-send to '{pid}': rivals + {bizLine} + {rosters} stored roster(s) (own publishes nudged) + {duty} duty entr(ies).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] ResendJoinerState: {ex.Message}"); }

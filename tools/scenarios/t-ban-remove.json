@@ -202,6 +202,11 @@
           "role": "d",
           "regex": "\\[Forfeit\\] viewer apply for '${clientPid}' \\(removed\\): [1-9]\\d* address\\(es\\) released",
           "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[MPSave\\] HostSaveNow session='${session}' reason=forfeit",
+          "within_s": 120
         }
       ],
       "seq": 19
@@ -237,6 +242,20 @@
     },
     {
       "role": "h",
+      "cmd": "ban devghost ${shopA} ${clientPid}",
+      "expect_result": "^OK devghost ",
+      "note": "F3 premise: the host's copy carries a stale banned tenancy, as a member offline at the removal would",
+      "seq": 25
+    },
+    {
+      "role": "h",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg .* forRent=False .*name='DevGhost'",
+      "note": "F3 premise",
+      "seq": 26
+    },
+    {
+      "role": "h",
       "cmd": "save",
       "expect_result": "^OK",
       "expect_log": [
@@ -247,23 +266,23 @@
         }
       ],
       "note": "the forfeit record rides the host save with the ledgers",
-      "seq": 25
+      "seq": 27
     },
     {
       "role": "h",
       "sleep_s": 15,
-      "seq": 26
+      "seq": 28
     },
     {
       "role": "all",
       "cmd": "mark TEST BANREM LEG2",
       "expect_result": "OK MARK",
-      "seq": 27
+      "seq": 29
     },
     {
       "role": "h",
       "drop": true,
-      "seq": 28
+      "seq": 30
     },
     {
       "role": "h",
@@ -275,18 +294,18 @@
           "within_s": 120
         }
       ],
-      "seq": 29
+      "seq": 31
     },
     {
       "role": "h",
       "sleep_s": 20,
-      "seq": 30
+      "seq": 32
     },
     {
       "role": "h",
       "cmd": "host",
       "expect_result": "^OK server started",
-      "seq": 31
+      "seq": 33
     },
     {
       "role": "h",
@@ -302,66 +321,71 @@
           "role": "h",
           "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
           "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[Forfeit\\] world load \\(world-ready\\): reapplied=1 .* at ${shopA}",
+          "within_s": 300
         }
       ],
-      "note": "(2) host restart: the record comes back with the ledgers",
-      "seq": 32
+      "note": "(2) host restart: the record comes back with the ledgers; F3: the world load re-applies the record to the host's own copy (the stale tenancy goes)",
+      "seq": 34
     },
     {
       "role": "h",
       "sleep_s": 40,
-      "seq": 33
+      "seq": 35
     },
     {
       "role": "h",
       "cmd": "ban forfeits",
       "expect_result": "^OK forfeits n=1 \\[${clientStable} '${clientPid}' .*${shopA}",
-      "seq": 34
+      "seq": 36
     },
     {
       "role": "h",
       "cmd": "bldgstate ${shopA}",
       "expect_result": "^OK bldg .* rented=False forRent=True .*items=0 .*ledger=- deed=- ",
-      "seq": 35
+      "seq": 37
     },
     {
       "role": "h",
       "cmd": "ban held ${clientStable}",
       "expect_result": "^OK held .* rented=0 bought=0 ",
-      "seq": 36
+      "seq": 38
     },
     {
       "role": "h",
       "cmd": "unban ${banKey}",
       "expect_result": "^OK unbanned 1 left=0",
-      "seq": 37
+      "seq": 39
     },
     {
       "role": "all",
       "cmd": "mark TEST BANREM LEG3",
       "expect_result": "OK MARK",
-      "seq": 38
-    },
-    {
-      "role": "c",
-      "drop": true,
-      "seq": 39
-    },
-    {
-      "role": "c",
-      "relaunch": true,
       "seq": 40
     },
     {
       "role": "c",
-      "sleep_s": 20,
+      "drop": true,
       "seq": 41
+    },
+    {
+      "role": "c",
+      "relaunch": true,
+      "seq": 42
+    },
+    {
+      "role": "c",
+      "sleep_s": 20,
+      "seq": 43
     },
     {
       "role": "all",
       "cmd": "mark TEST BANREM LEG3-REJOIN",
       "expect_result": "OK MARK",
-      "seq": 42
+      "seq": 44
     },
     {
       "role": "c",
@@ -374,12 +398,12 @@
           "within_s": 60
         }
       ],
-      "seq": 43
+      "seq": 45
     },
     {
       "role": "h",
       "sleep_s": 5,
-      "seq": 44
+      "seq": 46
     },
     {
       "role": "h",
@@ -403,49 +427,49 @@
           "within_s": 240
         }
       ],
-      "seq": 45
+      "seq": 47
     },
     {
       "role": "c",
       "sleep_s": 30,
-      "seq": 46
+      "seq": 48
     },
     {
       "role": "c",
       "cmd": "money",
       "expect_result": "^OK money=",
       "note": "report: the wallet after the rejoin",
-      "seq": 47
+      "seq": 49
     },
     {
       "role": "c",
       "cmd": "bldgstate ${shopA}",
       "expect_result": "^OK bldg .* rented=False forRent=True .*items=0 vehicles=0 ",
-      "seq": 48
+      "seq": 50
     },
     {
       "role": "h",
       "sleep_s": 60,
-      "seq": 49
+      "seq": 51
     },
     {
       "role": "h",
       "cmd": "ban held ${clientPid}",
       "expect_result": "^OK held .* rented=0 bought=0 ",
       "note": "(3) nothing re-adopted / healed / claimed back",
-      "seq": 50
+      "seq": 52
     },
     {
       "role": "h",
       "cmd": "bldgstate ${shopA}",
       "expect_result": "^OK bldg .* forRent=True .*ledger=- deed=- ",
-      "seq": 51
+      "seq": 53
     },
     {
       "role": "all",
       "cmd": "mark TEST BANREM LEG45",
       "expect_result": "OK MARK",
-      "seq": 52
+      "seq": 54
     },
     {
       "role": "c",
@@ -459,42 +483,42 @@
           "within_s": 30
         }
       ],
-      "seq": 53
+      "seq": 55
     },
     {
       "role": "h",
       "sleep_s": 5,
-      "seq": 54
+      "seq": 56
     },
     {
       "role": "h",
       "cmd": "ban held ${clientPid}",
       "expect_result": "^OK held .* rented=1 bought=0 .*addrs=\\[${shopA}\\]",
-      "seq": 55
+      "seq": 57
     },
     {
       "role": "h",
       "cmd": "ban forfeits",
       "expect_result": "^OK forfeits n=",
       "refute_result": "${shopA}",
-      "seq": 56
+      "seq": 58
     },
     {
       "role": "h",
       "cmd": "merge propose ${clientPid}",
       "expect_result": "OK merge propose sent",
-      "seq": 57
+      "seq": 59
     },
     {
       "role": "h",
       "sleep_s": 1,
-      "seq": 58
+      "seq": 60
     },
     {
       "role": "h",
       "cmd": "offers",
       "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]",
-      "seq": 59
+      "seq": 61
     },
     {
       "role": "c",
@@ -507,18 +531,18 @@
           "within_s": 20
         }
       ],
-      "seq": 60
+      "seq": 62
     },
     {
       "role": "h",
       "sleep_s": 5,
-      "seq": 61
+      "seq": 63
     },
     {
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "member=True.*flipped=[1-9]",
-      "seq": 62
+      "seq": 64
     },
     {
       "role": "h",
@@ -535,19 +559,19 @@
           "within_s": 30
         }
       ],
-      "seq": 63
+      "seq": 65
     },
     {
       "role": "h",
       "sleep_s": 15,
-      "seq": 64
+      "seq": 66
     },
     {
       "role": "h",
       "cmd": "absence",
       "expect_result": "^OK absence marks=\\[${clientPid}->${hostPid}.*${shopA}",
       "note": "(5) premise: the host stands in for the merged member's shop",
-      "seq": 65
+      "seq": 67
     },
     {
       "role": "h",
@@ -561,49 +585,126 @@
           "within_s": 10
         }
       ],
-      "seq": 66
+      "seq": 68
     },
     {
       "role": "h",
       "sleep_s": 15,
-      "seq": 67
+      "seq": 69
     },
     {
       "role": "h",
       "cmd": "absence",
       "expect_result": "^OK absence marks=\\[\\] simulating_here=\\[\\]",
       "note": "(5) the stand-in stopped simulating",
-      "seq": 68
+      "seq": 70
     },
     {
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "flipped=0",
-      "seq": 69
+      "seq": 71
     },
     {
       "role": "h",
       "cmd": "bldgstate ${shopA}",
       "expect_result": "^OK bldg .* rented=False forRent=True .*name='' .*items=0 .*ledger=- deed=- flipped=False",
-      "seq": 70
+      "seq": 72
     },
     {
       "role": "h",
       "cmd": "ban forfeits",
       "expect_result": "^OK forfeits n=1 \\[.*${shopA}",
-      "seq": 71
+      "seq": 73
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BANREM F2",
+      "expect_result": "OK MARK",
+      "seq": 74
+    },
+    {
+      "role": "h",
+      "cmd": "ban devai ${shopA}",
+      "expect_result": "^OK devai ",
+      "note": "F2 premise: the host's game moved an AI business into the released address",
+      "seq": 75
+    },
+    {
+      "role": "d",
+      "drop": true,
+      "seq": 76
+    },
+    {
+      "role": "d",
+      "relaunch": true,
+      "seq": 77
+    },
+    {
+      "role": "d",
+      "sleep_s": 20,
+      "seq": 78
+    },
+    {
+      "role": "d",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "(returning player '${dPid}' auto-accepted|mid-game join request from '${dPid}')",
+          "within_s": 60
+        }
+      ],
+      "seq": 79
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 80
+    },
+    {
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "note": "F2: the replay no longer sends shopA (the host's copy is held again)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] World-ready re-send to '${dPid}'",
+          "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[Forfeit\\] replay: '${shopA} \\(lease\\)' is no longer replayed",
+          "within_s": 300
+        }
+      ],
+      "seq": 81
+    },
+    {
+      "role": "d",
+      "sleep_s": 10,
+      "seq": 82
+    },
+    {
+      "role": "d",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg .* name='DevAI'",
+      "note": "F2: the joiner's copy keeps the AI shop (no replay wiped it)",
+      "seq": 83
     },
     {
       "role": "h",
       "cmd": "unban all",
       "expect_result": "^OK unbanned \\d+ left=0",
-      "seq": 72
+      "seq": 84
     },
     {
       "role": "all",
       "cmd": "mark TEST BANREM END",
       "expect_result": "OK MARK",
-      "seq": 73
+      "seq": 85
     }
   ]
 }
