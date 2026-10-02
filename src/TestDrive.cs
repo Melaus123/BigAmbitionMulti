@@ -6396,6 +6396,11 @@ namespace BigAmbitionsMP
                     //   `boxhold place`           the game's own confirm of a move (PlacementHelper.cs:166-168: SaveCurrentItemBeingMovedPosition + CancelPlacementMode)
                     //   `boxhold kill`            WRITES: deletes the held item mid-move through the game's own removal
                     //                             (BuildingRegistration.RemoveItemInstanceFromBuilding; object destroyed at frame end) - any 'object gone mid-move'
+                    //   `boxhold station`         WRITES: a NEW single-product station (or a register in a paper-bag shop) placed: picks an
+                    //                             item here that OnItemPlacementFinished fills (ItemController.cs:1469) whose product storage
+                    //                             holds, empties its stock slot as a just-bought item has it and puts one full slot's worth
+                    //                             (its capacity, at least its own units) into that storage first, so the fill takes exactly
+                    //                             that back and storage ends as it began; then the game's own move + confirm; reads its stock
                     // state also reads: blocker = PlacementMode navigation blocker held, noSave = GameManager.preventAutoSave,
                     // repairs = orphaned-move repairs (F2), guardLogs = [RestockGuard] lines (F1).
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
@@ -6464,7 +6469,7 @@ namespace BigAmbitionsMP
                             bool inReg = DevBoxHold.Id != null && reg.itemInstances.ContainsKey(DevBoxHold.Id);
                             string blk = "?";
                             try { blk = InstanceBehavior<global::GameManager>.Instance.playerController._activeNavigationBlockers.Contains(global::NavigationBlocker.PlacementMode).ToString(); } catch { }
-                            return $"OK boxhold state placing={cur != null} objAlive={objAlive} inReg={inReg} id={DevBoxHold.Id ?? "-"} probeHits={DevBoxHold.RemovedSeen} items={reg.itemInstances.Count} blocker={blk} noSave={(global::GameManager.preventAutoSave)} repairs={OrphanedPlacement.Repairs} guardLogs={HeldItemRestockGuard.SkipLogs}";
+                            return $"OK boxhold state placing={cur != null} objAlive={objAlive} inReg={inReg} id={DevBoxHold.Id ?? "-"} probeHits={DevBoxHold.RemovedSeen} items={reg.itemInstances.Count} blocker={blk} noSave={(global::GameManager.preventAutoSave)} repairs={OrphanedPlacement.Repairs} vehicle={Helpers.PlayerHelper.IsUsingVehicle} guardLogs={HeldItemRestockGuard.SkipLogs}";
                         }
                         if (bhv == "drain")
                         {
@@ -6515,7 +6520,77 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogInfo($"[TestDrive] boxhold kill: removed held '{kh.itemName}' id={kid} mid-move.");
                             return $"OK boxhold kill id={kid} inReg={reg.itemInstances.ContainsKey(kid)} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode}";
                         }
-                        return "ERR usage: boxhold list|pick [idPrefix]|state|drain|esc|place|kill";
+                        if (bhv == "station")
+                        {
+                            // OnItemPlacementFinished runs inside StopPlacingItem while the item still counts as held
+                            // (PlacementSystem.cs:693 before :701, 0916 asm); it fills the station from storage when it has
+                            // cargo, exactly one showcase product, an empty stock slot, and is not a point of sale unless this
+                            // shop's customers need paper bags (ItemController.cs:1469). Picks the candidate whose product
+                            // storage holds most of (same storage test as ItemHelper.cs:846-855); none -> ERR listing them.
+                            if (cur != null) return "ERR already placing";
+                            if (global::BuildingManager.isBuildingTemporarilyEditable) return "ERR building temporarily editable";
+                            bool bags = Helpers.BuildingHelper.CustomersNeedPaperBagsInCurrentBuilding();
+                            global::ItemController? sc = null; string prod = ""; int avail = 0, cands = 0; var cl = new StringBuilder();
+                            System.Func<string, BigAmbitions.Items.ItemInstance?, int> storageOf = (p, skip) =>
+                            {
+                                int a = 0;
+                                foreach (var v in reg.itemInstances.Values)
+                                {
+                                    if (v == null || ReferenceEquals(v, skip) || !v.ItemCached.HasTag(BigAmbitions.Tags.TagRef.Itemtag.isstockcontainer)) continue;
+                                    foreach (var ci in v.cargoInstances) if (ci != null && ci.itemName == p && ci.nestedCargoInstances.Count == 0) a += ci.amount;
+                                }
+                                return a;
+                            };
+                            foreach (var c in bm.allItemControllers)
+                            {
+                                try
+                                {
+                                    var si = (object?)c != null ? c.ItemInstance : null;
+                                    if (si == null || si.cargoInstances.Count == 0) continue;
+                                    var itm = si.ItemCached;
+                                    if (itm.itemsThatCanShowcase == null || itm.itemsThatCanShowcase.Length != 1) continue;
+                                    if ((itm.type & BigAmbitions.Items.ItemType.PointOfSale) != 0 && !bags) continue;
+                                    cands++;
+                                    int a = storageOf(itm.itemsThatCanShowcase[0], si);
+                                    cl.Append(c!.itemName).Append(':').Append(itm.itemsThatCanShowcase[0]).Append(":storage=").Append(a).Append(',');
+                                    if (a > avail) { sc = c; prod = itm.itemsThatCanShowcase[0]; avail = a; }
+                                }
+                                catch { }
+                            }
+                            if (sc == null) return $"ERR boxhold station: no item here that placement fills has its product in storage paperBags={bags} cands={cands} [{cl}]";
+                            var sst = sc.ItemInstance.GetStockInstance();
+                            string oldName = sst.itemName; int oldAmt = sst.amount;
+                            bool pos = (sc.ItemInstance.ItemCached.type & BigAmbitions.Items.ItemType.PointOfSale) != 0;
+                            BigAmbitions.Items.CargoInstance? back = null; string backId = "-";
+                            int capS = 0;
+                            try { capS = sst.GetMaxStockCapacity(sc.ItemInstance); } catch { capS = 0; }
+                            int putBack = Math.Max(oldAmt, capS);   // the fixture's storage is small: storage keeps what it had
+                            if (oldName == prod && putBack > 0)
+                            {
+                                foreach (var v in reg.itemInstances.Values)
+                                {
+                                    if (v == null || ReferenceEquals(v, sc.ItemInstance) || !v.ItemCached.HasTag(BigAmbitions.Tags.TagRef.Itemtag.isstockcontainer)) continue;
+                                    foreach (var ci in v.cargoInstances)
+                                        if (ci != null && ci.itemName == prod && ci.nestedCargoInstances.Count == 0 && (back == null || ci.amount > back.amount)) { back = ci; backId = v.id?.ToString() ?? ""; }
+                                }
+                                if (back != null) back.amount += putBack;   // one full slot's worth into storage, taken back by the fill
+                            }
+                            sst.itemName = ""; sst.amount = 0;   // a just-bought item: empty stock slot
+                            Buildings.Indoors.InteriorDesign.PlacementHelper.StartPlacementMode(sc);
+                            if (!BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode)
+                            {
+                                if (back != null) back.amount -= putBack;
+                                sst.itemName = oldName; sst.amount = oldAmt;
+                                return $"ERR boxhold station: StartPlacementMode did not start for '{sc.itemName}' (stock restored)";
+                            }
+                            int logs0 = HeldItemRestockGuard.SkipLogs;
+                            BigAmbitions.PlacementSystem.PlacementSystem.SaveCurrentItemBeingMovedPosition();
+                            Buildings.Indoors.InteriorDesign.PlacementHelper.CancelPlacementMode();   // -> StopPlacingItem -> OnItemPlacementFinished
+                            var aft = sc.ItemInstance.GetStockInstance();
+                            bool filled = aft != null && aft.amount > 0 && aft.itemName == prod;
+                            return $"OK boxhold station item={sc.itemName} pointOfSale={pos} paperBags={bags} cands={cands} [{cl}] product={prod} storageBefore={avail} stockBefore={oldAmt} cap={capS} putBack={(back != null ? putBack : 0)} into={(backId.Length > 8 ? backId.Substring(0, 8) : backId)} vehicle={Helpers.PlayerHelper.IsUsingVehicle} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode} stock={aft?.amount ?? -1} stockName={aft?.itemName ?? "-"} storageAfter={storageOf(prod, sc.ItemInstance)} guardLogDelta={HeldItemRestockGuard.SkipLogs - logs0} filled={filled}";
+                        }
+                        return "ERR usage: boxhold list|pick [idPrefix]|state|drain|esc|place|kill|station";
                     }
                     catch (Exception ex) { return $"ERR boxhold {bhv}: {ex.GetType().Name}: {ex.Message} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode}"; }
                 }

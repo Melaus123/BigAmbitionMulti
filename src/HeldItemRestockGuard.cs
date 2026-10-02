@@ -10,13 +10,16 @@
 // the game pauses during a move (PlacementHelper.cs:86-92); multiplayer suppresses that pause.
 //
 // WHAT THIS DOES. While the game says an item is being moved (PlacementSystem.CurrentPlaceableItemBeingPlaced,
-// the game's own state - never a proxy), that item and the items stacked on it (its childItemControllers,
-// which move with it) are neither a restock SOURCE nor a restock TARGET. Everything else restocks as before.
-// Nothing is changed and then restored: every hook only READS the game state and declines one transfer.
+// the game's own state - never a proxy), goods are never TAKEN OUT of that item or the items stacked on it
+// (its childItemControllers, which move with it). Only taking goods out empties and deletes a held box;
+// adding goods TO a held item never deletes it, so a held item is still a restock TARGET as in single player.
+// That matters: StopPlacingItem calls OnItemPlacementFinished (PlacementSystem.cs:693, 0916 asm) BEFORE it
+// clears the held field (:701), and OnItemPlacementFinished fills a newly placed single-product station, or a
+// register in a paper-bag shop, from storage (ItemController.cs:1469-1474) - the item still counts as held.
+// Everything else restocks as before. Nothing is changed and then restored: every hook only READS the game
+// state and declines one transfer.
 //
 // THE CHOKE POINTS AND WHY (read in the decompile; the narrowest places that cover every entry point):
-//   * TARGET, ReStockingHelper: MoveStockToItem. RefillSingleItemWithLimit and BOTH
-//     RedistributeStockByPercentage overloads move stock only through it (:142, :84; :115 calls :35).
 //   * SOURCE, ReStockingHelper: TryAddStockAmount. The only call that takes goods out of a storage item
 //     (:324, :363 - its only callers in the game). Declining it returns 0, so the loop moves on to the next
 //     storage item exactly as for an empty one. CanUseCargoForRestocking would be one hook for both
@@ -24,9 +27,9 @@
 //   * SOURCE COUNT, ReStockingHelper: CountAvailableStock. Postfix subtracts what the held item contributed,
 //     so the refill plan sizes itself from the storage the shop can really use, as if the box were not there
 //     (and, when nothing else holds those goods, no transfer is even attempted - so this also logs the skip).
-//   * ItemHelper.FillUpShowcaseShelfOrPointOfSale: its own loop, no shared helper. Prefix declines the call
-//     when the TARGET is held; otherwise it opens a scope in which CargoInstance.MergeAmount declines a merge
-//     whose SOURCE cargo belongs to the held item (amount untouched, so the loop just continues).
+//   * ItemHelper.FillUpShowcaseShelfOrPointOfSale: its own loop, no shared helper. Prefix opens a scope in
+//     which CargoInstance.MergeAmount declines a merge whose SOURCE cargo belongs to the held item (amount
+//     untouched, so the loop just continues). The fill itself always runs, also when its target is held.
 // Logged once per held item (the first time anything was declined for it).
 using System;
 using HarmonyLib;
@@ -49,24 +52,6 @@ namespace BigAmbitionsMP
             if (cur == null) return null;
             ctl = cur as global::ItemController;
             return cur.GetItemInstance();
-        }
-
-        /// <summary>True when <paramref name="it"/> is the item this machine's player is moving, or stacked on it.</summary>
-        internal static bool IsHeldItem(ItemInstance? it)
-        {
-            if (it == null) return false;
-            var held = Held(out var ctl);
-            if (held == null) return false;
-            if (ReferenceEquals(it, held)) return true;
-            if ((object?)ctl == null) return false;
-            var kids = ctl!.childItemControllers;
-            if (kids == null) return false;
-            for (int i = 0; i < kids.Count; i++)
-            {
-                var k = kids[i];
-                if ((object?)k != null && ReferenceEquals(k.ItemInstance, it)) return true;
-            }
-            return false;
         }
 
         /// <summary>The held item (or an item stacked on it) whose cargo list holds <paramref name="c"/>, else null.</summary>
@@ -151,23 +136,6 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>TARGET choke for RefillSingleItemWithLimit and both RedistributeStockByPercentage overloads.</summary>
-    [HarmonyPatch(typeof(global::ReStockingHelper), "MoveStockToItem")]
-    internal static class Patch_ReStockingHelper_MoveStockToItem_HeldTarget
-    {
-        static bool Prefix(ItemInstance targetItemInstance, ref int __result)
-        {
-            try
-            {
-                if (!HeldItemRestockGuard.IsHeldItem(targetItemInstance)) return true;
-                HeldItemRestockGuard.NoteSkip(targetItemInstance, "as a restock target", "ReStockingHelper.MoveStockToItem");
-                __result = 0;
-                return false;
-            }
-            catch { return true; }
-        }
-    }
-
     /// <summary>SOURCE choke for ReStockingHelper: the only call that takes goods out of a storage item.</summary>
     [HarmonyPatch(typeof(global::ReStockingHelper), nameof(global::ReStockingHelper.TryAddStockAmount))]
     internal static class Patch_ReStockingHelper_TryAddStockAmount_HeldSource
@@ -205,25 +173,20 @@ namespace BigAmbitionsMP
         }
     }
 
-    /// <summary>ItemHelper's own fill loop: target declined here, source declined in MergeAmount below.</summary>
+    /// <summary>ItemHelper's own fill loop: always runs (a held TARGET is filled as in single player - e.g. a
+    /// station just placed, OnItemPlacementFinished); only the held item as SOURCE is declined, in MergeAmount below.</summary>
     [HarmonyPatch(typeof(global::ItemHelper), nameof(global::ItemHelper.FillUpShowcaseShelfOrPointOfSale), typeof(ItemInstance))]
     internal static class Patch_ItemHelper_FillUpShowcase_HeldItem
     {
-        static bool Prefix(ItemInstance itemInstance, out bool __state)
+        static void Prefix(out bool __state)
         {
             __state = false;
             try
             {
-                if (HeldItemRestockGuard.IsHeldItem(itemInstance))
-                {
-                    HeldItemRestockGuard.NoteSkip(itemInstance, "as a shelf-fill target", "ItemHelper.FillUpShowcaseShelfOrPointOfSale");
-                    return false;
-                }
+                HeldItemRestockGuard.FillScope++;
+                __state = true;
             }
             catch { }
-            HeldItemRestockGuard.FillScope++;
-            __state = true;
-            return true;
         }
 
         static Exception? Finalizer(Exception? __exception, bool __state)
