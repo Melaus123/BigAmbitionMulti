@@ -1258,6 +1258,13 @@ namespace BigAmbitionsMP
             // members served their saves.  A failure (a throw, or LoadOwnHsg refusing) used to be logged
             // as "Host load" and nothing else - the lobby latch stayed burnt forever and the clients were
             // already loading.  It now reaches MPServer.StartFailed (lobby handed back, nobody served).
+            // RIVALS-HOST-SWITCH-1 (decision 55): the id the carry compares with the manifest's last host - the
+            // EFFECTIVE id the load uses (ResolveOwnSlot), captured now because the DEV load-as override can be
+            // consumed before the continuation runs.
+            string carryOwnId = MPConfig.StableId;
+#if BAMP_DEV
+            if (!string.IsNullOrEmpty(DevHostLoadAs)) carryOwnId = DevHostLoadAs!;
+#endif
             GameStatePatcher.EnqueueOnMainThread(() =>
             {
                 try
@@ -1278,6 +1285,12 @@ namespace BigAmbitionsMP
                     MPServer.StartFailed("HostLoadSession", ex);
                     return;   // no member was served
                 }
+                // RIVALS-HOST-SWITCH-1 part 1 (owner-approved 2026-09-30, decision 55): when another member hosted
+                // last, overlay the world-only rows (AI shops, neighbourhood clocks, rival histories, market...) from
+                // that host's mirrored .hsg onto the world just loaded - HERE, before the cash overlay and before any
+                // member is served, so every joiner's snapshot is built from the carried world. Never throws; a
+                // refused carry logs 'HOST HANDOFF CARRY: none' and the world continues from this copy as before.
+                HostHandoffCarry.Apply(session, m, carryOwnId);
                 try { if (hostCashKnown) QueueCashApply(hostCash); }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Host load cash overlay: {ex}"); }
                 try { MPServer.SendLoadDataToEachClient(session, m, lineage); }   // each client gets its own .hsg FROM the source, tagged with the lineage
@@ -1726,6 +1739,10 @@ namespace BigAmbitionsMP
         //                      and rig log on hand.
         /// <summary>Sticky for bug reports (report.md TornSaveReads line).</summary>
         public static string LastTornRead = "";
+        /// <summary>RIVALS-HOST-SWITCH-1: the last host start's carry stamp ("mode=full from=... aiCarried=..." /
+        /// "mode=none from=... (reason)" / "mode=same-host" / "mode=off ..."); "" = no host load on this machine yet.
+        /// Set by HostHandoffCarry.Apply.</summary>
+        public static string LastHostCarry = "";
 
         /// <summary>W1 (2026-09-18): which of the TWO native-Load failures the last containment ran on.
         /// true = the save file was NOT THERE — TryPrepareLoad returns false without an exception on

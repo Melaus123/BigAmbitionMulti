@@ -4830,6 +4830,29 @@ namespace BigAmbitionsMP
                     catch (Exception riEx) { return $"ERR rivalincome: {riEx.GetType().Name}: {riEx.Message}"; }
                 }
 
+                // RIVALS-HOST-SWITCH-1 part 1 levers (decision 55, 2026-09-30). READ-ONLY: the rival-world health
+                // figures of THIS machine's world (HostHandoffCarry.Health - the same line the carry logs at host start).
+                case "rivalhealth":
+                {
+                    try
+                    {
+                        if (SaveGameManager.Current == null) return "ERR no world loaded";
+                        return "OK rivalhealth " + HostHandoffCarry.Health(SaveGameManager.Current, true);
+                    }
+                    catch (Exception rhEx) { return $"ERR rivalhealth: {rhEx.GetType().Name}: {rhEx.Message}"; }
+                }
+
+                // 'hostcarry off' = the NEXT host start on this machine skips the carry (one-shot; logs carry=off) -
+                // the rig's proof that T-HOSTSWITCH1 sees the bug. 'on' disarms; bare = readout.
+                case "hostcarry":
+                {
+                    string hcArg = arg.Trim().ToLowerInvariant();
+                    if (hcArg == "off") { HostHandoffCarry.DevOffNext = true;  return "OK hostcarry off - the next host start skips the carry"; }
+                    if (hcArg == "on")  { HostHandoffCarry.DevOffNext = false; return "OK hostcarry on"; }
+                    if (hcArg.Length > 0) return "ERR usage: hostcarry [off|on]";
+                    return $"OK hostcarry next={(HostHandoffCarry.DevOffNext ? "off" : "on")} last='{MPSaveCoordinator.LastHostCarry}'";
+                }
+
                 case "rivalfire":
                 {
                     if (!MPServer.IsRunning) return "ERR host only";

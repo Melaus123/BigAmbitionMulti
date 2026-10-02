@@ -1,0 +1,274 @@
+{
+  "id": "T-HOSTSWITCH1-OFF",
+  "title": "RIVALS-HOST-SWITCH-1 negative control: T-HOSTSWITCH1 with the carry switched off on the new host ('hostcarry off'). The new host's start health must show the bug (carry=off, nonZeroIncome=0) - proof that T-HOSTSWITCH1's assertions catch it.",
+  "preconditions": "Reporter fixture session fx-hq1 (day 44, MERGED - vars.keepMerger true). h = melaus (guid-d2168c9d71f6484ca3f777d1a3682076, the manifest's last host), c = Client1. Dev build with RIVALS-HOST-SWITCH-1 part 1 (rivalhealth / hostcarry levers, BAMP_DEV). The fixture's client store holds only Client1's own copy; the host's .hsg reaches it through the coordinated save's store mirror (step 'save'). Part 2 (client fake records, client DefeatRival skip) is NOT built: the assertions are on the HOST only, the client's DefeatRival count is report-only. 10-day skip: the consensus skip (skipvote +<n>h = that far ahead of this machine's clock, both machines vote; skiprate is local, so both set it) in two +120h legs.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "hostStable": "guid-d2168c9d71f6484ca3f777d1a3682076",
+    "session": "fx-hq1",
+    "keepMerger": true
+  },
+  "oracles_absent": [
+    "\\[Guard\\]",
+    "(?<!swallowed )NullReferenceException"
+  ],
+  "oracles_report": [
+    "\\[MPSave\\] HOST HANDOFF",
+    "\\[RivalAttn\\] rival .* surrenders",
+    "DefeatRival",
+    "\\[Rest\\] skip GOAL reached"
+  ],
+  "steps": [
+    {
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK",
+      "seq": 1
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 2
+    },
+    {
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ],
+      "seq": 3
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST T-HOSTSWITCH1-OFF START",
+      "expect_result": "OK MARK",
+      "seq": 4
+    },
+    {
+      "role": "h",
+      "sleep_s": 20,
+      "note": "both worlds settle",
+      "seq": 5
+    },
+    {
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "seq": 6
+    },
+    {
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True",
+      "seq": 7
+    },
+    {
+      "role": "h",
+      "cmd": "hostcarry",
+      "expect_result": "^OK hostcarry next=on last='mode=same-host'",
+      "note": "h hosted last in the fixture: no host switch, so the carry is not needed (silent)",
+      "seq": 8
+    },
+    {
+      "role": "h",
+      "cmd": "rivalhealth",
+      "expect_result": "^OK rivalhealth day=",
+      "capture": {
+        "bDay": "day=(\\d+)",
+        "bAi": "aiRun=(\\d+)",
+        "bNz": "nonZeroIncome=(\\d+)",
+        "bNzPct": "nzPct=([0-9.]+)",
+        "bId7": "ident7=(\\d+)",
+        "bNsDue": "nsDue=(\\d+)",
+        "bNsF0": "nsForce0=(\\d+)",
+        "bFlat": "histFlat=(\\d+)",
+        "bSpec": "specialDefeated=(\\d+)",
+        "bLens": "lens=(\\S+)",
+        "bNeg7": "neg7=(\\d+)",
+        "bEmpty": "empty=(\\d+)"
+      },
+      "note": "BASELINE on the previous host (design D6 step 2): the world-only health just before the coordinated save",
+      "seq": 9
+    },
+    {
+      "role": "c",
+      "cmd": "rivalhealth",
+      "expect_result": "^OK rivalhealth day=",
+      "capture": {
+        "cbDay": "day=(\\d+)",
+        "cbAi": "aiRun=(\\d+)",
+        "cbNz": "nonZeroIncome=(\\d+)",
+        "cbNzPct": "nzPct=([0-9.]+)",
+        "cbId7": "ident7=(\\d+)",
+        "cbNsDue": "nsDue=(\\d+)",
+        "cbNsF0": "nsForce0=(\\d+)",
+        "cbFlat": "histFlat=(\\d+)",
+        "cbSpec": "specialDefeated=(\\d+)",
+        "cbLens": "lens=(\\S+)",
+        "cbNeg7": "neg7=(\\d+)",
+        "cbEmpty": "empty=(\\d+)"
+      },
+      "note": "REPORT: the client's own copy (the fake / frozen state the bug continues from)",
+      "seq": 10
+    },
+    {
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[MPSave\\] \\.hsg WRITE session='${session}' char='${hostStable}' [0-9]+B \\(store mirror\\)",
+          "within_s": 120
+        }
+      ],
+      "note": "the coordinated save: both copies land at the same moment and the host's .hsg is mirrored into c's store",
+      "seq": 11
+    },
+    {
+      "role": "h",
+      "sleep_s": 15,
+      "seq": 12
+    },
+    {
+      "role": "c",
+      "cmd": "leavegame menu",
+      "expect_result": "^OK leavegame menu",
+      "seq": 13
+    },
+    {
+      "role": "c",
+      "sleep_s": 10,
+      "seq": 14
+    },
+    {
+      "role": "h",
+      "drop": true,
+      "seq": 15
+    },
+    {
+      "role": "c",
+      "drop": true,
+      "seq": 16
+    },
+    {
+      "role": "h",
+      "relaunch": true,
+      "seq": 17
+    },
+    {
+      "role": "c",
+      "relaunch": true,
+      "seq": 18
+    },
+    {
+      "role": "h",
+      "sleep_s": 20,
+      "seq": 19
+    },
+    {
+      "role": "c",
+      "cmd": "hostcarry off",
+      "expect_result": "^OK hostcarry off",
+      "note": "the lever: the next host start on c skips the carry",
+      "seq": 20
+    },
+    {
+      "role": "c",
+      "cmd": "host",
+      "expect_result": "^OK",
+      "note": "ROLE SWAP: the former client hosts",
+      "seq": 21
+    },
+    {
+      "role": "h",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 22
+    },
+    {
+      "role": "c",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[MPSave\\] HOST HANDOFF: '${session}' was last hosted by",
+          "within_s": 120
+        },
+        {
+          "role": "c",
+          "regex": "HOST HANDOFF CARRY: mode=off from=${hostStable} ",
+          "within_s": 300
+        },
+        {
+          "role": "c",
+          "regex": "HOST HANDOFF CARRY health: day=[0-9]+ [0-9:]+ aiRun=[0-9]+ lens=\\S+ empty=[0-9]+ ident7=[0-9]+ nonZeroIncome=0 nzPct=\\S+ neg7=[0-9]+ nsDue=[0-9]+ nsForce0=[0-9]+ nsNamed=[0-9]+ rivalHist=\\S+ histFlat=[0-9]+ specialDefeated=[0-9]+ carry=off carryFrom=${hostStable}",
+          "within_s": 300
+        },
+        {
+          "role": "c",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 300
+        },
+        {
+          "role": "c",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ],
+      "note": "THE BUG, SHOWN: without the carry the new host starts from its own copy - nonZeroIncome=0 (only fake identical-7 or empty income lists)",
+      "seq": 23
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST T-HOSTSWITCH1-OFF CARRY-OFF",
+      "expect_result": "OK MARK",
+      "seq": 24
+    },
+    {
+      "role": "c",
+      "sleep_s": 20,
+      "seq": 25
+    },
+    {
+      "role": "c",
+      "cmd": "rivalhealth",
+      "expect_result": "^OK rivalhealth .*nonZeroIncome=0 .*carry=off carryFrom=${hostStable}",
+      "capture": {
+        "sDay": "day=(\\d+)",
+        "sAi": "aiRun=(\\d+)",
+        "sNz": "nonZeroIncome=(\\d+)",
+        "sNzPct": "nzPct=([0-9.]+)",
+        "sId7": "ident7=(\\d+)",
+        "sNsDue": "nsDue=(\\d+)",
+        "sNsF0": "nsForce0=(\\d+)",
+        "sFlat": "histFlat=(\\d+)",
+        "sSpec": "specialDefeated=(\\d+)",
+        "sLens": "lens=(\\S+)",
+        "sNeg7": "neg7=(\\d+)",
+        "sEmpty": "empty=(\\d+)"
+      },
+      "seq": 26
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST T-HOSTSWITCH1-OFF END",
+      "expect_result": "OK MARK",
+      "seq": 27
+    }
+  ]
+}

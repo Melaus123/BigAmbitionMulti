@@ -864,6 +864,7 @@ namespace BigAmbitionsMP
             // player reports something unrelated, the field self-reports data health (2026-07-12).
             sb.AppendLine($"IntegrityFindings: {(string.IsNullOrEmpty(MPSaveIntegrity.LastSummary) ? "none" : MPSaveIntegrity.LastSummary)}");
             sb.AppendLine($"TornSaveReads: {(string.IsNullOrEmpty(MPSaveCoordinator.LastTornRead) ? "none" : MPSaveCoordinator.LastTornRead)}");   // round-251B detect-only signal
+            sb.AppendLine($"HostCarry: {(string.IsNullOrEmpty(MPSaveCoordinator.LastHostCarry) ? "none" : MPSaveCoordinator.LastHostCarry)}");   // RIVALS-HOST-SWITCH-1: the last host start's world carry (mode/from/counts)
             // Round-90b (user-directed 2026-08-17): the navigation-blocker state AT REPORT TIME.
             // "I'm stuck" + a key marked "owner CLOSED — STUCK" here = the round-90 class caught
             // in the act; keys marked "owner open" are normal play (map being read, driving).
