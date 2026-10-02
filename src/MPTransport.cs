@@ -26,6 +26,13 @@ namespace BigAmbitionsMP
         public abstract bool IsAlive { get; }
         /// <summary>Log-safe endpoint description (no raw IPs).</summary>
         public abstract string Describe { get; }
+        /// <summary>BAN-PLAYERS-1 (A1): the joiner's remote ADDRESS (no port) on an IP join; "" where the transport has
+        /// none (Steam relay). For the host's saved-ban check ONLY - never log or show it (streamer rule; log
+        /// MPConfig.AddressTag instead).</summary>
+        public virtual string RemoteAddress => "";
+        /// <summary>BAN-PLAYERS-1 (A1): the joiner's Steam-VOUCHED SteamID64 (the connection's own identity, not anything
+        /// the client sent) on a Steam join; "" otherwise.</summary>
+        public virtual string SteamIdentity => "";
         /// <summary>Round-276: bytes this peer is owed but has not been handed yet —
         /// the congestion signal for the join-baseline verifier and the phase-report
         /// probe (a verify window or a peer-log deadline is unmeetable while megabytes
@@ -477,6 +484,22 @@ namespace BigAmbitionsMP
         public override int Id => Peer.Id;
         public override bool IsAlive => Peer.ConnectionState == ConnectionState.Connected;
         public override string Describe => $"udp:{Peer.Id}";
+        /// <summary>BAN-PLAYERS-1 (A1): LiteNetLib's NetPeer IS the remote IPEndPoint - its address, port dropped,
+        /// IPv4-mapped IPv6 unwrapped. Never logged (see MPLink.RemoteAddress).</summary>
+        public override string RemoteAddress
+        {
+            get
+            {
+                try
+                {
+                    var a = ((object)Peer as System.Net.IPEndPoint)?.Address;
+                    if (a == null) return "";
+                    if (a.IsIPv4MappedToIPv6) a = a.MapToIPv4();
+                    return a.ToString();
+                }
+                catch { return ""; }
+            }
+        }
         /// <summary>Round-276b (verifier finding 6): LiteNetLib exposes a reliable-queue
         /// PACKET count, not bytes — estimate as count × MTU (an upper bound; the sends
         /// above are ReliableOrdered on channel 0).  Over-estimating biases the verifier
@@ -716,7 +739,10 @@ namespace BigAmbitionsMP
             {
                 // Accept all connections (key-gated); LOGGED — a silent handler
                 // made transport-level join failures undiagnosable (2026-06-11).
-                Plugin.Logger.LogInfo($"[Server] connection request from {request.RemoteEndPoint} (peers={_links.Count}).");
+                // BAN-PLAYERS-1 (A7, row IP-IN-LOGS-1): never the raw address - its kind + a short per-run tag.
+                string from = "addr:?";
+                try { from = MPConfig.AddressTag(request.RemoteEndPoint?.Address?.ToString() ?? ""); } catch { }
+                Plugin.Logger.LogInfo($"[Server] connection request from {from} (peers={_links.Count}).");
                 request.AcceptIfKey("BAMP");
             };
             _listener.PeerConnectedEvent += peer =>

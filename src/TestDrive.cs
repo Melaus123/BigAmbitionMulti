@@ -2348,6 +2348,22 @@ namespace BigAmbitionsMP
                     return pending.Count == 0 ? "OK none pending" : $"OK accepted {pending.Count} pending join(s): {string.Join(", ", pending.ConvertAll(p => p.playerId))}";
                 }
 
+                case "ban":
+                case "unban":
+                {
+                    // BAN-PLAYERS-1 build A DEV levers (host side; build C's screens will call the same MPServer entry points):
+                    //   ban <pid>                 the in-game Ban of a CONNECTED player ('BAMP:bannedgame', clean leave)
+                    //   ban offline <pid|stable>  ban a player known to this session/save who is not connected
+                    //   ban list                  the saved bans (never an address - only how many each entry holds)
+                    //   unban <key|stable|steamId|name|all>
+                    string ba = arg.Trim();
+                    if (verb == "unban")
+                        return ba.Length == 0 ? "ERR usage: unban <key|stableId|steamId|name|all>" : MPServer.UnbanPlayer(ba);
+                    if (ba.Length == 0 || ba == "list") return "OK ban list " + MPConfig.DescribeBans();
+                    if (ba.StartsWith("offline ", StringComparison.Ordinal)) return MPServer.BanOfflinePlayer(ba.Substring(8).Trim());
+                    return MPServer.BanPlayer(ba);
+                }
+
                 case "rejectjoin":
                 {
                     // H-REFUSALMUTE-1: arm/disarm the one-shot refusal of the next join request parked for approval.

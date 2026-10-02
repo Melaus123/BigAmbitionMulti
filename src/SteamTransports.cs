@@ -283,6 +283,10 @@ namespace BigAmbitionsMP
         public override int Id => _id;
         public override bool IsAlive => Alive;
         public override string Describe => $"steam:{_who}";
+        /// <summary>BAN-PLAYERS-1 (A1): set once by SteamHostTransport.OnConnected from the connection's identity, which
+        /// Steam authenticates - "" when that identity is not a Steam id.</summary>
+        internal string VouchedSteamId = "";
+        public override string SteamIdentity => VouchedSteamId ?? "";
 
         // Silent-loss fix (field 2026-07-19, new-game start burst): Facepunch's
         // SendMessage REFUSES messages by Result return — oversized or send-
@@ -751,6 +755,8 @@ namespace BigAmbitionsMP
         public void OnConnected(Connection connection, ConnectionInfo info)
         {
             var link = new SteamLink(connection, Interlocked.Increment(ref _nextId), info.Identity.ToString());
+            try { if (info.Identity.IsSteamId) link.VouchedSteamId = info.Identity.SteamId.Value.ToString(); }   // BAN-PLAYERS-1 (A1): before any Hello can arrive
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[SteamHost] identity read for link {link.Id}: {ex.Message}"); }
             _links[connection.Id] = link;
             Plugin.Logger.LogInfo($"[SteamHost] connected: {link.Describe} → link {link.Id}.");
             PeerConnected?.Invoke(link);

@@ -2329,7 +2329,8 @@ namespace BigAmbitionsMP
             {
                 // reason is the transport's DisconnectReason name (ToString) — same values as pre-seam.
                 bool cleanLeave = reason == "RemoteConnectionClose"
-                               || reason == "DisconnectPeerCalled";
+                               || reason == "DisconnectPeerCalled"
+                               || reason == BanLeaveReason;   // BAN-PLAYERS-1 (A4): the host's own ban is a deliberate removal - never the paused-until-rejoin path
                 try
                 {
                     string leftName = DisplayNameFor(leftPlayer);
@@ -3739,6 +3740,124 @@ namespace BigAmbitionsMP
             lock (_pendingSince) { _pendingSince.Clear(); _pendingHbLines.Clear(); }   // JOIN-WAIT-1
         }
 
+        // ── BAN-PLAYERS-1 build A (owner-approved 2026-10-01): the LASTING ban ──────────────────────────────────────
+        // The saved list lives in the host's own config (MPConfig.BannedPlayers). Kick / Reject above are unchanged: they
+        // still ban by name + stable id in memory until re-host. Entry points below run on the MAIN thread (build C's
+        // screens and the DEV levers); the Hello check reads MPConfig's snapshot on the network thread.
+        internal const string BanLeaveReason = "BannedByHost";
+        // Steam-vouched id last seen for each claimed stable id this run - lets an OFFLINE ban carry the Steam id too.
+        private static readonly ConcurrentDictionary<string, string> _vouchedSteamByStable = new();
+
+        /// <summary>NETWORK THREAD (HandleHello). Refuse a joiner matching a saved ban - by the link's Steam-vouched id, the
+        /// claimed stable id, or an unexpired address - with 'BAMP:banned'. A banned player seen at a new public address
+        /// gets that address recorded (or its 7 days refreshed) on the main thread.</summary>
+        private static bool RefuseSavedBan(MPLink peer, HelloPayload hello)
+        {
+            try
+            {
+                string steam = "", ip = "";
+                try { steam = peer.SteamIdentity ?? ""; } catch { }
+                try { ip = peer.RemoteAddress ?? ""; } catch { }
+                if (!string.IsNullOrEmpty(hello.StableId) && steam.Length > 0) _vouchedSteamByStable[hello.StableId] = steam;
+                var hit = MPConfig.FindBan(steam, hello.StableId ?? "", ip, out var by);
+                if (hit == null) return false;
+                Plugin.Logger.LogInfo($"[Server] Hello from BANNED '{hello.PlayerId}' (saved ban {hit.Key}, matched by {by}; from {MPConfig.AddressTag(ip)}) — disconnected.");
+                try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:banned")); } catch { }
+                if (MPConfig.IsRecordableIp(ip))
+                {
+                    string key = hit.Key, ipc = ip, pid = hello.PlayerId;
+                    GameStatePatcher.EnqueueOnMainThread(() =>
+                    {
+                        try
+                        {
+                            if (MPConfig.NoteBannedAddress(key, ipc))
+                                Plugin.Logger.LogInfo($"[Server] saved ban {key} ('{pid}'): address {MPConfig.AddressTag(ipc)} recorded (stops matching {MPConfig.BanIpDays} days after last seen).");
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] saved-ban address note: {ex.Message}"); }
+                    });
+                }
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] saved-ban check: {ex.Message}"); return false; }
+        }
+
+        /// <summary>BAN-PLAYERS-1 (A4) - MAIN THREAD. Ban a CONNECTED player: record the saved ban from what the host knows
+        /// of that link (Steam-vouched id / public address) and that player (stable id), run the normal leave cleanup HERE
+        /// as a clean leave (avatar, lobby list, offers, till duty, votes; buildings stay held as on any leave; never the
+        /// paused-until-rejoin path, on either transport), then disconnect with 'BAMP:bannedgame'. Idempotent: the
+        /// transport's own later disconnect report finds no player left to clean up.</summary>
+        public static string BanPlayer(string playerId)
+        {
+            try
+            {
+                if (!_running) return "ERR not hosting";
+                if (string.IsNullOrEmpty(playerId) || playerId == MPConfig.PlayerId) return "ERR not a remote player";
+                var link = PeerForPlayer(playerId);
+                if (link == null) return $"ERR '{playerId}' is not connected (use the offline ban)";
+                string stable = StableOfPid(playerId);
+                string steam = "", ip = "";
+                try { steam = link.SteamIdentity ?? ""; } catch { }
+                try { ip = link.RemoteAddress ?? ""; } catch { }
+                var e = MPConfig.AddBan(playerId, steam, stable, ip, GameDayNow());
+                if (e == null) return $"ERR nothing identifies '{playerId}' - not banned";
+                bool ipKept = MPConfig.IsRecordableIp(ip);
+                Plugin.Logger.LogInfo($"[Server] BANNED '{playerId}' (saved ban {e.Key}: stable id {(stable.Length > 0 ? "yes" : "no")}, Steam id {(steam.Length > 0 ? "yes" : "no")}, address {(ipKept ? "recorded" : "not recorded")} {MPConfig.AddressTag(ip)}) - lasts until unbanned.");
+                OnPeerDisconnected(link, BanLeaveReason);   // the normal leave, run here - before the close, so the transport's report finds nobody
+                try { link.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:bannedgame")); } catch { }
+                return $"OK banned '{playerId}' key={e.Key} stable={(stable.Length > 0 ? "yes" : "no")} steam={(steam.Length > 0 ? "yes" : "no")} ip={(ipKept ? "recorded" : "not-recorded")} ({MPConfig.AddressTag(ip)})";
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BanPlayer('{playerId}'): {ex.Message}"); return "ERR " + ex.Message; }
+        }
+
+        /// <summary>BAN-PLAYERS-1 (A4) - MAIN THREAD. Ban a player who is NOT connected but is known to this session or save:
+        /// by name or stable id. The Steam id goes in only when this run saw it vouched for that stable id. A player who
+        /// turns out to be connected gets the full in-game ban.</summary>
+        public static string BanOfflinePlayer(string who)
+        {
+            try
+            {
+                who = (who ?? "").Trim();
+                if (who.Length == 0) return "ERR usage: name or stable id";
+                string pid = "", stable = "";
+                if (StableIdByPlayer.TryGetValue(who, out var s1) && !string.IsNullOrEmpty(s1)) { pid = who; stable = s1; }
+                else
+                {
+                    foreach (var kv in StableIdByPlayer) if (kv.Value == who) { pid = kv.Key; stable = who; break; }
+                    if (stable.Length == 0)
+                    {
+                        string saved = "";
+                        try { saved = GrantSync.NameOf(who); } catch { }
+                        if (saved.Length > 0) { pid = saved; stable = who; }   // a stable id the save knows
+                    }
+                }
+                if (stable.Length == 0) return $"ERR '{who}' is not a player known to this session or save";
+                if (stable == MPConfig.StableId || pid == MPConfig.PlayerId) return "ERR that is the host";
+                if (_running && IsOnlinePid(pid)) return BanPlayer(pid);
+                _vouchedSteamByStable.TryGetValue(stable, out var steam);
+                var e = MPConfig.AddBan(pid, steam ?? "", stable, "", GameDayNow());
+                if (e == null) return $"ERR nothing identifies '{who}' - not banned";
+                Plugin.Logger.LogInfo($"[Server] BANNED offline player '{pid}' (saved ban {e.Key}: stable id yes, Steam id {(string.IsNullOrEmpty(steam) ? "no" : "yes")}) - lasts until unbanned.");
+                return $"OK banned offline '{pid}' key={e.Key} stable=yes steam={(string.IsNullOrEmpty(steam) ? "no" : "yes")}";
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] BanOfflinePlayer('{who}'): {ex.Message}"); return "ERR " + ex.Message; }
+        }
+
+        /// <summary>BAN-PLAYERS-1 (A4) - MAIN THREAD. Lift saved bans by key, stable id, Steam id or name ("all" = every
+        /// one). Kick / Reject session bans are not touched (they still lift at re-host).</summary>
+        public static string UnbanPlayer(string who)
+        {
+            try
+            {
+                int n = MPConfig.RemoveBan(who);
+                Plugin.Logger.LogInfo($"[Server] UNBANNED: {n} saved ban(s) matching '{who}' removed ({MPConfig.BannedPlayers.Count} left).");
+                return $"OK unbanned {n} left={MPConfig.BannedPlayers.Count}";
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] UnbanPlayer('{who}'): {ex.Message}"); return "ERR " + ex.Message; }
+        }
+
+        /// <summary>BAN-PLAYERS-1 (A4): the saved bans (a snapshot - read only).</summary>
+        public static IReadOnlyList<MPConfig.BanEntry> BanList() => MPConfig.BannedPlayers;
+
         /// <summary>The Hello binds this connection's identity for the whole
         /// session — refuse empty ids, ids duplicating the host's own, identity
         /// switches on a live connection, and ids already bound to another live
@@ -4079,6 +4198,8 @@ namespace BigAmbitionsMP
                 try { peer.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:banned")); } catch { }
                 return;
             }
+            // BAN-PLAYERS-1 (A3): the host's SAVED bans - last across re-hosts and restarts until Unban.
+            if (RefuseSavedBan(peer, hello)) return;
 
             Plugin.Logger.LogInfo($"[Server] Hello from '{hello.PlayerId}' (v{hello.Version})");
 

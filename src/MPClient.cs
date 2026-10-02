@@ -183,9 +183,10 @@ namespace BigAmbitionsMP
             t.Received     += OnReceive;
             _transport = t;
             if (!t.Connect(hostIp, port))
-            { Plugin.Logger.LogError($"[Client] transport failed to start toward {hostIp}:{port}."); _transport = null; return; }
+            { Plugin.Logger.LogError($"[Client] transport failed to start toward {MPConfig.AddressTag(hostIp)}:{port}."); _transport = null; return; }
 
-            Plugin.Logger.LogInfo($"[Client] Connecting to {hostIp}:{port} ({LastConnectTargetClass} address, direct IP; connect attempts/delay: {DescribeConnectPolicy()})...");
+            // IP-IN-LOGS-1: logs reach bug reports - the host's address is logged as a non-reversible tag (streamer rule).
+            Plugin.Logger.LogInfo($"[Client] Connecting to {MPConfig.AddressTag(hostIp)}:{port} ({LastConnectTargetClass} address, direct IP; connect attempts/delay: {DescribeConnectPolicy()})...");
         }
 
         /// <summary>Connect over Valve's relay network by the host's SteamId
@@ -469,7 +470,8 @@ namespace BigAmbitionsMP
                     // below run exactly as before.
                     else if (tag == "BAMP:hostquit") why = "The host saved and left the session";
                     else if (tag == "BAMP:kicked") why = "KICKED by host";
-                    else if (tag == "BAMP:banned") why = "Banned until host re-hosts";
+                    else if (tag == "BAMP:banned") why = "You're banned from this host's games.";   // BAN-PLAYERS-1 (A6, owner-approved text 2026-10-01): refused at join
+                    else if (tag == "BAMP:bannedgame") why = "You were banned by the host.";           // BAN-PLAYERS-1 (A6): removed in game by a ban
                     else if (tag == "BAMP:identity") why = "Join refused — player identity invalid or already connected";
                     else if (tag.StartsWith("BAMP:mods")) why = ModsRefusalFromTag(tag);   // MODS-GATE-1: the host's 'Different mods: Refuse'
                     else if (tag.StartsWith("BAMP:build"))

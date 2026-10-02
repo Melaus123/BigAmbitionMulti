@@ -1590,6 +1590,8 @@ namespace BigAmbitionsMP
                         redacted[key] = string.IsNullOrWhiteSpace(redacted[key]) ? "" : "<configured>";
                     else if (key.IndexOf("HostIP", StringComparison.OrdinalIgnoreCase) >= 0)
                         redacted[key] = IpKind(redacted[key]);
+                    else if (key.IndexOf("BannedPlayers", StringComparison.OrdinalIgnoreCase) >= 0)
+                        redacted[key] = string.IsNullOrWhiteSpace(redacted[key]) ? "" : "<ban list redacted: addresses and Steam ids never leave the host>";   // BAN-PLAYERS-1
                 }
 
                 File.WriteAllText(path, JsonConvert.SerializeObject(redacted, Formatting.Indented));

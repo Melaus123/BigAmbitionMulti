@@ -148,6 +148,277 @@ namespace BigAmbitionsMP
             try { Set("RefuseModMismatch", refuse ? "true" : "false"); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] RefuseModMismatch save: {ex.Message}"); }
         }
+
+        // ── BAN-PLAYERS-1 build A (owner-approved 2026-10-01): the host's SAVED ban list ─────────────────────────────
+        // Key 'BannedPlayers' = a JSON list of BanEntry. A ban lasts across re-hosts and restarts until Unban, and belongs
+        // to THIS host (its own config), never to a world. The Hello check reads it on the NETWORK thread, so - like
+        // RefuseModMismatch - it is an in-memory SNAPSHOT loaded once at Init: every change builds a NEW list of NEW
+        // entries (copy-on-write) on the MAIN thread, swaps the reference and persists. A published entry is never
+        // mutated, so a reader holding the old list is safe.
+        // Addresses are kept for MATCHING ONLY: never log or show one (streamer rule) - log AddressTag instead.
+        public sealed class BanAddress
+        {
+            public string Ip = "";        // exact public address, no port
+            public string SeenUtc = "";   // ISO-8601 UTC; the address stops matching BanIpDays after this
+        }
+        public sealed class BanEntry
+        {
+            public string Key = "";        // short random id - what Unban names
+            public string Name = "";       // the player's name, for showing only (never matched)
+            public string SteamId = "";    // Steam-VOUCHED SteamID64 from the link (Steam joins); "" when unknown
+            public string StableId = "";   // the player's claimed stable id
+            public List<BanAddress> Ips = new();   // IP joins only: public addresses, each expiring BanIpDays after last seen
+            public int BanDay;             // game day of the ban (0 = no world loaded)
+            public string BannedUtc = "";  // real date of the ban, ISO-8601 UTC
+            internal BanEntry Clone()
+            {
+                var c = new BanEntry { Key = Key, Name = Name, SteamId = SteamId, StableId = StableId, BanDay = BanDay, BannedUtc = BannedUtc };
+                if (Ips != null) foreach (var a in Ips) if (a != null) c.Ips.Add(new BanAddress { Ip = a.Ip, SeenUtc = a.SeenUtc });
+                return c;
+            }
+        }
+        public const int BanIpDays = 7;
+        private static volatile List<BanEntry> _bans = new();
+        /// <summary>The saved bans (a snapshot - never mutate it; change it only through AddBan / NoteBannedAddress / RemoveBan).</summary>
+        public static IReadOnlyList<BanEntry> BannedPlayers => _bans;
+
+        private static void LoadBans()
+        {
+            try
+            {
+                string raw = Get("BannedPlayers", "").Trim();
+                var list = raw.Length == 0 ? new List<BanEntry>() : (JsonConvert.DeserializeObject<List<BanEntry>>(raw) ?? new List<BanEntry>());
+                var now = DateTime.UtcNow;
+                int dropped = 0;
+                var keep = new List<BanEntry>();
+                foreach (var e in list)
+                {
+                    if (e == null) continue;
+                    e.Ips ??= new List<BanAddress>();
+                    dropped += e.Ips.RemoveAll(a => a == null || IpExpired(a.SeenUtc, now) || !IsRecordableIp(a.Ip));
+                    if (string.IsNullOrEmpty(e.SteamId) && string.IsNullOrEmpty(e.StableId) && e.Ips.Count == 0) continue;   // nothing left to match
+                    if (string.IsNullOrEmpty(e.Key)) e.Key = NewBanKey();
+                    keep.Add(e);
+                }
+                _bans = keep;
+                if (dropped > 0 || keep.Count != list.Count) SaveBans(keep);
+                Plugin.Logger.LogInfo($"[Config] Saved bans: {keep.Count}{(dropped > 0 ? $" ({dropped} expired address(es) dropped)" : "")}.");
+            }
+            catch (Exception ex)
+            {
+                _bans = new List<BanEntry>();
+                Plugin.Logger.LogWarning($"[Config] BannedPlayers load: {ex.Message} - no saved bans this run.");
+            }
+        }
+
+        private static void SaveBans(List<BanEntry> list)
+        {
+            try { Set("BannedPlayers", JsonConvert.SerializeObject(list)); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] BannedPlayers save: {ex.Message}"); }
+        }
+
+        private static List<BanEntry> CloneBans()
+        {
+            var outp = new List<BanEntry>();
+            foreach (var e in _bans) if (e != null) outp.Add(e.Clone());
+            return outp;
+        }
+
+        private static string NewBanKey() => "b" + Guid.NewGuid().ToString("N").Substring(0, 7);
+
+        private static bool IpExpired(string seenUtc, DateTime nowUtc)
+        {
+            try
+            {
+                if (!DateTime.TryParse(seenUtc, System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var seen)) return true;
+                return (nowUtc - seen).TotalDays > BanIpDays;
+            }
+            catch { return true; }
+        }
+
+        private static System.Net.IPAddress? ParseIp(string ip)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(ip) || !System.Net.IPAddress.TryParse(ip.Trim(), out var a)) return null;
+                if (a.IsIPv4MappedToIPv6) a = a.MapToIPv4();
+                return a;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>BAN-PLAYERS-1: what kind of address this is - none / loopback / private / link-local / own (the host's own
+        /// public address) / public. Only "public" is ever recorded in a ban.</summary>
+        private static string AddressKind(System.Net.IPAddress? a)
+        {
+            try
+            {
+                if (a == null) return "none";
+                if (System.Net.IPAddress.IsLoopback(a)) return "loopback";
+                var b = a.GetAddressBytes();
+                if (a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                {
+                    if (b[0] == 0) return "private";
+                    if (b[0] == 10 || (b[0] == 172 && b[1] >= 16 && b[1] <= 31) || (b[0] == 192 && b[1] == 168)) return "private";
+                    if (b[0] == 169 && b[1] == 254) return "link-local";
+                }
+                else if (a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+                {
+                    if (a.IsIPv6LinkLocal) return "link-local";
+                    if (a.IsIPv6SiteLocal || (b[0] & 0xFE) == 0xFC) return "private";   // fec0::/10 + fc00::/7 unique-local
+                    if (a.Equals(System.Net.IPAddress.IPv6Any) || a.Equals(System.Net.IPAddress.IPv6None)) return "none";
+                }
+                else return "none";
+                var own = ParseIp(MPNet.PublicIp ?? "");
+                if (own != null && own.Equals(a)) return "own";
+                return "public";
+            }
+            catch { return "none"; }
+        }
+
+        /// <summary>BAN-PLAYERS-1 (A2): may this address go into a ban? Only a public address that is not the host's own -
+        /// never 10.x / 172.16-31.x / 192.168.x / 127.x / ::1 / fe80:: (or other private/link-local) ones.</summary>
+        public static bool IsRecordableIp(string ip) => AddressKind(ParseIp(ip)) == "public";
+
+        private static string NormalizeIp(string ip) { var a = ParseIp(ip); return a == null ? "" : a.ToString(); }
+
+        private static readonly byte[] _addrTagSalt = Guid.NewGuid().ToByteArray();   // per process: a tag cannot be reversed from the log
+        /// <summary>BAN-PLAYERS-1 (A7, row IP-IN-LOGS-1): the ONLY way an address reaches a log - its kind plus a short keyed
+        /// hash ("addr:public#3fa21c"). The key is random per process, so the tag tells two addresses apart within one run
+        /// and reveals nothing about the address itself.</summary>
+        public static string AddressTag(string ip)
+        {
+            try
+            {
+                var a = ParseIp(ip);
+                if (a == null) return "addr:none";
+                using var h = new System.Security.Cryptography.HMACSHA256(_addrTagSalt);
+                var d = h.ComputeHash(System.Text.Encoding.UTF8.GetBytes(a.ToString()));
+                return $"addr:{AddressKind(a)}#{d[0]:x2}{d[1]:x2}{d[2]:x2}";
+            }
+            catch { return "addr:?"; }
+        }
+
+        /// <summary>BAN-PLAYERS-1 (A3) - NETWORK-THREAD SAFE (reads the snapshot only): the first saved ban matching this
+        /// joiner by Steam id (from the link), claimed stable id, or an UNEXPIRED address; <paramref name="matchedBy"/> says which.</summary>
+        public static BanEntry? FindBan(string steamId, string stableId, string ip, out string matchedBy)
+        {
+            matchedBy = "";
+            try
+            {
+                var list = _bans;
+                var now = DateTime.UtcNow;
+                string ipN = NormalizeIp(ip);
+                foreach (var e in list)
+                {
+                    if (e == null) continue;
+                    if (!string.IsNullOrEmpty(steamId) && e.SteamId == steamId) { matchedBy = "Steam id"; return e; }
+                    if (!string.IsNullOrEmpty(stableId) && e.StableId == stableId) { matchedBy = "stable id"; return e; }
+                    if (ipN.Length > 0 && e.Ips != null)
+                        foreach (var a in e.Ips)
+                            if (a != null && a.Ip == ipN && !IpExpired(a.SeenUtc, now)) { matchedBy = "address"; return e; }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static bool TouchIp(BanEntry e, string ipN, DateTime nowUtc)
+        {
+            foreach (var a in e.Ips)
+                if (a.Ip == ipN)
+                {
+                    if (!IpExpired(a.SeenUtc, nowUtc.AddHours(-1))) return false;   // seen within the last hour: no rewrite per retry
+                    a.SeenUtc = nowUtc.ToString("o"); return true;
+                }
+            e.Ips.Add(new BanAddress { Ip = ipN, SeenUtc = nowUtc.ToString("o") });
+            return true;
+        }
+
+        /// <summary>BAN-PLAYERS-1 (A2/A4) - MAIN THREAD: record a ban (merged into an existing entry with the same stable id
+        /// or Steam id) and persist it. The address is kept only when IsRecordableIp; the host's own stable id never is.
+        /// Returns the entry, or null when nothing identifies the player.</summary>
+        public static BanEntry? AddBan(string name, string steamId, string stableId, string ip, int gameDay)
+        {
+            try
+            {
+                steamId = (steamId ?? "").Trim(); stableId = (stableId ?? "").Trim();
+                if (stableId == StableId) stableId = "";
+                string ipN = IsRecordableIp(ip) ? NormalizeIp(ip) : "";
+                if (steamId.Length == 0 && stableId.Length == 0 && ipN.Length == 0) return null;
+                var list = CloneBans();
+                BanEntry? e = null;
+                foreach (var x in list)
+                    if ((stableId.Length > 0 && x.StableId == stableId) || (steamId.Length > 0 && x.SteamId == steamId)) { e = x; break; }
+                var now = DateTime.UtcNow;
+                if (e == null) { e = new BanEntry { Key = NewBanKey(), BanDay = gameDay, BannedUtc = now.ToString("o") }; list.Add(e); }
+                if (!string.IsNullOrEmpty(name)) e.Name = name;
+                if (steamId.Length > 0) e.SteamId = steamId;
+                if (stableId.Length > 0) e.StableId = stableId;
+                if (ipN.Length > 0) TouchIp(e, ipN, now);
+                _bans = list;
+                SaveBans(list);
+                return e;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] AddBan: {ex.Message}"); return null; }
+        }
+
+        /// <summary>BAN-PLAYERS-1 (A2) - MAIN THREAD: a banned player was seen at this address - record it (or refresh its
+        /// 7 days). True when the saved list changed.</summary>
+        public static bool NoteBannedAddress(string key, string ip)
+        {
+            try
+            {
+                if (!IsRecordableIp(ip)) return false;
+                var list = CloneBans();
+                foreach (var e in list)
+                    if (e.Key == key)
+                    {
+                        if (!TouchIp(e, NormalizeIp(ip), DateTime.UtcNow)) return false;
+                        _bans = list;
+                        SaveBans(list);
+                        return true;
+                    }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] NoteBannedAddress: {ex.Message}"); }
+            return false;
+        }
+
+        /// <summary>BAN-PLAYERS-1 (A4) - MAIN THREAD: remove every saved ban whose key, stable id, Steam id or name equals
+        /// <paramref name="who"/> ("all" = every ban); persists. Returns how many were removed.</summary>
+        public static int RemoveBan(string who)
+        {
+            try
+            {
+                who = (who ?? "").Trim();
+                if (who.Length == 0) return 0;
+                var list = CloneBans();
+                int n = who == "all" ? list.Count
+                      : list.RemoveAll(e => e.Key == who || e.StableId == who || e.SteamId == who || e.Name == who);
+                if (who == "all") list.Clear();
+                if (n == 0) return 0;
+                _bans = list;
+                SaveBans(list);
+                return n;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Config] RemoveBan: {ex.Message}"); return 0; }
+        }
+
+        /// <summary>BAN-PLAYERS-1: one line per saved ban for the DEV lever - never an address, only how many it holds.</summary>
+        public static string DescribeBans()
+        {
+            try
+            {
+                var list = _bans;
+                var parts = new List<string>();
+                foreach (var e in list)
+                    if (e != null)
+                        parts.Add($"{e.Key} '{e.Name}' stable={(string.IsNullOrEmpty(e.StableId) ? "-" : e.StableId)} steam={(string.IsNullOrEmpty(e.SteamId) ? "no" : "yes")} ips={e.Ips?.Count ?? 0} day={e.BanDay} since={(e.BannedUtc.Length >= 10 ? e.BannedUtc.Substring(0, 10) : e.BannedUtc)}");
+                return $"n={parts.Count} [{string.Join("; ", parts)}]";
+            }
+            catch (Exception ex) { return "n=? (" + ex.Message + ")"; }
+        }
         public static void SetChatWindowPlace(string v)
         {
             try { Set("ChatWindowPlace", v ?? ""); }
@@ -411,6 +682,8 @@ namespace BigAmbitionsMP
             try { _refuseModMismatch = string.Equals(Get("RefuseModMismatch", "false").Trim(), "true", StringComparison.OrdinalIgnoreCase); }
             catch { _refuseModMismatch = false; }
             Plugin.Logger.LogInfo($"[Config] Different mods: {(_refuseModMismatch ? "Refuse" : "Allow")}.");
+
+            LoadBans();   // BAN-PLAYERS-1: the saved ban list, loaded once (the network-thread Hello check reads this snapshot)
 
             StableId = ResolveStableId(true);
             Plugin.Logger.LogInfo($"[Config] Stable id: {StableId}");
