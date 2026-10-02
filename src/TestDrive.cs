@@ -4837,7 +4837,22 @@ namespace BigAmbitionsMP
                     try
                     {
                         if (SaveGameManager.Current == null) return "ERR no world loaded";
-                        return "OK rivalhealth " + HostHandoffCarry.Health(SaveGameManager.Current, true);
+                        string rhLine = HostHandoffCarry.Health(SaveGameManager.Current, true);
+                        // Part 2 (decision 55): 'rivalhealth base' records this world's ident7; later lines print the
+                        // change (ident7Delta) and, on a client, where the Rivals app's figures come from.
+                        int rhId7 = -1;
+                        try { var rhM = System.Text.RegularExpressions.Regex.Match(rhLine, @"ident7=(\d+)"); if (rhM.Success) rhId7 = int.Parse(rhM.Groups[1].Value); } catch { }
+                        int rhWorld = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(SaveGameManager.Current);
+                        if (arg.Trim().ToLowerInvariant() == "base")
+                        {
+                            HostHandoffCarry.DevRhBaseId7 = rhId7; HostHandoffCarry.DevRhBaseWorld = rhWorld;
+                            return $"OK rivalhealth base ident7={rhId7} | {rhLine}";
+                        }
+                        string rhTail = "";
+                        if (HostHandoffCarry.DevRhBaseWorld == rhWorld && HostHandoffCarry.DevRhBaseId7 >= 0 && rhId7 >= 0)
+                            rhTail += $" ident7Delta={rhId7 - HostHandoffCarry.DevRhBaseId7}";
+                        if (MPClient.IsClientInWorld && !MPServer.IsRunning) rhTail += " " + MPPatches.ClientRivalFiguresDev();
+                        return "OK rivalhealth " + rhLine + rhTail;
                     }
                     catch (Exception rhEx) { return $"ERR rivalhealth: {rhEx.GetType().Name}: {rhEx.Message}"; }
                 }
@@ -4848,8 +4863,10 @@ namespace BigAmbitionsMP
                 {
                     string hcArg = arg.Trim().ToLowerInvariant();
                     if (hcArg == "off") { HostHandoffCarry.DevOffNext = true;  return "OK hostcarry off - the next host start skips the carry"; }
-                    if (hcArg == "on")  { HostHandoffCarry.DevOffNext = false; return "OK hostcarry on"; }
-                    if (hcArg.Length > 0) return "ERR usage: hostcarry [off|on]";
+                    if (hcArg == "on")  { HostHandoffCarry.DevOffNext = false; HostHandoffCarry.DevBuildSkewNext = false; return "OK hostcarry on"; }
+                    // 'buildskew' (gate-F1 unit leg): the NEXT carry reads the running build as one higher (one-shot).
+                    if (hcArg == "buildskew") { HostHandoffCarry.DevBuildSkewNext = true; return "OK hostcarry buildskew - the next carry sees the running build as one higher"; }
+                    if (hcArg.Length > 0) return "ERR usage: hostcarry [off|on|buildskew]";
                     return $"OK hostcarry next={(HostHandoffCarry.DevOffNext ? "off" : "on")} last='{MPSaveCoordinator.LastHostCarry}'";
                 }
 

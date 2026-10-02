@@ -1203,23 +1203,13 @@ namespace BigAmbitionsMP
                         {
                             if (rd.ownedBusinesses             != null) rd.ownedBusinesses.Add(reg);
                             if (rd.ownedRetailOfficeBusinesses != null) rd.ownedRetailOfficeBusinesses.Add(reg);
-                            // Feed the replica's dailyIncomes from the synced
-                            // per-business weekly figure: RivalData.WeeklyIncome
-                            // and the detail-view graphs compute NATIVELY from
-                            // dailyIncomes.TakeLast(7) — replicas had it empty,
-                            // so player rows graphed flat zero (0.11 UI map).
-                            try
-                            {
-                                if (syncedIncome != null
-                                    && syncedIncome.TryGetValue(GameStateReader.AddressKey(reg), out var wk)
-                                    && reg.dailyIncomes != null
-                                    && !reg.RentedByPlayer)   // never overwrite the OWNER'S own income series from a rival's synced figure
-                                {
-                                    reg.dailyIncomes.Clear();
-                                    for (int d = 0; d < 7; d++) reg.dailyIncomes.Add(wk / 7f);
-                                }
-                            }
-                            catch { }
+                            // RIVALS-HOST-SWITCH-1 part 2 (decision 55, design D4a): the synced weekly figure is NO
+                            // LONGER written into the real reg.dailyIncomes as 7 x (weekly/7) - that fake series was
+                            // saved into every client's copy (identical-7 lists, many negative) and became the world
+                            // of a client that later hosted. The client's Rivals app now reads the host's figures
+                            // directly: RivalData.WeeklyIncome / MostActiveNeighborhood (MPPatches
+                            // Patch_RivalData_*_ClientStats), the business rows (Patch_RivalBusinessesCellView_SetData)
+                            // and the chart (Patch_SelectedRivalUI_SetChartWeeklyIncome_ClientStats).
                         }
                     }
                     catch { }

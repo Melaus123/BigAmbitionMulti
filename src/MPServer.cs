@@ -11804,6 +11804,20 @@ namespace BigAmbitionsMP
                                         catch { }
                                     }
                                 }
+                                // RIVALS-HOST-SWITCH-1 part 2 (design D4a step 4): the AI rival's REAL income history
+                                // (this host's rivalStates, written by RivalsHelper.RunDaily) fills the EXISTING
+                                // IncomeHistory (until now players only), so a client's chart plots the host's series.
+                                // Session players are left out here: their series come from their own self-report below.
+                                try
+                                {
+                                    if (rs.weeklyIncomeHistory != null && !GameStatePatcher.IsSessionPlayerRivalId(id))
+                                    {
+                                        foreach (var hp in rs.weeklyIncomeHistory)
+                                            if (hp != null) info.IncomeHistory.Add(new HistoryPointF { Day = hp.Item1, Value = hp.Item2 });
+                                        if (info.IncomeHistory.Count > 10) info.IncomeHistory.RemoveRange(0, info.IncomeHistory.Count - 10);
+                                    }
+                                }
+                                catch { }
                             }
                         }
                         catch (Exception ex) { Plugin.Logger.LogWarning($"[Server] GetRivalData('{id}'): {ex.Message}"); }

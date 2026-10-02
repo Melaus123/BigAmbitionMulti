@@ -39,7 +39,19 @@ namespace BigAmbitionsMP
         /// <summary>DEV lever 'hostcarry off': skip the carry at the NEXT host start (one-shot) and log
         /// carry=off with the start health line - the rig's proof that the test sees the bug.</summary>
         public static bool DevOffNext;
+        /// <summary>DEV lever 'hostcarry buildskew' (gate-F1 unit leg): the NEXT carry reads the running game's
+        /// build as one higher than it is (one-shot), so gate d refuses the previous host's copy exactly as it
+        /// would after a game update.</summary>
+        public static bool DevBuildSkewNext;
+        /// <summary>DEV 'rivalhealth base': the ident7 count recorded on this world (by object identity) - later
+        /// rivalhealth lines print ident7Delta against it (part 2 test: a client writes no identical-7 lists).</summary>
+        internal static int DevRhBaseId7 = -1, DevRhBaseWorld;
 #endif
+
+        // F3 (review of 8920306): the carry is staged and committed in ONE final step. 0 = nothing in the loaded
+        // world changed yet; 1 = the commit is running (a throw here can leave the world partly carried);
+        // 2 = committed (only the report is left). Read by Apply's catch so the log and the stamp tell the truth.
+        private static int _phase;
 
         private const float FullWindowMinutes = 60f;          // |delta| <= 60 game-minutes = one coordinated save
         private const float PartialFloorMinutes = -7f * 1440f; // previous host's copy older by up to 7 days = partial
@@ -82,12 +94,24 @@ namespace BigAmbitionsMP
         /// override included). Never throws.</summary>
         public static void Apply(string session, MpManifest m, string ownId)
         {
+            _phase = 0;
             try { ApplyInner(session, m, ownId); }
             catch (Exception ex)
             {
-                Mode = "none";
-                MPSaveCoordinator.LastHostCarry = "mode=none (exception)";
-                Plugin.Logger.LogError($"[MPSave] HOST HANDOFF CARRY: none — the carry threw ({ex.GetType().Name}: {ex.Message}); world-only state continues from this machine's copy as loaded. {ex}");
+                if (_phase == 0)
+                {
+                    Mode = "none";
+                    MPSaveCoordinator.LastHostCarry = "mode=none (exception before the commit - nothing changed)";
+                    Plugin.Logger.LogError($"[MPSave] HOST HANDOFF CARRY: none — the carry threw before it changed anything ({ex.GetType().Name}: {ex.Message}); world-only state continues from this machine's copy as loaded. {ex}");
+                }
+                else if (_phase == 1)
+                {
+                    Mode = "torn";
+                    MPSaveCoordinator.LastHostCarry = "mode=torn (exception DURING the commit - the world may be partly carried)";
+                    Plugin.Logger.LogError($"[MPSave] HOST HANDOFF CARRY: none — the carry threw DURING its commit ({ex.GetType().Name}: {ex.Message}); the world-only state may be PARTLY carried from the previous host's copy. {ex}");
+                }
+                else
+                    Plugin.Logger.LogWarning($"[MPSave] HOST HANDOFF CARRY: the carry was committed (mode={Mode}) but its report threw ({ex.GetType().Name}: {ex.Message}).");
             }
         }
 
@@ -166,6 +190,14 @@ namespace BigAmbitionsMP
             // never carried; the city identity is the registration address set (at most 1% difference).
             if (prev.buildNumberAtLastSave != cur.buildNumberAtLastSave)
             { None(prevId, $"the previous host's save is from build {prev.buildNumberAtLastSave}, this machine's from build {cur.buildNumberAtLastSave}", cur); return; }
+            // F1 (review of 8920306): the two files agreeing is not enough. After a game update BOTH carry the old
+            // build; the save repairs (SaveGameCompatibilityFixes, 'buildNumberAtLastSave <= item.buildNumber') ran
+            // on this machine's copy only, and the build is stamped only at save (SaveGameManager.cs:175) - so the
+            // previous host's copy must come from the RUNNING build. The repairs are NOT run on prev (the item
+            // validator pays compensation into SaveGameManager.Current.Money).
+            int running = RunningBuild();
+            if (prev.buildNumberAtLastSave != running)
+            { None(prevId, $"the previous host's save is from build {prev.buildNumberAtLastSave}, the running game is build {running} (the game's save repairs ran on this machine's copy only, never on the previous host's)", cur); return; }
             var prevByKey = new Dictionary<string, BuildingRegistration>(StringComparer.Ordinal);
             if (prev.BuildingRegistrations != null)
                 foreach (var pr in prev.BuildingRegistrations)
@@ -193,18 +225,41 @@ namespace BigAmbitionsMP
             EnsureFields();
             var swApply = Stopwatch.StartNew();
 
+            // ── STAGE (F3): everything below up to COMMIT only READS the loaded world. Every replacement is
+            // computed into the plan first; an exception before COMMIT leaves this machine's world untouched.
+
             // Step 1: the AI id list from prev - a positive list (player stamps never match the manifest's
             // names, design fixture note, so player shops can only be recognised as "not AI").
             var ai = AiIds(prev, false);
+
+            // F4: this machine's employee records by id (the roster + every registration's poached copies) - a
+            // carried AI shop takes prev's poachedEmployees only when every one of them resolves HERE (the objects
+            // used are this world's own; no EmployeeInstance is ever created). Built lazily: most worlds have none.
+            Dictionary<string, Entities.EmployeeInstance>? ownEmp = null;
+            Dictionary<string, Entities.EmployeeInstance> OwnEmployees()
+            {
+                if (ownEmp != null) return ownEmp;
+                ownEmp = new Dictionary<string, Entities.EmployeeInstance>(StringComparer.Ordinal);
+                if (cur.EmployeeInstances != null)
+                    foreach (var e in cur.EmployeeInstances) if (e != null && !string.IsNullOrEmpty(e.id)) ownEmp[e.id] = e;
+                if (cur.BuildingRegistrations != null)
+                    foreach (var r in cur.BuildingRegistrations)
+                        if (r?.poachedEmployees != null)
+                            foreach (var e in r.poachedEmployees) if (e != null && !string.IsNullOrEmpty(e.id)) ownEmp[e.id] = e;
+                return ownEmp;
+            }
 
             // Step 2: registrations, matched on the address key (prevByKey, built at gate d), classified by design D3.
             var ledger = m.BuildingOwners ?? new Dictionary<string, string>();
             var deeds = m.BuildingRealEstateOwners ?? new Dictionary<string, string>();
             int aiCarried = 0, keptPlayer = 0, keptLedger = 0, keptRented = 0, keptStamp = 0, keptUnknown = 0,
-                conflicts = 0, deedKept = 0, unmatched = 0, partialSkipped = 0;
+                conflicts = 0, deedKept = 0, unmatched = 0, partialSkipped = 0, poachPrev = 0, poachOwn = 0, poachNone = 0;
             var conflictKeys = new List<string>();
             var matched = new HashSet<string>(StringComparer.Ordinal);
             var fields = full ? _fullFields! : _partialFields!;
+            bool fieldsHaveAiEmp = false;
+            foreach (var f in fields) if (f.Name == "aiEmployees") { fieldsHaveAiEmp = true; break; }
+            var regPlan = new List<RegCarry>();
             if (cur.BuildingRegistrations != null)
                 foreach (var own in cur.BuildingRegistrations)
                 {
@@ -242,37 +297,63 @@ namespace BigAmbitionsMP
                     bool deed = deeds.ContainsKey(key)
                              || (ownBldg.Length > 0 && !ai.Contains(ownBldg))
                              || (prevBldg.Length > 0 && !ai.Contains(prevBldg));
-                    string? keepBldg = own.buildingOwnerRivalId;
-                    CopyFields(p, own, fields);
-                    if (deed && full) { own.buildingOwnerRivalId = keepBldg; deedKept++; }
-                    aiCarried++;
+                    var rc = new RegCarry { Own = own, Prev = p, KeepBldg = deed && full };
+                    // F4: the AI-employee list and the poached list are one pair (EmployeeInstance.cs:1150-1161 moves one
+                    // AI worker into poachedEmployees per poach). Carry prev's pair when every poached id resolves in
+                    // this world's records; otherwise keep own's pair (own aiEmployees + own poachedEmployees).
+                    if (fieldsHaveAiEmp)
+                    {
+                        var pp = p.poachedEmployees;
+                        if ((pp == null || pp.Count == 0) && (own.poachedEmployees == null || own.poachedEmployees.Count == 0))
+                        { poachNone++; rc.PoachSet = false; }
+                        else
+                        {
+                            List<Entities.EmployeeInstance>? np = new List<Entities.EmployeeInstance>(pp?.Count ?? 0);
+                            if (pp != null)
+                            {
+                                var oe = OwnEmployees();
+                                foreach (var e in pp)
+                                {
+                                    if (e == null) continue;
+                                    if (string.IsNullOrEmpty(e.id) || !oe.TryGetValue(e.id, out var mine) || mine == null) { np = null; break; }
+                                    np.Add(mine);
+                                }
+                            }
+                            if (np != null) { rc.PoachSet = true; rc.Poach = np; poachPrev++; }
+                            else { rc.KeepAiEmployees = true; poachOwn++; }
+                        }
+                    }
+                    regPlan.Add(rc);
                 }
             int prevOnly = 0;
             foreach (var k in prevByKey.Keys) if (!matched.Contains(k)) prevOnly++;
 
-            // Step 3: the collections.
-            int ns = 0, rivalStates = 0, rivalAdded = 0, special = 0, market = 0, events = 0, forSale = 0, forSaleDropped = 0;
+            // Step 3: the collections (staged).
+            int ns = 0, rivalStates = 0, rivalAdded = 0, special = 0, market = 0, events = 0, forSale = 0, forSaleDropped = 0, forSaleNoAddr = 0;
+            var nsPlan = new List<KeyValuePair<int, BigAmbitions.Neighborhoods.NeighbourhoodStats>>();
             if (prev.NeighbourhoodStats != null && cur.NeighbourhoodStats != null)
                 foreach (var pn in prev.NeighbourhoodStats)
                 {
                     if (pn == null || string.IsNullOrEmpty(pn.name)) continue;
-                    int at = cur.NeighbourhoodStats.FindIndex(x => x != null && x.name == pn.name);
-                    if (at >= 0) cur.NeighbourhoodStats[at] = pn; else cur.NeighbourhoodStats.Add(pn);
+                    nsPlan.Add(new KeyValuePair<int, BigAmbitions.Neighborhoods.NeighbourhoodStats>(cur.NeighbourhoodStats.FindIndex(x => x != null && x.name == pn.name), pn));
                     ns++;
                 }
+            var rsPlan = new List<KeyValuePair<int, BigAmbitions.Rivals.RivalState>>();
             if (prev.rivalStates != null)
-            {
-                if (cur.rivalStates == null) cur.rivalStates = new List<BigAmbitions.Rivals.RivalState>();
                 foreach (var pr in prev.rivalStates)
                 {
                     if (pr == null || string.IsNullOrEmpty(pr.rivalId)) continue;
-                    int at = cur.rivalStates.FindIndex(x => x != null && x.rivalId == pr.rivalId);
-                    if (at >= 0) cur.rivalStates[at] = pr; else { cur.rivalStates.Add(pr); rivalAdded++; }
+                    int at = cur.rivalStates == null ? -1 : cur.rivalStates.FindIndex(x => x != null && x.rivalId == pr.rivalId);
+                    if (at < 0) rivalAdded++;
+                    rsPlan.Add(new KeyValuePair<int, BigAmbitions.Rivals.RivalState>(at, pr));
                     rivalStates++;
                 }
-            }
+            // F2 (manager decision): the special rivals' isActive/isDefeated/defenseStates are carried in FULL mode only.
+            // In PARTIAL mode (prev older) own's copy is the newer synced one (R3 publishes them, and part 2 stops a
+            // client defeating a rival locally), the same rule the design gives every synced row in partial mode.
             int specialMissing = 0;
-            if (prev.specialRivalStates != null && cur.specialRivalStates != null)
+            var spPlan = new List<KeyValuePair<BigAmbitions.Rivals.SpecialRivalState, BigAmbitions.Rivals.SpecialRivalState>>();
+            if (full && prev.specialRivalStates != null && cur.specialRivalStates != null)
                 foreach (var ps in prev.specialRivalStates)
                 {
                     if (ps == null || string.IsNullOrEmpty(ps.rivalId)) continue;
@@ -280,32 +361,65 @@ namespace BigAmbitionsMP
                     // The per-player parts (completedTimelineEntryIds, sentMessageKeys) stay this machine's own
                     // (D1 row 11) - so a state missing here is not invented from the previous host's.
                     if (os == null) { specialMissing++; continue; }
-                    os.isActive = ps.isActive;
-                    os.isDefeated = ps.isDefeated;
-                    os.defenseStates = ps.defenseStates;
+                    spPlan.Add(new KeyValuePair<BigAmbitions.Rivals.SpecialRivalState, BigAmbitions.Rivals.SpecialRivalState>(os, ps));
                     special++;
                 }
             bool idsDiffer = false;
+            List<BuildingForSale>? forSaleList = null;
             if (full)
             {
-                if (prev.productMarketEntries != null) { cur.productMarketEntries = prev.productMarketEntries; market = prev.productMarketEntries.Count; }
-                if (prev.marketEvents != null) { cur.marketEvents = prev.marketEvents; events = prev.marketEvents.Count; }
+                if (prev.productMarketEntries != null) market = prev.productMarketEntries.Count;
+                if (prev.marketEvents != null) events = prev.marketEvents.Count;
                 if (prev.buildingsForSale != null)
                 {
-                    var list = new List<BuildingForSale>(prev.buildingsForSale.Count);
+                    forSaleList = new List<BuildingForSale>(prev.buildingsForSale.Count);
                     foreach (var b in prev.buildingsForSale)
                     {
                         if (b == null) continue;
-                        if (deeds.ContainsKey(GameStateReader.AddressKey(b.address))) { forSaleDropped++; continue; }
-                        list.Add(b);
+                        // F3: null-guarded (an entry without an address cannot be a player's deed: kept as prev has it).
+                        object? boxed = b.address;
+                        string? bKey = null;
+                        if (boxed != null) { try { bKey = GameStateReader.AddressKey(b.address); } catch { bKey = null; } }
+                        if (bKey == null) forSaleNoAddr++;
+                        else if (deeds.ContainsKey(bKey)) { forSaleDropped++; continue; }
+                        forSaleList.Add(b);
                     }
-                    cur.buildingsForSale = list;
-                    forSale = list.Count;
+                    forSale = forSaleList.Count;
                 }
                 idsDiffer = !SameIds(prev.wholesaleRivalIds, cur.wholesaleRivalIds) || !SameIds(prev.importRivalIds, cur.importRivalIds);
+            }
+
+            // ── COMMIT (F3): the one step that changes the loaded world. Plain assignments and the field copy only.
+            _phase = 1;
+            foreach (var rc in regPlan)
+            {
+                string? keepBldg = rc.Own.buildingOwnerRivalId;
+                CopyFields(rc.Prev, rc.Own, fields, rc.KeepAiEmployees ? "aiEmployees" : null);
+                if (rc.KeepBldg) { rc.Own.buildingOwnerRivalId = keepBldg; deedKept++; }
+                if (rc.PoachSet) rc.Own.poachedEmployees = rc.Poach;
+                aiCarried++;
+            }
+            foreach (var kv in nsPlan)
+                if (kv.Key >= 0) cur.NeighbourhoodStats![kv.Key] = kv.Value; else cur.NeighbourhoodStats!.Add(kv.Value);   // nsPlan is filled only when the list exists
+            if (rsPlan.Count > 0 && cur.rivalStates == null) cur.rivalStates = new List<BigAmbitions.Rivals.RivalState>();
+            foreach (var kv in rsPlan)
+                if (kv.Key >= 0) cur.rivalStates![kv.Key] = kv.Value; else cur.rivalStates!.Add(kv.Value);
+            foreach (var kv in spPlan)
+            {
+                var os = kv.Key; var ps = kv.Value;
+                os.isActive = ps.isActive;
+                os.isDefeated = ps.isDefeated;
+                os.defenseStates = ps.defenseStates;
+            }
+            if (full)
+            {
+                if (prev.productMarketEntries != null) cur.productMarketEntries = prev.productMarketEntries;
+                if (prev.marketEvents != null) cur.marketEvents = prev.marketEvents;
+                if (forSaleList != null) cur.buildingsForSale = forSaleList;
                 if (prev.wholesaleRivalIds != null) cur.wholesaleRivalIds = prev.wholesaleRivalIds;
                 if (prev.importRivalIds != null) cur.importRivalIds = prev.importRivalIds;
             }
+            _phase = 2;
             long applyMs = swApply.ElapsedMilliseconds;
             prev = null;   // step 4: release the side copy
 
@@ -314,7 +428,8 @@ namespace BigAmbitionsMP
                            + $"ns={ns} rivalStates={rivalStates} special={special} market={market} events={events} forSale={forSale} "
                            + $"ledger={ledger.Count} keptLedger={keptLedger} keptRented={keptRented} keptStamp={keptStamp} deedKept={deedKept} "
                            + $"partialSkipped={partialSkipped} unmatched={unmatched} prevOnly={prevOnly} rivalAdded={rivalAdded} specialMissing={specialMissing} "
-                           + $"forSaleDropped={forSaleDropped} idsDiffer={idsDiffer} addrMatch={addrBoth}/{addrUnion} seedOwn={seedOwn} seedPrev={seedPrev} "
+                           + $"forSaleDropped={forSaleDropped} forSaleNoAddr={forSaleNoAddr} poachPrev={poachPrev} poachOwn={poachOwn} poachNone={poachNone} "
+                           + $"idsDiffer={idsDiffer} addrMatch={addrBoth}/{addrUnion} build={running} seedOwn={seedOwn} seedPrev={seedPrev} "
                            + $"deserializeMs={deserMs} applyMs={applyMs} totalMs={swTotal.ElapsedMilliseconds}";
             MPSaveCoordinator.LastHostCarry = summary;
             Plugin.Logger.LogWarning($"[MPSave] HOST HANDOFF CARRY: {summary}");
@@ -323,6 +438,34 @@ namespace BigAmbitionsMP
             if (idsDiffer)
                 Plugin.Logger.LogWarning("[MPSave] HOST HANDOFF CARRY: the wholesale/import rival ids differed between the two copies - the previous host's were taken.");
             LogHealth(cur);
+        }
+
+        /// <summary>One staged registration carry (F3/F4).</summary>
+        private sealed class RegCarry
+        {
+            public BuildingRegistration Own = null!;
+            public BuildingRegistration Prev = null!;
+            public bool KeepBldg;          // rule 5: own's building-owner field stays
+            public bool KeepAiEmployees;   // F4: own's aiEmployees + poachedEmployees pair stays
+            public bool PoachSet;          // F4: prev's poached list, resolved to this world's own records
+            public List<Entities.EmployeeInstance>? Poach;
+        }
+
+        /// <summary>The running game's build (GameVersion.GetCurrent().buildNumber - the value SaveGameManager stamps
+        /// at save, SaveGameManager.cs:175). -1 when unreadable (gate d then refuses).</summary>
+        private static int RunningBuild()
+        {
+            int b;
+            try { b = GameVersion.GetCurrent()?.buildNumber ?? -1; } catch { b = -1; }
+#if BAMP_DEV
+            if (DevBuildSkewNext && b >= 0)
+            {
+                DevBuildSkewNext = false;
+                Plugin.Logger.LogWarning($"[MPSave] HOST HANDOFF CARRY: DEV 'hostcarry buildskew' lever - the running build reads as {b + 1} (real {b}) for this carry.");
+                b += 1;
+            }
+#endif
+            return b;
         }
 
         private static void None(string prevId, string reason, GameInstance? cur)
@@ -339,9 +482,10 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] HOST HANDOFF CARRY health: failed ({ex.Message})"); }
         }
 
-        private static void CopyFields(BuildingRegistration from, BuildingRegistration to, FieldInfo[] fields)
+        private static void CopyFields(BuildingRegistration from, BuildingRegistration to, FieldInfo[] fields, string? keepField = null)
         {
-            for (int i = 0; i < fields.Length; i++) fields[i].SetValue(to, fields[i].GetValue(from));
+            for (int i = 0; i < fields.Length; i++)
+                if (keepField == null || fields[i].Name != keepField) fields[i].SetValue(to, fields[i].GetValue(from));
             // The interior-design lookup is a private cache of interiorDesigns (BuildingRegistration.cs:511-536);
             // a fresh one rebuilds itself on first use from the carried list.
             try { if (_interiorLookupField != null) _interiorLookupField.SetValue(to, Activator.CreateInstance(_interiorLookupField.FieldType)); } catch { }

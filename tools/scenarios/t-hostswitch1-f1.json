@@ -1,6 +1,6 @@
 {
-  "id": "T-HOSTSWITCH1-OFF",
-  "title": "RIVALS-HOST-SWITCH-1 negative control: T-HOSTSWITCH1 with the carry switched off on the new host ('hostcarry off'). The new host's start health must show the bug (carry=off, nonZeroIncome=0) - proof that T-HOSTSWITCH1's assertions catch it.",
+  "id": "T-HOSTSWITCH1-F1",
+  "title": "RIVALS-HOST-SWITCH-1 gate-F1 unit leg: T-HOSTSWITCH1 up to the role swap, then the new host's carry sees the running build as one higher ('hostcarry buildskew' - what a game update looks like: both copies carry the old build). The carry must refuse (mode=none, the build reason) and leave the new host's own world as loaded.",
   "preconditions": "Reporter fixture session fx-hq1 (day 44, MERGED - vars.keepMerger true). h = melaus (guid-d2168c9d71f6484ca3f777d1a3682076, the manifest's last host), c = Client1. Dev build with RIVALS-HOST-SWITCH-1 part 1 (rivalhealth / hostcarry levers, BAMP_DEV). The fixture's client store holds only Client1's own copy; the host's .hsg reaches it through the coordinated save's store mirror (step 'save'). Part 2 (decision 55 D4) is built; this control asserts only the new host's start health (the client copy's OLD fake records are still in the fixture). 10-day skip: the consensus skip (skipvote +<n>h = that far ahead of this machine's clock, both machines vote; skiprate is local, so both set it) in two +120h legs.",
   "instances": 2,
   "vars": {
@@ -53,7 +53,7 @@
     },
     {
       "role": "both",
-      "cmd": "mark TEST T-HOSTSWITCH1-OFF START",
+      "cmd": "mark TEST T-HOSTSWITCH1-F1 START",
       "expect_result": "OK MARK",
       "seq": 4
     },
@@ -181,9 +181,9 @@
     },
     {
       "role": "c",
-      "cmd": "hostcarry off",
-      "expect_result": "^OK hostcarry off",
-      "note": "the lever: the next host start on c skips the carry",
+      "cmd": "hostcarry buildskew",
+      "expect_result": "^OK hostcarry buildskew",
+      "note": "the lever: the next carry on c reads the running build as one higher (one-shot)",
       "seq": 20
     },
     {
@@ -211,12 +211,17 @@
         },
         {
           "role": "c",
-          "regex": "HOST HANDOFF CARRY: mode=off from=${hostStable} ",
+          "regex": "HOST HANDOFF CARRY: DEV 'hostcarry buildskew' lever - the running build reads as ([0-9]+) \\(real [0-9]+\\)",
           "within_s": 300
         },
         {
           "role": "c",
-          "regex": "HOST HANDOFF CARRY health: day=[0-9]+ [0-9:]+ aiRun=[0-9]+ lens=\\S+ empty=[0-9]+ ident7=[0-9]+ nonZeroIncome=0 nzPct=\\S+ neg7=[0-9]+ nsDue=[0-9]+ nsForce0=[0-9]+ nsNamed=[0-9]+ rivalHist=\\S+ histFlat=[0-9]+ specialDefeated=[0-9]+ carry=off carryFrom=${hostStable}",
+          "regex": "HOST HANDOFF CARRY: none . the previous host's save is from build ([0-9]+), the running game is build [0-9]+ \\(the game's save repairs ran on this machine's copy only",
+          "within_s": 300
+        },
+        {
+          "role": "c",
+          "regex": "HOST HANDOFF CARRY health: day=[0-9]+ [0-9:]+ aiRun=[0-9]+ .* carry=none carryFrom=${hostStable}",
           "within_s": 300
         },
         {
@@ -230,12 +235,12 @@
           "within_s": 60
         }
       ],
-      "note": "THE BUG, SHOWN: without the carry the new host starts from its own copy - nonZeroIncome=0 (only fake identical-7 or empty income lists)",
+      "note": "GATE F1: the previous host's copy is not from the running build -> no carry, one loud line with the build reason",
       "seq": 23
     },
     {
       "role": "both",
-      "cmd": "mark TEST T-HOSTSWITCH1-OFF CARRY-OFF",
+      "cmd": "mark TEST T-HOSTSWITCH1-F1 GATE-F1",
       "expect_result": "OK MARK",
       "seq": 24
     },
@@ -247,7 +252,7 @@
     {
       "role": "c",
       "cmd": "rivalhealth",
-      "expect_result": "^OK rivalhealth .*nonZeroIncome=0 .*carry=off carryFrom=${hostStable}",
+      "expect_result": "^OK rivalhealth .*carry=none carryFrom=${hostStable}",
       "capture": {
         "sDay": "day=(\\d+)",
         "sAi": "aiRun=(\\d+)",
@@ -265,10 +270,17 @@
       "seq": 26
     },
     {
-      "role": "both",
-      "cmd": "mark TEST T-HOSTSWITCH1-OFF END",
-      "expect_result": "OK MARK",
+      "role": "c",
+      "cmd": "hostcarry",
+      "expect_result": "^OK hostcarry next=on last='mode=none from=${hostStable} \\(the previous host's save is from build",
+      "note": "the bug-report stamp names the build reason; the skew lever was consumed (next=on)",
       "seq": 27
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST T-HOSTSWITCH1-F1 END",
+      "expect_result": "OK MARK",
+      "seq": 28
     }
   ]
 }

@@ -2756,6 +2756,218 @@ namespace BigAmbitionsMP
             }
         }
 
+        // ── RIVALS-HOST-SWITCH-1 part 2 (decision 55, design D4): the CLIENT keeps no fake rival records ──────
+        // A client never simulates the AI economy, so its own copies of the AI shops' income lists and the rival
+        // histories are not real. Until now the client wrote fake ones (PopulateRivalOwnedFromSync's 7 x weekly/7,
+        // RivalsHelper.RunDaily's histories built from them) and could defeat a rival locally - all of it saved into
+        // the client's copy, which became the world of a client that later hosted. Now the client's Rivals app reads
+        // the host's figures (ClientRivalStats, the stats snapshot) and the client writes none of these records.
+        // Gate everywhere: MPClient.IsClientInWorld && !MPServer.IsRunning (host and single-player unchanged).
+        internal static bool ClientOnlyRivalView => MPClient.IsClientInWorld && !MPServer.IsRunning;
+
+        // Once-per-rival-per-world log gates (the world told apart by object identity, an int). HashSet.Add of an
+        // existing id allocates nothing, so the hot getters below stay allocation-free after the first line.
+        private static int _rivalOnceWorld;
+        private static readonly System.Collections.Generic.HashSet<string> _onceWk = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        private static readonly System.Collections.Generic.HashSet<string> _onceNb = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        private static readonly System.Collections.Generic.HashSet<string> _onceChart = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        private static readonly System.Collections.Generic.HashSet<string> _onceDefeat = new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        private static bool RivalOnce(System.Collections.Generic.HashSet<string> set, string id)
+        {
+            int w = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(SaveGameManager.Current);
+            if (w != _rivalOnceWorld)
+            {
+                _rivalOnceWorld = w;
+                _onceWk.Clear(); _onceNb.Clear(); _onceChart.Clear(); _onceDefeat.Clear();
+            }
+            return set.Add(id);
+        }
+
+        /// <summary>D4a step 2: on a client, a rival's WeeklyIncome is the host's figure (ClientRivalStats) when the
+        /// snapshot holds the rival - never the client's own dailyIncomes. Read by the leaderboard row
+        /// (RivalLeaderboard.GetRivalLeaderboardData, also its native defeat test) and the chart's today point
+        /// (SelectedRivalUI.SetChartWeeklyIncome). A PREFIX that skips the getter (the brief/design say postfix; the
+        /// prefix returns the same value and also skips the native sum over the client's own lists). No snapshot
+        /// entry = the native getter, as before.</summary>
+        [HarmonyPatch(typeof(BigAmbitions.Rivals.RivalData), "WeeklyIncome", MethodType.Getter)]
+        public static class Patch_RivalData_WeeklyIncome_ClientStats
+        {
+            internal static int Served;   // DEV readout (rivalhealth on a client)
+
+            static bool Prefix(BigAmbitions.Rivals.RivalData __instance, ref float __result)
+            {
+                try
+                {
+                    if (!ClientOnlyRivalView || __instance == null) return true;
+                    string id = __instance.id ?? "";
+                    if (id.Length == 0 || !GameStatePatcher.ClientRivalStats.TryGetValue(id, out var s) || s == null) return true;
+                    __result = s.WeeklyIncome;
+                    Served++;
+                    if (RivalOnce(_onceWk, id))
+                        Plugin.Logger.LogInfo($"[RivalStats] client: rival {id} WeeklyIncome = the host's stats figure (${s.WeeklyIncome:F0}); this machine's own income lists are not used for display.");
+                    return false;
+                }
+                catch { return true; }
+            }
+        }
+
+        /// <summary>D4a step 2: MostActiveNeighborhood on a client = the host's figure when the snapshot has one (the
+        /// native getter groups the client's own income lists, and throws on a null list).</summary>
+        [HarmonyPatch(typeof(BigAmbitions.Rivals.RivalData), "MostActiveNeighborhood", MethodType.Getter)]
+        public static class Patch_RivalData_MostActiveNeighborhood_ClientStats
+        {
+            static bool Prefix(BigAmbitions.Rivals.RivalData __instance, ref string __result)
+            {
+                try
+                {
+                    if (!ClientOnlyRivalView || __instance == null) return true;
+                    string id = __instance.id ?? "";
+                    if (id.Length == 0 || !GameStatePatcher.ClientRivalStats.TryGetValue(id, out var s) || s == null
+                        || string.IsNullOrEmpty(s.MostActiveNeighborhood)) return true;
+                    __result = s.MostActiveNeighborhood;
+                    if (RivalOnce(_onceNb, id))
+                        Plugin.Logger.LogInfo($"[RivalStats] client: rival {id} MostActiveNeighborhood = the host's stats figure ('{s.MostActiveNeighborhood}').");
+                    return false;
+                }
+                catch { return true; }
+            }
+        }
+
+        /// <summary>D4a step 4: the AI rival's weekly-income chart on a client plots the host's series
+        /// (RivalStatsInfo.IncomeHistory, filled for AI rivals by the host's stats snapshot). The prefix swaps
+        /// rivalState.weeklyIncomeHistory for a COPY of that series for the draw only; the finalizer puts the
+        /// original list back, so the saved rivalStates never hold it (as InstallPlayerRivalStateHistory's
+        /// runtime-only series). Session players keep their installed synthetic state (untouched here).</summary>
+        [HarmonyPatch(typeof(UI.Smartphone.Apps.Rivals.SelectedRivalUI), "SetChartWeeklyIncome")]
+        public static class Patch_SelectedRivalUI_SetChartWeeklyIncome_ClientStats
+        {
+            internal static int Swaps;   // DEV readout
+
+            internal sealed class SwapBack
+            {
+                public BigAmbitions.Rivals.RivalState State = null!;
+                public System.Collections.Generic.List<System.Tuple<int, float>> Original = null!;
+            }
+
+            static void Prefix(BigAmbitions.Rivals.RivalData ____selectedRival, out SwapBack? __state)
+            {
+                __state = null;
+                try
+                {
+                    if (!ClientOnlyRivalView || ____selectedRival == null) return;
+                    string id = ____selectedRival.id ?? "";
+                    if (id.Length == 0 || GameStatePatcher.IsSessionPlayerRivalId(id)) return;
+                    if (!GameStatePatcher.ClientRivalStats.TryGetValue(id, out var s) || s?.IncomeHistory == null || s.IncomeHistory.Count == 0) return;
+                    var rs = BigAmbitions.Rivals.RivalsHelper.GetRivalState(id);
+                    if (rs == null) return;
+                    var series = new System.Collections.Generic.List<System.Tuple<int, float>>(s.IncomeHistory.Count);
+                    foreach (var pt in s.IncomeHistory) if (pt != null) series.Add(new System.Tuple<int, float>(pt.Day, pt.Value));
+                    __state = new SwapBack { State = rs, Original = rs.weeklyIncomeHistory };
+                    rs.weeklyIncomeHistory = series;
+                    Swaps++;
+                    if (RivalOnce(_onceChart, id))
+                        Plugin.Logger.LogInfo($"[RivalStats] client: rival {id} income chart plots the host's series ({series.Count} points); this machine's saved history is put back after the draw.");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalStats] chart swap: {ex.Message}"); }
+            }
+
+            static void Finalizer(SwapBack? __state)
+            {
+                try { if (__state != null) __state.State.weeklyIncomeHistory = __state.Original; }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[RivalStats] chart swap-back: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>D4b (P3): a client never defeats a rival - defeats are host-authoritative (the host's
+        /// MPRivalAttention surrender path and native timeline; the result reaches clients through the R3 rival-state
+        /// sync). Covers every caller (the leaderboard's native test fired on clients whose own lists were empty or
+        /// faked). Priority.Last: the TellEveryKey prefix (MPRivalAttention) still runs first; its postfix counts
+        /// DefeatRuns from its prefix's state, so this patch's Priority.Last postfix puts DefeatRuns back to the
+        /// value before the call when the body was skipped - the DEV count stays "real defeats on this machine".</summary>
+        [HarmonyPatch(typeof(BigAmbitions.Rivals.RivalsHelper), "DefeatRival", new[] { typeof(BigAmbitions.Rivals.RivalData) })]
+        public static class Patch_RivalsHelper_DefeatRival_SkipOnClient
+        {
+            internal static int Skips;   // DEV readout
+
+            [HarmonyPriority(Priority.Last)]
+            static bool Prefix(BigAmbitions.Rivals.RivalData rival, out int __state)
+            {
+                __state = -1;
+                try
+                {
+                    if (!ClientOnlyRivalView) return true;
+                    __state = MPRivalAttention.DefeatRuns;
+                    Skips++;
+                    string id = rival?.id ?? "";
+                    if (RivalOnce(_onceDefeat, id))
+                        Plugin.Logger.LogInfo($"[RivalGuard] DefeatRival({id}) skipped on client - rival defeats are host-authoritative (the host's state arrives through the rival-state sync).");
+                    return false;
+                }
+                catch { return true; }
+            }
+
+            [HarmonyPriority(Priority.Last)]
+            static void Postfix(int __state)
+            {
+                try { if (__state >= 0) MPRivalAttention.DefeatRuns = __state; } catch { }
+            }
+        }
+
+        /// <summary>D4a (P4): RivalsHelper.RunDaily appends the rival histories from this machine's own income lists
+        /// (decompile RivalsHelper.cs:69-102) - on a client those lists are not the simulation's, so the client's
+        /// saved histories went flat. Skipped on clients like the rest of the rival machinery above (the timeline
+        /// sweep, the defense clock). Priority.Last so the other RunDaily prefixes (the merger veil, the orphan-state
+        /// drop) still run as before; their finalizers run either way.</summary>
+        [HarmonyPatch(typeof(BigAmbitions.Rivals.RivalsHelper), "RunDaily")]
+        public static class Patch_RivalsHelper_RunDaily_SkipOnClient
+        {
+            internal static int Skips;   // DEV readout
+
+            [HarmonyPriority(Priority.Last)]
+            static bool Prefix()
+            {
+                try
+                {
+                    if (!ClientOnlyRivalView) return true;
+                    if (Skips++ == 0)
+                        Plugin.Logger.LogInfo("[Suppress] RivalsHelper.RunDaily skipped on client (rival histories are host-authoritative; the client's Rivals app reads the host's stats).");
+                    return false;
+                }
+                catch { return true; }
+            }
+        }
+
+#if BAMP_DEV
+        /// <summary>DEV (rivalhealth on a client): where the client's Rivals app figures come from. cStats = AI rivals
+        /// with a host stats entry and a RivalData here; cWkFromStats = of those, how many read WeeklyIncome equal to
+        /// the stats figure (through the getter patch); then the skip / swap counters of this process.</summary>
+        internal static string ClientRivalFiguresDev()
+        {
+            int stats = 0, wkMatch = 0;
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.rivalStates != null)
+                    foreach (var rs in gi.rivalStates)
+                    {
+                        string id = rs?.rivalId ?? "";
+                        if (id.Length == 0 || GameStatePatcher.IsSessionPlayerRivalId(id)) continue;
+                        if (!GameStatePatcher.ClientRivalStats.TryGetValue(id, out var s) || s == null) continue;
+                        BigAmbitions.Rivals.RivalData? rd = null;
+                        try { rd = BigAmbitions.Rivals.RivalsHelper.GetRivalData(id); } catch { }
+                        if (rd == null) continue;
+                        stats++;
+                        float wk = float.NaN;
+                        try { wk = rd.WeeklyIncome; } catch { }
+                        if (wk == s.WeeklyIncome) wkMatch++;
+                    }
+            }
+            catch { }
+            return $"cStats={stats} cWkFromStats={wkMatch} cWkServed={Patch_RivalData_WeeklyIncome_ClientStats.Served} cChartSwaps={Patch_SelectedRivalUI_SetChartWeeklyIncome_ClientStats.Swaps} "
+                 + $"cDefeatSkips={Patch_RivalsHelper_DefeatRival_SkipOnClient.Skips} cRunDailySkips={Patch_RivalsHelper_RunDaily_SkipOnClient.Skips}";
+        }
+#endif
+
         /// <summary>RIVAL-FAIR-2 R3 (2026-09-12): the HOST recomputes its rival-state signature after
         /// every method that can move it — the hourly timeline sweep and the per-neighbourhood check
         /// (RivalsHelper.CheckRivalTimelines / CheckRivalTimeline, the same pair the skip patch above
