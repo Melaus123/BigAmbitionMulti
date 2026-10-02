@@ -37,6 +37,17 @@ namespace BigAmbitionsMP
 
     /// <summary>Manifest for one MP save session — the MP-only state the per-player
     /// .hsg files don't capture.</summary>
+    /// <summary>BAN-PLAYERS-1 build B (B1): one banned player's forfeited property (MpManifest.Forfeits).</summary>
+    public class MpForfeitEntry
+    {
+        public string StableId { get; set; } = "";
+        public string SteamId  { get; set; } = "";   // the Steam id the ban carried, "" when unknown
+        public string Name     { get; set; } = "";   // display only
+        public List<string> Rented { get; set; } = new();   // address keys released from the rent ledger
+        public List<string> Bought { get; set; } = new();   // address keys released from the deed ledger
+        public int    Day      { get; set; }               // game day of the (latest) removal
+        public string Utc      { get; set; } = "";         // real time of the (latest) removal, ISO-8601 UTC
+    }
     public class MpManifest
     {
         public int    Version        { get; set; } = 1;
@@ -63,6 +74,11 @@ namespace BigAmbitionsMP
         /// MPServer.BuildingRealEstateOwners), so two players never own one building
         /// across save/reload.</summary>
         public Dictionary<string, string> BuildingRealEstateOwners { get; set; } = new();
+        /// <summary>BAN-PLAYERS-1 build B (B1, additive): the FORFEIT record - per banned player (stable id; Steam id when
+        /// known) the addresses the host removed from them (rented and bought) and the game day. Written with the ledgers
+        /// it changed (MPSaveCoordinator.SetSessionMetadata), restored with them, so it follows the save timeline exactly.
+        /// NULL (absent) = the manifest predates the field = nothing forfeited.</summary>
+        public List<MpForfeitEntry>? Forfeits { get; set; }
         /// <summary>Player-to-player access GRANTS ("keys"), keyed by StableId so they survive
         /// renames + reloads (docs/PERMISSIONS-SYSTEM.md, Phase 1).</summary>
         public List<MpGrant> Grants { get; set; } = new();

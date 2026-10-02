@@ -2360,10 +2360,49 @@ namespace BigAmbitionsMP
                     if (verb == "unban")
                         return ba.Length == 0 ? "ERR usage: unban <key|stableId|steamId|name|all>" : MPServer.UnbanPlayer(ba);
                     if (ba.Length == 0 || ba == "list") return "OK ban list " + MPConfig.DescribeBans();
+                    // BAN-PLAYERS-1 build B levers (host side; build C's screens call the same MPServer entry points):
+                    //   ban remove <key|stable|steamId|name>   remove EVERYTHING a banned player holds (MPServer.RemoveProperty)
+                    //   ban held <pid|stable|key|name>         what the ledgers hold for a player (read only)
+                    //   ban forfeits                           the forfeit record (read only)
+                    if (ba.StartsWith("remove ", StringComparison.Ordinal)) return MPServer.RemoveProperty(ba.Substring(7).Trim());
+                    if (ba.StartsWith("held ", StringComparison.Ordinal)) return MPServer.DescribeHeld(ba.Substring(5).Trim());
+                    if (ba == "forfeits") return "OK forfeits " + MPServer.DescribeForfeits();
                     if (ba.StartsWith("offline ", StringComparison.Ordinal)) return MPServer.BanOfflinePlayer(ba.Substring(8).Trim());
                     return MPServer.BanPlayer(ba);
                 }
 
+                case "bldgstate":
+                {
+                    // BAN-PLAYERS-1 build B (read-only, any role): what THIS machine's copy of an address holds - tenancy
+                    // flags, deed, sale listing, business, furniture/stock items and this machine's vehicles at the address;
+                    // on the host also both ledger values.
+                    if (arg.Length == 0) return "ERR address key required";
+                    var freg = GameStatePatcher.FindRegistration(arg);
+                    if (freg == null) return $"ERR no registration for '{arg}'";
+                    int fitems = 0, fveh = 0;
+                    try { fitems = freg.itemInstances?.Count ?? 0; } catch { }
+                    try
+                    {
+                        var fvi = SaveGameManager.Current?.VehicleInstances;
+                        if (fvi != null)
+                            foreach (var fv in fvi) { bool here = false; try { here = fv != null && fv.Address == freg.Address; } catch { } if (here) fveh++; }
+                    }
+                    catch { }
+                    bool fowned = false; try { fowned = freg.BuildingOwnedByPlayer; } catch { }
+                    bool fsale = false;
+                    try { var faddr = freg.Address; fsale = SaveGameManager.Current?.buildingsForSale?.Exists(x => x.address == faddr) ?? false; } catch { }
+                    string fname = "", ftype = "", fstamp = "";
+                    try { fname = freg.BusinessName?.ToString() ?? ""; } catch { }
+                    try { ftype = freg.businessTypeName ?? ""; } catch { }
+                    try { fstamp = freg.businessOwnerRivalId ?? ""; } catch { }
+                    string fled = "-", fdeed = "-";
+                    if (MPServer.IsRunning)
+                    {
+                        if (MPServer.BuildingOwners.TryGetValue(arg, out var flo) && !string.IsNullOrEmpty(flo)) fled = flo;
+                        if (MPServer.BuildingRealEstateOwners.TryGetValue(arg, out var fdo) && !string.IsNullOrEmpty(fdo)) fdeed = fdo;
+                    }
+                    return $"OK bldg '{arg}' rented={freg.RentedByPlayer} forRent={freg.AvailableForRent} owned={fowned} forSale={fsale} name='{fname}' type={ftype} stamp='{fstamp}' items={fitems} vehicles={fveh} ledger={fled} deed={fdeed} flipped={MergerFlip.IsFlipped(arg)}";
+                }
                 case "rejectjoin":
                 {
                     // H-REFUSALMUTE-1: arm/disarm the one-shot refusal of the next join request parked for approval.

@@ -1,0 +1,609 @@
+{
+  "id": "T-BAN-REMOVE",
+  "title": "BAN-PLAYERS-1 build B (remove property): (1) a connected client banned WITH removal - every address it held is released on the host and the other client (contents gone, ledger entries gone, forfeit record kept); (2) after a host save + restart the record is restored and nothing comes back; (3) unban + rejoin - the client's own machine ends those leases with no payout; (4) ban without removal then remove from the offline entry; (5) a merged member's absence mark is dropped and the stand-in stops.",
+  "preconditions": "Dev build with the 'ban remove/held/forfeits' and 'bldgstate' levers. Fixture save1 (host melaus, client Client1 holding several buildings) plus the third instance (Client2, no slot in save1 - charconfirm before hostload). The saved ban list is emptied at start and end.",
+  "instances": 3,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "dPid": "Client2",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[Forfeit\\] RemoveProperty\\(",
+    "\\[Forfeit\\] (receive|held release|manifest (snapshot|restore)|reset|record cleared .*hosting|send to '|apply for '|check '|re-acquire note)",
+    "\\[Forfeit\\] viewer '[^']+' (REFUSED|: )",
+    "\\[Forfeit\\] .*(vehicle delete|ShutdownBusiness:|purchasing plans:|listing failed)",
+    "\\[Forfeit\\] remove property of .* REFUSED"
+  ],
+  "oracles_report": [
+    "\\[Forfeit\\]",
+    "\\[(Ledger|LedgerHeal)\\].*ADOPTED",
+    "\\[Contested\\] '.*' is claimed by BOTH",
+    "\\[Server\\] (BANNED|UNBANNED)",
+    "\\[Absence\\] mark for",
+    "\\[Merger\\] flip OFF",
+    "\\[Lease\\]"
+  ],
+  "steps": [
+    {
+      "role": "all",
+      "cmd": "mark TEST BANREM START",
+      "expect_result": "OK MARK",
+      "seq": 1
+    },
+    {
+      "role": "h",
+      "cmd": "unban all",
+      "expect_result": "^OK unbanned \\d+ left=0",
+      "note": "hygiene: no saved ban left from an aborted run",
+      "seq": 2
+    },
+    {
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK",
+      "seq": 3
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] '${clientPid}' joined lobby\\.",
+          "within_s": 60
+        }
+      ],
+      "seq": 4
+    },
+    {
+      "role": "d",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] '${dPid}' joined lobby\\.",
+          "within_s": 60
+        }
+      ],
+      "seq": 5
+    },
+    {
+      "role": "d",
+      "cmd": "charconfirm",
+      "expect_result": "^OK",
+      "seq": 6
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 7
+    },
+    {
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ],
+      "seq": 8
+    },
+    {
+      "role": "h",
+      "sleep_s": 30,
+      "seq": 9
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BANREM PREMISE",
+      "expect_result": "OK MARK",
+      "seq": 10
+    },
+    {
+      "role": "h",
+      "cmd": "ban held ${clientPid}",
+      "expect_result": "^OK held '${clientPid}' stable=\\S+ rented=[1-9]\\d* bought=\\d+ richest=\\[",
+      "capture": {
+        "shopA": "richest=\\[([^\\]]+)\\]",
+        "clientStable": "stable=(\\S+)"
+      },
+      "note": "premise (1): the client holds buildings in the host ledgers; shopA = the first",
+      "seq": 11
+    },
+    {
+      "role": "h",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg .* ledger=${clientPid} ",
+      "expect_gt": {
+        "items=(\\d+)": 0
+      },
+      "abort_on_fail": false,
+      "note": "premise: the host's copy of shopA holds contents (not aborting: a false premise is a finding)",
+      "seq": 12
+    },
+    {
+      "role": "d",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg ",
+      "note": "the other client's copy before (report)",
+      "seq": 13
+    },
+    {
+      "role": "c",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg .* rented=True ",
+      "note": "premise: the client rents shopA on its own machine",
+      "seq": 14
+    },
+    {
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "^OK money=",
+      "note": "report: the client's wallet before the ban",
+      "seq": 15
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BANREM LEG1",
+      "expect_result": "OK MARK",
+      "seq": 16
+    },
+    {
+      "role": "h",
+      "cmd": "ban ${clientPid}",
+      "expect_result": "^OK banned '${clientPid}' key=(\\S+) stable=yes",
+      "capture": {
+        "banKey": "key=(\\S+)"
+      },
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:bannedgame'",
+          "within_s": 30
+        }
+      ],
+      "seq": 17
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 18
+    },
+    {
+      "role": "h",
+      "cmd": "ban remove ${banKey}",
+      "expect_result": "^OK removed '${clientPid}' key=${banKey} rented=[1-9]\\d* bought=\\d+ cleared=[1-9]\\d* mark=none addrs=\\[.*${shopA}",
+      "note": "(1) WITH removal at ban time: ledger entries gone, host copy released, every connected machine told",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Forfeit\\] REMOVED the property of banned '${clientPid}'",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[Forfeit\\] host '${shopA}' released",
+          "within_s": 10
+        },
+        {
+          "role": "d",
+          "regex": "\\[Forfeit\\] viewer apply for '${clientPid}' \\(removed\\): [1-9]\\d* address\\(es\\) released",
+          "within_s": 30
+        }
+      ],
+      "seq": 19
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 20
+    },
+    {
+      "role": "h",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg .* rented=False forRent=True .*name='' type=ba:businesstype_empty .*items=0 vehicles=0 ledger=- deed=- ",
+      "seq": 21
+    },
+    {
+      "role": "d",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg .* rented=False forRent=True .*name='' .*items=0 vehicles=0 ",
+      "seq": 22
+    },
+    {
+      "role": "h",
+      "cmd": "ban held ${clientStable}",
+      "expect_result": "^OK held .* rented=0 bought=0 ",
+      "seq": 23
+    },
+    {
+      "role": "h",
+      "cmd": "ban forfeits",
+      "expect_result": "^OK forfeits n=1 \\[${clientStable} '${clientPid}' rented=[1-9]\\d* bought=\\d+ day=\\d+ addrs=.*${shopA}",
+      "seq": 24
+    },
+    {
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[MPSave\\] Wrote manifest '${session}'",
+          "within_s": 180
+        }
+      ],
+      "note": "the forfeit record rides the host save with the ledgers",
+      "seq": 25
+    },
+    {
+      "role": "h",
+      "sleep_s": 15,
+      "seq": 26
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BANREM LEG2",
+      "expect_result": "OK MARK",
+      "seq": 27
+    },
+    {
+      "role": "h",
+      "drop": true,
+      "seq": 28
+    },
+    {
+      "role": "h",
+      "relaunch": true,
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Config\\] Saved bans: 1\\.",
+          "within_s": 120
+        }
+      ],
+      "seq": 29
+    },
+    {
+      "role": "h",
+      "sleep_s": 20,
+      "seq": 30
+    },
+    {
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK server started",
+      "seq": 31
+    },
+    {
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Forfeit\\] restored 1 forfeit record\\(s\\) \\([1-9]\\d* address\\(es\\)\\) from the manifest\\.",
+          "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 300
+        }
+      ],
+      "note": "(2) host restart: the record comes back with the ledgers",
+      "seq": 32
+    },
+    {
+      "role": "h",
+      "sleep_s": 40,
+      "seq": 33
+    },
+    {
+      "role": "h",
+      "cmd": "ban forfeits",
+      "expect_result": "^OK forfeits n=1 \\[${clientStable} '${clientPid}' .*${shopA}",
+      "seq": 34
+    },
+    {
+      "role": "h",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg .* rented=False forRent=True .*items=0 .*ledger=- deed=- ",
+      "seq": 35
+    },
+    {
+      "role": "h",
+      "cmd": "ban held ${clientStable}",
+      "expect_result": "^OK held .* rented=0 bought=0 ",
+      "seq": 36
+    },
+    {
+      "role": "h",
+      "cmd": "unban ${banKey}",
+      "expect_result": "^OK unbanned 1 left=0",
+      "seq": 37
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BANREM LEG3",
+      "expect_result": "OK MARK",
+      "seq": 38
+    },
+    {
+      "role": "c",
+      "drop": true,
+      "seq": 39
+    },
+    {
+      "role": "c",
+      "relaunch": true,
+      "seq": 40
+    },
+    {
+      "role": "c",
+      "sleep_s": 20,
+      "seq": 41
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BANREM LEG3-REJOIN",
+      "expect_result": "OK MARK",
+      "seq": 42
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "(returning player '${clientPid}' auto-accepted|mid-game join request from '${clientPid}')",
+          "within_s": 60
+        }
+      ],
+      "seq": 43
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 44
+    },
+    {
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "note": "(3) unban + rejoin: the client's OWN machine ends those leases with no payout (wallet before == after inside the apply)",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Forfeit\\] record sent to '${clientPid}' \\(world-ready re-send\\): .* - including that player's OWN forfeited property",
+          "within_s": 240
+        },
+        {
+          "role": "c",
+          "regex": "\\[Forfeit\\] own lease '${shopA}' ENDED",
+          "within_s": 240
+        },
+        {
+          "role": "c",
+          "regex": "\\[Forfeit\\] OWN property removed by the host's ban \\(day \\d+, world-ready re-send\\): [1-9]\\d* lease\\(s\\) ended, \\d+ bought building\\(s\\) given up, \\d+ already released; \\d+ item\\(s\\) and \\d+ vehicle\\(s\\) removed; no payout - money before=(\\S+) after=\\1\\.",
+          "within_s": 240
+        }
+      ],
+      "seq": 45
+    },
+    {
+      "role": "c",
+      "sleep_s": 30,
+      "seq": 46
+    },
+    {
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "^OK money=",
+      "note": "report: the wallet after the rejoin",
+      "seq": 47
+    },
+    {
+      "role": "c",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg .* rented=False forRent=True .*items=0 vehicles=0 ",
+      "seq": 48
+    },
+    {
+      "role": "h",
+      "sleep_s": 60,
+      "seq": 49
+    },
+    {
+      "role": "h",
+      "cmd": "ban held ${clientPid}",
+      "expect_result": "^OK held .* rented=0 bought=0 ",
+      "note": "(3) nothing re-adopted / healed / claimed back",
+      "seq": 50
+    },
+    {
+      "role": "h",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg .* forRent=True .*ledger=- deed=- ",
+      "seq": 51
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BANREM LEG45",
+      "expect_result": "OK MARK",
+      "seq": 52
+    },
+    {
+      "role": "c",
+      "cmd": "rent ${shopA}",
+      "expect_result": "^OK RentBuilding invoked",
+      "note": "a NEW, ordinary rent of a forfeited address leaves the record",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Forfeit\\] '${shopA}' rented again by '${clientPid}' through the normal request",
+          "within_s": 30
+        }
+      ],
+      "seq": 53
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 54
+    },
+    {
+      "role": "h",
+      "cmd": "ban held ${clientPid}",
+      "expect_result": "^OK held .* rented=1 bought=0 .*addrs=\\[${shopA}\\]",
+      "seq": 55
+    },
+    {
+      "role": "h",
+      "cmd": "ban forfeits",
+      "expect_result": "^OK forfeits n=",
+      "refute_result": "${shopA}",
+      "seq": 56
+    },
+    {
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent",
+      "seq": 57
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 58
+    },
+    {
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]",
+      "seq": 59
+    },
+    {
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] FORMED group",
+          "within_s": 20
+        }
+      ],
+      "seq": 60
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 61
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "seq": 62
+    },
+    {
+      "role": "h",
+      "cmd": "ban ${clientPid}",
+      "expect_result": "^OK banned '${clientPid}' key=(\\S+) stable=yes",
+      "capture": {
+        "banKey2": "key=(\\S+)"
+      },
+      "note": "(4) ban WITHOUT removal",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Client\\] disconnect reason tag: 'BAMP:bannedgame'",
+          "within_s": 30
+        }
+      ],
+      "seq": 63
+    },
+    {
+      "role": "h",
+      "sleep_s": 15,
+      "seq": 64
+    },
+    {
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[${clientPid}->${hostPid}.*${shopA}",
+      "note": "(5) premise: the host stands in for the merged member's shop",
+      "seq": 65
+    },
+    {
+      "role": "h",
+      "cmd": "ban remove ${banKey2}",
+      "expect_result": "^OK removed '${clientPid}' key=${banKey2} rented=1 bought=0 cleared=1 mark=dropped addrs=\\[${shopA}\\]",
+      "note": "(4) removal later from the offline entry; (5) the merged member's absence mark is dropped",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] mark for '${clientPid}' dropped \\(property forfeited by a ban\\)",
+          "within_s": 10
+        }
+      ],
+      "seq": 66
+    },
+    {
+      "role": "h",
+      "sleep_s": 15,
+      "seq": 67
+    },
+    {
+      "role": "h",
+      "cmd": "absence",
+      "expect_result": "^OK absence marks=\\[\\] simulating_here=\\[\\]",
+      "note": "(5) the stand-in stopped simulating",
+      "seq": 68
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "flipped=0",
+      "seq": 69
+    },
+    {
+      "role": "h",
+      "cmd": "bldgstate ${shopA}",
+      "expect_result": "^OK bldg .* rented=False forRent=True .*name='' .*items=0 .*ledger=- deed=- flipped=False",
+      "seq": 70
+    },
+    {
+      "role": "h",
+      "cmd": "ban forfeits",
+      "expect_result": "^OK forfeits n=1 \\[.*${shopA}",
+      "seq": 71
+    },
+    {
+      "role": "h",
+      "cmd": "unban all",
+      "expect_result": "^OK unbanned \\d+ left=0",
+      "seq": 72
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST BANREM END",
+      "expect_result": "OK MARK",
+      "seq": 73
+    }
+  ]
+}

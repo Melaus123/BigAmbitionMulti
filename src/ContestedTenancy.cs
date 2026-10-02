@@ -254,6 +254,10 @@ namespace BigAmbitionsMP
             {
                 string addr = p.AddressKey;
                 if (_resolved.Contains(addr)) return;   // settled this session — no re-arbitration, no spam
+                // BAN-PLAYERS-1 build B (B3): a claim from a banned player's OWN copy of an address its ban forfeited never
+                // enters arbitration - the property was removed by the host and comes back only through a normal rent/buy.
+                if (senderPid != MPConfig.PlayerId && MPServer.IsForfeitedPid(senderPid, addr, out _))
+                { MPServer.LogForfeitRefusal("contested claim", senderPid, addr); return; }
                 // Round-164: receipt visibility (remote senders only — the host's own seed re-enters
                 // claims every health tick and would spam).
                 if (senderPid != MPConfig.PlayerId)
@@ -409,6 +413,9 @@ namespace BigAmbitionsMP
                 if (_resolved.Contains(addr)) { _pendingAdopt.Remove(addr); _adoptDeferrals.Remove(addr); return; }
                 if (!_claims.TryGetValue(addr, out var c) || string.IsNullOrEmpty(c.pid) || c.pid == MPConfig.PlayerId)
                 { _pendingAdopt.Remove(addr); _adoptDeferrals.Remove(addr); return; }
+                // BAN-PLAYERS-1 build B (B3): never heal a forfeited (player, address) back into the ledger.
+                if (MPServer.IsForfeitedPid(c.pid, addr, out _))
+                { MPServer.LogForfeitRefusal("ledger heal (adopt)", c.pid, addr); _pendingAdopt.Remove(addr); _adoptDeferrals.Remove(addr); return; }
 
                 // Ledger already speaks → nothing orphaned here.
                 if (MPServer.BuildingOwners.TryGetValue(addr, out var cur) && !string.IsNullOrEmpty(cur))

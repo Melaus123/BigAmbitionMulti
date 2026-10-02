@@ -1215,6 +1215,9 @@ namespace BigAmbitionsMP
                     BillboardAdSync.Apply(env.GetPayload<BillboardAdsPayload>());
                     break;
 
+                case MessageType.PropertyForfeit:   // BAN-PLAYERS-1 build B: a banned player's property was removed (or the record is replayed at my world-ready)
+                    GameStatePatcher.ReceivePropertyForfeit(env.GetPayload<PropertyForfeitPayload>());
+                    break;
                 case MessageType.WorldSettings:   // SAVED-SETTINGS-1: the host's world settings (my world loaded, the host's own apply, or a re-send)
                 {
                     var wsp = env.GetPayload<WorldSettingsPayload>();
@@ -2461,6 +2464,7 @@ namespace BigAmbitionsMP
 
         internal static void TickSettledReport()
         {
+            GameStatePatcher.TickHeldForfeits();   // BAN-PLAYERS-1 build B: a forfeit notice held for the settled edge (no-op when none)
             if (_settledReported || !IsConnected || MPServer.IsRunning || !IsClientInWorld) return;
             if (!MPWorldReady.IsSettled) return;
             _settledReported = true;

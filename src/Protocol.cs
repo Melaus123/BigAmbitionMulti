@@ -222,6 +222,7 @@ namespace BigAmbitionsMP
         CustomerVisitState    = 219,     // H-HANDOFF-1 (batch 27, 2026-09-26; rides protocol 26, unreleased): the VISIT STATE of a shop's live customers - per customer the schedule entry id, the visit clock (spawn minute), the order's items with their available/acceptable/paid/processed flags, completed, leaving, basket, queue spot, the citizen, plus SeatItem/SeatIndex/Remaining kept for later efforts. Simulator -> Host -> the players INSIDE that building, routed exactly like CustomerPuppetState (144) with the same SimulatorPid == sender check. Final=true is the one snapshot a simulator sends at the moment it lets go (Reason "exit" from BuildingManager.ResetIndoors, "authority" from the swap to follower); Final=false rows are the continuous on-change stream (at most 1/s per building, full set every 10 s) that leaves the taker recent state when a simulator disconnects. The taker applies the newest row per id when it adopts the copies (CustomerHandoff / CustomerPuppets.AdoptPuppetAsNative).
         CustomerUnsoldLeave   = 220,     // H-HANDOFF-1 R1 (hand-off stock S4, 2026-09-27; rides protocol 26, unreleased): a customer whose visit crossed a hand-off walked out UNSOLD on a PARTNER's machine (the partner runs the owner's shop as a helper; nothing paid, order still open at the game's own Customer.Leave). Partner -> HOST -> the building OWNER, routed like HelperOrderForward (142) - same sender check, owner lookup and Housing/Business grant gate. Items = the processed, non-service, non-bag lines: exactly what the game's own Leave puts back on a shelf (Customer.cs:316-327). The owner returns min(those lines, the units its own shelves gave the visit) and nothing more; the other units are the native pick-then-leave loss. Once per visit on both sides.
         WorldSettings         = 221,     // SAVED-SETTINGS-1 (user-approved 2026-09-29, decisions 18/20/21; protocol 27): the saved world's FLEXIBLE settings the host changed in the load lobby. Host -> client {Rev, Settings} when the client reports its world loaded (the Settled/Running applying-edge), after the host's own world-ready apply (broadcast), and on ask; the client applies through the game's own SaveGameManager.ApplyNewDifficulty (skipped when already equal). Client -> host with Settings = null = 'my applied rev differs from the heartbeat's WorldRev - re-send'.
+        PropertyForfeit       = 222,     // BAN-PLAYERS-1 build B (owner-approved 2026-10-01; protocol 27, unreleased - additive): Host -> clients. The host REMOVED a banned player's property: per banned owner (stable id) the addresses it rented and bought, the ones whose contents go, and the game day. A machine that is not that owner clears its copy (for-rent flags, name, type, furniture/stock/storage; a building its own player holds is never touched); the banned player's OWN machine - only if it is ever unbanned and rejoins (the host replays the record at its world-ready) - ends those leases through the game's own lease-end steps WITHOUT any payout and gives up the bought buildings. Host -> client only.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -2162,6 +2163,28 @@ namespace BigAmbitionsMP
         public bool PowerNapAllowed { get; set; } = true;   // 2026-09-05 POWERNAP host gate (additive; old peers ignore)
     }
 
+    /// <summary>BAN-PLAYERS-1 build B (MessageType.PropertyForfeit, protocol 27, additive). Host -> client.</summary>
+    public class PropertyForfeitPayload
+    {
+        public List<PropertyForfeitInfo> Entries { get; set; } = new();
+        /// <summary>Log only: "removed" (the moment the host removed it) or "world-ready re-send".</summary>
+        public string Why { get; set; } = "";
+    }
+
+    /// <summary>One banned owner's forfeited addresses (BAN-PLAYERS-1 build B).</summary>
+    public class PropertyForfeitInfo
+    {
+        public string OwnerStable { get; set; } = "";
+        public string OwnerName { get; set; } = "";
+        /// <summary>Address keys the owner RENTED (rent ledger) - released to the for-rent market.</summary>
+        public List<string> Rented { get; set; } = new();
+        /// <summary>Address keys the owner BOUGHT (deed ledger) - back on the sale market as unowned.</summary>
+        public List<string> Bought { get; set; } = new();
+        /// <summary>Address keys whose CONTENTS (furniture, stock, storage) are cleared on a machine that is not the
+        /// owner's: every rented one, and a bought one nobody else rents.</summary>
+        public List<string> Cleared { get; set; } = new();
+        public int Day { get; set; }
+    }
     /// <summary>SAVED-SETTINGS-1 (MessageType.WorldSettings, protocol 27). Host -> client: Rev + the host's live world
     /// settings (only the flexible fields are applied; days per year / starting money / age / tutorial stay each machine's own,
     /// exactly as the game's ApplyNewDifficulty keeps them). Client -> host: Settings = null asks for a re-send (Rev = the

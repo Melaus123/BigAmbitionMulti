@@ -3848,6 +3848,7 @@ namespace BigAmbitionsMP
                 }
                 m.BuildingOwners = BuildOwnersStableKeyed();
                 m.BuildingRealEstateOwners = RealEstateOwnersStableKeyed();
+                m.Forfeits = MPServer.SnapshotForfeits();   // BAN-PLAYERS-1 build B (B1): the forfeit record rides the ledgers it changed
                 m.Grants = new List<MpGrant>();
                 foreach (var e in GrantSync.AllStoreEntries())
                     m.Grants.Add(new MpGrant { Kind = e.Kind, Owner = e.Owner, Grantee = e.Grantee, GranteeName = GrantSync.NameOf(e.Grantee) });

@@ -7356,6 +7356,315 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectPlayerVacate: {ex.Message}"); }
         }
 
+        // ── BAN-PLAYERS-1 build B (owner-approved 2026-10-01): REMOVE PROPERTY of a banned player ────────────────────
+        // The host releases every address the banned player rented or bought (MPServer.RemoveProperty) and tells every
+        // machine with one PropertyForfeit message. A machine that is NOT the banned player clears its copy (flags, name,
+        // type, furniture/stock/storage; a building its own player holds is never touched). The banned player's OWN machine
+        // - only if it is ever unbanned and rejoins - ends those leases with the game's own lease-end steps WITHOUT any
+        // payout and gives up the bought buildings. Vehicles are held only in their owner's own save (other machines hold
+        // no VehicleInstance of another player), so they go on the owner's machine.
+        private static readonly List<PropertyForfeitPayload> _heldForfeits = new();
+
+        /// <summary>CLIENT (network thread): a forfeit notice from the host - applied on the MAIN thread once this world is
+        /// settled (held until then, so the load window cannot race the save's own records).</summary>
+        internal static void ReceivePropertyForfeit(PropertyForfeitPayload? p)
+        {
+            if (p?.Entries == null || p.Entries.Count == 0) return;
+            EnqueueOnMainThread(() =>
+            {
+                try
+                {
+                    if (!MPWorldReady.IsSettled || SaveGameManager.Current == null)
+                    {
+                        _heldForfeits.Add(p);
+                        Plugin.Logger.LogInfo($"[Forfeit] notice held ({p.Entries.Count} entr(ies), '{p.Why}') - this world is not settled yet; applied at the settled edge.");
+                        return;
+                    }
+                    ApplyPropertyForfeit(p);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] receive: {ex.Message}"); }
+            });
+        }
+
+        /// <summary>CLIENT, MAIN THREAD (MPClient.TickSettledReport, every frame): the settled edge releases held notices.
+        /// A notice held by a session that has since ended is discarded (it belongs to that host's world).</summary>
+        internal static void TickHeldForfeits()
+        {
+            if (_heldForfeits.Count == 0) return;
+            try
+            {
+                if (!MPClient.IsConnected)
+                {
+                    Plugin.Logger.LogInfo($"[Forfeit] {_heldForfeits.Count} held notice(s) discarded - the session ended before this world settled.");
+                    _heldForfeits.Clear();
+                    return;
+                }
+                if (!MPWorldReady.IsSettled || SaveGameManager.Current == null) return;
+                var held = new List<PropertyForfeitPayload>(_heldForfeits);
+                _heldForfeits.Clear();
+                foreach (var p in held) ApplyPropertyForfeit(p);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] held release: {ex.Message}"); }
+        }
+
+        /// <summary>CLIENT, MAIN THREAD: one notice - the entry naming THIS machine's stable id is its own property (B4),
+        /// every other entry is a viewer clear.</summary>
+        internal static void ApplyPropertyForfeit(PropertyForfeitPayload p)
+        {
+            foreach (var e in p.Entries)
+            {
+                if (e == null) continue;
+                try
+                {
+                    bool mine = !string.IsNullOrEmpty(e.OwnerStable) && e.OwnerStable == MPConfig.StableId;
+                    if (mine) OwnerApplyForfeit(e, p.Why ?? "");
+                    else ViewerApplyForfeit(e, p.Why ?? "");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] apply for '{e.OwnerName}': {ex.Message}"); }
+            }
+            try { HamptonsAccess.RefreshAllBlockers(); }
+            catch (Exception ex) { HamptonsAccess.WarnOnce("Forfeit/hamptons-refresh", ex); }
+        }
+
+        /// <summary>HOST, MAIN THREAD (MPServer.RemoveProperty step 5): release the host's own copy of one forfeited address.
+        /// The ledger entries are already gone. Rented -> back on the for-rent market (MakeRegVacant); bought -> any listing
+        /// of the banned player replaced by the game's own unowned market listing (RealEstateHelper.SetBuildingForSale, the
+        /// market value; deed field cleared); contents (furniture, stock, storage) cleared where asked. No money moves.</summary>
+        internal static void HostApplyForfeit(string addr, bool rented, bool bought, bool clear, string ownerName)
+        {
+            try
+            {
+                var reg = FindRegistration(addr);
+                if (reg == null) { Plugin.Logger.LogWarning($"[Forfeit] host '{addr}': no registration - ledgers released, world copy untouched."); return; }
+                bool flipped = MergerFlip.IsFlipped(addr);
+                if (flipped) MergerFlip.ParkRunnerIfFlipped(addr, "");   // the flip's OFF edge (keys already left the company) restores an EMPTY tenant mark
+                if (rented) MakeRegVacant(reg);
+                bool listed = false;
+                if (bought)
+                {
+                    try
+                    {
+                        var gi = SaveGameManager.Current;
+                        if (gi?.buildingsForSale != null) gi.buildingsForSale.RemoveAll(x => GameStateReader.AddressKey(x.address) == addr);
+                        RealEstateHelper.SetBuildingForSale(reg);
+                        listed = true;
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] host '{addr}': sale-market listing failed: {ex.Message}"); }
+                    if (!rented && clear) { try { reg.AvailableForRent = true; } catch { } }
+                }
+                int items = 0, veh = 0;
+                if (clear) ClearForfeitContents(reg, addr, false, out items, out veh);
+                RefreshForfeitPoi(reg);
+                string what = (rented ? "back on the for-rent market" : "")
+                            + (rented && bought ? "; " : "")
+                            + (bought ? (listed ? "back on the sale market as unowned" : "deed freed (listing failed)") : "");
+                Plugin.Logger.LogInfo($"[Forfeit] host '{addr}' released (owner '{ownerName}'): {what}; {items} item(s) cleared from the host's copy{(flipped ? "; company flip parked empty" : "")}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] host '{addr}': {ex.Message}"); }
+        }
+
+        /// <summary>CLIENT, MAIN THREAD: another player's forfeited addresses on THIS machine's copy. A building this
+        /// machine's own player rents (true tenancy, not a company flip) or owns is never touched (refused, logged).</summary>
+        private static void ViewerApplyForfeit(PropertyForfeitInfo e, string why)
+        {
+            var all = new List<string>(e.Rented ?? new List<string>());
+            foreach (var a in e.Bought ?? new List<string>()) if (!all.Contains(a)) all.Add(a);
+            int done = 0, skipped = 0, itemsAll = 0;
+            foreach (var addr in all)
+            {
+                try
+                {
+                    var reg = FindRegistration(addr);
+                    if (reg == null) { skipped++; Plugin.Logger.LogWarning($"[Forfeit] viewer '{addr}': no registration here - skipped."); continue; }
+                    bool rented = e.Rented != null && e.Rented.Contains(addr);
+                    bool clear = e.Cleared != null && e.Cleared.Contains(addr);
+                    bool ownRent = false; try { ownRent = MergerFlip.TrulyMine(reg); } catch { }
+                    bool ownDeed = false; try { ownDeed = reg.BuildingOwnedByPlayer; } catch { }
+                    if (ownRent || ownDeed)
+                    {
+                        skipped++;
+                        Plugin.Logger.LogWarning($"[Forfeit] viewer '{addr}' REFUSED - this machine's own player {(ownRent ? "rents" : "owns")} it; a forfeit of '{e.OwnerName}' never touches another player's holding.");
+                        continue;
+                    }
+                    bool flipped = MergerFlip.IsFlipped(addr);
+                    if (flipped) MergerFlip.ParkRunnerIfFlipped(addr, "");   // the flip's OFF edge restores an EMPTY tenant mark
+                    if (rented)
+                    {
+                        // The vacate notify's own writes (ApplyBuildingVacated): tenant off, name/type cleared, for rent.
+                        reg.AvailableForRent = true;
+                        if (!flipped) { try { reg.businessOwnerRivalId = ""; } catch { } }
+                        try { reg.BusinessName = null; } catch { }
+                        try { reg.businessTypeName = "ba:businesstype_empty"; } catch { }
+                    }
+                    else if (clear) { try { reg.AvailableForRent = true; } catch { } }
+                    int items = 0, veh = 0;
+                    if (clear) ClearForfeitContents(reg, addr, false, out items, out veh);
+                    RefreshForfeitPoi(reg);
+                    done++; itemsAll += items;
+                    Plugin.Logger.LogInfo($"[Forfeit] viewer '{addr}' released ({(rented ? "rented" : "bought")}{(flipped ? ", company flip parked empty" : "")}): {items} item(s) cleared from this copy.");
+                }
+                catch (Exception ex) { skipped++; Plugin.Logger.LogWarning($"[Forfeit] viewer '{addr}': {ex.Message}"); }
+            }
+            Plugin.Logger.LogInfo($"[Forfeit] viewer apply for '{e.OwnerName}' ({why}): {done} address(es) released, {itemsAll} item(s) cleared, {skipped} skipped.");
+        }
+
+        /// <summary>B4 - the banned player's OWN machine (unbanned, rejoined), MAIN THREAD. Every forfeited lease this world
+        /// still holds is ended with the game's own lease-end steps (BizManPresentation.OnTerminateContractConfirm,
+        /// decompile :621-705) MINUS its two payouts - the deposit/furniture/vehicle refund (ChangeMoneySafe
+        /// 'depositreturnfurniture', :650) and the bare deposit refund (:700) are simply never called, and nothing else in
+        /// those steps moves money (so the mod's lease-end watch, which keys on those two refund transactions, never fires
+        /// either). Every forfeited building it still owns is given up (the realEstate record and its own sale listing go,
+        /// no sale price is paid). The wallet is read before and after and logged.</summary>
+        private static void OwnerApplyForfeit(PropertyForfeitInfo e, string why)
+        {
+            var gi = SaveGameManager.Current;
+            if (gi == null) { Plugin.Logger.LogWarning("[Forfeit] own property: no world loaded - nothing applied."); return; }
+            float before = 0f; try { before = gi.Money; } catch { }
+            int leases = 0, deeds = 0, already = 0, items = 0, veh = 0;
+            foreach (var addr in e.Rented ?? new List<string>())
+            {
+                try
+                {
+                    var reg = FindRegistration(addr);
+                    if (reg == null) { Plugin.Logger.LogWarning($"[Forfeit] own lease '{addr}': no registration here - skipped."); continue; }
+                    bool rentedHere = false; try { rentedHere = reg.RentedByPlayer && !MergerFlip.IsFlipped(addr); } catch { }
+                    if (!rentedHere) { already++; Plugin.Logger.LogInfo($"[Forfeit] own lease '{addr}': not rented on this machine - nothing to end."); continue; }
+                    OwnerEndLeaseNoPayout(reg, addr, out var i1, out var v1);
+                    leases++; items += i1; veh += v1;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own lease '{addr}': {ex.Message}"); }
+            }
+            foreach (var addr in e.Bought ?? new List<string>())
+            {
+                try
+                {
+                    var reg = FindRegistration(addr);
+                    if (reg == null) { Plugin.Logger.LogWarning($"[Forfeit] own building '{addr}': no registration here - skipped."); continue; }
+                    bool ownedHere = false; try { ownedHere = reg.BuildingOwnedByPlayer; } catch { }
+                    if (!ownedHere) { already++; Plugin.Logger.LogInfo($"[Forfeit] own building '{addr}': not owned on this machine - nothing to give up."); continue; }
+                    bool clear = e.Cleared != null && e.Cleared.Contains(addr);
+                    OwnerGiveUpBuilding(reg, addr, clear, out var i2, out var v2);
+                    deeds++; items += i2; veh += v2;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own building '{addr}': {ex.Message}"); }
+            }
+            float after = before; try { after = gi.Money; } catch { }
+            if (leases + deeds > 0) { try { SaveGameManager.MarkChange(); } catch { } }
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            Plugin.Logger.LogInfo($"[Forfeit] OWN property removed by the host's ban (day {e.Day}, {why}): {leases} lease(s) ended, {deeds} bought building(s) given up, {already} already released; {items} item(s) and {veh} vehicle(s) removed; no payout - money before={before.ToString("F2", inv)} after={after.ToString("F2", inv)}.");
+        }
+
+        /// <summary>B4: native's lease end for one building, without the payouts. A business is shut down first with the
+        /// game's own BusinessHelper.ShutdownBusiness (decompile Helpers/BusinessHelper.cs:1340) - native's terminate does
+        /// NOT unassign staff (read), ShutdownBusiness does (UnassignEmployeeFromAllWorkshifts for every employee assigned to
+        /// the address) and also drops that address's delivery contracts, licensing rows, logistics and an HQ's plans; it
+        /// moves no money. Homes (residential) have no business and skip it, exactly as native keeps their type.</summary>
+        private static void OwnerEndLeaseNoPayout(BuildingRegistration reg, string addr, out int items, out int vehicles)
+        {
+            string btype = ""; try { btype = reg.GetBuildingType() ?? ""; } catch { }
+            bool residential = btype == "ba:buildingtype_residential";
+            string name = ""; try { name = reg.BusinessName ?? ""; } catch { }
+            if (!residential)
+            {
+                try { BusinessHelper.ShutdownBusiness(reg); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own lease '{addr}': ShutdownBusiness: {ex.Message}"); }
+            }
+            ClearForfeitContents(reg, addr, true, out items, out vehicles);
+            if (name.Length > 0)
+            {
+                try { string dir = LogoHelper.GetPlayerBusinessLogoPath(name); if (System.IO.Directory.Exists(dir)) System.IO.Directory.Delete(dir, true); } catch { }
+            }
+            reg.BusinessName = null;
+            reg.RentedByPlayer = false;
+            reg.AvailableForRent = true;
+            try { reg.takenOver = false; } catch { }
+            if (btype == "ba:buildingtype_warehouse")
+            { try { Buildings.Office.Headquarters.PurchasingAgentHelper.CancelPlansThatDeliverToAddress(reg.Address); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] own lease '{addr}': purchasing plans: {ex.Message}"); } }
+            if (!residential) reg.businessTypeName = "ba:businesstype_empty";
+            RefreshForfeitPoi(reg);
+            try { UI.Guiders.GuidersManager.UpdateGuidersWithAddress(reg.Address); } catch { }
+            try { RealEstateHelper.AddNoHomeModifierIfNeeded(); } catch { }
+            var a = reg.Address;
+            try { SaveGameManager.Current.FurnitureDeliveryContracts.RemoveAll(x => x.toAddress == a); } catch { }
+            try { Buildings.BuildingTypes.Special.FoodDelivery.FoodDeliveryHelper.RemoveContractsForAddress(a); } catch { }
+            try
+            {
+                var tasksUi = InstanceBehavior<UI.UIs>.Instance?.tasksUI;
+                if (tasksUi != null)
+                {
+                    var done = new List<Entities.TodoTask>();
+                    foreach (var t in SaveGameManager.Current.TodoTasks)
+                        if (t != null && t.address == a) done.Add(t);
+                    if (done.Count > 0) tasksUi.InstantlyCompleteListOfTasks(done);
+                }
+            }
+            catch { }
+            try { GameEvent.Invoke("ba:gameevent_rentedbuilding"); } catch { }
+            Plugin.Logger.LogInfo($"[Forfeit] own lease '{addr}' ENDED ({(residential ? "home" : (name.Length > 0 ? $"business '{name}' shut down, staff unassigned" : "no business"))}): {items} item(s) and {vehicles} vehicle(s) removed, NO refund.");
+        }
+
+        /// <summary>B4: give up one bought building without a sale price - the game's own AI-purchase steps
+        /// (RealEstateHelper.SimulateCompetitorBuyingPlayerBuildings, decompile :138-149) minus the payment: the realEstate
+        /// record and this player's own sale listing go; contents and vehicles at the address go when the host cleared them.</summary>
+        private static void OwnerGiveUpBuilding(BuildingRegistration reg, string addr, bool clear, out int items, out int vehicles)
+        {
+            items = 0; vehicles = 0;
+            if (clear) ClearForfeitContents(reg, addr, true, out items, out vehicles);
+            var gi = SaveGameManager.Current;
+            var a = reg.Address;
+            int listings = 0, records = 0;
+            try { listings = gi.buildingsForSale.RemoveAll(x => x.address == a); } catch { }
+            try { records = gi.realEstate.RemoveAll(x => x != null && x.address == a); } catch { }
+            RefreshForfeitPoi(reg);
+            try { RealEstateHelper.AddNoHomeModifierIfNeeded(); } catch { }
+            Plugin.Logger.LogInfo($"[Forfeit] own building '{addr}' GIVEN UP: {records} ownership record(s) and {listings} own sale listing(s) removed; {items} item(s) and {vehicles} vehicle(s) removed; NO sale price.");
+        }
+
+        /// <summary>Clear one address's contents on THIS machine's copy: every item (furniture, shelves and the stock in
+        /// them, storage) through the game's own RemoveItemInstanceFromBuilding; a Hamptons house's served interior through
+        /// the existing tenancy-end clear (viewers); on the OWNER's machine also the vehicles at the address (native's
+        /// VehicleInstance.Delete, with the controller for a Hamptons motor vehicle exactly as native passes it). The
+        /// interior baselines are forgotten and an open interior of this address is redrawn.</summary>
+        private static void ClearForfeitContents(BuildingRegistration reg, string addr, bool ownerSide, out int items, out int vehicles)
+        {
+            items = 0; vehicles = 0;
+            bool hamptons = false; try { hamptons = reg.BuildingCached != null && reg.BuildingCached.IsHamptonsHouse(); } catch { }
+            try { items = reg.itemInstances?.Count ?? 0; } catch { }
+            if (hamptons && !ownerSide) ClearHamptonsInteriorOnTenancyEnd(addr, "property forfeited");
+            var list = new List<BigAmbitions.Items.ItemInstance>();
+            try { if (reg.itemInstances != null) foreach (var ii in reg.itemInstances.Values) if (ii != null) list.Add(ii); } catch { }
+            foreach (var ii in list) { try { reg.RemoveItemInstanceFromBuilding(ii); } catch { } }
+            if (ownerSide)
+            {
+                var vl = new List<VehicleInstance>();
+                try
+                {
+                    var vi = SaveGameManager.Current?.VehicleInstances;
+                    if (vi != null)
+                        foreach (var v in vi) { if (v == null) continue; bool here = false; try { here = v.Address == reg.Address; } catch { } if (here) vl.Add(v); }
+                }
+                catch { }
+                foreach (var v in vl)
+                {
+                    try
+                    {
+                        VehicleController? vc = null;
+                        if (hamptons) { try { if (v.VehicleType.IsMotorVehicle) vc = VehicleHelper.GetVehicleController(v); } catch { } }
+                        v.Delete(vc);
+                        vehicles++;
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] '{addr}': vehicle delete: {ex.Message}"); }
+                }
+            }
+            ForgetInteriorBaselines(addr);
+            try { TryRefreshActiveInteriorIfMatches(addr); } catch { }
+        }
+
+        private static void RefreshForfeitPoi(BuildingRegistration reg)
+        {
+            try { InstanceBehavior<CityManager>.Instance?.FindCityBuildingController(reg.Address)?.UpdatePoi(); } catch { }
+            try { InstanceBehavior<UI.UIs>.Instance?.mapFilters.ApplyFilters(); } catch { }
+        }
         /// <summary>Round-260 (field 20260810-232704): the ONE definition of "this reg is
         /// vacant" — used by the vacate reflect above and the ghost-tenancy healer. The
         /// field wedge: the reflect cleared only AvailableForRent + tenant id, while the
