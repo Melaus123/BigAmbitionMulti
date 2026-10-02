@@ -6384,6 +6384,115 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { return $"ERR cartstrand: {ex.Message}"; }
                 }
 
+                case "boxhold":
+                {
+                    // BOX-PLACEMENT-STUCK-1 reproduction lever (DEV; bundle 20260929-205810). Inside THIS machine's building:
+                    //   `boxhold list`            closed cardboard boxes: id, stock/discard tags, cargo, and the items that restock from it
+                    //   `boxhold pick [idPrefix]` the player's RIGHT-CLICK pick-up of a closed box with cargo (ItemController.SecondaryInteract)
+                    //   `boxhold state`           placement flag / held object alive / held id still in the building / probe hits
+                    //   `boxhold drain`           WRITES: the game's own sale-to-zero refill (ItemHelper.cs:1008-1012) on every item stocking
+                    //                             the held box's cargo - stock set to 0 then ReStockingHelper.RefillSingleItemWithLimit
+                    //   `boxhold esc`             the Escape key's path (PlacementHelper.CancelPlacementModeIfIsActive)
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                    string[] bh = arg.Trim().Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                    string bhv = bh.Length > 0 ? bh[0].ToLowerInvariant() : "state";
+                    try
+                    {
+                        var bm = InstanceBehavior<global::BuildingManager>.Instance;
+                        if (!global::BuildingManager.IsInsideBuilding || bm == null || bm.buildingRegistration == null) return "ERR not inside a building";
+                        var reg = bm.buildingRegistration;
+                        var cur = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced;
+                        if (bhv == "list")
+                        {
+                            var sb = new StringBuilder(); int n = 0;
+                            foreach (var ii in reg.itemInstances.Values)
+                            {
+                                if (ii == null || ii.itemName != "ba:itemname_closedcardboardbox") continue;
+                                n++;
+                                string iid = ii.id?.ToString() ?? "";
+                                sb.Append(" [").Append(iid.Substring(0, Math.Min(8, iid.Length)))
+                                  .Append(" stock=").Append(ii.ItemCached.HasTag(BigAmbitions.Tags.TagRef.Itemtag.isstockcontainer))
+                                  .Append(" discard=").Append(ii.ItemCached.HasTag(BigAmbitions.Tags.TagRef.Itemtag.discardcontainerwhenempty))
+                                  .Append(" parent=").Append(string.IsNullOrEmpty(ii.parentId) ? "-" : "Y").Append(" cargo=");
+                                foreach (var ci in ii.cargoInstances)
+                                    sb.Append(ci.itemName).Append('x').Append(ci.amount).Append(ci.nestedCargoInstances.Count > 0 ? "(nested)" : "").Append(ci.IsSealed ? "(sealed)" : "").Append(',');
+                                if (ii.cargoInstances.Count > 0)
+                                {
+                                    string want = ii.cargoInstances[0].itemName; int users = 0; long stockSum = 0;
+                                    foreach (var jj in reg.itemInstances.Values)
+                                    {
+                                        try { var st = jj?.GetStockInstance(); if (st != null && st.itemName == want) { users++; stockSum += (long)st.amount; } } catch { }
+                                    }
+                                    sb.Append(" users=").Append(users).Append(" userStock=").Append(stockSum);
+                                }
+                                sb.Append(']');
+                            }
+                            return $"OK boxhold list bldg='{reg.BusinessName}' items={reg.itemInstances.Count} boxes={n}{sb}";
+                        }
+                        if (bhv == "pick" || bhv == "pick!")
+                        {
+                            string pre = bh.Length > 1 ? bh[1].Trim() : "";
+                            global::ItemController? pc = null;
+                            foreach (var c in bm.allItemControllers)
+                                if (c != null && c.ItemInstance != null && c.itemName == "ba:itemname_closedcardboardbox" && c.ItemInstance.cargoInstances.Count > 0
+                                    && (pre.Length == 0 || (c.ItemInstance.id?.ToString() ?? "").StartsWith(pre, StringComparison.Ordinal))) { pc = c; break; }
+                            if (pc == null) return "ERR no closed box with cargo matching '" + pre + "'";
+                            DevBoxHold.Id = pc.ItemInstance.id?.ToString();
+                            DevBoxHold.RemovedSeen = 0;
+                            pc.SecondaryInteract();   // the player's right-click path, unchanged
+                            string how = "rightclick";
+                            string gate = "";
+                            if (!BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode)
+                            {
+                                try { gate = $" gate(rented={reg.RentedByPlayer} occupied={pc.Occupied} entering={bm.enteringBuilding} exiting={bm.exitingBuilding} vehicle={Helpers.PlayerHelper.IsUsingVehicle})"; } catch (Exception gex) { gate = " gate(" + gex.Message + ")"; }
+                                if (bhv == "pick!")
+                                {
+                                    how = "StartPlacementMode";   // the body SecondaryInteract calls (ItemController.cs:691) - the field's origin line
+                                    Buildings.Indoors.InteriorDesign.PlacementHelper.StartPlacementMode(pc);
+                                }
+                            }
+                            return $"OK boxhold pick id={DevBoxHold.Id} via={how} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode}{gate}";
+                        }
+                        if (bhv == "state")
+                        {
+                            bool objAlive = cur is UnityEngine.Object uo && uo != null;
+                            bool inReg = DevBoxHold.Id != null && reg.itemInstances.ContainsKey(DevBoxHold.Id);
+                            return $"OK boxhold state placing={cur != null} objAlive={objAlive} inReg={inReg} id={DevBoxHold.Id ?? "-"} probeHits={DevBoxHold.RemovedSeen} items={reg.itemInstances.Count}";
+                        }
+                        if (bhv == "drain")
+                        {
+                            var held = cur?.GetItemInstance();
+                            if (held == null || held.cargoInstances.Count == 0) return "ERR not holding an item with cargo";
+                            string want = held.cargoInstances[0].itemName; string hid = held.id?.ToString() ?? "";
+                            int rounds = 0, users = 0;
+                            while (rounds < 20 && reg.itemInstances.ContainsKey(hid))
+                            {
+                                users = 0;
+                                foreach (var jj in new System.Collections.Generic.List<BigAmbitions.Items.ItemInstance>(reg.itemInstances.Values))
+                                {
+                                    if (jj == null || ReferenceEquals(jj, held)) continue;
+                                    bool hit = false;
+                                    try { var st = jj.GetStockInstance(); if (st != null && st.itemName == want) { hit = true; st.amount = 0; } } catch { }   // as if customers bought it empty
+                                    if (!hit) continue;
+                                    users++;
+                                    ReStockingHelper.RefillSingleItemWithLimit(jj);  // the game's own refill on a sale to zero
+                                    if (!reg.itemInstances.ContainsKey(hid)) break;
+                                }
+                                if (users == 0) return $"ERR no item here stocks '{want}'";
+                                rounds++;
+                            }
+                            return $"OK boxhold drain item={want} users={users} rounds={rounds} boxInReg={reg.itemInstances.ContainsKey(hid)} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode} probeHits={DevBoxHold.RemovedSeen}";
+                        }
+                        if (bhv == "esc")
+                        {
+                            bool r = Buildings.Indoors.InteriorDesign.PlacementHelper.CancelPlacementModeIfIsActive();
+                            return $"OK boxhold esc ret={r} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode}";
+                        }
+                        return "ERR usage: boxhold list|pick [idPrefix]|state|drain|esc";
+                    }
+                    catch (Exception ex) { return $"ERR boxhold {bhv}: {ex.GetType().Name}: {ex.Message} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode}"; }
+                }
+
                 case "cartgrab":
                 {
                     // H-CARTICON-1 fold rig lever (DEV, WRITES the local player's position). `cartgrab <vid>`: take a PARTNER's
@@ -8069,6 +8178,30 @@ namespace BigAmbitionsMP
                 return false;
             }
             catch { return true; }
+        }
+    }
+
+    /// <summary>DEV lever state for `boxhold` (BOX-PLACEMENT-STUCK-1).</summary>
+    internal static class DevBoxHold { internal static string? Id; internal static int RemovedSeen; }
+
+    /// <summary>DEV log-only probe (BOX-PLACEMENT-STUCK-1): ItemController.OnInstanceRemoved is the game's object-destroy
+    /// hook for an item removed from its building (BuildingRegistration.RemoveItemInstanceFromBuilding -> onInstanceRemoved).
+    /// Logs the stack when the destroyed object is the one being placed (or the box `boxhold pick` took).</summary>
+    [HarmonyLib.HarmonyPatch(typeof(global::ItemController), nameof(global::ItemController.OnInstanceRemoved))]
+    public static class Patch_ItemController_OnInstanceRemoved_DevBoxProbe
+    {
+        static void Prefix(global::ItemController __instance)
+        {
+            try
+            {
+                var cur = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced;
+                bool held = cur != null && ReferenceEquals(cur, __instance);
+                string iid = __instance?.ItemInstance?.id?.ToString() ?? "";
+                if (!held && (DevBoxHold.Id == null || iid != DevBoxHold.Id)) return;
+                DevBoxHold.RemovedSeen++;
+                Plugin.Logger.LogWarning($"[TestDrive] BOXPROBE object of '{__instance?.itemName}' id={iid} destroyed while held={held}\n{Environment.StackTrace}");
+            }
+            catch { }
         }
     }
 }

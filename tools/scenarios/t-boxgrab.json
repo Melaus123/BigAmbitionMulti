@@ -1,0 +1,54 @@
+{
+  "id": "T-BOXGRAB",
+  "title": "BOX-PLACEMENT-STUCK-1 reproduction (bundle 20260929-205810). The CLIENT stands in its own fast-food shop (the reporter's 'Burgerking Foot', imported as fixture fx-boxgrab) and RIGHT-CLICK picks up a closed cardboard box that holds stock (the player's own path, ItemController.SecondaryInteract). Leg 1: hold it 40 s with the world running (in multiplayer the game's placement pause is suppressed). Leg 2: the game's own sale-to-zero refill on every item that stocks the box's goods (DEV lever, writes stock). A log-only DEV probe on ItemController.OnInstanceRemoved logs the stack if the held box's object is destroyed. Then the Escape path twice. Every boxhold answer is RECORDED, not judged. NO save.",
+  "preconditions": "Fixture fx-boxgrab (bugs15 bundle 20260929-205810: host Near_write -> melaus, client Kuronuk -> Client1; the client owns '76 ba:street_fifthavenue'). Dev build with the boxhold lever and the BOXPROBE probe (BAMP_DEV).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "fx-boxgrab",
+    "shop": "76 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "HarmonyException"
+  ],
+  "oracles_report": [
+    "\\[TestDrive\\] BOXPROBE",
+    "\\[BAMP\\] \\[TickIso\\]",
+    "CancelPlacementMode THREW",
+    "Tried to remove ba:itemname_closedcardboardbox",
+    "\\[BAMP\\] \\[Placement\\]",
+    "PlacementSystem\\.(UpdateItemPosition|RevertPlacement|StopPlacingItem)"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 4, "role": "h", "sleep_s": 45, "note": "both worlds load" },
+    { "seq": 5, "role": "both", "cmd": "mark TEST BOXGRAB START", "expect_result": "OK MARK" },
+    { "seq": 6, "role": "h", "sleep_s": 25 },
+    { "seq": 7, "role": "h", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 8, "role": "c", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 9, "role": "c", "cmd": "exitbuilding", "note": "recorded only - the fixture may load the client inside" },
+    { "seq": 10, "role": "c", "sleep_s": 8 },
+    { "seq": 11, "role": "c", "cmd": "enterbuilding ${shop}", "expect_result": "^OK enterbuilding" },
+    { "seq": 12, "role": "c", "sleep_s": 12 },
+    { "seq": 13, "role": "c", "cmd": "boxhold list", "expect_result": "^OK boxhold list .*boxes=[1-9]", "note": "PREMISE: the shop holds at least one closed box; recorded: tags, cargo, the items that restock from it" },
+    { "seq": 14, "role": "both", "cmd": "mark TEST BOXGRAB PICK", "expect_result": "OK MARK" },
+    { "seq": 15, "role": "c", "cmd": "boxhold pick! +vQxI", "expect_result": "^OK boxhold pick .*placing=True", "note": "PREMISE: the reporter's own box (+vQxI, 10 hot dogs, run 1) is being placed; via= says whether the right-click gate let it through or the StartPlacementMode body was called (gate values recorded)" },
+    { "seq": 16, "role": "c", "cmd": "boxhold state", "note": "recorded: immediately after the pick-up" },
+    { "seq": 17, "role": "c", "sleep_s": 40, "note": "leg 1: held with the world running" },
+    { "seq": 18, "role": "c", "cmd": "boxhold state", "note": "recorded: did the world destroy the held box by itself?" },
+    { "seq": 19, "role": "both", "cmd": "mark TEST BOXGRAB DRAIN", "expect_result": "OK MARK" },
+    { "seq": 20, "role": "c", "cmd": "boxhold drain", "note": "recorded: the game's own refill drains the held box" },
+    { "seq": 21, "role": "c", "sleep_s": 3 },
+    { "seq": 22, "role": "c", "cmd": "boxhold state", "note": "recorded: objAlive / inReg / placing after the drain" },
+    { "seq": 23, "role": "both", "cmd": "mark TEST BOXGRAB ESC", "expect_result": "OK MARK" },
+    { "seq": 24, "role": "c", "cmd": "boxhold esc", "note": "recorded: the Escape key's path, first press" },
+    { "seq": 25, "role": "c", "sleep_s": 2 },
+    { "seq": 26, "role": "c", "cmd": "boxhold esc", "note": "recorded: second press" },
+    { "seq": 27, "role": "c", "sleep_s": 2 },
+    { "seq": 28, "role": "c", "cmd": "boxhold state", "note": "recorded: still in placement mode = the player's wedge" },
+    { "seq": 29, "role": "both", "cmd": "mark TEST BOXGRAB END", "expect_result": "OK MARK" }
+  ]
+}
