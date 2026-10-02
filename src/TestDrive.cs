@@ -6393,6 +6393,11 @@ namespace BigAmbitionsMP
                     //   `boxhold drain`           WRITES: the game's own sale-to-zero refill (ItemHelper.cs:1008-1012) on every item stocking
                     //                             the held box's cargo - stock set to 0 then ReStockingHelper.RefillSingleItemWithLimit
                     //   `boxhold esc`             the Escape key's path (PlacementHelper.CancelPlacementModeIfIsActive)
+                    //   `boxhold place`           the game's own confirm of a move (PlacementHelper.cs:166-168: SaveCurrentItemBeingMovedPosition + CancelPlacementMode)
+                    //   `boxhold kill`            WRITES: deletes the held item mid-move through the game's own removal
+                    //                             (BuildingRegistration.RemoveItemInstanceFromBuilding; object destroyed at frame end) - any 'object gone mid-move'
+                    // state also reads: blocker = PlacementMode navigation blocker held, noSave = GameManager.preventAutoSave,
+                    // repairs = orphaned-move repairs (F2), guardLogs = [RestockGuard] lines (F1).
                     if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
                     string[] bh = arg.Trim().Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
                     string bhv = bh.Length > 0 ? bh[0].ToLowerInvariant() : "state";
@@ -6457,14 +6462,16 @@ namespace BigAmbitionsMP
                         {
                             bool objAlive = cur is UnityEngine.Object uo && uo != null;
                             bool inReg = DevBoxHold.Id != null && reg.itemInstances.ContainsKey(DevBoxHold.Id);
-                            return $"OK boxhold state placing={cur != null} objAlive={objAlive} inReg={inReg} id={DevBoxHold.Id ?? "-"} probeHits={DevBoxHold.RemovedSeen} items={reg.itemInstances.Count}";
+                            string blk = "?";
+                            try { blk = InstanceBehavior<global::GameManager>.Instance.playerController._activeNavigationBlockers.Contains(global::NavigationBlocker.PlacementMode).ToString(); } catch { }
+                            return $"OK boxhold state placing={cur != null} objAlive={objAlive} inReg={inReg} id={DevBoxHold.Id ?? "-"} probeHits={DevBoxHold.RemovedSeen} items={reg.itemInstances.Count} blocker={blk} noSave={(global::GameManager.preventAutoSave)} repairs={OrphanedPlacement.Repairs} guardLogs={HeldItemRestockGuard.SkipLogs}";
                         }
                         if (bhv == "drain")
                         {
                             var held = cur?.GetItemInstance();
                             if (held == null || held.cargoInstances.Count == 0) return "ERR not holding an item with cargo";
                             string want = held.cargoInstances[0].itemName; string hid = held.id?.ToString() ?? "";
-                            int rounds = 0, users = 0;
+                            int rounds = 0, users = 0; long refilled = 0;
                             while (rounds < 20 && reg.itemInstances.ContainsKey(hid))
                             {
                                 users = 0;
@@ -6476,19 +6483,39 @@ namespace BigAmbitionsMP
                                     if (!hit) continue;
                                     users++;
                                     ReStockingHelper.RefillSingleItemWithLimit(jj);  // the game's own refill on a sale to zero
+                                    try { refilled += (long)(jj.GetStockInstance()?.amount ?? 0); } catch { }   // units that came from OTHER storage
                                     if (!reg.itemInstances.ContainsKey(hid)) break;
                                 }
                                 if (users == 0) return $"ERR no item here stocks '{want}'";
                                 rounds++;
                             }
-                            return $"OK boxhold drain item={want} users={users} rounds={rounds} boxInReg={reg.itemInstances.ContainsKey(hid)} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode} probeHits={DevBoxHold.RemovedSeen}";
+                            int heldLeft = 0;
+                            foreach (var hc in held.cargoInstances) if (hc != null && hc.itemName == want) heldLeft += hc.amount;
+                            return $"OK boxhold drain item={want} users={users} rounds={rounds} boxInReg={reg.itemInstances.ContainsKey(hid)} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode} probeHits={DevBoxHold.RemovedSeen} heldLeft={heldLeft} refilled={refilled} guardLogs={HeldItemRestockGuard.SkipLogs}";
                         }
                         if (bhv == "esc")
                         {
                             bool r = Buildings.Indoors.InteriorDesign.PlacementHelper.CancelPlacementModeIfIsActive();
                             return $"OK boxhold esc ret={r} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode}";
                         }
-                        return "ERR usage: boxhold list|pick [idPrefix]|state|drain|esc";
+                        if (bhv == "place")
+                        {
+                            if (cur == null) return "ERR not placing";
+                            BigAmbitions.PlacementSystem.PlacementSystem.SaveCurrentItemBeingMovedPosition();
+                            Buildings.Indoors.InteriorDesign.PlacementHelper.CancelPlacementMode();
+                            bool pAlive = cur is UnityEngine.Object po && po != null;
+                            return $"OK boxhold place placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode} objAlive={pAlive} noSave={(global::GameManager.preventAutoSave)}";
+                        }
+                        if (bhv == "kill")
+                        {
+                            var kh = cur?.GetItemInstance();
+                            if (kh == null) return "ERR not placing";
+                            string kid = kh.id?.ToString() ?? "";
+                            reg.RemoveItemInstanceFromBuilding(kh);   // the game's own removal; the object is destroyed at the end of this frame
+                            Plugin.Logger.LogInfo($"[TestDrive] boxhold kill: removed held '{kh.itemName}' id={kid} mid-move.");
+                            return $"OK boxhold kill id={kid} inReg={reg.itemInstances.ContainsKey(kid)} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode}";
+                        }
+                        return "ERR usage: boxhold list|pick [idPrefix]|state|drain|esc|place|kill";
                     }
                     catch (Exception ex) { return $"ERR boxhold {bhv}: {ex.GetType().Name}: {ex.Message} placing={BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode}"; }
                 }

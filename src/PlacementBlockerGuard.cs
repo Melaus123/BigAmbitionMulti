@@ -188,3 +188,174 @@ namespace BigAmbitionsMP
     }
 }
 // PROBE-END: P-PLACEMENT-STRAND
+
+// ORPHANED-MOVE REPAIR - BOX-PLACEMENT-STUCK-1, F2 (owner-approved 2026-10-02, decision 72). Part of the GUARD:
+// it is outside the P-PLACEMENT-STRAND probe bracket on purpose and survives that probe's cleanup.
+//
+// THE FAILURE. The object being moved can be deleted mid-move (the restock in T-BOXGRAB-20261002-061901; any
+// other removal does the same - BuildingRegistration.RemoveItemInstanceFromBuilding destroys the object,
+// ItemController.cs:435-438). PlacementSystem.CurrentPlaceableItemBeingPlaced still points at the destroyed
+// controller, so IsInPlacementMode stays true (PlacementSystem.cs:89) and every exit route throws on the
+// missing transform before it clears anything:
+//   * every frame:  PlacementHelper.Run -> PlacementSystem.UpdateItemPosition (the TickIso NRE), so a click
+//                   never reaches the confirm path (PlacementHelper.cs:164-168);
+//   * Escape:       CancelPlacementModeIfIsActive -> PlacementSystem.RevertPlacement (:653-655) throws BEFORE
+//                   CancelPlacementMode is called - so the cancel guard above never ran, and nothing ever
+//                   called SetPreventAutoSave(false): that is why preventAutoSave stayed TRUE in the run;
+//   * any cancel:   CancelPlacementMode -> PlacementSystem.StopPlacingItem throws on its first line
+//                   (TransformCached.tag, PlacementSystem.cs:689), and the guard's own StopPlacingItem retry
+//                   threw the same way, so IsInPlacementMode never became false.
+// THE REPAIR. StopPlacingItem gets the safe body for a gone object (the field clears of :700-711, the outline
+// and grid steps only where their objects still exist), so the game's OWN CancelPlacementMode completes:
+// SetPreventAutoSave(false), onPlacementModeEnd, unpause, time control, camera reset and - at the end of that
+// coroutine - UnsetNavigationBlocker(PlacementMode). RevertPlacement has nothing to put back for a gone object
+// and is skipped. PlacementHelper.Run ends such a move through that same native cancel on the next frame, so
+// no exception repeats per frame and the player's next click is an ordinary click.
+namespace BigAmbitionsMP
+{
+    internal static class OrphanedPlacement
+    {
+        private static object? _repairedFor;
+        internal static int Repairs;   // DEV lever readout
+
+        /// <summary>True when the game still says an item is being moved but that item's object no longer exists.</summary>
+        internal static bool IsOrphaned()
+        {
+            var cur = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced;
+            if (cur == null) return false;
+            if (cur is UnityEngine.Object uo && uo == null) return true;
+            var t = BigAmbitions.PlacementSystem.PlacementSystem.TransformCached;
+            return (object?)t != null && t == null;
+        }
+
+        /// <summary>What StopPlacingItem (PlacementSystem.cs:687-712) does, minus the steps on the gone object.</summary>
+        internal static void FinishStopPlacing(string why)
+        {
+            var cur = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced;
+            try
+            {
+                if (cur is global::ItemController ic && ic.childItemControllers != null)
+                    for (int i = 0; i < ic.childItemControllers.Count; i++)
+                    {
+                        var k = ic.childItemControllers[i];
+                        if (k != null) { try { k.RemoveOutline(); } catch { } }
+                    }
+            }
+            catch { }
+            try
+            {
+                var lp = BigAmbitions.PlacementSystem.PlacementSystem.lastParentItem;
+                if (lp != null && !(lp is UnityEngine.Object lpo && lpo == null)) lp.RemoveOutline();
+            }
+            catch { }
+            try { BigAmbitions.PlacementSystem.PlacementSystem.currentBuildingGrid?.HideGrid(BigAmbitions.PlacementSystem.GridType.Both); } catch { }
+            ClearFields();
+            Repairs++;
+            try { Plugin.Logger.LogWarning($"[Placement] moved object was GONE - {why}: placement state cleared the way StopPlacingItem would (IsInPlacementMode now {BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode})."); } catch { }
+        }
+
+        /// <summary>The field clears of StopPlacingItem (:701-711); the property uses the game's own setter.</summary>
+        internal static void ClearFields()
+        {
+            BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced = null;
+            BigAmbitions.PlacementSystem.PlacementSystem.TransformCached = null;
+            BigAmbitions.PlacementSystem.PlacementSystem.ItemInstanceCached = null;
+            BigAmbitions.PlacementSystem.PlacementSystem.ItemCached = null;
+            BigAmbitions.PlacementSystem.PlacementSystem.IsItemRotating = false;
+            BigAmbitions.PlacementSystem.PlacementSystem.IsNewItemPlacementValid = false;
+            BigAmbitions.PlacementSystem.PlacementSystem.WasLastItemPlacementValid = true;
+            BigAmbitions.PlacementSystem.PlacementSystem.lastAttachmentPoint = null;
+            BigAmbitions.PlacementSystem.PlacementSystem.lastParentItem = null;
+            BigAmbitions.PlacementSystem.PlacementSystem.InitialParentPlaceableItem = null;
+            BigAmbitions.PlacementSystem.PlacementSystem.InitialParentAttachmentPoint = null;
+        }
+
+        /// <summary>Ends a move whose object is gone through the game's own cancel (main thread, from Run).</summary>
+        internal static void EndOrphanedMove()
+        {
+            var cur = BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced;
+            bool again = cur != null && ReferenceEquals(cur, _repairedFor);
+            _repairedFor = cur;
+            if (!again)
+            {
+                Plugin.Logger.LogWarning($"[Placement] the object being moved is GONE ({PlacementWatch.Describe()}) - "
+                    + "ending the move through the game's own cancel (nothing is left to place).");
+                bool designer = false;
+                try { designer = global::UI.InteriorDesigner.InteriorDesignerUI.IsOpen; } catch { }
+                PlacementHelper.CancelPlacementMode(setCamera: !designer);   // the guard above finalizes a throw
+            }
+            if (!BigAmbitions.PlacementSystem.PlacementSystem.IsInPlacementMode) return;
+            // The native cancel could not finish twice for the same object: clear it directly, release the pair.
+            Plugin.Logger.LogWarning("[Placement] native cancel left the gone object in place - clearing the placement state directly.");
+            FinishStopPlacing("direct clear after the native cancel");
+            try { GameManager.SetPreventAutoSave(false); } catch { }
+            try { InstanceBehavior<GameManager>.Instance.playerController.UnsetNavigationBlocker(NavigationBlocker.PlacementMode); } catch { }
+            try { PlacementWatch.NoteEnd("object gone - placement state cleared by the mod"); } catch { }
+        }
+    }
+
+    /// <summary>A gone object: the safe body instead of a throw on line 1. Any OTHER throw is finished the same
+    /// way and swallowed, so the caller (CancelPlacementMode) completes its own teardown.</summary>
+    [HarmonyPatch(typeof(BigAmbitions.PlacementSystem.PlacementSystem), nameof(BigAmbitions.PlacementSystem.PlacementSystem.StopPlacingItem))]
+    internal static class Patch_PlacementSystem_StopPlacingItem_OrphanRepair
+    {
+        [HarmonyPriority(Priority.First)]
+        static bool Prefix()
+        {
+            try
+            {
+                if (!OrphanedPlacement.IsOrphaned()) return true;
+                OrphanedPlacement.FinishStopPlacing("StopPlacingItem");
+                return false;
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Placement] orphan check in StopPlacingItem: {e.Message}"); return true; }
+        }
+
+        static Exception? Finalizer(Exception? __exception)
+        {
+            if (__exception == null) return null;
+            try
+            {
+                Plugin.Logger.LogError($"[Placement] StopPlacingItem THREW ({__exception.GetType().Name}: {__exception.Message}) - "
+                    + $"finishing its field clears so placement mode can end.\n{__exception.StackTrace}");
+                OrphanedPlacement.FinishStopPlacing("StopPlacingItem threw");
+            }
+            catch { }
+            return null;
+        }
+    }
+
+    /// <summary>Escape on a gone object: nothing to put back; let CancelPlacementModeIfIsActive reach the cancel.</summary>
+    [HarmonyPatch(typeof(BigAmbitions.PlacementSystem.PlacementSystem), nameof(BigAmbitions.PlacementSystem.PlacementSystem.RevertPlacement))]
+    internal static class Patch_PlacementSystem_RevertPlacement_OrphanRepair
+    {
+        static bool Prefix()
+        {
+            try
+            {
+                if (!OrphanedPlacement.IsOrphaned()) return true;
+                Plugin.Logger.LogInfo("[Placement] RevertPlacement skipped - the moved object is gone, nothing to put back.");
+                return false;
+            }
+            catch { return true; }
+        }
+    }
+
+    /// <summary>Per frame (GameManager.cs:562): a move whose object is gone is ended once through the native cancel.
+    /// Not placing: one static read and a null test, no allocation.</summary>
+    [HarmonyPatch(typeof(PlacementHelper), nameof(PlacementHelper.Run))]
+    internal static class Patch_PlacementHelper_Run_OrphanRepair
+    {
+        static bool Prefix()
+        {
+            if (BigAmbitions.PlacementSystem.PlacementSystem.CurrentPlaceableItemBeingPlaced == null) return true;
+            try
+            {
+                if (!OrphanedPlacement.IsOrphaned()) return true;
+                OrphanedPlacement.EndOrphanedMove();
+                return false;
+            }
+            catch (Exception e) { Plugin.Logger.LogWarning($"[Placement] orphaned-move repair: {e.Message}"); return true; }
+        }
+    }
+}
