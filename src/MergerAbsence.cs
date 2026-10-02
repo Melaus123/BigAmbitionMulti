@@ -1232,7 +1232,9 @@ namespace BigAmbitionsMP
             RequestResendIfInstallsLost();     // r4 F3
         }
 
-        private static readonly HashSet<string> _resendAsked = new();   // "ownerPid|address" (G3): ONE re-ask per hand-over
+        private static readonly HashSet<string> _resendAsked = new();   // "ownerPid|address" (G3): ONE re-ask per hand-over when the building is missing
+        private static readonly Dictionary<string, float> _resendLastAsk = new();   // ownerPid -> last ask (lost installs: paced asks, never stop)
+        private const float ResendPaceSeconds = 31f;   // the host serves one re-send per owner per 30 s (MPServer HostResendDue)
         private static readonly HashSet<string> _resendStopped = new();   // G3: the 'stopped asking' line, once per key per hand-over
 
         // ── ABSENT-OWNER-GATES-1 (C4): a hand-over that arrives before this machine's world is ready ──
@@ -1329,8 +1331,8 @@ namespace BigAmbitionsMP
         /// nothing ever noticed. Detect it off the MergerState broadcast (this machine is named as the
         /// simulator, yet SimulatesHere is false) and ask the host to hand it over again. No new message
         /// type and no new field: this type ALREADY travels client -> host carrying nothing but Ack, so
-        /// the request is Ack="resend". It recurs with the 10s broadcast until served (D15: the host
-        /// holds every push, so a lost request costs nothing); the log line is once per owner.</summary>
+        /// the request is Ack="resend". Lost installs: it recurs with the 10s broadcast, paced to the host's 30 s
+        /// window, until served; a missing building: one ask per hand-over (G3). The log line is once per owner.</summary>
         private static void RequestResendIfInstallsLost()
         {
             try
@@ -1340,7 +1342,7 @@ namespace BigAmbitionsMP
                 {
                     if (a == null || a.SimulatorPid != MPConfig.PlayerId) continue;
                     if (HeldFor(a.OwnerPid ?? "", a.OwnerStable ?? "")) continue;   // ABSENT-OWNER-GATES-1 (C4): applied at the settled edge
-                    bool lost = false; string lostAddr = "";
+                    bool lost = false; string lostAddr = ""; bool noReg = false;
                     // ABSENT-OWNER-GATES-1 (C4): 'simulated here' with NO building registration in a ready world is lost
                     // too (a hand-over applied before the world existed took nothing over).
                     bool settled = false; try { settled = MPWorldReady.IsSettled; } catch { }
@@ -1348,19 +1350,33 @@ namespace BigAmbitionsMP
                     {
                         if (string.IsNullOrEmpty(addr)) continue;
                         if (!SimulatesHere(addr)) { lost = true; lostAddr = addr; break; }
-                        if (settled && GameStatePatcher.FindRegistration(addr) == null) { lost = true; lostAddr = addr; break; }
+                        if (settled && GameStatePatcher.FindRegistration(addr) == null) { lost = true; lostAddr = addr; noReg = true; break; }
                     }
                     if (!lost) continue;
-                    // ABSENT-OWNER-GATES-1 G3 (review fold): ONE re-ask per (owner, address) per hand-over - a stand-in that
-                    // truly has no registration for a mark address re-asked every 10 s forever. The next applied hand-over
-                    // (ApplyHandover) re-arms it; until then one line says the asking stopped.
+                    // ABSENT-OWNER-GATES-1 G3 (review fold, corrected by the re-check of d972491): two different cases.
+                    // (a) 'simulated here' but NO building registration for the address: a re-send cannot create the building,
+                    //     so ONE ask per (owner, address) per hand-over, then one line says the asking stopped (the next applied
+                    //     hand-over re-arms it).
+                    // (b) the installs are GONE (SimulatesHere false): keep asking while it holds - recurrence-covered on this
+                    //     10 s broadcast, paced to the host's one-re-send-per-30 s window (MPServer HostResendDue) so a refused
+                    //     or held-then-discarded reply is followed by a new ask instead of leaving the shops unrun all session.
                     string rk = (a.OwnerPid ?? "") + "|" + lostAddr;
-                    if (!_resendAsked.Add(rk))
+                    if (noReg)
                     {
-                        if (_resendStopped.Add(rk))
-                            Plugin.Logger.LogWarning($"[Absence] '{lostAddr}' for '{a.OwnerPid}' is still not running here after one re-send request - "
-                                                   + "not asking again until the next hand-over.");
-                        continue;
+                        if (!_resendAsked.Add(rk))
+                        {
+                            if (_resendStopped.Add(rk))
+                                Plugin.Logger.LogWarning($"[Absence] '{lostAddr}' for '{a.OwnerPid}' has no building here after one re-send request - "
+                                                       + "not asking again until the next hand-over.");
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        float now = UnityEngine.Time.realtimeSinceStartup;
+                        string ok = a.OwnerPid ?? "";
+                        if (_resendLastAsk.TryGetValue(ok, out var last) && now - last < ResendPaceSeconds) continue;
+                        _resendLastAsk[ok] = now;
                     }
                     Plugin.Logger.LogInfo($"[Absence] installs for '{a.OwnerPid}' are gone here (scene churn) - "
                                         + "asking the host to re-send the hand-over.");
@@ -1701,7 +1717,7 @@ namespace BigAmbitionsMP
             RememberHeld();   // H-STANDINTILL-2 T1: BEFORE the undo empties _simHere
             try { UndoLocalAll("session/scene reset"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] reset undo: {ex.Message}"); }
             _simHere.Clear(); _known.Clear(); _promotedStaff.Clear(); _installed.Clear();
-            _snapQueue.Clear(); _idWarned.Clear(); _fieldWarned.Clear(); _resendAsked.Clear(); _resendStopped.Clear();
+            _snapQueue.Clear(); _idWarned.Clear(); _fieldWarned.Clear(); _resendAsked.Clear(); _resendStopped.Clear(); _resendLastAsk.Clear();
             // P3-C (C5): a held return payload dies with the connection - the host clears a mark only
             // after a SEND, so the next return re-sends the whole thing.
             _heldReturn = null; _heldLogged = false; _returnAddrs.Clear(); _replaced.Clear(); _lastToastKey = "";
