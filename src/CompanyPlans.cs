@@ -2410,6 +2410,34 @@ namespace BigAmbitionsMP
         /// diff now sends it.  No index crosses the wire any more.
         /// Ops: manager &lt;employeeId|->, warehouse &lt;addressKey|->, destadd [addressKey],
         /// destremove &lt;index&gt;, destchange &lt;index&gt; &lt;addressKey&gt;, target &lt;index&gt; &lt;item&gt; &lt;amount&gt;.</summary>
+        /// <summary>ISSUE-8 test probe: read actual native stock targets from
+        /// either the owner's plan or a tagged display plan, without modifying it.
+        /// This verifies amounts (not just destination counts) across the network.</summary>
+        private static string HqLogTargets(string id)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.logisticsManagerPlans == null) return "ERR no plans here";
+                foreach (var pl in gi.logisticsManagerPlans)
+                {
+                    if (pl == null || pl.id != id) continue;
+                    var parts = new List<string>();
+                    for (int i = 0; i < (pl.destinations?.Count ?? 0); i++)
+                    {
+                        var dst = pl.destinations[i];
+                        if (dst == null) continue;
+                        foreach (var t in dst.stockTargets ?? new List<BigAmbitions.Items.ItemAmountTarget>())
+                            if (t != null && !string.IsNullOrEmpty(t.itemName))
+                                parts.Add($"d{i}:{RowFieldSafe(t.itemName)}={t.targetAmount}");
+                    }
+                    return $"OK hqlog {id} targets=[{string.Join(";", parts)}]";
+                }
+                return $"ERR no logistics plan '{id}' here";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
         public static string TestDriveHqLog(string arg)
         {
             try
@@ -2419,6 +2447,7 @@ namespace BigAmbitionsMP
                 string id = a[0], op = a[1].ToLowerInvariant();
                 if (op == "shape") return HqLogShape(id);
                 if (op == "load")  return HqLogLoad(id);
+                if (op == "targets") return HqLogTargets(id);
                 string s = ""; int iv = 0, dest = -1;
                 switch (op)
                 {
