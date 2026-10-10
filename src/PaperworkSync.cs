@@ -1144,8 +1144,17 @@ namespace BigAmbitionsMP
         private static void Apply(CompanyListsPayload p)
         {
             string tag = MergerAbsence.DisplayOwnerTag(p.OwnerPid);
+            // ISSUE-8: preserve displayed logistics plans while the HQ UI holds them.
+            // A remove/reinstall on every snapshot orphaned the pane's reference and tag.
+            var keepLogistics = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pl in p.LogisticsManagerPlans ?? new List<PwLogisticsPlan>())
+                if (pl != null && !string.IsNullOrEmpty(pl.Id)
+                    && !string.IsNullOrEmpty(pl.HeadquartersAddressKey)
+                    && MergerFlip.IsFlipped(pl.HeadquartersAddressKey)
+                    && !MergerAbsence.SimulatesHere(pl.HeadquartersAddressKey))
+                    keepLogistics.Add(pl.Id + "|" + pl.HeadquartersAddressKey);
             int lifted = 0;
-            try { lifted = MergerAbsence.RemoveInstalledForOwner(tag); }
+            try { lifted = MergerAbsence.RemoveInstalledForOwner(tag, keepLogistics); }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] lift of the previous set: {ex.Message}"); }
 
             // The installer works one address at a time out of a paperwork bundle, so the rows are handed
@@ -1537,6 +1546,11 @@ namespace BigAmbitionsMP
             public int Bundles;          // bundles seen for this plan since the send, none of them the echo
         }
         private static readonly Dictionary<string, PendingPlan> _pendingPlan = new();
+
+        // ISSUE-8: an owner's older snapshot must not roll back an in-flight
+        // destination edit on the member's live display plan.
+        internal static bool HasPendingLogisticsEdit(string id)
+            => !string.IsNullOrEmpty(id) && _pendingPlan.ContainsKey(id);
 
         /// <summary>FOLD c1: one received bundle's verdict on a pending plan.  True = the mark is gone and
         /// the ordinary re-seed runs; false = keep what this machine sent.  The echo is recognised by SHAPE,

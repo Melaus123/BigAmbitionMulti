@@ -1,0 +1,213 @@
+{
+  "id": "T-ISSUE8-QUANTITIES",
+  "title": "Issue #8: merged HQ warehouse and importer quantities synchronize and round-trip between two players without losing plan identity",
+  "preconditions": "Fixture save1 with two merged-capable players. On host: HQ logistics plan with manager, source warehouse with an assigned truck/driver, a destination row, and at least one stocked product whose item name is ONE token (captured by the rig); HQ purchasing partnership with a one-token item in its product list. Both mod builds must match. The rig proves native target amounts, routed owner apply, and member's authoritative echo. Manual UI focus/typing check is still required: the headless rig cannot type into the Unity canvas. No save.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] plan edit REFUSED",
+    "whole plan:",
+    "installed untagged",
+    "\\[CompanyLists\\] display logistics reconcile:"
+  ],
+  "oracles_report": [
+    "\\[Plans\\] received",
+    "\\[Merger\\] plan edit applied",
+    "\\[Merger\\] purchasing target routed"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "sleep_s": 30,
+      "note": "Allow the first paperwork and plan feed to settle"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "logistics:[^:]+:[^#]*#max=[1-9][0-9]* dests=[1-9]",
+      "capture": {
+        "logPlan": "logistics:([^:]+):",
+        "logItem": "stock=\\[([^=;\\] ]+)="
+      }
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows purchasing",
+      "expect_result": "purchasing:[^:]+:[^#]*#lines=\\[item=[^ ]+ amount=",
+      "capture": {
+        "puPlan": "purchasing:([^:]+):",
+        "puItem": "item=([^ ]+) amount="
+      }
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "hqlog ${logPlan} target 0 ${logItem} 14",
+      "expect_result": "^OK hqlog .* applied",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] received ${hostPid}:",
+          "within_s": 8
+        }
+      ]
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "sleep_s": 4
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "hqlog ${logPlan} targets",
+      "expect_result": "^OK hqlog .* targets=\\[[^\\]]*d0:${logItem}=14(?:;|\\])",
+      "note": "Owner -> member: actual native destination target, not just DTO counters"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "hqlog ${logPlan} target 0 ${logItem} 25",
+      "expect_result": "^OK hqlog .* routed to '${hostPid}'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied .*logistics destset",
+          "within_s": 8
+        }
+      ]
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "sleep_s": 4
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "hqlog ${logPlan} targets",
+      "expect_result": "^OK hqlog .* targets=\\[[^\\]]*d0:${logItem}=25(?:;|\\])",
+      "note": "Member -> owner: routed destination amount persists in the real plan"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "hqlog ${logPlan} targets",
+      "expect_result": "^OK hqlog .* targets=\\[[^\\]]*d0:${logItem}=25(?:;|\\])",
+      "note": "Owner echo also preserves the member's displayed plan"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "hqtarget ${puPlan} ${puItem} 31",
+      "expect_result": "^OK hqtarget .* amount=31",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] received ${hostPid}:",
+          "within_s": 8
+        }
+      ]
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "sleep_s": 4
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows purchasing",
+      "expect_result": "purchasing:${puPlan}:[^#]*#lines=\\[[^\\]]*item=${puItem} amount=31(?: |\\])",
+      "note": "Owner -> member importer quantity must be published"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "planedit purchasing ${puPlan} target ${puItem} 47",
+      "expect_result": "^OK planedit purchasing .* routed=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied .*purchasing target",
+          "within_s": 8
+        }
+      ]
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "sleep_s": 4
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows purchasing",
+      "expect_result": "purchasing:${puPlan}:[^#]*#lines=\\[[^\\]]*item=${puItem} amount=47(?: |\\])",
+      "note": "Member -> owner target, then owner's authoritative echo"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "hqlog ${logPlan} load",
+      "expect_result": "^OK hqlog load sends=0",
+      "note": "A passive re-open must not turn a snapshot into a routed edit"
+    },
+    {
+      "seq": 25,
+      "role": "both",
+      "cmd": "mark TEST ISSUE8 QUANTITIES END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

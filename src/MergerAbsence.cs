@@ -1142,7 +1142,8 @@ namespace BigAmbitionsMP
 
         /// <summary>WAVE 4: lift every item installed under `ownerTag` back out (RemoveInstalled's own
         /// per-owner filter - an absence's items are tagged with a pid and are never touched).</summary>
-        public static int RemoveInstalledForOwner(string ownerTag) => RemoveInstalled(ownerTag);
+        public static int RemoveInstalledForOwner(string ownerTag, HashSet<string>? keepLogistics = null)
+            => RemoveInstalled(ownerTag, keepLogistics);
 
         /// <summary>THE EXECUTION-GUARD PREDICATE: is this list element one THIS machine installed (an
         /// absence hand-over's, or a wave-4 display copy)? A native pass must never run one it does not
@@ -1717,6 +1718,7 @@ namespace BigAmbitionsMP
             RememberHeld();   // H-STANDINTILL-2 T1: BEFORE the undo empties _simHere
             try { UndoLocalAll("session/scene reset"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] reset undo: {ex.Message}"); }
             _simHere.Clear(); _known.Clear(); _promotedStaff.Clear(); _installed.Clear();
+            _deferredDisplayLogistics.Clear(); // ISSUE-8: no pending display edits survive disconnect/reset.
             _snapQueue.Clear(); _idWarned.Clear(); _fieldWarned.Clear(); _resendAsked.Clear(); _resendStopped.Clear(); _resendLastAsk.Clear();
             // P3-C (C5): a held return payload dies with the connection - the host clears a mark only
             // after a SEND, so the next return re-sends the whole thing.
@@ -1797,6 +1799,8 @@ namespace BigAmbitionsMP
                     foreach (var pl in l.LogisticsManagerPlans)
                     {
                         if (pl == null || !Same(pl.HeadquartersAddressKey, addr)) continue;
+                        if (_installOwner.StartsWith("display:", StringComparison.Ordinal)
+                            && ReconcileDisplayLogistics(addr, pl)) continue;
                         var item = NewElement(gi.logisticsManagerPlans as IList);
                         if (item == null) continue;
                         SetField(item, "id", pl.Id);                       // the game's 'id' is readonly; reflection sets it, and a refusal only leaves the fresh uuid
@@ -2007,7 +2011,132 @@ namespace BigAmbitionsMP
 
         /// <summary>Lift installed items back out of this machine's lists. owner == null means EVERY
         /// owner; otherwise only that owner's entries move and everybody else's stay (r1 MAJOR-6).</summary>
-        private static int RemoveInstalled(string? owner)
+
+        // ISSUE-8: the game keeps the plan object in its open logistics UI.
+        // Reuse both the object and its nested destination rows. A new owner
+        // snapshot can update its values, but never during an unfinished edit.
+        private static readonly Dictionary<Buildings.Office.Headquarters.LogisticsManagerPlan, PwLogisticsPlan>
+            _deferredDisplayLogistics = new();
+        internal static bool HasDeferredDisplayLogistics => _deferredDisplayLogistics.Count > 0;
+
+        private static bool ReconcileDisplayLogistics(string hq, PwLogisticsPlan latest)
+        {
+            foreach (var e in _installed)
+            {
+                if (e.Owner != _installOwner || e.List != "logisticsManagerPlans"
+                    || !(e.Item is Buildings.Office.Headquarters.LogisticsManagerPlan live)
+                    || !string.Equals(live.id, latest.Id, StringComparison.Ordinal)
+                    || !Same(AddrKeyOf(live, "headquartersAddress"), hq)) continue;
+                if (DisplayLogisticsMatches(live, latest))
+                {
+                    _deferredDisplayLogistics.Remove(live);
+                    return true;
+                }
+                if (CompanyPlans.HeadquartersEditInProgress()
+                    || CompanyLists.HasPendingLogisticsEdit(live.id ?? ""))
+                    _deferredDisplayLogistics[live] = latest;
+                else
+                {
+                    ApplyDisplayLogistics(live, latest);
+                    _deferredDisplayLogistics.Remove(live);
+                }
+                return true;
+            }
+            return false;
+        }
+
+        internal static void FlushDeferredDisplayLogistics()
+        {
+            if (_deferredDisplayLogistics.Count == 0 || CompanyPlans.HeadquartersEditInProgress()) return;
+            foreach (var kv in new List<KeyValuePair<Buildings.Office.Headquarters.LogisticsManagerPlan, PwLogisticsPlan>>(_deferredDisplayLogistics))
+            {
+                if (!IsDisplayInstall(kv.Key)) { _deferredDisplayLogistics.Remove(kv.Key); continue; }
+                if (CompanyLists.HasPendingLogisticsEdit(kv.Key.id ?? "")) continue;
+                ApplyDisplayLogistics(kv.Key, kv.Value);
+                _deferredDisplayLogistics.Remove(kv.Key);
+            }
+        }
+
+        private static bool DisplayLogisticsMatches(
+            Buildings.Office.Headquarters.LogisticsManagerPlan live, PwLogisticsPlan dto)
+        {
+            if (!Same(live.assignedEmployeeId, dto.AssignedEmployeeId)
+                || !Same(AddrKeyOf(live, "targetAddress"), dto.TargetAddressKey)
+                || live.isFactory != dto.IsFactory) return false;
+            var a = live.destinations; var b = dto.Destinations;
+            if (a == null || b == null) return (a?.Count ?? 0) == 0 && (b?.Count ?? 0) == 0;
+            if (a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++)
+            {
+                if (a[i] == null || b[i] == null
+                    || !Same(AddrKeyOf(a[i], "deliveryTargetAddress"), b[i].DeliveryTargetAddressKey))
+                    return false;
+                var x = a[i].stockTargets; var y = b[i].StockTargets;
+                if ((x?.Count ?? 0) != (y?.Count ?? 0)) return false;
+                for (int j = 0; j < (x?.Count ?? 0); j++)
+                    if (x![j] == null || y![j] == null
+                        || !string.Equals(x[j].itemName, y[j].ItemName, StringComparison.Ordinal)
+                        || x[j].targetAmount != y[j].Amount) return false;
+            }
+            return true;
+        }
+
+        private static void ApplyDisplayLogistics(
+            Buildings.Office.Headquarters.LogisticsManagerPlan live, PwLogisticsPlan dto)
+        {
+            try
+            {
+                if (DisplayLogisticsMatches(live, dto)) return;
+                // Resolve every address before touching any live plan field.
+                Address? source = string.IsNullOrEmpty(dto.TargetAddressKey) ? null : AddressOfKey(dto.TargetAddressKey);
+                if (!string.IsNullOrEmpty(dto.TargetAddressKey) && source == null) return;
+                var rows = new List<(PwLogisticsDestination dto, Address? address)>();
+                foreach (var d in dto.Destinations ?? new List<PwLogisticsDestination>())
+                {
+                    if (d == null) continue;
+                    Address? destination = string.IsNullOrEmpty(d.DeliveryTargetAddressKey) ? null : AddressOfKey(d.DeliveryTargetAddressKey);
+                    if (!string.IsNullOrEmpty(d.DeliveryTargetAddressKey) && destination == null) return;
+                    rows.Add((d, destination));
+                }
+                if (live.destinations == null) return;
+                var spare = new List<Entities.LogisticsManagerPlanDestination>(live.destinations);
+                var updated = new List<Entities.LogisticsManagerPlanDestination>();
+                foreach (var (row, address) in rows)
+                {
+                    Entities.LogisticsManagerPlanDestination? target = null;
+                    for (int i = 0; i < spare.Count; i++)
+                        if (spare[i] != null && Same(AddrKeyOf(spare[i], "deliveryTargetAddress"), row.DeliveryTargetAddressKey))
+                        { target = spare[i]; spare.RemoveAt(i); break; }
+                    target ??= new Entities.LogisticsManagerPlanDestination();
+                    target.deliveryTargetAddress = address;
+                    target.stockTargets ??= new List<BigAmbitions.Items.ItemAmountTarget>();
+                    var available = new List<BigAmbitions.Items.ItemAmountTarget>(target.stockTargets);
+                    var items = new List<BigAmbitions.Items.ItemAmountTarget>();
+                    foreach (var entry in row.StockTargets ?? new List<PwItemOrderLine>())
+                    {
+                        if (entry == null || string.IsNullOrEmpty(entry.ItemName)) continue;
+                        BigAmbitions.Items.ItemAmountTarget? item = null;
+                        for (int i = 0; i < available.Count; i++)
+                            if (available[i] != null && available[i].itemName == entry.ItemName)
+                            { item = available[i]; available.RemoveAt(i); break; }
+                        item ??= new BigAmbitions.Items.ItemAmountTarget(entry.ItemName);
+                        item.targetAmount = entry.Amount;
+                        items.Add(item);
+                    }
+                    target.stockTargets.Clear();
+                    target.stockTargets.AddRange(items);
+                    updated.Add(target);
+                }
+                live.assignedEmployeeId = dto.AssignedEmployeeId;
+                live.targetAddress = source;
+                live.isFactory = dto.IsFactory;
+                live.destinations.Clear();
+                live.destinations.AddRange(updated);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[CompanyLists] display logistics reconcile: {ex.Message}"); }
+        }
+
+        private static int RemoveInstalled(string? owner, HashSet<string>? keepLogistics = null)
         {
             var gi = SaveGameManager.Current;
             int n = 0;
@@ -2015,6 +2144,12 @@ namespace BigAmbitionsMP
             {
                 var e = _installed[i];
                 if (owner != null && e.Owner != owner) continue;
+                if (keepLogistics != null && e.List == "logisticsManagerPlans"
+                    && e.Item is Buildings.Office.Headquarters.LogisticsManagerPlan live
+                    && keepLogistics.Contains((live.id ?? "") + "|" + AddrKeyOf(live, "headquartersAddress")))
+                    continue; // Keep the live object AND its display:owner tag.
+                if (e.Item is Buildings.Office.Headquarters.LogisticsManagerPlan removed)
+                    _deferredDisplayLogistics.Remove(removed);
                 if (TakeOne(gi, e.List, e.Item)) n++;
                 _installed.RemoveAt(i);
             }

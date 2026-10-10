@@ -390,16 +390,19 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (_pendingRedraw.Length == 0 && _pendingOwn.Count == 0) return;
+                if (_pendingRedraw.Length == 0 && _pendingOwn.Count == 0
+                    && !MergerAbsence.HasDeferredDisplayLogistics) return;
                 if (UnityEngine.Time.unscaledTime < _nextDeferredCheck) return;
                 _nextDeferredCheck = UnityEngine.Time.unscaledTime + 1f;
                 if (!CompanyHqPageOpen(out _, out _))
                 {
                     _pendingRedraw = ""; _pendingReason = "";
                     _pendingOwn.Clear();
+                    MergerAbsence.FlushDeferredDisplayLogistics();
                     return;
                 }
                 if (EditWindowOpen().Length > 0) return;
+                MergerAbsence.FlushDeferredDisplayLogistics();
                 if (_pendingRedraw.Length > 0)
                 {
                     string owner = _pendingRedraw;
@@ -485,6 +488,9 @@ namespace BigAmbitionsMP
         /// (d) the TRAINING SLIDER held - the mod's own EventTrigger pointer events (HrSliderHeld), not a
         ///     timer, because LoadPlan re-seats `trainingTargetSlider.value` from the plan (:98) and the
         ///     PointerUp commit would then publish the value the reload put there.</summary>
+        // ISSUE-8: one guard for the native UI redraw and owner-snapshot application.
+        internal static bool HeadquartersEditInProgress() => EditWindowOpen().Length > 0;
+
         private static string EditWindowOpen()
         {
             try
@@ -517,14 +523,24 @@ namespace BigAmbitionsMP
             {
                 var es = UnityEngine.EventSystems.EventSystem.current;
                 var go = es != null ? es.currentSelectedGameObject : null;
-                if (go == null) return false;
                 var ui = InstanceBehavior<UI.UIs>.Instance;
                 var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
-                if (bm == null || !go.transform.IsChildOf(bm.transform)) return false;
-                var tmp = go.GetComponentInParent<TMPro.TMP_InputField>();
-                if (tmp != null) return tmp.isFocused;
-                var leg = go.GetComponentInParent<UnityEngine.UI.InputField>();
-                return leg != null && leg.isFocused;
+                if (bm == null) return false;
+                if (go != null && go.transform.IsChildOf(bm.transform))
+                {
+                    var tmp = go.GetComponentInParent<TMPro.TMP_InputField>();
+                    if (tmp != null && tmp.isFocused) return true;
+                    var leg = go.GetComponentInParent<UnityEngine.UI.InputField>();
+                    if (leg != null && leg.isFocused) return true;
+                }
+                // ISSUE-8: NumberInput can briefly move EventSystem selection
+                // to its wrapper while the TMP field is still being edited.
+                // Consult the input's own focus instead of guessing from selection.
+                foreach (var input in bm.GetComponentsInChildren<TMPro.TMP_InputField>(false))
+                    if (input != null && input.isActiveAndEnabled && input.isFocused) return true;
+                foreach (var input in bm.GetComponentsInChildren<UnityEngine.UI.InputField>(false))
+                    if (input != null && input.isActiveAndEnabled && input.isFocused) return true;
+                return false;
             }
             catch { return false; }
         }
@@ -1954,6 +1970,22 @@ namespace BigAmbitionsMP
         /// this player's own is never mistaken for one.</summary>
         public static bool IsOverlayPlan(object plan) => plan != null && _rowOwner.ContainsKey(plan);
 
+        // ISSUE-8: a destroyed/rebuilt purchasing list may leave its pane holding
+        // the old detached partner row. That is NOT an own plan just because
+        // reference-based overlay tracking no longer recognizes the object.
+        public static bool RefuseStalePartnerPurchasingPlan(ImportPartnership? plan)
+        {
+            if (plan == null || IsOverlayPlan(plan) || !MergerSync.IAmMember) return false;
+            string hq = KeyOf(plan.headquartersAddress);
+            // Absence hand-over installs the real plan here, not a detached overlay.
+            if (hq.Length > 0 && MergerAbsence.SimulatesHere(hq)) return false;
+            if (hq.Length == 0 || !CompanyLists.TryOwnerOfAddress(hq, out var owner)
+                || string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return false;
+            if (_refusalLogged.Add("stale-purchasing|" + (plan.id ?? "")))
+                Plugin.Logger.LogWarning($"[Merger] stale partner purchasing row '{plan.id}' refused; awaiting fresh owner data.");
+            return true;
+        }
+
         /// <summary>U7 (HQ-UNION-2): how many PARTNER rows this family actually DREW on the page in its last
         /// draw.  It replaces HasOverlayRows, which read the row CACHE and answered a different question:
         /// _rowOwner is emptied only on suspend, a stale rebuild or Clear, so a partner headquarters that
@@ -2380,6 +2412,34 @@ namespace BigAmbitionsMP
         /// diff now sends it.  No index crosses the wire any more.
         /// Ops: manager &lt;employeeId|->, warehouse &lt;addressKey|->, destadd [addressKey],
         /// destremove &lt;index&gt;, destchange &lt;index&gt; &lt;addressKey&gt;, target &lt;index&gt; &lt;item&gt; &lt;amount&gt;.</summary>
+        /// <summary>ISSUE-8 test probe: read actual native stock targets from
+        /// either the owner's plan or a tagged display plan, without modifying it.
+        /// This verifies amounts (not just destination counts) across the network.</summary>
+        private static string HqLogTargets(string id)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi?.logisticsManagerPlans == null) return "ERR no plans here";
+                foreach (var pl in gi.logisticsManagerPlans)
+                {
+                    if (pl == null || pl.id != id) continue;
+                    var parts = new List<string>();
+                    for (int i = 0; i < (pl.destinations?.Count ?? 0); i++)
+                    {
+                        var dst = pl.destinations[i];
+                        if (dst == null) continue;
+                        foreach (var t in dst.stockTargets ?? new List<BigAmbitions.Items.ItemAmountTarget>())
+                            if (t != null && !string.IsNullOrEmpty(t.itemName))
+                                parts.Add($"d{i}:{RowFieldSafe(t.itemName)}={t.targetAmount}");
+                    }
+                    return $"OK hqlog {id} targets=[{string.Join(";", parts)}]";
+                }
+                return $"ERR no logistics plan '{id}' here";
+            }
+            catch (Exception ex) { return "ERR " + ex.Message; }
+        }
+
         public static string TestDriveHqLog(string arg)
         {
             try
@@ -2389,6 +2449,7 @@ namespace BigAmbitionsMP
                 string id = a[0], op = a[1].ToLowerInvariant();
                 if (op == "shape") return HqLogShape(id);
                 if (op == "load")  return HqLogLoad(id);
+                if (op == "targets") return HqLogTargets(id);
                 string s = ""; int iv = 0, dest = -1;
                 switch (op)
                 {
@@ -3568,7 +3629,13 @@ namespace BigAmbitionsMP
                     if (mutate != null) { try { mutate(plan); } catch (Exception mx) { Plugin.Logger.LogWarning($"[Plans] {family} {op} display: {mx.Message}"); } }
                     return Send(family, lg.id ?? "", lhq, lowner ?? "", op, what, null, strValue, intValue, number, flag, station);
                 }
-                if (!IsOverlayPlan(plan)) { OwnEditCommitted("pane edit"); return false; }   // my own plan: nothing changes here, but the company is watching
+                if (!IsOverlayPlan(plan))
+                {
+                    if (family == "purchasing" && RefuseStalePartnerPurchasingPlan(plan as ImportPartnership))
+                        return true; // Do not execute a native write onto a stale detached copy.
+                    OwnEditCommitted("pane edit");
+                    return false;
+                }
                 if (!_rowInfo.TryGetValue(plan, out var ri) || ri == null)
                 { Refused(family, op, "?", "the row is no longer in the registry"); return true; }
                 if (mutate != null) { try { mutate(plan); } catch (Exception mx) { Plugin.Logger.LogWarning($"[Plans] {family} {op} display: {mx.Message}"); } }
