@@ -1,0 +1,21 @@
+name: Issue 8 source contracts
+
+on:
+  push:
+    branches:
+      - fix/issue-8-merged-hq-quantities
+  pull_request:
+
+jobs:
+  source-contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify issue 8 static contracts and scenario
+        run: python -m unittest discover -s tools/tests -p 'test_issue8_*.py' -v
+
+# Unity/game integration is exercised with tools/scenarios/t-issue8-quantities.json
+# on a Windows installation of Big Ambitions. It cannot run on hosted CI.
