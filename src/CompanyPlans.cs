@@ -390,16 +390,19 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (_pendingRedraw.Length == 0 && _pendingOwn.Count == 0) return;
+                if (_pendingRedraw.Length == 0 && _pendingOwn.Count == 0
+                    && !MergerAbsence.HasDeferredDisplayLogistics) return;
                 if (UnityEngine.Time.unscaledTime < _nextDeferredCheck) return;
                 _nextDeferredCheck = UnityEngine.Time.unscaledTime + 1f;
                 if (!CompanyHqPageOpen(out _, out _))
                 {
                     _pendingRedraw = ""; _pendingReason = "";
                     _pendingOwn.Clear();
+                    MergerAbsence.FlushDeferredDisplayLogistics();
                     return;
                 }
                 if (EditWindowOpen().Length > 0) return;
+                MergerAbsence.FlushDeferredDisplayLogistics();
                 if (_pendingRedraw.Length > 0)
                 {
                     string owner = _pendingRedraw;
@@ -485,6 +488,9 @@ namespace BigAmbitionsMP
         /// (d) the TRAINING SLIDER held - the mod's own EventTrigger pointer events (HrSliderHeld), not a
         ///     timer, because LoadPlan re-seats `trainingTargetSlider.value` from the plan (:98) and the
         ///     PointerUp commit would then publish the value the reload put there.</summary>
+        // ISSUE-8: one guard for the native UI redraw and owner-snapshot application.
+        internal static bool HeadquartersEditInProgress() => EditWindowOpen().Length > 0;
+
         private static string EditWindowOpen()
         {
             try
@@ -1953,6 +1959,20 @@ namespace BigAmbitionsMP
         /// <summary>Is this plan object one of the DETACHED partner rows?  Reference identity, so a plan of
         /// this player's own is never mistaken for one.</summary>
         public static bool IsOverlayPlan(object plan) => plan != null && _rowOwner.ContainsKey(plan);
+
+        // ISSUE-8: a destroyed/rebuilt purchasing list may leave its pane holding
+        // the old detached partner row. That is NOT an own plan just because
+        // reference-based overlay tracking no longer recognizes the object.
+        public static bool RefuseStalePartnerPurchasingPlan(ImportPartnership? plan)
+        {
+            if (plan == null || IsOverlayPlan(plan) || !MergerSync.IAmMember) return false;
+            string hq = KeyOf(plan.headquartersAddress);
+            if (hq.Length == 0 || !CompanyLists.TryOwnerOfAddress(hq, out var owner)
+                || string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return false;
+            if (_refusalLogged.Add("stale-purchasing|" + (plan.id ?? "")))
+                Plugin.Logger.LogWarning($"[Merger] stale partner purchasing row '{plan.id}' refused; awaiting fresh owner data.");
+            return true;
+        }
 
         /// <summary>U7 (HQ-UNION-2): how many PARTNER rows this family actually DREW on the page in its last
         /// draw.  It replaces HasOverlayRows, which read the row CACHE and answered a different question:
@@ -3568,7 +3588,13 @@ namespace BigAmbitionsMP
                     if (mutate != null) { try { mutate(plan); } catch (Exception mx) { Plugin.Logger.LogWarning($"[Plans] {family} {op} display: {mx.Message}"); } }
                     return Send(family, lg.id ?? "", lhq, lowner ?? "", op, what, null, strValue, intValue, number, flag, station);
                 }
-                if (!IsOverlayPlan(plan)) { OwnEditCommitted("pane edit"); return false; }   // my own plan: nothing changes here, but the company is watching
+                if (!IsOverlayPlan(plan))
+                {
+                    if (family == "purchasing" && RefuseStalePartnerPurchasingPlan(plan as ImportPartnership))
+                        return true; // Do not execute a native write onto a stale detached copy.
+                    OwnEditCommitted("pane edit");
+                    return false;
+                }
                 if (!_rowInfo.TryGetValue(plan, out var ri) || ri == null)
                 { Refused(family, op, "?", "the row is no longer in the registry"); return true; }
                 if (mutate != null) { try { mutate(plan); } catch (Exception mx) { Plugin.Logger.LogWarning($"[Plans] {family} {op} display: {mx.Message}"); } }
