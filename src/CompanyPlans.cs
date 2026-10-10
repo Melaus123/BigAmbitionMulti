@@ -523,14 +523,24 @@ namespace BigAmbitionsMP
             {
                 var es = UnityEngine.EventSystems.EventSystem.current;
                 var go = es != null ? es.currentSelectedGameObject : null;
-                if (go == null) return false;
                 var ui = InstanceBehavior<UI.UIs>.Instance;
                 var bm = ui != null && ui.fullMenu != null ? ui.fullMenu.bizMan : null;
-                if (bm == null || !go.transform.IsChildOf(bm.transform)) return false;
-                var tmp = go.GetComponentInParent<TMPro.TMP_InputField>();
-                if (tmp != null) return tmp.isFocused;
-                var leg = go.GetComponentInParent<UnityEngine.UI.InputField>();
-                return leg != null && leg.isFocused;
+                if (bm == null) return false;
+                if (go != null && go.transform.IsChildOf(bm.transform))
+                {
+                    var tmp = go.GetComponentInParent<TMPro.TMP_InputField>();
+                    if (tmp != null && tmp.isFocused) return true;
+                    var leg = go.GetComponentInParent<UnityEngine.UI.InputField>();
+                    if (leg != null && leg.isFocused) return true;
+                }
+                // ISSUE-8: NumberInput can briefly move EventSystem selection
+                // to its wrapper while the TMP field is still being edited.
+                // Consult the input's own focus instead of guessing from selection.
+                foreach (var input in bm.GetComponentsInChildren<TMPro.TMP_InputField>(false))
+                    if (input != null && input.isActiveAndEnabled && input.isFocused) return true;
+                foreach (var input in bm.GetComponentsInChildren<UnityEngine.UI.InputField>(false))
+                    if (input != null && input.isActiveAndEnabled && input.isFocused) return true;
+                return false;
             }
             catch { return false; }
         }
