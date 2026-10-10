@@ -1977,6 +1977,8 @@ namespace BigAmbitionsMP
         {
             if (plan == null || IsOverlayPlan(plan) || !MergerSync.IAmMember) return false;
             string hq = KeyOf(plan.headquartersAddress);
+            // Absence hand-over installs the real plan here, not a detached overlay.
+            if (hq.Length > 0 && MergerAbsence.SimulatesHere(hq)) return false;
             if (hq.Length == 0 || !CompanyLists.TryOwnerOfAddress(hq, out var owner)
                 || string.IsNullOrEmpty(owner) || owner == MPConfig.PlayerId) return false;
             if (_refusalLogged.Add("stale-purchasing|" + (plan.id ?? "")))
