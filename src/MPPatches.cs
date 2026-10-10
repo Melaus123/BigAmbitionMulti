@@ -13918,7 +13918,12 @@ namespace BigAmbitionsMP
                 try
                 {
                     var ip = MergerPurchasingPlan();
-                    if (!CompanyPlans.IsOverlayPlan(ip)) { CompanyPlans.OwnEditCommitted("purchasing pane control"); return true; }   // HQ-PARITY-3 B4
+                    if (!CompanyPlans.IsOverlayPlan(ip))
+                    {
+                        if (CompanyPlans.RefuseStalePartnerPurchasingPlan(ip)) return false;
+                        CompanyPlans.OwnEditCommitted("purchasing pane control");
+                        return true;
+                    }
                     var data = MergerCellModel(__instance);
                     if (data == null || data.productRef == null) return true;
                     string item = data.productRef.itemName ?? "";
@@ -13940,7 +13945,12 @@ namespace BigAmbitionsMP
                 try
                 {
                     var ip = MergerPurchasingPlan();
-                    if (!CompanyPlans.IsOverlayPlan(ip)) { CompanyPlans.OwnEditCommitted("purchasing pane control"); return true; }   // HQ-PARITY-3 B4
+                    if (!CompanyPlans.IsOverlayPlan(ip))
+                    {
+                        if (CompanyPlans.RefuseStalePartnerPurchasingPlan(ip)) return false;
+                        CompanyPlans.OwnEditCommitted("purchasing pane control");
+                        return true;
+                    }
                     var data = MergerCellModel(__instance);
                     if (data == null || data.productRef == null) return true;
                     string item = data.productRef.itemName ?? "";
@@ -13969,7 +13979,12 @@ namespace BigAmbitionsMP
                 try
                 {
                     var ip = MergerPurchasingPlan();
-                    if (!CompanyPlans.IsOverlayPlan(ip)) { CompanyPlans.OwnEditCommitted("purchasing pane control"); return true; }   // HQ-PARITY-3 B4
+                    if (!CompanyPlans.IsOverlayPlan(ip))
+                    {
+                        if (CompanyPlans.RefuseStalePartnerPurchasingPlan(ip)) return false;
+                        CompanyPlans.OwnEditCommitted("purchasing pane control");
+                        return true;
+                    }
                     // HO-1c L4.11: native returns while the contract is ACTIVE (decompile
                     // PurchasingAgentProductsMassActionsUI.cs:105-108) - a private STATIC property, so reflection
                     // reads it without an instance.  Skipping the body and sending nothing is what native does.
