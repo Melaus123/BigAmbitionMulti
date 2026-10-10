@@ -45,6 +45,7 @@ class Issue8Contracts(unittest.TestCase):
         patches = source("MPPatches.cs")
         self.assertIn("RefuseStalePartnerPurchasingPlan(ImportPartnership? plan)", plans)
         self.assertIn("CompanyLists.TryOwnerOfAddress(hq, out var owner)", plans)
+        self.assertIn("MergerAbsence.SimulatesHere(hq)", plans)  # absence stand-ins still edit natively
         self.assertIn("plan as ImportPartnership", plans)
         self.assertEqual(3, patches.count("if (CompanyPlans.RefuseStalePartnerPurchasingPlan(ip)) return false;"))
 
