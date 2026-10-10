@@ -1718,6 +1718,7 @@ namespace BigAmbitionsMP
             RememberHeld();   // H-STANDINTILL-2 T1: BEFORE the undo empties _simHere
             try { UndoLocalAll("session/scene reset"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] reset undo: {ex.Message}"); }
             _simHere.Clear(); _known.Clear(); _promotedStaff.Clear(); _installed.Clear();
+            _deferredDisplayLogistics.Clear(); // ISSUE-8: no pending display edits survive disconnect/reset.
             _snapQueue.Clear(); _idWarned.Clear(); _fieldWarned.Clear(); _resendAsked.Clear(); _resendStopped.Clear(); _resendLastAsk.Clear();
             // P3-C (C5): a held return payload dies with the connection - the host clears a mark only
             // after a SEND, so the next return re-sends the whole thing.
