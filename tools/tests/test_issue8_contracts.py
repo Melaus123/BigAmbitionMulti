@@ -71,7 +71,7 @@ class Issue8Contracts(unittest.TestCase):
                          "hqtarget ${puPlan} ${puItem} 31",
                          "planedit purchasing ${puPlan} target ${puItem} 47"):
             self.assertIn(required, commands)
-        self.assertEqual(2, sum("hqlog ${logPlan} target" in c for c in commands))
+        self.assertEqual(2, sum(c.startswith("hqlog ${logPlan} target 0 ") for c in commands))
         for step in data["steps"]:
             self.assertIn(step["role"], ("h", "c", "both"))
             for field in ("expect_result", "refute_result"):
