@@ -1,166 +1,31 @@
-// PROBE-START: P-T32-PRICES
-// Log-only probe for T-32, prices part (ACTIVE 2026-11-13; all configurations; .modding/04-probes.md P-T32-PRICES).
-// Question: in a merged company a partner who opens the pricing-manager screen of a shared plan gets the
-// SUGGESTED prices recomputed from that machine's OWN data: PricingManagerPlanUI.LoadPlan (decompile
-// UI.Smartphone.Apps.BizMan.PricingManagers/PricingManagerPlanUI.cs:44, call at :47) runs
-// PricingManagerPlan.RecomputeSuggestions (Buildings.Office.Headquarters/PricingManagerPlan.cs:167-185), which
-// throws away the host's copied list (CompanyPlans.BuildPricing) and rebuilds it through BuildSuggestion
-// (:303-323) -> PricingManagerHelper.ComputeSuggestion (PricingManagerHelper.cs:38-52). Do the two machines
-// get different suggestions for the same plan and product, and from which inputs?
-// Hook: a Postfix on RecomputeSuggestions - the narrowest PUBLIC method that holds the whole result
-// (cachedSuggestions); BuildSuggestion is private and per item. It logs only for a plan ARMED by the screen
-// (a LoadPlan prefix) or by the DEV lever `pricesuggest`, once per arming, so the hourly RunUpdate /
-// assign / neighbourhood recomputes add nothing; a screen redraw that recomputes the SAME values is not
-// logged again. The formula's inputs are re-read in the same frame through the same public game helpers
-// the formula calls. Never changes the outcome.
-// Remove when: a run or log shows whether suggestions differ and why, or T-32 closes.
+#if BAMP_DEV
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
-using System.Reflection;
 using System.Text;
 using Buildings.Office.Headquarters;             // PricingManagerPlan, PricingManagerHelper, PriceSuggestion
-using HarmonyLib;
+using HarmonyLib;                                // AccessTools (PartnerPricingRows)
 using Helpers;                                   // EmployeeHelper, UpdateSecurityLevel (extension)
-using UI.Smartphone.Apps.BizMan.PricingManagers; // PricingManagerPlanUI
 using UnityEngine;
 
 namespace BigAmbitionsMP
 {
-    internal static class ProbeT32
+    /// <summary>T-32 (prices) DEV test levers, dev build only; they drive tools/scenarios/t-pricesuggest.json.
+    /// Moved here from the removed log-only probe P-T32-PRICES (.modding/04-probes.md) once T-32 was fixed and
+    /// proven (commit 465e6e4): same levers, same result lines, no probe logging and no Harmony patches.</summary>
+    internal static class DevT32
     {
-        private const int MaxProducts = 30;                       // product lines per open
-        private static string _armedId;                            // the plan the next recompute is logged for
-        private static string _armedBy = "";                       // "screen" or "lever"
-        private static string _lastSummary = "";                   // the lever's result text
-        private static readonly Dictionary<string, string> _lastScreenSig = new Dictionary<string, string>(StringComparer.Ordinal);
-        private static MethodInfo _stable;
-        private static bool _stableLooked;
-
-        internal static void Arm(PricingManagerPlan plan, string by)
-        {
-            try { _armedId = plan?.id; _armedBy = by ?? ""; } catch { }
-        }
-
-        internal static void AfterRecompute(PricingManagerPlan plan)
-        {
-            try
-            {
-                if (plan == null || _armedId == null || plan.id != _armedId) return;
-                string by = _armedBy;
-                _armedId = null;
-                Describe(plan, by);
-            }
-            catch (Exception ex) { try { Plugin.Logger.LogWarning("[PROBE T32-PRICES] probe error: " + ex.Message); } catch { } }
-        }
+        private const int MaxProducts = 30;   // products the result names in sugg= (sig= covers the whole list)
 
         private static string F(float v) { return v.ToString("0.00", CultureInfo.InvariantCulture); }
 
-        /// <summary>One header line and up to MaxProducts product lines for the plan's fresh suggestions.
-        /// Inputs, as ComputeSuggestion (PricingManagerHelper.cs:38-52) reads them: maxAcceptable =
-        /// ItemHelper.CalculateMaxAcceptablePriceByNeighborhood (lowest over social classes of marketRef x
-        /// CitizenHelper.MaxAcceptableRelativePrice, +0.3 with a player monopoly; ItemHelper.cs:624-647), capped
-        /// at 10000; marketRef = ItemHelper.GetMarketReferencePrice = min(DefaultMarketPrice, GetLowestMarketPrice
-        /// over this machine's rival shops) (:619-622); skill01 = analyst's ba:skill_pricingmanager / 100
-        /// (PricingManagerPlan.cs:55, :174); jitter = RngHelper.StableValue01(id + assignedEmployeeId + item)
-        /// (:309); settings minSkillCapture / captureJitter / visibleSpread.</summary>
-        private static void Describe(PricingManagerPlan plan, string by)
-        {
-            string id = plan.id ?? "";
-            string nb = plan.supervisedNeighborhood ?? "";
-            string emp = plan.assignedEmployeeId ?? "";
-            bool empFound = false; float skill = 0f;
-            try { empFound = plan.AnalystInstance != null; skill = plan.PricingManagerSkillValue; } catch { }
-            float skill01 = Mathf.Clamp01(skill / 100f);
-            int stores = 0;
-            try
-            {
-                foreach (var r in SaveGameManager.Current.BuildingRegistrations)
-                    if (r != null && PricingManagerHelper.IsManageableBusiness(r) && r.Neighborhood == nb) stores++;
-            }
-            catch { }
-            bool display = false; try { display = MergerAbsence.IsDisplayInstall(plan); } catch { }
-            string settings = "n/a";
-            try
-            {
-                var s = PricingManagerHelper.Settings;
-                if (s != null) settings = "minSkillCapture=" + F(s.minSkillCapture) + " captureJitter=" + F(s.captureJitter) + " visibleSpread=" + F(s.visibleSpread);
-            }
-            catch { }
-            var list = new List<PriceSuggestion>();
-            if (plan.cachedSuggestions != null)
-                foreach (var sg in plan.cachedSuggestions) if (sg != null && !string.IsNullOrEmpty(sg.itemName)) list.Add(sg);
-            list.Sort((a, b) => string.CompareOrdinal(a.itemName, b.itemName));
-
-            var lines = new List<string>();
-            var sb = new StringBuilder();
-            int n = 0;
-            foreach (var sg in list)
-            {
-                if (n >= MaxProducts) break;
-                n++;
-                string item = sg.itemName;
-                string inputs;
-                try
-                {
-                    float maxAcc = global::ItemHelper.CalculateMaxAcceptablePriceByNeighborhood(item, nb);
-                    float mref = global::ItemHelper.GetMarketReferencePrice(item, nb);
-                    float def = global::ItemHelper.GetDefaultMarketPrice(item);
-                    float low = global::ItemHelper.GetLowestMarketPrice(item, nb);
-                    bool mono = global::ItemHelper.HasPlayerMonopoly(item, nb);
-                    inputs = "maxAcceptable=" + F(maxAcc) + " marketRef=" + F(mref) + " default=" + F(def) + " lowestHere=" + F(low)
-                           + " monopolyHere=" + mono + " skill01=" + F(skill01) + " jitter=" + Jitter(id + emp + item)
-                           + " rivalRef=" + F(sg.rivalReferencePrice) + " playerSellingHere=" + sg.isPlayerSelling;
-                }
-                catch (Exception ex) { inputs = "unreadable(" + ex.GetType().Name + ")"; }
-                lines.Add("[PROBE T32-PRICES] agreement=" + id + " product=" + item + " suggested=" + F(sg.suggestedMin) + "-" + F(sg.suggestedMax) + " inputs=" + inputs);
-                if (sb.Length > 0) sb.Append(';');
-                sb.Append(item).Append(':').Append(F(sg.suggestedMax));
-            }
-            string head = "[PROBE T32-PRICES] agreement=" + id + " by=" + by + " hq=" + plan.headquartersAddress + " neighborhood=" + nb
-                        + " manager=" + emp + " managerFoundHere=" + empFound + " skill=" + F(skill) + " supervisedStoresHere=" + stores
-                        + " displayCopy=" + display + " partnerCopy=" + CompanyPlans.IsOverlayPlan(plan) + " suggestions=" + list.Count + " settings: " + settings;
-            _lastSummary = "agreement=" + id + " manager=" + emp + " managerFoundHere=" + empFound + " skill=" + F(skill)
-                         + " stores=" + stores + " suggestions=" + list.Count + " sugg=" + (sb.Length == 0 ? "-" : sb.ToString())
-                         + " sig=" + PricingPlanCopies.Digest(PricingPlanCopies.Signature(plan)) + " copy=" + CompanyPlans.IsOverlayPlan(plan);
-
-            if (by == "screen")
-            {
-                string sig = _lastSummary + "|" + string.Join("|", lines);
-                if (_lastScreenSig.TryGetValue(id, out var prev) && prev == sig) return;   // a redraw with the same values
-                _lastScreenSig[id] = sig;
-            }
-            Plugin.Logger.LogInfo(head);
-            foreach (var l in lines) Plugin.Logger.LogInfo(l);
-            if (list.Count > n) Plugin.Logger.LogInfo("[PROBE T32-PRICES] agreement=" + id + " " + (list.Count - n) + " more product(s) not logged (cap " + MaxProducts + ")");
-        }
-
-        /// <summary>RngHelper.StableValue01(string) by reflection: the type is not in the decompiled game
-        /// tree, so it is looked up at run time rather than named at compile time.</summary>
-        private static string Jitter(string key)
-        {
-            try
-            {
-                if (!_stableLooked)
-                {
-                    _stableLooked = true;
-                    var t = AccessTools.TypeByName("RngHelper");
-                    if (t != null) _stable = AccessTools.Method(t, "StableValue01", new[] { typeof(string) });
-                }
-                if (_stable == null) return "n/a";
-                object v = _stable.Invoke(null, new object[] { key });
-                return v is float f ? F(f) : Convert.ToString(v, CultureInfo.InvariantCulture);
-            }
-            catch { return "n/a"; }
-        }
-
-#if BAMP_DEV
         /// <summary>DEV lever `pricesuggest <planId|first>`: runs what the screen runs on open
         /// (PricingManagerPlanUI.LoadPlan:47, RecomputeSuggestions) on one pricing plan without opening any UI,
-        /// with the probe armed, and answers the probe's summary. `pricesuggest make [neighbourhood]` creates
+        /// and answers the plan's list as that recompute left it (Summary). `pricesuggest make [neighbourhood]` creates
         /// one plan first (DevMakePlan); `pricesuggest recruit` gets this machine a pricing-manager candidate for its
-        /// headquarters first (DevRecruit). `first` = this machine's own REAL plan with a
+        /// headquarters first (DevRecruit); `pricesuggest shift <station> <employee> <fromHour>` puts an employee on a
+        /// headquarters desk shift (DevShift). `first` = this machine's own REAL plan with a
         /// manager (lowest id), else a partner's copy with a manager. An id looks in the partner copies first
         /// (CompanyPlans._rows, as CompanyPlans.PlanObjectOf does), then in this machine's own list.
         /// T-32: on a partner's copy the recompute is skipped (PricingPlanCopies), so the summary is the list that
@@ -203,18 +68,47 @@ namespace BigAmbitionsMP
                     if (pick == null) foreach (var p in own) if (p.id == want) { pick = p; break; }
                 }
                 if (pick == null) return "ERR pricesuggest: no pricing plan '" + want + "' here (own=" + own.Count + " partnerRows=" + partnerRows.Count + ")";
-                _lastSummary = "";
-                if (peek) Describe(pick, "peek");
-                else
-                {
-                    Arm(pick, "lever");
-                    pick.RecomputeSuggestions();
-                    _armedId = null;
-                }
-                return "OK pricesuggest " + (_lastSummary.Length > 0 ? _lastSummary : "agreement=" + pick.id + " (probe wrote nothing)")
-                     + " own=" + own.Count + " partnerRows=" + partnerRows.Count;
+                if (!peek) pick.RecomputeSuggestions();
+                return "OK pricesuggest " + Summary(pick) + " own=" + own.Count + " partnerRows=" + partnerRows.Count;
             }
             catch (Exception ex) { return "ERR pricesuggest: " + ExText(ex); }
+        }
+
+        /// <summary>The plan as the lever's result names it, read from the plan as it stands (for `pricesuggest <id>`
+        /// right after the lever's own RecomputeSuggestions): `agreement=<id> manager=<employee id>
+        /// managerFoundHere=<bool> skill=<pricing-manager skill> stores=<manageable businesses in the supervised
+        /// neighbourhood here> suggestions=<n> sugg=<item:suggestedMax;...> (first MaxProducts by item name, '-' when
+        /// none) sig=<PricingPlanCopies fingerprint of the whole list> copy=<a partner's copy>`.</summary>
+        private static string Summary(PricingManagerPlan plan)
+        {
+            string id = plan.id ?? "";
+            string nb = plan.supervisedNeighborhood ?? "";
+            string emp = plan.assignedEmployeeId ?? "";
+            bool empFound = false; float skill = 0f;
+            try { empFound = plan.AnalystInstance != null; skill = plan.PricingManagerSkillValue; } catch { }
+            int stores = 0;
+            try
+            {
+                foreach (var r in SaveGameManager.Current.BuildingRegistrations)
+                    if (r != null && PricingManagerHelper.IsManageableBusiness(r) && r.Neighborhood == nb) stores++;
+            }
+            catch { }
+            var list = new List<PriceSuggestion>();
+            if (plan.cachedSuggestions != null)
+                foreach (var sg in plan.cachedSuggestions) if (sg != null && !string.IsNullOrEmpty(sg.itemName)) list.Add(sg);
+            list.Sort((a, b) => string.CompareOrdinal(a.itemName, b.itemName));
+            var sb = new StringBuilder();
+            int n = 0;
+            foreach (var sg in list)
+            {
+                if (n >= MaxProducts) break;
+                n++;
+                if (sb.Length > 0) sb.Append(';');
+                sb.Append(sg.itemName).Append(':').Append(F(sg.suggestedMax));
+            }
+            return "agreement=" + id + " manager=" + emp + " managerFoundHere=" + empFound + " skill=" + F(skill)
+                 + " stores=" + stores + " suggestions=" + list.Count + " sugg=" + (sb.Length == 0 ? "-" : sb.ToString())
+                 + " sig=" + PricingPlanCopies.Digest(PricingPlanCopies.Signature(plan)) + " copy=" + CompanyPlans.IsOverlayPlan(plan);
         }
 
         /// <summary>DEV lever `pricesuggest make [neighbourhood]`: creates ONE pricing-manager plan on THIS machine
@@ -458,7 +352,6 @@ namespace BigAmbitionsMP
             foreach (var sd in hq.scheduleDays)
                 if (sd != null && sd.isOpen) sd.RemoveWorkShift(pick);
             AfterShiftChange(hq, pickEmp);
-            try { Plugin.Logger.LogInfo("[PROBE T32-PRICES] recruit freed a workstation at " + hqKey + ": removed the work shift " + freed + " (day " + dayNo + ", ScheduleDay.RemoveWorkShift on every open day, data level)"); } catch { }
             return "";
         }
 
@@ -560,7 +453,6 @@ namespace BigAmbitionsMP
                 AfterShiftChange(hq, emp);
                 GameEvent.Invoke("ba:gameevent_employeeassigned");
                 string shiftTxt = shift.startingHour + "-" + shift.endingHour;
-                try { Plugin.Logger.LogInfo("[PROBE T32-PRICES] shift added at " + hqKey + ": " + empId + "@" + stId + "/" + shiftTxt + " on " + days + " open days (ScheduleDay.AddWorkShift, data level)"); } catch { }
                 return "OK pricesuggest shift st=" + stId + " emp=" + empId + " day=" + (int)day.day + " asked=" + asked + " shift=" + shiftTxt
                      + " days=" + days + "/" + open + " assigned=" + emp.IsAssignedToAnyWorkShift() + " addErr=none hq=" + hqKey;
             }
@@ -596,48 +488,32 @@ namespace BigAmbitionsMP
             return "ERR pricesuggest ask: no partner copy '" + id + "' here";
         }
 
-        /// <summary>The partner pricing copies CompanyPlans holds (private `_rows`, read by reflection - this
-        /// probe may not edit CompanyPlans.cs). When none is built yet, CompanyPlans' own MaterialiseRows is run
-        /// for every partner it holds lists of, as opening the page would.</summary>
+        /// <summary>The partner pricing copies CompanyPlans holds (private `_rows`, read by reflection - a DEV
+        /// lever does not edit CompanyPlans.cs). When none is built yet, CompanyPlans' own MaterialiseRows is run
+        /// for every partner it holds lists of, as opening the page would. A read failure throws, so the lever
+        /// answers ERR.</summary>
         private static List<PricingManagerPlan> PartnerPricingRows()
         {
             var res = new List<PricingManagerPlan>();
-            try
+            var t = typeof(CompanyPlans);
+            var rows = AccessTools.Field(t, "_rows")?.GetValue(null) as IDictionary;
+            if (rows == null) return res;
+            bool any = false;
+            foreach (DictionaryEntry kv in rows) if (kv.Value is PricingManagerPlan) { any = true; break; }
+            if (!any)
             {
-                var t = typeof(CompanyPlans);
-                var rows = AccessTools.Field(t, "_rows")?.GetValue(null) as IDictionary;
-                if (rows == null) return res;
-                bool any = false;
-                foreach (DictionaryEntry kv in rows) if (kv.Value is PricingManagerPlan) { any = true; break; }
-                if (!any)
+                var owners = AccessTools.Field(t, "_byOwner")?.GetValue(null) as IDictionary;
+                var mat = AccessTools.Method(t, "MaterialiseRows", new[] { typeof(string) });
+                if (owners != null && mat != null)
                 {
-                    var owners = AccessTools.Field(t, "_byOwner")?.GetValue(null) as IDictionary;
-                    var mat = AccessTools.Method(t, "MaterialiseRows", new[] { typeof(string) });
-                    if (owners != null && mat != null)
-                    {
-                        var keys = new List<string>();
-                        foreach (var k in owners.Keys) if (k is string s) keys.Add(s);
-                        foreach (var k in keys) mat.Invoke(null, new object[] { k });
-                    }
+                    var keys = new List<string>();
+                    foreach (var k in owners.Keys) if (k is string s) keys.Add(s);
+                    foreach (var k in keys) mat.Invoke(null, new object[] { k });
                 }
-                foreach (DictionaryEntry kv in rows) if (kv.Value is PricingManagerPlan p) res.Add(p);
             }
-            catch (Exception ex) { Plugin.Logger.LogWarning("[PROBE T32-PRICES] partner rows unreadable: " + ex.Message); }
+            foreach (DictionaryEntry kv in rows) if (kv.Value is PricingManagerPlan p) res.Add(p);
             return res;
         }
-#endif
-    }
-
-    [HarmonyPatch(typeof(PricingManagerPlanUI), nameof(PricingManagerPlanUI.LoadPlan))]
-    public static class Patch_ProbeT32_LoadPlan
-    {
-        static void Prefix(PricingManagerPlan plan) { ProbeT32.Arm(plan, "screen"); }
-    }
-
-    [HarmonyPatch(typeof(PricingManagerPlan), nameof(PricingManagerPlan.RecomputeSuggestions))]
-    public static class Patch_ProbeT32_Recompute
-    {
-        static void Postfix(PricingManagerPlan __instance) { ProbeT32.AfterRecompute(__instance); }
     }
 }
-// PROBE-END: P-T32-PRICES
+#endif
