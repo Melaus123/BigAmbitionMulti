@@ -1,0 +1,160 @@
+{
+  "id": "T-BUYOWNED",
+  "title": "T-33 (2026-11-13): every building buy is decided by the host BEFORE any money moves - BizManPresentation.SendBuyBuildingOffer is held by a prefix; a guest sends a BuyClaim and the host answers from one locked check-and-record against the deed ledger; the host's own buy runs the same check. A building whose deed another player holds is refused ('Another player already owns this building.'), money and ledger unchanged; a race for one unowned building yields exactly one owner; list/cancel/sale-done for a building need the DEED (a tenant is dropped); an unowned building still buys normally, charged once",
+  "preconditions": "Fixture save1 (host melaus, client Client1; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA== owns for-rent buildings). Dev build with the realbuy + deedgate levers (TestDrive.cs, T-33) and rivalrent buy (client, no money). T3 races for the cheapest listed building and the race loser buys the second cheapest in T5 (realbuy unless lever), at the game's own minimum offer. Step 9 gives each player 20M (spend lever) for T1's minimum offer (a rival building's minimum can exceed 17M); step 18 takes 14M back so T3/T5's exact charge checks run under the float limit (16,777,216); step 35 refunds the guest for T2 (the lever answers ERR ... (premise - nothing pressed) otherwise). T2/T4 use the building the host bought. NOTHING is saved (fixture reset).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "rival": "ju1yVbREcE2B5ymg6q5tyA=="
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Buy\\] SendBuyBuildingOffer prefix:",
+    "\\[Buy\\] claim answer:",
+    "\\[Patch\\] Patch_SendBuyBuildingOffer:",
+    "Rolled back buy of",
+    "\\[Server\\] BuyRequest .* DENIED",
+    "\\[Server\\] ListForSale: .* by Client1 @",
+    "\\[Server\\] CancelSale: .* by Client1\\.",
+    "\\[Server\\] SaleCompleted: ",
+    "\\[TestDrive\\] .*'(realbuy|deedgate)[^']*'.*ERR"
+  ],
+  "oracles_report": [
+    "\\[Buy\\] ",
+    "\\[Client\\] Sent BuyClaim",
+    "\\[Server\\] (BuyRequest|ListForSale|CancelSale|SaleCompleted)",
+    "\\[Patch\\] (Client|Host) bought",
+    "\\[TestDrive\\] .* '(realbuy|deedgate|bldgstate|money)"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "sleep_s": 60, "note": "the host's world loads" },
+    { "seq": 4, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 5, "role": "h", "sleep_s": 5 },
+    { "seq": 6, "role": "h", "cmd": "acceptjoin", "expect_result": "^OK" },
+    { "seq": 7, "role": "c", "sleep_s": 110, "note": "the client is served its save and settles" },
+    { "seq": 8, "role": "c", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 9, "role": "both", "cmd": "spend -20000000", "expect_result": "^OK spend amount=20000000\\.00 money=", "note": "PREMISE: each player gets 20M through the game's own money path (spend lever; a negative amount earns), so every realbuy below clears the game's money check and minimum price and reaches the deed check" },
+
+    { "seq": 10, "role": "both", "cmd": "mark TEST BUYOWNED T1", "expect_result": "OK MARK" },
+    {
+      "seq": 11, "role": "h", "cmd": "rivalrent find ${rival}",
+      "expect_result": "^OK rivalrent find rival=${rival} owned=\\d+ forrent=[1-9]",
+      "capture": { "addr1": "first=(.+?) \\[" },
+      "note": "an empty building to give the guest (t-clientrealestate's way)"
+    },
+    {
+      "seq": 12, "role": "c", "cmd": "rivalrent buy ${addr1}",
+      "expect_result": "^OK rivalrent buy sent addr='${addr1}' .*owned=True",
+      "expect_log": [ { "role": "h", "regex": "\\[Server\\] BuyRequest: ${addr1} \\S+ owned by ${clientPid}", "within_s": 15 } ],
+      "note": "Client1 holds the deed (no claim: the DEV lever bypasses the buy screen; the host records it through BuyRequest)"
+    },
+    { "seq": 13, "role": "h", "cmd": "bldgstate ${addr1}", "expect_result": "^OK bldg .* owned=False .* deed=${clientPid} ", "note": "PREMISE: the deed names Client1 on the host" },
+    {
+      "seq": 14, "role": "h", "cmd": "realbuy ${addr1}",
+      "expect_result": "^OK realbuy addr='${addr1}' amount=\\d+\\.00 .* owned=False held=False deed=${clientPid}$",
+      "expect_log": [ { "role": "h", "regex": "\\[Buy\\] buy of '${addr1}' by ${hostPid} @ \\S+ REFUSED - the deed is held by ${clientPid}", "within_s": 5 } ],
+      "note": "TEST: the host presses the game's real buy for the guest's building - refused in the prefix before any money moves (the game's own minimum offer: a lower offer stops at the game's price check before the deed check, T-33 fold F5)"
+    },
+    { "seq": 15, "role": "h", "cmd": "realbuy last", "expect_result": "^OK realbuy last addr='${addr1}' .* owned=False once=False unchanged=True ", "note": "TEST: the host's money is unchanged" },
+    { "seq": 16, "role": "h", "cmd": "bldgstate ${addr1}", "expect_result": "^OK bldg .* owned=False .* deed=${clientPid} ", "note": "TEST: the ledger still names Client1" },
+    { "seq": 17, "role": "c", "cmd": "bldgstate ${addr1}", "expect_result": "^OK bldg .* owned=True ", "note": "TEST: the guest still owns it" },
+    { "seq": 18, "role": "both", "cmd": "spend 14000000", "expect_result": "^OK spend amount=-14000000\\.00 money=", "note": "PREMISE: back under 16,777,216 - the game keeps money as a float, which above that can only hold even numbers, so T3/T5 once= (charged exactly the offer) needs a smaller balance; each player keeps ~9.5M, enough for one of the two cheapest buildings" },
+
+    { "seq": 19, "role": "both", "cmd": "mark TEST BUYOWNED T3", "expect_result": "OK MARK", "note": "leg order T1, T3, T5, T2, T4: each player can afford ONE building (step 18 money vs find's prices), so the race and the T5 buys come first and T2/T4 use the one building the host bought" },
+    {
+      "seq": 20, "role": "h", "cmd": "realbuy find 2",
+      "expect_result": "^OK realbuy find n=2 ",
+      "capture": { "race": "a1='([^']+)'", "spare": "a2='([^']+)'" },
+      "note": "the two cheapest listed buildings nobody holds: T3 races for the cheapest, the race loser buys the other in T5"
+    },
+    {
+      "seq": 21, "role": "both", "cmd": "realbuy ${race}",
+      "expect_result": "^OK realbuy addr='${race}' ",
+      "note": "both players press the game's buy for one unowned building, back to back (the lever answers ERR ... (premise - nothing pressed) if a player cannot afford it)"
+    },
+    {
+      "seq": 22, "role": "h", "sleep_s": 8,
+      "expect_log": [ { "role": "h", "regex": "\\[Buy\\] buy of '${race}' by \\S+ @ \\d+ REFUSED - the deed is held by \\S+", "within_s": 15 } ],
+      "note": "exactly one of the two is refused (the oracle below checks there is exactly one owner)"
+    },
+    {
+      "seq": 23, "role": "h", "cmd": "bldgstate ${race}",
+      "expect_result": "^OK bldg .* (owned=True .* deed=${hostPid}|owned=False .* deed=${clientPid}) ",
+      "capture": { "hostowned": "owned=(True|False)" },
+      "note": "TEST: the host owns it exactly when the deed names the host"
+    },
+    {
+      "seq": 24, "role": "c", "cmd": "bldgstate ${race}",
+      "expect_result": "^OK bldg .* owned=(?!${hostowned} )(True|False) ",
+      "note": "TEST: the guest owns it exactly when the host does not - one owner, never two, never none"
+    },
+    { "seq": 25, "role": "h", "cmd": "realbuy last", "expect_result": "^OK realbuy last addr='${race}' .* (owned=True once=True|owned=False once=False unchanged=True) ", "note": "TEST: the host was charged once if it won, nothing if it lost" },
+    { "seq": 26, "role": "c", "cmd": "realbuy last", "expect_result": "^OK realbuy last addr='${race}' .* (owned=True once=True|owned=False once=False unchanged=True) held=False$", "note": "TEST: the guest was charged once if it won, nothing if it lost" },
+
+    { "seq": 27, "role": "both", "cmd": "mark TEST BUYOWNED T5", "expect_result": "OK MARK" },
+    {
+      "seq": 28, "role": "h", "cmd": "realbuy unless ${race} | ${spare}",
+      "expect_result": "^OK realbuy (skip race='${race}' owned=True |addr='${spare}' .* owned=True held=False deed=${hostPid}$)",
+      "note": "T5 host leg: if the host lost the race it buys the spare building normally on the host; if it won, its race buy (step 25 once=True) is its charged-once leg and nothing is pressed"
+    },
+    {
+      "seq": 29, "role": "c", "cmd": "realbuy unless ${race} | ${spare}",
+      "expect_result": "^OK realbuy (skip race='${race}' owned=True |addr='${spare}' .* owned=False held=True )",
+      "note": "T5 guest leg: if the guest lost the race its claim for the spare building is sent (granted below); if it won, its race buy is its leg"
+    },
+    { "seq": 30, "role": "c", "sleep_s": 5, "note": "the guest's claim answer, BuyRequest and market removal settle" },
+    {
+      "seq": 31, "role": "h", "cmd": "realbuy last",
+      "expect_result": "^OK realbuy last addr='(${race}|${spare})' .* owned=True once=True unchanged=False held=False$",
+      "capture": { "hostb": "addr='([^']+)'" },
+      "note": "TEST (T5 host side): the host owns the one unowned building it bought normally and was charged exactly the offer, once"
+    },
+    { "seq": 32, "role": "c", "cmd": "realbuy last", "expect_result": "^OK realbuy last addr='(${race}|${spare})' .* owned=True once=True unchanged=False held=False$", "note": "TEST (T5 guest side): the guest owns the one unowned building it bought and was charged exactly the offer, once, with no claim left waiting" },
+    { "seq": 33, "role": "h", "cmd": "bldgstate ${spare}", "expect_result": "^OK bldg .* owned=(?!${hostowned} )(True .* deed=${hostPid}|False .* deed=${clientPid}) ", "note": "TEST: the race loser holds the spare building's deed on the host (a guest's BuyRequest confirmed it)" },
+    { "seq": 34, "role": "c", "cmd": "bldgstate ${spare}", "expect_result": "^OK bldg .* owned=${hostowned} ", "note": "TEST: the guest owns the spare building exactly when the host won the race" },
+    { "seq": 35, "role": "c", "cmd": "spend -20000000", "expect_result": "^OK spend amount=20000000\\.00 money=", "note": "PREMISE: the guest can afford the game's minimum offer on the host's building in T2 (T2 checks only that no money moves)" },
+
+    { "seq": 36, "role": "both", "cmd": "mark TEST BUYOWNED T2", "expect_result": "OK MARK" },
+    { "seq": 37, "role": "h", "cmd": "bldgstate ${hostb}", "expect_result": "^OK bldg .* owned=True .* deed=${hostPid} ", "note": "PREMISE: the host holds the deed of the building it bought in T3/T5" },
+    {
+      "seq": 38, "role": "c", "cmd": "realbuy ${hostb}",
+      "expect_result": "^OK realbuy addr='${hostb}' amount=\\d+\\.00 .* owned=False held=True ",
+      "expect_log": [
+        { "role": "h", "regex": "\\[Buy\\] buy of '${hostb}' by ${clientPid} @ \\S+ REFUSED - the deed is held by ${hostPid}", "within_s": 15 },
+        { "role": "c", "regex": "\\[Buy\\] claim \\S+ for '${hostb}' REFUSED by the host - another player holds the deed", "within_s": 15 }
+      ],
+      "note": "TEST: the guest's buy is held (claim sent, nothing charged) and the host refuses it (the game's own minimum offer, funded by step 35)"
+    },
+    { "seq": 39, "role": "c", "cmd": "realbuy last", "expect_result": "^OK realbuy last addr='${hostb}' .* owned=False once=False unchanged=True held=False$", "note": "TEST: the guest's money is unchanged and no claim is left waiting" },
+    { "seq": 40, "role": "h", "cmd": "bldgstate ${hostb}", "expect_result": "^OK bldg .* owned=True .* deed=${hostPid} ", "note": "TEST: the ledger still names the host" },
+
+    { "seq": 41, "role": "both", "cmd": "mark TEST BUYOWNED T4", "expect_result": "OK MARK" },
+    { "seq": 42, "role": "h", "cmd": "deedgate tenant ${clientPid} ${hostb}", "expect_result": "^OK deedgate tenant addr='${hostb}' tenant=${clientPid} deed=${hostPid} ", "note": "Client1 becomes the TENANT of the host's deed building (DEV ledger write; restored in 46) - the old SenderOwns gate would accept its sale messages" },
+    {
+      "seq": 43, "role": "c", "cmd": "deedgate send list ${hostb}", "expect_result": "^OK deedgate sent list ",
+      "expect_log": [ { "role": "h", "regex": "\\[Server\\] ListForSale for '${hostb}' from '${clientPid}' but the sender doesn't hold the deed", "within_s": 10 } ],
+      "note": "TEST: a tenant cannot list the building"
+    },
+    {
+      "seq": 44, "role": "c", "cmd": "deedgate send cancel ${hostb}", "expect_result": "^OK deedgate sent cancel ",
+      "expect_log": [ { "role": "h", "regex": "\\[Server\\] CancelSale for '${hostb}' from '${clientPid}' but the sender doesn't hold the deed", "within_s": 10 } ],
+      "note": "TEST: a tenant cannot cancel a listing"
+    },
+    {
+      "seq": 45, "role": "c", "cmd": "deedgate send sold ${hostb}", "expect_result": "^OK deedgate sent sold ",
+      "expect_log": [ { "role": "h", "regex": "\\[Server\\] SaleCompleted for '${hostb}' from '${clientPid}' but the sender doesn't hold the deed", "within_s": 10 } ],
+      "note": "TEST: a tenant's sale-done report is dropped - it cannot erase the holder's deed"
+    },
+    { "seq": 46, "role": "h", "cmd": "deedgate restore ${hostb}", "expect_result": "^OK deedgate restore addr='${hostb}' " },
+    { "seq": 47, "role": "h", "cmd": "bldgstate ${hostb}", "expect_result": "^OK bldg .* owned=True forSale=False .* deed=${hostPid} ", "note": "TEST: the deed still names the host and nothing was listed" },
+
+    { "seq": 48, "role": "both", "cmd": "money", "expect_result": "^OK money=", "note": "REPORT" },
+    { "seq": 49, "role": "both", "cmd": "mark TEST BUYOWNED END", "expect_result": "OK MARK" }
+  ]
+}

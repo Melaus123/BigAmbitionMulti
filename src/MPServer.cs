@@ -430,6 +430,7 @@ namespace BigAmbitionsMP
                 }
 
                 BuildingRealEstateOwners.Clear();
+                lock (_deedLock) _deedGrants.Clear();   // T-33 re-check: a reload re-seeds the ledger, so a waiting claim's grant must not survive it
                 foreach (var kv in m.BuildingRealEstateOwners)
                 {
                     string ownerStable = kv.Value;
@@ -1609,6 +1610,7 @@ namespace BigAmbitionsMP
             BuildingOwners.Clear();   // per-session state — a new game must not inherit
             _sharedPoolByOwner.Clear();   // shared-shop slice 3: cached benches are per session too
             BuildingRealEstateOwners.Clear(); // bought-real-estate ledger — same per-session lifecycle (the load path re-seeds it from the manifest); was leaking across a new game and locking fresh-world buildings un-buyable
+            lock (_deedLock) _deedGrants.Clear();   // T-33 (F3): pending buy-claim grants share the deed ledger's lifecycle - a stale one must not expire into a new session's deed
             ResetForfeits("hosting starts");   // BAN-PLAYERS-1 build B: same per-session lifecycle; the load path restores it from the manifest
             CashByStableId.Clear();   // owners/cash; the load path re-seeds from the manifest
             _characterNamesByPlayerId.Clear();   // per-session: a returning player must not collide with a stale name
@@ -2442,6 +2444,9 @@ namespace BigAmbitionsMP
                     break;
                 case MessageType.BuyRequest:
                     HandleBuyRequest(peer, senderPid, env);
+                    break;
+                case MessageType.BuyClaim:              // T-33: a guest's buy, held before any money moves - one locked check-and-record
+                    HandleBuyClaim(peer, senderPid, env);
                     break;
 
                 case MessageType.RadioState:            // round-227: relay a member's speaker change
@@ -5985,6 +5990,7 @@ namespace BigAmbitionsMP
         {
             if (!_running) return;
             TickGateHeal();
+            TickDeedGrantExpiry();        // T-33: undo a granted buy claim nobody confirmed
             TickPendingJoinHeartbeat();   // JOIN-WAIT-1 (C3): a parked join request must not wait in silence
             try { MPConfig.DropOwnPublicAddress(); } catch { }   // BAN-PLAYERS-1 build C1 (F4): once the host's public address is known
             bool release = false;
@@ -6836,20 +6842,127 @@ namespace BigAmbitionsMP
             if (req == null) return;
             if (!SenderIs(req.OwnerPlayerId, senderPid, MessageType.BuyRequest, allowEmpty: true)) return;
 
-            if (BuildingRealEstateOwners.TryGetValue(req.AddressKey, out var current) && current != "" && current != senderPid)
+            // T-33: since the buy claim (BuyClaim 223) a normal guest buy arrives here with the ledger ALREADY naming
+            // the sender (granted before any money moved), so this message is now the after-the-fact CONFIRMATION: it
+            // closes the claim's confirm window and drives the market removal below. The deny branch is kept only as
+            // the consistency backstop for a buy that did not pass a claim (the DEV rivalrent buy lever, a claim that
+            // expired) - through the same locked check-and-record as a claim, so it can never race one.
+            if (!TryClaimDeed(req.AddressKey, senderPid, "", out var current, out _))
             {
                 Plugin.Logger.LogWarning($"[Server] BuyRequest {req.AddressKey} from {senderPid} DENIED — already owned by {current}.");
                 Send(peer, MessageEnvelope.Create(MessageType.BuyDeny, "host", req));
                 return;
             }
-
-            BuildingRealEstateOwners[req.AddressKey] = senderPid;
+            ConfirmDeedClaim(req.AddressKey, senderPid);
             NoteForfeitReacquired(senderPid, req.AddressKey, "bought");   // BAN-PLAYERS-1 build B: a NEW holding leaves the forfeit record
             Plugin.Logger.LogInfo($"[Server] BuyRequest: {req.AddressKey} → owned by {senderPid}.");
             string addr = req.AddressKey;
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
             RefreshBuildingAccess();   // housing: a guest granted housing can now enter this newly-bought building
         }
+
+        // ── T-33 (2026-11-13): buy claims - the host alone decides deeds, before any money moves ──────────
+        // Every buy runs through the game's BizManPresentation.SendBuyBuildingOffer (decompile :889; money :934, deed
+        // :937). MPPatches.Patch_SendBuyBuildingOffer holds it: a guest sends a BuyClaim and waits (HandleBuyClaim);
+        // the host's own buy runs the same TryClaimDeed synchronously. Check-and-record is ONE step under _deedLock, so
+        // of two claims for one unowned building the first records and the second sees that record. A granted claim
+        // waits for its confirmation (the guest's BuyRequest 17, the host's own postfix); a released one, or one not
+        // confirmed within DeedGrantConfirmMs (TickFencePrune, ~1 Hz), is undone in the ledger.
+        private static readonly object _deedLock = new();
+        private static readonly Dictionary<string, (string pid, string claimId, int grantedMs)> _deedGrants = new(StringComparer.Ordinal);   // under _deedLock
+        private const int DeedGrantConfirmMs = 60_000;   // the guest stops waiting after 10s (MPPatches BuyClaimReplyTimeoutS) - well inside this
+
+        /// <summary>T-33: THE locked check-and-record. True = the deed ledger now names buyerPid (recordedNew = this claim
+        /// now holds the confirm window: the deed is new to buyerPid, or it takes over the window of the same buyer's
+        /// earlier unconfirmed claim). False = the deed is held by someone else (holder).</summary>
+        internal static bool TryClaimDeed(string addr, string buyerPid, string claimId, out string holder, out bool recordedNew)
+        {
+            lock (_deedLock)
+            {
+                if (BuildingRealEstateOwners.TryGetValue(addr, out var cur) && !string.IsNullOrEmpty(cur) && cur != buyerPid)
+                { holder = cur; recordedNew = false; return false; }
+                holder = buyerPid;
+                recordedNew = cur != buyerPid;
+                BuildingRealEstateOwners[addr] = buyerPid;
+                // F1: the same buyer's EARLIER claim still waits for its confirmation (its answer was late, the guest
+                // dropped it and pressed buy again): this claim takes over that window, so releasing or expiring the
+                // dead earlier claim (id no longer matches) can never erase the deed this claim is buying with.
+                if (!recordedNew && !string.IsNullOrEmpty(claimId) && _deedGrants.TryGetValue(addr, out var prev) && prev.pid == buyerPid)
+                    recordedNew = true;
+                if (recordedNew && !string.IsNullOrEmpty(claimId))
+                    _deedGrants[addr] = (buyerPid, claimId, Environment.TickCount);
+                return true;
+            }
+        }
+
+        /// <summary>T-33: the granted buy completed - the deed stays.</summary>
+        internal static void ConfirmDeedClaim(string addr, string pid)
+        {
+            lock (_deedLock)
+                if (_deedGrants.TryGetValue(addr, out var g) && g.pid == pid) _deedGrants.Remove(addr);
+        }
+
+        /// <summary>T-33: undo a granted, unconfirmed claim (only that claim: same address, player and claim id).</summary>
+        internal static bool ReleaseDeedClaim(string addr, string pid, string claimId, string why)
+        {
+            lock (_deedLock)
+            {
+                if (!_deedGrants.TryGetValue(addr, out var g) || g.pid != pid || g.claimId != claimId) return false;
+                _deedGrants.Remove(addr);
+                ((ICollection<KeyValuePair<string, string>>)BuildingRealEstateOwners).Remove(new KeyValuePair<string, string>(addr, pid));
+            }
+            Plugin.Logger.LogInfo($"[Buy] claim {claimId} for '{addr}' by {pid} released ({why}) - the deed ledger no longer names {pid}.");
+            return true;
+        }
+
+        private static void TickDeedGrantExpiry()
+        {
+            List<(string addr, string pid, string claimId)>? stale = null;
+            int now = Environment.TickCount;
+            lock (_deedLock)
+                foreach (var kv in _deedGrants)
+                    if (unchecked(now - kv.Value.grantedMs) > DeedGrantConfirmMs) (stale ??= new()).Add((kv.Key, kv.Value.pid, kv.Value.claimId));
+            if (stale == null) return;
+            foreach (var s in stale) ReleaseDeedClaim(s.addr, s.pid, s.claimId, $"no confirmation within {DeedGrantConfirmMs / 1000}s");
+        }
+
+        /// <summary>T-33: a guest's held buy. Release = the guest's buy did not complete - undo its grant.</summary>
+        private static void HandleBuyClaim(MPLink peer, string senderPid, MessageEnvelope env)
+        {
+            var c = env.GetPayload<BuyClaimPayload>();
+            if (c == null || string.IsNullOrEmpty(c.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
+            string claimId = c.ClaimId ?? "";
+            if (claimId.Length == 0)   // T-33 (F6): a claim with no id could never be confirmed, released or expired - refuse it outright
+            { Plugin.Logger.LogWarning($"[Buy] claim for '{c.AddressKey}' by {senderPid} has no claim id - ignored, nothing recorded."); return; }
+            if (c.Release) { ReleaseDeedClaim(c.AddressKey, senderPid, claimId, "the claimant's buy did not complete"); return; }
+            var answer = new BuyClaimPayload { AddressKey = c.AddressKey, Amount = c.Amount, ClaimId = claimId };
+            if (TryClaimDeed(c.AddressKey, senderPid, claimId, out var holder, out _))
+            {
+                answer.Granted = true;
+                Plugin.Logger.LogInfo($"[Buy] claim {claimId} for '{c.AddressKey}' by {senderPid} @ {c.Amount:F0} GRANTED - the deed ledger names {senderPid}; the guest runs the game's own buy once.");
+            }
+            else BuyOfPlayerOwnedBuilding(c.AddressKey, senderPid, holder, c.Amount, answer);
+            Send(peer, MessageEnvelope.Create(MessageType.BuyClaimAnswer, "host", answer));
+        }
+
+        /// <summary>T-33 SEAM (owner decisions 28/29 will turn this into an offer sent to the deed holder, who accepts or
+        /// declines): the ONE place that decides what a buy of a building whose deed ANOTHER player holds does. Today it
+        /// refuses. Called for a guest's claim (answer is filled here, the guest shows the approved text) and, with
+        /// answer == null, for the host's own buy (MPPatches.Patch_SendBuyBuildingOffer shows the text).</summary>
+        internal static void BuyOfPlayerOwnedBuilding(string addr, string buyerPid, string holder, double amount, BuyClaimPayload? answer)
+        {
+            Plugin.Logger.LogWarning($"[Buy] buy of '{addr}' by {buyerPid} @ {amount:F0} REFUSED - the deed is held by {holder} (no money moved).");
+            if (answer != null) { answer.Granted = false; answer.OwnedByPlayer = true; }
+        }
+
+        /// <summary>T-33: the DEED gate for listing, cancelling and completing a building SALE - true iff senderPid holds the
+        /// deed (BuildingRealEstateOwners). A tenant (BuildingOwners) is not the owner here: only SenderOwns, the gate for
+        /// shop updates, counts tenants. F8: a deed recorded as the literal "host" (the load path, :437) is the CURRENT
+        /// host's (MPConfig.PlayerId), the same sentinel resolution the rest of this file uses.</summary>
+        private static bool SenderHoldsDeed(string addr, string senderPid)
+            => !string.IsNullOrEmpty(addr) && !string.IsNullOrEmpty(senderPid)
+               && BuildingRealEstateOwners.TryGetValue(addr, out var r)
+               && (r == senderPid || (r == "host" && senderPid == MPConfig.PlayerId));
 
         /// <summary>True iff senderPid is the recorded owner of this address in EITHER ownership ledger
         /// (BuildingOwners = rents/operates, BuildingRealEstateOwners = bought).  The gate for inbound
@@ -6939,9 +7052,9 @@ namespace BigAmbitionsMP
         {
             var info = env.GetPayload<BuildingForSaleInfo>();
             if (info == null || string.IsNullOrEmpty(info.AddressKey)) return;
-            if (!SenderOwns(info.AddressKey, senderPid))
+            if (!SenderHoldsDeed(info.AddressKey, senderPid))   // T-33: deed only - a tenant cannot list the building
             {
-                LogRejectThrottled("ListForSale", info.AddressKey, $"from '{senderPid}' but the sender doesn't own it");
+                LogRejectThrottled("ListForSale", info.AddressKey, $"from '{senderPid}' but the sender doesn't hold the deed");
                 return;
             }
             Plugin.Logger.LogInfo($"[Server] ListForSale: {info.AddressKey} by {senderPid} @ {info.BuildingPrice:F0}.");
@@ -6953,9 +7066,9 @@ namespace BigAmbitionsMP
         {
             var req = env.GetPayload<BuildingOwnershipPayload>();
             if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
-            if (!SenderOwns(req.AddressKey, senderPid))
+            if (!SenderHoldsDeed(req.AddressKey, senderPid))    // T-33: deed only
             {
-                LogRejectThrottled("CancelSale", req.AddressKey, $"from '{senderPid}' but the sender doesn't own it");
+                LogRejectThrottled("CancelSale", req.AddressKey, $"from '{senderPid}' but the sender doesn't hold the deed");
                 return;
             }
             Plugin.Logger.LogInfo($"[Server] CancelSale: {req.AddressKey} by {senderPid}.");
@@ -6969,9 +7082,9 @@ namespace BigAmbitionsMP
         {
             var req = env.GetPayload<BuildingOwnershipPayload>();
             if (req == null || string.IsNullOrEmpty(req.AddressKey)) return;
-            if (!SenderOwns(req.AddressKey, senderPid))
+            if (!SenderHoldsDeed(req.AddressKey, senderPid))    // T-33: deed only - a tenant's report must never erase the holder's deed
             {
-                Plugin.Logger.LogWarning($"[Server] SaleCompleted for '{req.AddressKey}' from '{senderPid}' but the sender doesn't own it — dropped.");
+                Plugin.Logger.LogWarning($"[Server] SaleCompleted for '{req.AddressKey}' from '{senderPid}' but the sender doesn't hold the deed — dropped.");
                 return;
             }
             Plugin.Logger.LogInfo($"[Server] SaleCompleted: {req.AddressKey} (AI bought {senderPid}'s building) — releasing.");

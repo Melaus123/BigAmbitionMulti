@@ -305,44 +305,265 @@ namespace BigAmbitionsMP
         }
 
         // ── Patch: BizManPresentation.SendBuyBuildingOffer ────────────────────
-        // Buying real estate adds the building to the LOCAL gi.realEstate and removes it
-        // from the LOCAL gi.buildingsForSale — but the host owns the authoritative
-        // for-sale market + a real-estate ownership registry.  Unrouted, a client's buy
-        // never reaches the host, so the building stays for-sale for everyone else and a
-        // second player can buy the SAME building (two owners).  This postfix (the buy
-        // already ran locally) ratifies it: client → BuyRequest (host arbitrates + removes
-        // it from the market, or denies → we roll back); host → record ownership directly
-        // (its own native buy already updated its market, which the poll propagates).
+        // T-33 (2026-11-13; field bamp-bug-20261107-223938: the host bought a guest's listed building through the
+        // game's buy screen - the host paid, the guest got nothing, both games thought they owned it). Every buy runs
+        // through this one native method (decompile BizManPresentation.cs:889 - listed buildings, offers on unlisted
+        // ones at market value x (1 + rival accept rate) :913, Hamptons houses :902, buying the building you rent
+        // :950-953; money :934, deed :937). The host alone decides deeds, BEFORE any money moves:
+        //  - GUEST: the Prefix holds the buy and sends a BuyClaim; the host answers from one locked check-and-record
+        //    (MPServer.TryClaimDeed). On 'yes' the guest re-runs this same method ONCE with _bypass set, so the native
+        //    charge, deed and notifications happen exactly once; on 'no' it shows the approved text. No answer within
+        //    BuyClaimReplyTimeoutS = nothing happens (a late 'yes' is released, never acted on).
+        //  - HOST: the same locked check runs synchronously in the Prefix (refuse, or record and let the native buy
+        //    run); the Postfix confirms the record, or releases it when the native buy stopped on its own checks.
+        // The Postfix keeps the after-the-fact report: a guest's BuyRequest (17) confirms its claim and drives the
+        // host's market removal. BuyDeny (18) + GameStatePatcher.RollbackBuy remain only as the consistency backstop
+        // for a buy that never passed a claim (the DEV `rivalrent buy` lever, a claim that expired) - a normal buy
+        // reaches the host with the ledger already naming the buyer, so the undo is not reached.
         [HarmonyPatch(typeof(BizManPresentation), "SendBuyBuildingOffer")]
         public static class Patch_SendBuyBuildingOffer
         {
-            static void Postfix(BizManPresentation __instance)
+            internal const string OwnedRefusalText = "Another player already owns this building.";   // owner-approved wording (decision 25d, 2026-11-13)
+            private const float BuyClaimReplyTimeoutS = 10f;   // the host undoes a grant nobody confirmed after 60s (MPServer.DeedGrantConfirmMs)
+
+            private sealed class PendingClaim
             {
+                public string Id = "", Addr = "", AmountText = "";
+                public double Amount;
+                public float SentAt;
+                public BizManPresentation? Pres;
+                public TMPro.TMP_InputField? Field;
+            }
+            private static PendingClaim? _pending;   // MAIN THREAD only; one claim at a time (the MPTakeover pattern)
+            private static bool _bypass;             // true only while the one approved re-run executes
+            private static string _rerunClaimId = "", _rerunAddr = "";
+            private static int _claimSeq;
+            private static string? _hostState;       // MAIN THREAD: the host's own recorded claim while its native buy runs (F2: the Finalizer's copy of __state)
+
+            internal static bool HasPendingClaim => _pending != null;
+
+            // Runs after SharedShopVisibility's other-player's-shop block (default priority) and respects its veto.
+            [HarmonyPriority(Priority.Last)]
+            static bool Prefix(BizManPresentation __instance, bool __runOriginal, out string? __state)
+            {
+                __state = null;
+                if (_bypass) { __state = "rerun"; return __runOriginal; }   // the approved re-run: the native buy runs once
+                if (!__runOriginal) return false;                            // another prefix already stopped this buy
                 try
                 {
-                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // single player — nothing to do
-
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return true;   // single player - nothing to do
                     var reg = RegOf(__instance);
-                    if (reg == null) return;
-                    // Only act if the purchase actually went through (enough money / valid offer).
-                    bool bought; try { bought = reg.BuildingOwnedByPlayer; } catch { bought = false; }
-                    if (!bought) return;
+                    if (reg == null) return true;
+                    // Hold only a buy the game would get past its own early checks (offer amount :902, money :907);
+                    // otherwise let it run - it shows its own error and returns before any money moves.
+                    if (!ReadOffer(__instance, out var field, out string text, out double amount)) return true;
+                    if ((double)SaveGameManager.Current.Money < amount) return true;
+                    // T-33 (F5): likewise the game's DLC check (:892) and minimum price (:912-916) - a buy failing them
+                    // stops in the game with its own notice, so it must not reserve the deed for a round trip.
+                    if (WouldRefuseOffer(__instance, amount)) return true;
                     string key = GameStateReader.AddressKey(reg);
 
                     if (MPClient.IsConnected)
                     {
-                        MPClient.RequestBuyBuilding(key);
-                        Plugin.Logger.LogInfo($"[Patch] Client bought {key} locally + notifying host.");
+                        float now = UnityEngine.Time.unscaledTime;
+                        if (_pending != null && now - _pending.SentAt < BuyClaimReplyTimeoutS)
+                        {
+                            Plugin.Logger.LogInfo($"[Buy] buy of '{key}' ignored - claim {_pending.Id} for '{_pending.Addr}' is still waiting for the host.");
+                            return false;
+                        }
+                        if (_pending != null)
+                            Plugin.Logger.LogWarning($"[Buy] claim {_pending.Id} for '{_pending.Addr}' got no answer in {BuyClaimReplyTimeoutS:F0}s - dropped; nothing was charged.");
+                        string id = $"{MPConfig.PlayerId}-{++_claimSeq}-{(Environment.TickCount & 0xFFFFFF):x}";
+                        _pending = new PendingClaim { Id = id, Addr = key, AmountText = text, Amount = amount, SentAt = now, Pres = __instance, Field = field };
+                        MPClient.SendBuyClaim(key, amount, id, release: false);
+                        Plugin.Logger.LogInfo($"[Buy] buy of '{key}' @ {amount:F0} held - claim {id} sent to the host; no money moves until it answers.");
+                        return false;
+                    }
+
+                    // HOST: the same locked check-and-record, synchronously on this thread.
+                    string pid = MPConfig.PlayerId;
+                    string claimId = $"host-{++_claimSeq}";
+                    if (!MPServer.TryClaimDeed(key, pid, claimId, out var holder, out bool fresh))
+                    {
+                        MPServer.BuyOfPlayerOwnedBuilding(key, pid, holder, amount, null);
+                        ShowOwnedRefusal();
+                        return false;
+                    }
+                    if (fresh) _hostState = __state = "host|" + claimId + "|" + key;
+                    Plugin.Logger.LogInfo($"[Buy] host buy of '{key}' @ {amount:F0}: deed claim {claimId} recorded{(fresh ? "" : " (the deed was already the host's)")} - the game's own buy runs.");
+                    return true;
+                }
+                catch (System.Exception ex)
+                {
+                    Plugin.Logger.LogWarning($"[Buy] SendBuyBuildingOffer prefix: {ex.Message} - buy held, nothing charged.");
+                    return false;   // never let an unchecked buy through in a session
+                }
+            }
+
+            static void Postfix(BizManPresentation __instance, string? __state)
+            {
+                _hostState = null;
+                Settle(__instance, __state, null);
+            }
+
+            // T-33 (F2): the game's buy THREW (e.g. :955, FindCityBuildingController null) - Harmony then skips the Postfix,
+            // but the game may already have charged (:934) and recorded the building (:937). Settle from the real fact:
+            // the game's realEstate list naming the building (BuildingOwnedByPlayer) confirms, else release. Void return =
+            // the exception carries on unchanged (for the guest's replay, to OnClaimAnswer's catch).
+            static void Finalizer(System.Exception? __exception, BizManPresentation __instance)
+            {
+                if (__exception == null) return;
+                string? state = _bypass ? "rerun" : _hostState;
+                _hostState = null;
+                if (state == null) return;
+                Plugin.Logger.LogWarning($"[Buy] the game's own buy threw ({__exception.Message}) - settling the claim from the game's real-estate record.");
+                Settle(__instance, state, "the game's own buy threw before recording the building");
+            }
+
+            /// <summary>Confirm or release the claim behind this buy from the game's real-estate record (failWhy = the
+            /// release reason when the buy threw; null = the normal end of the native buy).</summary>
+            private static void Settle(BizManPresentation __instance, string? __state, string? failWhy)
+            {
+                try
+                {
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return;   // single player - nothing to do
+                    if (__state == null) return;                                // held, refused, or not the mod's to report
+
+                    var reg = RegOf(__instance);
+                    // Only act if the purchase actually went through (the game's own checks passed).
+                    bool bought; try { bought = reg != null && reg.BuildingOwnedByPlayer; } catch { bought = false; }
+                    string key = reg != null ? GameStateReader.AddressKey(reg) : "";
+
+                    if (MPClient.IsConnected)
+                    {
+                        if (__state != "rerun") return;
+                        if (!bought || key != _rerunAddr)
+                        {
+                            MPClient.SendBuyClaim(_rerunAddr, 0, _rerunClaimId, release: true);
+                            Plugin.Logger.LogInfo($"[Buy] granted claim {_rerunClaimId} for '{_rerunAddr}': {failWhy ?? "the game's own buy did not complete here (its own checks)"} - grant released.");
+                            return;
+                        }
+                        MPClient.RequestBuyBuilding(key);   // the confirmation (BuyRequest 17): closes the claim + host market removal
+                        Plugin.Logger.LogInfo($"[Patch] Client bought {key} locally (claim {_rerunClaimId} granted) + notifying host.");
                         return;
                     }
-                    // Round-159: record the REAL id, never the literal "host" — after a host handoff
-                    // "host" means whoever hosts NOW (a previous host's deed would silently transfer),
-                    // and the ledger shield explicitly ignores "host" entries.
-                    MPServer.BuildingRealEstateOwners[key] = MPConfig.PlayerId;
+
+                    // HOST: the Prefix recorded the deed (Round-159: the REAL id, never the literal "host").
+                    var hs = __state.Split('|');
+                    if (hs.Length < 3 || hs[0] != "host") return;
+                    string claimId = hs[1], ckey = hs[2];
+                    if (!bought)
+                    {
+                        MPServer.ReleaseDeedClaim(ckey, MPConfig.PlayerId, claimId, failWhy ?? "the game's own buy stopped on its own checks");
+                        return;
+                    }
+                    MPServer.ConfirmDeedClaim(ckey, MPConfig.PlayerId);
                     MPServer.RefreshBuildingAccess();   // housing: guests granted housing can now enter this newly-bought building
-                    Plugin.Logger.LogInfo($"[Patch] Host bought {key} (recorded in ownership registry).");
+                    Plugin.Logger.LogInfo($"[Patch] Host bought {ckey} (recorded in ownership registry).");
                 }
                 catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Patch] Patch_SendBuyBuildingOffer: {ex.Message}"); }
+            }
+
+            /// <summary>Guest, MAIN THREAD: the host's verdict on the held buy.</summary>
+            internal static void OnClaimAnswer(BuyClaimPayload a)
+            {
+                try
+                {
+                    var p = _pending;
+                    if (p == null || a.ClaimId != p.Id)
+                    {
+                        if (a.Granted) MPClient.SendBuyClaim(a.AddressKey, 0, a.ClaimId, release: true);
+                        Plugin.Logger.LogWarning($"[Buy] answer for claim {a.ClaimId} ('{a.AddressKey}') matches no waiting claim - {(a.Granted ? "grant released" : "ignored")}; nothing was charged.");
+                        return;
+                    }
+                    _pending = null;
+                    float waited = UnityEngine.Time.unscaledTime - p.SentAt;
+                    if (waited > BuyClaimReplyTimeoutS)
+                    {
+                        if (a.Granted) MPClient.SendBuyClaim(p.Addr, p.Amount, p.Id, release: true);
+                        Plugin.Logger.LogWarning($"[Buy] answer for claim {p.Id} ('{p.Addr}') came after {waited:F0}s - {(a.Granted ? "grant released" : "ignored")}; nothing was charged.");
+                        return;
+                    }
+                    if (!a.Granted)
+                    {
+                        Plugin.Logger.LogInfo($"[Buy] claim {p.Id} for '{p.Addr}' REFUSED by the host{(a.OwnedByPlayer ? " - another player holds the deed" : "")}; nothing was charged.");
+                        if (a.OwnedByPlayer) ShowOwnedRefusal();
+                        return;
+                    }
+                    // Granted: re-run the game's own buy ONCE, on the same page, for the same building and offer.
+                    var pres = p.Pres;
+                    string shown = pres != null ? PageAddress(pres) : "";
+                    if (pres == null || shown != p.Addr)
+                    {
+                        MPClient.SendBuyClaim(p.Addr, p.Amount, p.Id, release: true);
+                        Plugin.Logger.LogWarning($"[Buy] claim {p.Id} for '{p.Addr}' granted, but the buy page now shows '{shown}' - not bought, grant released; nothing was charged.");
+                        return;
+                    }
+                    try { if (p.Field != null) p.Field.text = p.AmountText; } catch { }
+                    _rerunClaimId = p.Id; _rerunAddr = p.Addr; _bypass = true;
+                    try { pres.SendBuyBuildingOffer(); }
+                    finally { _bypass = false; }
+                    Plugin.Logger.LogInfo($"[Buy] claim {p.Id} for '{p.Addr}' GRANTED - the game's own buy ran once.");
+                }
+                catch (System.Exception ex) { _bypass = false; Plugin.Logger.LogWarning($"[Buy] claim answer: {ex.Message}"); }
+            }
+
+            internal static void ShowOwnedRefusal()
+            {
+                try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, OwnedRefusalText); } catch { }
+            }
+
+            /// <summary>The address key the BizMan page shows ("" when none).</summary>
+            internal static string PageAddress(BizManPresentation pres)
+            {
+                try { var r = RegOf(pres); return r != null ? GameStateReader.AddressKey(r) : ""; } catch { return ""; }
+            }
+
+            /// <summary>The offer field the game reads (:902): the Hamptons purchase box for a Hamptons house, else the buy field.</summary>
+            internal static TMPro.TMP_InputField? OfferField(BizManPresentation pres)
+            {
+                var biz = ReadMember(pres, "bizManBusiness") as BizManBusiness;
+                bool hamptons = false; try { hamptons = biz != null && biz.building != null && biz.building.IsHamptonsHouse(); } catch { }
+                if (!hamptons) return pres.buyBuildingAmountInputField;
+                var box = ReadMember(pres, "hamptonsPurchaseBoxUI");
+                return box == null ? null : ReadMember(box, "offerInputField") as TMPro.TMP_InputField;
+            }
+
+            internal static bool SetOfferText(BizManPresentation pres, string text)
+            {
+                var f = OfferField(pres);
+                if (f == null) return false;
+                f.text = text;
+                return true;
+            }
+
+            /// <summary>T-33 (F5): true iff the game's own buy would refuse this offer on its DLC check (:892) or its
+            /// minimum price (:912-916, same formula). Unreadable = false (the claim goes ahead as before).</summary>
+            private static bool WouldRefuseOffer(BizManPresentation pres, double amount)
+            {
+                try
+                {
+                    var biz = ReadMember(pres, "bizManBusiness") as BizManBusiness;
+                    if (biz == null || biz.building == null || biz.buildingRegistration == null) return false;
+                    if (!biz.building.requiredDLC.DlcIsOwned()) return true;
+                    var addr = biz.building.Address;
+                    BuildingForSale? sale = null;
+                    var list = SaveGameManager.Current.buildingsForSale;
+                    if (list != null) foreach (var x in list) if (x != null && x.address == addr) { sale = x; break; }
+                    double min = sale == null
+                        ? (double)(biz.building.GetMarketValue() * (1f + BigAmbitions.Rivals.RivalsHelper.GetBuyBuildingAcceptRate(biz.buildingRegistration.buildingOwnerRivalId) / 100f))
+                        : (double)(sale.buildingPrice * sale.acceptOfferRate);
+                    return amount < min;
+                }
+                catch { return false; }
+            }
+
+            private static bool ReadOffer(BizManPresentation pres, out TMPro.TMP_InputField? field, out string text, out double amount)
+            {
+                field = OfferField(pres);
+                text = field != null ? field.text ?? "" : "";
+                if (!double.TryParse(text, out amount)) return false;
+                return amount > 0.0;
             }
 
             static BuildingRegistration? RegOf(BizManPresentation pres)

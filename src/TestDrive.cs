@@ -71,6 +71,12 @@ namespace BigAmbitionsMP
         /// load ran (MPSaveCoordinator.HostLoadSession, EFFORT BATCH 29) - both BEFORE any client is told.</summary>
         internal static bool ForceStartFailOnce;
 
+        /// <summary>T-19 "savefail" verb state - while true, the NEXT PerformLocalSave on this machine fails
+        /// every one of its attempts (each throws before the game's Save runs), exercising the SAVE FAILED log
+        /// line and the save-failure notice (shown once per failed save however many attempts it retried).
+        /// Consumed by that save.</summary>
+        internal static bool ForceSaveFailOnce;
+
         /// <summary>Round-260 "rentdeny" verb state — while true, the host denies every
         /// RentRequest with a TestDrive reason, letting an agent exercise the client's
         /// optimistic-rent rollback (the starter-item leak) without needing a genuinely
@@ -785,6 +791,11 @@ namespace BigAmbitionsMP
             catch (Exception ex) { return "ERR uifill: " + ex.Message; }
         }
 
+        // T-33 DEV levers' state (realbuy last / deedgate restore).
+        private static string _rbAddr = "";
+        private static double _rbAmount, _rbMoneyBefore;
+        private static readonly System.Collections.Generic.Dictionary<string, string?> _dgPrev = new();
+
         private static string Execute(string line)
         {
             if (string.IsNullOrEmpty(line)) return "ERR empty command";
@@ -866,6 +877,166 @@ namespace BigAmbitionsMP
                     return $"OK ghostjitter window=10s samples={jn} mean={jmean:F3} max={jmax:F3}";
                 }
 
+                case "realbuy":
+                {
+                    // T-33 DEV lever: drives the game's REAL BizManPresentation.SendBuyBuildingOffer (decompile :889) -
+                    // unlike `rivalrent buy` (MPRivalAttention.cs:2199), which bypasses it - so the hold-before-pay prefix
+                    // (MPPatches.Patch_SendBuyBuildingOffer) and the host's deed check are what answer.
+                    //   realbuy find [n]          - the n cheapest listed buildings this machine could buy (not its own, not
+                    //                               rented by it, not a Hamptons house; on the host also no deed/tenant entry)
+                    //   realbuy <addr>[ @amount]  - open the BizMan page on <addr>, type the offer (default: the game's own
+                    //                               minimum :912-913, rounded up, +1) and press the game's buy. A guest's
+                    //                               result is asynchronous (held=True until the host answers).
+                    //   realbuy last              - the last realbuy: money before/now, owned, once=charged exactly the offer,
+                    //                               unchanged=no money moved
+                    var t33gi = SaveGameManager.Current;
+                    if (t33gi == null) return "ERR no game instance";
+                    var t33inv = System.Globalization.CultureInfo.InvariantCulture;
+                    if (arg == "last")
+                    {
+                        if (_rbAddr.Length == 0) return "ERR realbuy last: no realbuy yet";
+                        var lreg = GameStatePatcher.FindRegistration(_rbAddr);
+                        bool lown = false; try { lown = lreg != null && lreg.BuildingOwnedByPlayer; } catch { }
+                        double lnow = t33gi.Money, lch = _rbMoneyBefore - lnow;
+                        return $"OK realbuy last addr='{_rbAddr}' amount={_rbAmount.ToString("F2", t33inv)} moneyBefore={_rbMoneyBefore.ToString("F2", t33inv)} moneyNow={lnow.ToString("F2", t33inv)} charged={lch.ToString("F2", t33inv)} owned={lown} once={Math.Abs(lch - _rbAmount) < 1.0} unchanged={Math.Abs(lch) < 0.01} held={MPPatches.Patch_SendBuyBuildingOffer.HasPendingClaim}";
+                    }
+                    if (arg == "find" || arg.StartsWith("find ", StringComparison.Ordinal))
+                    {
+                        int fwant = 3;
+                        if (arg.Length > 5 && int.TryParse(arg.Substring(5).Trim(), out var fw)) fwant = Math.Max(1, fw);
+                        var fpicks = new List<(double price, string key)>();
+                        foreach (var bfs in t33gi.buildingsForSale)
+                        {
+                            try
+                            {
+                                if (bfs?.address == null) continue;
+                                string fk = GameStateReader.AddressKey(bfs.address);
+                                var freg2 = GameStatePatcher.FindRegistration(fk);
+                                if (freg2 == null || freg2.BuildingOwnedByPlayer || freg2.RentedByPlayer) continue;
+                                if (freg2.BuildingCached == null || freg2.BuildingCached.IsHamptonsHouse()) continue;
+                                if (MPServer.IsRunning
+                                    && ((MPServer.BuildingRealEstateOwners.TryGetValue(fk, out var t33fd) && !string.IsNullOrEmpty(t33fd))
+                                        || (MPServer.BuildingOwners.TryGetValue(fk, out var ft) && !string.IsNullOrEmpty(ft)))) continue;
+                                fpicks.Add(((double)bfs.buildingPrice * bfs.acceptOfferRate, fk));
+                            }
+                            catch { }
+                        }
+                        fpicks.Sort((x, y) => x.price.CompareTo(y.price));
+                        var fsb = new StringBuilder($"OK realbuy find n={Math.Min(fwant, fpicks.Count)}");
+                        for (int t33i = 0; t33i < fpicks.Count && t33i < fwant; t33i++)
+                            fsb.Append($" a{t33i + 1}='{fpicks[t33i].key}' price{t33i + 1}={fpicks[t33i].price.ToString("F0", t33inv)}");
+                        return fsb.ToString();
+                    }
+                    //   realbuy unless <raceAddr> | <addr>[ @amount] - t-buyowned T5: the T3 race LOSER's normal buy. When THIS
+                    //                               machine owns <raceAddr> (it won the race; its 'once' check already covered its
+                    //                               charged-once leg) nothing is pressed; otherwise the realbuy below runs on <addr>.
+                    string rarg = arg;
+                    if (rarg.StartsWith("unless ", StringComparison.Ordinal))
+                    {
+                        int ubar = rarg.IndexOf('|');
+                        if (ubar < 0) return "ERR usage: realbuy unless <raceAddr> | <addr>[ @amount]";
+                        string urace = rarg.Substring(7, ubar - 7).Trim();
+                        var ureg = GameStatePatcher.FindRegistration(urace);
+                        if (ureg == null) return $"ERR no registration for '{urace}'";
+                        bool uown = false; try { uown = ureg.BuildingOwnedByPlayer; } catch { }
+                        rarg = rarg.Substring(ubar + 1).Trim();
+                        if (uown) return $"OK realbuy skip race='{GameStateReader.AddressKey(ureg)}' owned=True - this machine won the race; nothing pressed for '{rarg}'";
+                    }
+                    string rspec = rarg; double ramt = -1;
+                    int t33at = rarg.LastIndexOf('@');
+                    if (t33at >= 0)
+                    {
+                        if (!double.TryParse(rarg.Substring(t33at + 1).Trim(), System.Globalization.NumberStyles.Float, t33inv, out ramt) || ramt <= 0)
+                            return "ERR realbuy: bad @amount";
+                        rspec = rarg.Substring(0, t33at).Trim();
+                    }
+                    if (rspec.Length == 0) return "ERR usage: realbuy find [n] | realbuy <addr>[ @amount] | realbuy last";
+                    if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR realbuy: not in a session";
+                    var t33reg = GameStatePatcher.FindRegistration(rspec);
+                    if (t33reg == null) return $"ERR no registration for '{rspec}'";
+                    string t33key = GameStateReader.AddressKey(t33reg);
+                    if (ramt <= 0)
+                    {
+                        var rfs = t33gi.buildingsForSale.FirstOrDefault(x => x?.address != null && GameStateReader.AddressKey(x.address) == t33key);
+                        double rneed = rfs != null
+                            ? (double)(rfs.buildingPrice * rfs.acceptOfferRate)
+                            : (double)(t33reg.BuildingCached.GetMarketValue() * (1f + BigAmbitions.Rivals.RivalsHelper.GetBuyBuildingAcceptRate(t33reg.buildingOwnerRivalId) / 100f));
+                        ramt = rneed + 1.0;
+                    }
+                    ramt = Math.Ceiling(ramt);
+                    double rmoney = t33gi.Money;
+                    if (rmoney < ramt) return $"ERR realbuy: money={rmoney.ToString("F2", t33inv)} < amount={ramt.ToString("F2", t33inv)} (premise - nothing pressed)";
+                    var ruis = InstanceBehavior<UI.UIs>.Instance;
+                    if (ruis == null || ruis.fullMenu == null || ruis.fullMenu.bizMan == null) return "ERR realbuy: no BizMan app (not in a game?)";
+                    ruis.fullMenu.bizMan.Open(t33reg.Address);
+                    BizManPresentation? rpres = null;
+                    foreach (var t33rp in UnityEngine.Object.FindObjectsOfType<BizManPresentation>(true))
+                        if (MPPatches.Patch_SendBuyBuildingOffer.PageAddress(t33rp) == t33key) { rpres = t33rp; break; }
+                    if (rpres == null) return $"ERR realbuy: the BizMan page did not open on '{t33key}'";
+                    // The game parses the field with the current culture (:902) - a whole number reads the same everywhere.
+                    if (!MPPatches.Patch_SendBuyBuildingOffer.SetOfferText(rpres, ramt.ToString("F0", System.Globalization.CultureInfo.CurrentCulture)))
+                        return "ERR realbuy: no offer field on the page";
+                    _rbAddr = t33key; _rbAmount = ramt; _rbMoneyBefore = rmoney;
+                    rpres.SendBuyBuildingOffer();
+                    bool rown = false; try { rown = t33reg.BuildingOwnedByPlayer; } catch { }
+                    string rdeed = MPServer.IsRunning ? (MPServer.BuildingRealEstateOwners.TryGetValue(t33key, out var rd) ? rd : "") : "n/a";
+                    return $"OK realbuy addr='{t33key}' amount={ramt.ToString("F2", t33inv)} moneyBefore={rmoney.ToString("F2", t33inv)} moneyNow={((double)t33gi.Money).ToString("F2", t33inv)} owned={rown} held={MPPatches.Patch_SendBuyBuildingOffer.HasPendingClaim} deed={rdeed}";
+                }
+
+                case "deedgate":
+                {
+                    // T-33 DEV lever (t-buyowned T4): the DEED gate on ListForSale / CancelSale / SaleCompleted.
+                    //   HOST:   deedgate tenant <pid> <addr>  - write a TENANCY ledger entry (MPServer.BuildingOwners) naming <pid>
+                    //           deedgate restore <addr>       - put that tenancy entry back as it was before 'tenant'
+                    //   CLIENT: deedgate send <list|cancel|sold> <addr> - send that message for <addr> as this player
+                    var dtk = arg.Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                    if (dtk.Length < 2) return "ERR usage: deedgate tenant <pid> <addr> | deedgate restore <addr> | deedgate send <list|cancel|sold> <addr>";
+                    string dverb = dtk[0], drest = dtk[1].Trim();
+                    if (dverb == "tenant")
+                    {
+                        if (!MPServer.IsRunning) return "ERR deedgate tenant: host only";
+                        var dp = drest.Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                        if (dp.Length < 2) return "ERR usage: deedgate tenant <pid> <addr>";
+                        var t33dreg = GameStatePatcher.FindRegistration(dp[1]);
+                        if (t33dreg == null) return $"ERR no registration for '{dp[1]}'";
+                        string t33dkey = GameStateReader.AddressKey(t33dreg);
+                        string? dprev = MPServer.BuildingOwners.TryGetValue(t33dkey, out var dpv) ? dpv : null;
+                        if (!_dgPrev.ContainsKey(t33dkey)) _dgPrev[t33dkey] = dprev;
+                        MPServer.BuildingOwners[t33dkey] = dp[0];
+                        string ddeed = MPServer.BuildingRealEstateOwners.TryGetValue(t33dkey, out var t33dd) ? t33dd : "";
+                        return $"OK deedgate tenant addr='{t33dkey}' tenant={dp[0]} deed={ddeed} was='{dprev ?? ""}'";
+                    }
+                    if (dverb == "restore")
+                    {
+                        if (!MPServer.IsRunning) return "ERR deedgate restore: host only";
+                        var t33dreg = GameStatePatcher.FindRegistration(drest);
+                        if (t33dreg == null) return $"ERR no registration for '{drest}'";
+                        string t33dkey = GameStateReader.AddressKey(t33dreg);
+                        if (!_dgPrev.TryGetValue(t33dkey, out var dwas)) return $"ERR deedgate restore: nothing recorded for '{t33dkey}'";
+                        if (dwas == null) MPServer.BuildingOwners.TryRemove(t33dkey, out _); else MPServer.BuildingOwners[t33dkey] = dwas;
+                        _dgPrev.Remove(t33dkey);
+                        return $"OK deedgate restore addr='{t33dkey}' tenant='{dwas ?? ""}'";
+                    }
+                    if (dverb == "send")
+                    {
+                        if (!MPClient.IsConnected) return "ERR deedgate send: client only";
+                        var ds = drest.Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+                        if (ds.Length < 2) return "ERR usage: deedgate send <list|cancel|sold> <addr>";
+                        var t33sreg = GameStatePatcher.FindRegistration(ds[1]);
+                        if (t33sreg == null) return $"ERR no registration for '{ds[1]}'";
+                        string t33skey = GameStateReader.AddressKey(t33sreg);
+                        bool sok = ds[0] switch
+                        {
+                            "list"   => MPClient.RequestListForSale(new BuildingForSaleInfo { AddressKey = t33skey, BuildingPrice = 1f, AcceptOfferRate = 1f }),
+                            "cancel" => MPClient.RequestCancelSale(t33skey),
+                            "sold"   => MPClient.SendSaleCompleted(t33skey),
+                            _        => false,
+                        };
+                        return sok ? $"OK deedgate sent {ds[0]} addr='{t33skey}'" : $"ERR deedgate send '{ds[0]}' failed (unknown kind or not connected)";
+                    }
+                    return $"ERR deedgate: unknown verb '{dverb}'";
+                }
+
                 case "ledgerdump":
                 {
                     if (!MPServer.IsRunning) return "ERR host only";
@@ -897,6 +1068,12 @@ namespace BigAmbitionsMP
                     if (arg == "off") { ForceStartFailOnce = false; return "OK startfail disarmed"; }
                     // EFFORT BATCH 29: clientInLobby = this machine's CLIENT lobby latch (true until a start is acted on).
                     return $"OK startfail armed={ForceStartFailOnce} running={MPServer.IsRunning} inLobby={MPServer.IsInLobby} clientInLobby={MPClient.IsInLobby}";
+
+                case "savefail":
+                    // T-19 test lever, either side: 'arm' -> this machine's next own save fails all its attempts once.
+                    if (arg == "arm") { ForceSaveFailOnce = true;  return "OK the next own save on this machine fails (all attempts) once"; }
+                    if (arg == "off") { ForceSaveFailOnce = false; return "OK savefail disarmed"; }
+                    return $"OK savefail armed={ForceSaveFailOnce}";
 
                 case "rivalids":
                 {

@@ -1067,6 +1067,13 @@ namespace BigAmbitionsMP
                     HandleBuyDeny(env);
                     break;
 
+                case MessageType.BuyClaimAnswer:        // T-33: the host's verdict on my held buy
+                {
+                    var bca = env.GetPayload<BuyClaimPayload>();
+                    if (bca != null) GameStatePatcher.EnqueueOnMainThread(() => MPPatches.Patch_SendBuyBuildingOffer.OnClaimAnswer(bca));
+                    break;
+                }
+
                 case MessageType.MarketSnapshot:
                     HandleMarketSnapshot(env);
                     break;
@@ -2897,6 +2904,17 @@ namespace BigAmbitionsMP
             };
             Send(MessageEnvelope.Create(MessageType.BuyRequest, MPConfig.PlayerId, payload));
             Plugin.Logger.LogInfo($"[Client] Sent BuyRequest for {addressKey}");
+            return true;
+        }
+
+        /// <summary>T-33: a held buy's claim (or, release = true, 'drop my granted claim') - no money moves
+        /// on this machine until the host's BuyClaimAnswer grants it.</summary>
+        public static bool SendBuyClaim(string addressKey, double amount, string claimId, bool release)
+        {
+            if (!IsConnected) return false;
+            Send(MessageEnvelope.Create(MessageType.BuyClaim, MPConfig.PlayerId,
+                new BuyClaimPayload { AddressKey = addressKey, Amount = amount, ClaimId = claimId, Release = release }));
+            Plugin.Logger.LogInfo($"[Client] Sent BuyClaim{(release ? " RELEASE" : "")} {claimId} for {addressKey} (${amount:N0})");
             return true;
         }
 

@@ -223,6 +223,8 @@ namespace BigAmbitionsMP
         CustomerUnsoldLeave   = 220,     // H-HANDOFF-1 R1 (hand-off stock S4, 2026-09-27; rides protocol 26, unreleased): a customer whose visit crossed a hand-off walked out UNSOLD on a PARTNER's machine (the partner runs the owner's shop as a helper; nothing paid, order still open at the game's own Customer.Leave). Partner -> HOST -> the building OWNER, routed like HelperOrderForward (142) - same sender check, owner lookup and Housing/Business grant gate. Items = the processed, non-service, non-bag lines: exactly what the game's own Leave puts back on a shelf (Customer.cs:316-327). The owner returns min(those lines, the units its own shelves gave the visit) and nothing more; the other units are the native pick-then-leave loss. Once per visit on both sides.
         WorldSettings         = 221,     // SAVED-SETTINGS-1 (user-approved 2026-09-29, decisions 18/20/21; protocol 27): the saved world's FLEXIBLE settings the host changed in the load lobby. Host -> client {Rev, Settings} when the client reports its world loaded (the Settled/Running applying-edge), after the host's own world-ready apply (broadcast), and on ask; the client applies through the game's own SaveGameManager.ApplyNewDifficulty (skipped when already equal). Client -> host with Settings = null = 'my applied rev differs from the heartbeat's WorldRev - re-send'.
         PropertyForfeit       = 222,     // BAN-PLAYERS-1 build B (owner-approved 2026-10-01; protocol 27, unreleased - additive): Host -> clients. The host REMOVED a banned player's property: per banned owner (stable id) the addresses it rented and bought, the ones whose contents go, and the game day. A machine that is not that owner clears its copy (for-rent flags, name, type, furniture/stock/storage; a building its own player holds is never touched); the banned player's OWN machine - only if it is ever unbanned and rejoins (the host replays the record at its world-ready) - ends those leases through the game's own lease-end steps WITHOUT any payout and gives up the bought buildings. Host -> client only.
+        BuyClaim              = 223,     // T-33 (2026-11-13; protocol 28, unreleased - additive): Guest -> Host, BEFORE any money moves. The game's BizManPresentation.SendBuyBuildingOffer (decompile :889) is held by a prefix and the guest asks 'may I buy AddressKey at Amount' (ClaimId pairs the answer). The host decides in ONE locked check-and-record against the deed ledger (MPServer.TryClaimDeed) and answers with BuyClaimAnswer. The same type with Release=true is the guest's 'drop my granted claim': its one native re-run did not complete the buy, or the answer came after it stopped waiting.
+        BuyClaimAnswer        = 224,     // T-33: Host -> that guest. Granted=true = the deed ledger now names the guest; it re-runs the game's own buy ONCE (native charge/deed/notifications exactly once) and its BuyRequest (17) then confirms. Granted=false + OwnedByPlayer = another player holds the deed; the guest shows the approved refusal. No money ever moves without Granted=true.
     }
 
     /// <summary>Merger slice 3 — a routed owner-only business edit (currently the temporarily-closed
@@ -2033,6 +2035,23 @@ namespace BigAmbitionsMP
         /// <summary>Round-50: why a RentDeny was issued (host-side availability verdict) —
         /// for the client's log/toast. Optional; absent/empty on older senders.</summary>
         public string DenyReason { get; set; } = "";
+    }
+
+    /// <summary>T-33 (2026-11-13): a held buy's claim (BuyClaim, guest -> host) and its verdict (BuyClaimAnswer,
+    /// host -> guest). ClaimId pairs an answer with the one claim the guest waits on; an answer for any other id
+    /// is never acted on (a granted one is released).</summary>
+    public class BuyClaimPayload
+    {
+        public string AddressKey { get; set; } = "";
+        /// <summary>The offer the guest typed; the game's own buy re-checks it on the re-run.</summary>
+        public double Amount { get; set; }
+        public string ClaimId { get; set; } = "";
+        /// <summary>Claim only: true = drop my granted claim (the buy did not complete on my machine).</summary>
+        public bool Release { get; set; }
+        /// <summary>Answer only: true = the deed ledger now names the claimant.</summary>
+        public bool Granted { get; set; }
+        /// <summary>Answer only: the refusal is 'another player holds the deed'.</summary>
+        public bool OwnedByPlayer { get; set; }
     }
 
     /// <summary>Periodic market price broadcast.</summary>

@@ -1170,7 +1170,7 @@ namespace BigAmbitionsMP
                 int rc = ResolveOwnSlot(session, MPConfig.StableId, out _, out string effId);
                 if (rc == -1)
                 {
-                    Plugin.Logger.LogError($"[MPSave] HostLoadSession '{session}' REFUSED before any state change: no save for this character (stable={effId}) among multiple member folders. Nothing was stamped, persisted, or served.");
+                    Plugin.Logger.LogError($"[MPSave] HostLoadSession '{session}' REFUSED before any state change: no save for this character (stable={effId}) among the member folders. Nothing was stamped, persisted, or served.");
                     // Round-285: hand the lobby back — the caller burned IsInLobby before we
                     // could refuse, and nothing else restores it (the wedge, live 2026-08-21).
                     MPServer.NotifyLoadRefused("no character found.");
@@ -1634,8 +1634,8 @@ namespace BigAmbitionsMP
         /// and LoadOwnHsg (2026-08-18: the refused-load-still-mutated-the-manifest defect
         /// needs the answer BEFORE any write, and a second copy of this matching would
         /// drift — the derived-counter lesson).  Honors the Dev impersonation override.
-        /// Returns 1 = own slot matched; 0 = legacy single-folder fallback (chosen set);
-        /// -1 = refused (no own slot among several member folders); -2 = no saves.</summary>
+        /// Returns 1 = own slot matched; 0 = legacy single old-style folder (chosen set);
+        /// -1 = refused (no own slot: several folders, or one named for another player); -2 = no saves.</summary>
         private static int ResolveOwnSlot(string session, string stableId,
             out SaveGameManager.SaveGameStruct? chosen, out string effectiveId)
         {
@@ -1656,10 +1656,21 @@ namespace BigAmbitionsMP
                 string seg = saves[i]?.characterId ?? "";
                 if (string.Equals(seg, want, StringComparison.OrdinalIgnoreCase)) { chosen = saves[i]; return 1; }
             }
-            // Review-2 semantics preserved: a single-folder store keeps the legacy
-            // fallback; several folders with no own slot is a refusal.
-            if (saves.Count == 1) { chosen = saves[0]; return 0; }
+            // A single-folder store keeps the legacy fallback ONLY for an old-style folder
+            // (named before stable ids existed). A lone folder named for a player id
+            // ("steam-…" / "guid-…") is another member's character, never ours: refuse
+            // (T-19, owner decision 41 = A, 2026-11-13 — loading it made a twin character).
+            if (saves.Count == 1 && !IsMemberIdFolder(saves[0]?.characterId)) { chosen = saves[0]; return 0; }
             return -1;
+        }
+
+        /// <summary>True when a character folder is named for a player's stable id
+        /// ("steam-…" / "guid-…", MPConfig.StableId's namespaces).</summary>
+        private static bool IsMemberIdFolder(string? seg)
+        {
+            if (string.IsNullOrEmpty(seg)) return false;
+            return seg!.StartsWith("steam-", StringComparison.OrdinalIgnoreCase)
+                || seg.StartsWith("guid-", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>MAIN THREAD: load this player's .hsg out of the MP session folder.
@@ -2647,6 +2658,11 @@ namespace BigAmbitionsMP
                 // reached that client).  The launch bat now gives instance 2 its
                 // own %TEMP%; this retry covers any remaining collision.
                 _lastSaveFailReason = "";
+#if BAMP_DEV
+                // T-19 test lever ('savefail arm'): consumed by THIS save; every attempt below throws.
+                bool devSaveFail = TestDrive.ForceSaveFailOnce;
+                TestDrive.ForceSaveFailOnce = false;
+#endif
                 for (int attempt = 0; attempt < 3 && !ok; attempt++)
                 {
                     if (attempt > 0)
@@ -2656,6 +2672,9 @@ namespace BigAmbitionsMP
                     }
                     try
                     {
+#if BAMP_DEV
+                        if (devSaveFail) throw new IOException("DEV savefail lever: forced save failure (test)");
+#endif
                         ok = SaveGameManager.Save(saveType, SaveFileName, folder);
                         if (!ok)
                         {
@@ -2738,8 +2757,15 @@ namespace BigAmbitionsMP
                     + "timestamp, THIS is it, and they most likely force-quit a game that would have recovered.");
             // 4a diagnostic: a failed save is the upstream cause of most "lost progress" reports — make it
             // LOUD so it stands out in a submitted log (the routine line above is INFO).
-            if (!ok) Plugin.Logger.LogError($"[MPSave] SAVE FAILED for '{sessionName}' (char='{charName}', day={day}) — .hsg not written; a later load may fall back to an older copy." +
-                (string.IsNullOrEmpty(_lastSaveFailReason) ? "" : $" Last attempt: {_lastSaveFailReason}."));
+            if (!ok)
+            {
+                Plugin.Logger.LogError($"[MPSave] SAVE FAILED for '{sessionName}' (char='{charName}', day={day}) — .hsg not written; a later load may fall back to an older copy." +
+                    (string.IsNullOrEmpty(_lastSaveFailReason) ? "" : $" Last attempt: {_lastSaveFailReason}."));
+                // T-19 (owner-approved wording 2026-11-13, decision 34): tell THIS player, host or guest. Once per
+                // failed save: the retry attempts above all sit inside this one call, and Toast refreshes an identical
+                // line still on screen instead of stacking a second one.
+                try { GameStatePatcher.EnqueueOnMainThread(() => PassengerHud.Toast("Your game failed to save. Recent progress may be lost if you quit now.", 8f)); } catch { }
+            }
 
             saved = ok;
             return new MpSlot
