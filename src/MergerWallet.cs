@@ -191,7 +191,13 @@ namespace BigAmbitionsMP
                     if (SetMirror(p.Balance, "company balance")) WalletMirrored = true;
                 }
                 else
+                {
                     SetMirror(p.Balance, "leave payout — personal wallet");
+                    // T-35 (3): a personal payout ENDS the company mirror on this machine. Until the membership update
+                    // lands this machine still reads as a member, and with the flag up a save in that gap would divide
+                    // the payout as if it were the company balance (MPSaveCoordinator.TryMergedShare client leg).
+                    WalletMirrored = false;
+                }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Wallet] apply: {ex.Message}"); }
         }

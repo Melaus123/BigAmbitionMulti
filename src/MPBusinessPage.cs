@@ -1803,7 +1803,7 @@ namespace BigAmbitionsMP
                     BpPos(av.rectTransform, 14f, 13f, 40f, 40f);
                     BpText(av.transform, BLetter(nm), 16f, B_AVTXT, 0f, 0f, 40f, 40f, TextAlignmentOptions.Center, true);
                     BpText(bg.transform, nm, 16f, Color.white, 68f, 11f, rx - 14f - 68f, 22f, TextAlignmentOptions.Left, true);
-                    BpText(bg.transform, $"Banned on day {r.BanDay} · {r.How}", 13f, BP_SUB, 68f, 36f, rx - 14f - 68f, 18f, TextAlignmentOptions.Left);
+                    BpText(bg.transform, r.BanDay <= 0 ? $"Banned in the lobby · {r.How}" : $"Banned on day {r.BanDay} · {r.How}", 13f, BP_SUB, 68f, 36f, rx - 14f - 68f, 18f, TextAlignmentOptions.Left);
                     BpButton(bg.transform, "Remove property", canRemove ? 0 : 4, rx, 15f, rw, 36f, 13f, 6, r.Key, nm);
                     BpButton(bg.transform, "Unban", 1, ux, 15f, 110f, 36f, 13f, 5, r.Key, nm);
                     y += RH + (i < shown - 1 ? RG : 0f);
@@ -1920,7 +1920,8 @@ namespace BigAmbitionsMP
                 string pp = _bpPid;
                 if (pp.Length == 0)
                 {
-                    int q1 = res.IndexOf('\''), q2 = q1 >= 0 ? res.IndexOf('\'', q1 + 1) : -1;
+                    // T-10 (c): ids are display names and may hold an apostrophe ("O'Neil") - end at "' key=", not the next quote.
+                    int q1 = res.IndexOf('\''), q2 = q1 >= 0 ? res.IndexOf("' key=", q1 + 1, StringComparison.Ordinal) : -1;
                     if (q2 > q1 + 1) pp = res.Substring(q1 + 1, q2 - q1 - 1);
                 }
                 if (key.Length > 0) { _bpPendKey = key; _bpPendPid = pp; _bpPendSince = Time.unscaledTime; _bpPendNext = 0f; }

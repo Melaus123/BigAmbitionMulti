@@ -4236,7 +4236,8 @@ namespace BigAmbitionsMP
         /// stand-in undoes its install and stops simulating those shops); (3) the ledger entries go; (4) the company sharing
         /// update goes out (members' partner-shop flips come off) BEFORE (5) the host's own copy is released (flags, name,
         /// type, furniture/stock/storage; a bought building goes back on the sale market as unowned) and (6) every
-        /// connected machine is told (PropertyForfeit). No money moves on any machine. Refused (logged) unless hosting with
+        /// connected machine is told (PropertyForfeit). No money is paid out: a merged member also leaves the company with no
+        /// payout (T-10 a - HostMemberLeave; their share stays with the company). Refused (logged) unless hosting with
         /// a world loaded, the player is on the saved ban list, and the player is not connected.</summary>
         public static string RemoveProperty(string who)
         {
@@ -4262,6 +4263,14 @@ namespace BigAmbitionsMP
                 string name = string.IsNullOrEmpty(e.Name) ? stable : e.Name;
                 if (rented.Count + bought.Count == 0)
                 {
+                    // T-10 (a), owner decision 2026-10-02: 'remove everything' also takes a merged member out of the
+                    // company - even when they own nothing - with NO payout (the share stays, their cash becomes 0).
+                    bool leftCo = false;
+                    try { leftCo = HostMemberLeave(stable, "", payOut: false); }
+                    catch (Exception lx) { Plugin.Logger.LogWarning($"[Forfeit] member leave of '{name}' failed: {lx.GetType().Name}: {lx.Message}"); }
+                    // review F1: the company change is persisted at once (PersistGrantsNow) but each player's cash only at a
+                    // full save - save now, as the branch with property does, so a host quit cannot split the money.
+                    if (leftCo) { try { MPSaveCoordinator.HostSaveNow("forfeit"); } catch (Exception sx) { Plugin.Logger.LogWarning($"[Forfeit] save after the member leave failed: {sx.Message}"); } }
                     Plugin.Logger.LogInfo($"[Forfeit] remove property of banned '{name}' (saved ban {e.Key}): the ledgers hold nothing for that player - nothing to remove.");
                     return $"OK removed '{name}' key={e.Key} rented=0 bought=0 cleared=0 addrs=[]";
                 }
@@ -4285,6 +4294,9 @@ namespace BigAmbitionsMP
                 // so the mark has nothing left and is dropped rather than shrunk.
                 bool hadMark = MergerAbsence.Marks.ContainsKey(stable);
                 if (hadMark) MergerAbsence.HostDropMark(stable, "property forfeited by a ban");
+                // T-10 (a): a merged member also LEAVES the company, with no payout (share stays with the company).
+                try { HostMemberLeave(stable, "", payOut: false); }   // review F4: never stops the removal and its save below
+                catch (Exception lx) { Plugin.Logger.LogWarning($"[Forfeit] member leave of '{name}' failed: {lx.GetType().Name}: {lx.Message}"); }
 
                 // (3) the ledgers - the one exception to H-STANDINLEASE-1 (a BANNED player only).
                 foreach (var a in rented) BuildingOwners.TryRemove(a, out _);
@@ -8453,181 +8465,220 @@ namespace BigAmbitionsMP
                 case "leave":
                 {
                     string s = StableOfPid(actorPid);
-                    string g0 = MergerSync.GroupOfStable(s);
-                    if (string.IsNullOrEmpty(s) || g0 == "") { PMergeReqDrop(action, actorPid, targetPid, string.IsNullOrEmpty(s) ? "leave with no stable id" : "leave while not in a company"); return; }
-
-                    // Slice 4 — settle the shared wallet BEFORE membership changes. Equal split: the
-                    // leaver takes balance / memberCount; a dissolving pair's REMAINING member takes
-                    // the rest as their personal wallet (combined entity — no contribution tracking
-                    // by design; "this is ours" has no ledgers of whose money it was).
-                    if (_walletBalance.TryGetValue(g0, out var bal))
-                    {
-                        int members = MergerSync.StoreGroups.TryGetValue(g0, out var set) ? set.Count : 0;
-                        if (members > 0)
-                        {
-                            float share = bal / members;
-                            // FOLD b X2 (r1 F2): EVERY payout decided here is written into CashByStableId at once,
-                            // online or offline. Only the OFFLINE member's figure used to be recorded, so an ONLINE
-                            // member kept the full-pot MIRROR as their "last known cash" until the 3 s resync
-                            // (MPCanvasUI.cs:4359) — and a coordinated save or MergeSlot upload inside that window
-                            // stamped the WHOLE balance into their slot, handing each of them the full pot on the
-                            // next load. The leaver goes first: they are leaving the group, so from this instant
-                            // CashByStableId is the only thing that answers for them.
-                            CashByStableId[s] = share;
-                            var payout = new MergerWalletStatePayload { GroupId = "", Balance = share };
-                            if (actorPid == MPConfig.PlayerId) MergerWallet.ApplyState(payout);
-                            else SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerWalletState, "host", payout));
-                            Plugin.Logger.LogInfo($"[EconProbe] wallet SPLIT '{g0}': '{actorPid}' leaves with ${share:N0} of ${bal:N0} ({members} member(s)).");
-                            if (members <= 2)
-                            {
-                                // Group dissolves — the other member gets the remainder as personal cash.
-                                string other = "";
-                                foreach (var mem in set) if (mem != s) { other = mem; break; }
-                                string otherPid = "";
-                                if (other == MPConfig.StableId) otherPid = MPConfig.PlayerId;
-                                else foreach (var kv in StableIdByPlayer) if (kv.Value == other) { otherPid = kv.Key; break; }
-                                var rest = new MergerWalletStatePayload { GroupId = "", Balance = bal - share };
-                                if (otherPid == MPConfig.PlayerId) MergerWallet.ApplyState(rest);
-                                else if (otherPid != "") SendToPid(otherPid, MessageEnvelope.Create(MessageType.MergerWalletState, "host", rest));
-                                // X2: the remaining member's figure regardless of who they are — the company is gone,
-                                // so CashByStableId is their only record, exactly as for the leaver above.
-                                if (other != "") CashByStableId[other] = bal - share;
-                                Plugin.Logger.LogInfo($"[EconProbe] wallet DISSOLVE '{g0}': remaining member gets ${bal - share:N0}.");
-                                _walletBalance.Remove(g0);
-                                _walletContributed.Remove(g0);
-                            }
-                            else
-                            {
-                                _walletBalance[g0] = bal - share;
-                                if (_walletContributed.TryGetValue(g0, out var cset)) cset.Remove(s);
-                                // X2: the company SURVIVES, so the members who stay are re-shared over the reduced
-                                // pot and count. Their live figure is written too, so CashByStableId never holds the
-                                // pre-leave full pot for anybody. The remainder holder is the founder, or — when the
-                                // founder is the one leaving — the next member in join order, which is exactly what
-                                // MergerSync.StoreRemove installs a few lines below.
-                                var stay = new List<string>();
-                                foreach (var mem in MergerSync.JoinOrderOfGroup(g0)) if (mem != s) stay.Add(mem);
-                                if (stay.Count > 0)
-                                {
-                                    string keeper = MergerSync.FounderOfGroup(g0);
-                                    if (keeper == s || !stay.Contains(keeper)) keeper = stay[0];
-                                    foreach (var mem in stay)
-                                        CashByStableId[mem] = MPSaveCoordinator.EqualShare(bal - share, stay.Count, mem == keeper);
-                                }
-                                BroadcastWalletGroup(g0);
-                            }
-                        }
-                    }
-
-                    // PHASE 5 / P7 (2026-09-12), narrowed by r2 (J7): a routed PRESS waiting on a partner must
-                    // never run after the company that authorised it changed. The peer-departure path already
-                    // forgets them (:1783); "leave" never did. WHOSE presses go depends on what the leave
-                    // does to the company: a 3+ company SURVIVES it, so only the LEAVER loses their pending
-                    // presses and the members who stay keep both their company and theirs; a leave that takes
-                    // the member count below two DISSOLVES the company, and then every member loses it.
-                    // Collected BEFORE the store changes, forgotten after it.
-                    var exPids = new List<string>();
-                    bool dissolves = !MergerSync.StoreGroups.TryGetValue(g0, out var lset) || lset.Count <= 2;
-                    if (!dissolves) exPids.Add(actorPid);
-                    else if (lset != null)
-                        foreach (var mem in lset)
-                        {
-                            string mpid = mem == MPConfig.StableId ? MPConfig.PlayerId : "";
-                            if (mpid.Length == 0)
-                                foreach (var kv in StableIdByPlayer) if (kv.Value == mem) { mpid = kv.Key; break; }
-                            if (mpid.Length > 0 && !exPids.Contains(mpid)) exPids.Add(mpid);
-                        }
-                    // FOLD c C3 (r1 MINOR-3): the press list above must be pids (a press is held per pid), and
-                    // the stable -> pid reverse lookup only answers for a pid this session has seen, taking the
-                    // FIRST match - so a member who is offline, or who rejoined under a second pid, can be
-                    // missed. The merger store keeps STABLE ids, so the TRANSFER step below matches on those
-                    // instead: every stable in the group when the company dissolves, the leaver's alone when it
-                    // survives. Collected BEFORE StoreRemove, like exPids (lset is the store's own set).
-                    var exStables = new HashSet<string>(StringComparer.Ordinal);
-                    if (!dissolves) exStables.Add(s);
-                    else if (lset != null)
-                        foreach (var mem in lset) if (!string.IsNullOrEmpty(mem)) exStables.Add(mem);
-
-                    var rivalKeyMove = MPRivalAttention.BeginMembershipChange(lset != null ? new List<string>(lset) { s } : new List<string> { s });   // H-RIVALPARITY-1 D F3
-                    MergerSync.StoreRemove(s);
-                    MPRivalAttention.EndMembershipChange(rivalKeyMove, dissolves ? "dissolve" : "leave");
-                    MarkMergerStateAuthoritative();   // X3: a leave — and the DISSOLVE it may be — is this process deciding the merger state, so the empty store it can leave behind must be persisted, not kept off disk
-                    foreach (var xp in exPids)
-                    {
-                        GameStatePatcher.EnqueueOnMainThread(() => HostForgetPressesOf(xp));
-                        Plugin.Logger.LogInfo($"[Merger] presses forgotten for '{xp}' — their company changed on leave ({(dissolves ? "the company dissolved" : "they left it")}).");
-                    }
-                    HostForgetCandidatesOf(actorPid);   // phase 4b (people) r2 (MINOR-9): their pool rows and claims leave with them
-                    Plugin.Logger.LogInfo($"[Merger] '{actorPid}' left their merger group.");
-
-                    // DISSOLVE step 5 (2026-09-12, user ruling) - HOST ONLY. An OPEN employee transfer the
-                    // host is holding was authorised by a company that has just changed, so it must not land
-                    // on a machine that is no longer a co-member. Value-based and idempotent: a transfer
-                    // nobody has released yet has moved NOTHING and is simply cancelled (the entry is kept a
-                    // game day exactly as the deadline path keeps it, so a release still in the air finds it);
-                    // one the host is already holding goes HOME down the existing "return" leg. A transfer
-                    // that is already going back is left alone, and an adoption that already COMPLETED is a
-                    // real record on its new machine and is correct to keep - nothing here touches it.
-                    // Fold c: the sides are matched on STABLE ids, so an OFFLINE member's held transfers are
-                    // swept too. "Home" for an offline source is what RelayReturn already does - it hands the
-                    // record to whoever runs the from-address as a stand-in, and with nobody there it logs
-                    // "the host keeps '<employee>' until one of them is back" (:7687) and keeps holding it,
-                    // re-offered once a game hour by the transfers tick. There is no queue for an absent pid.
-                    int xBack = 0, xCancelled = 0;
-                    foreach (var xt in new List<HostTransfer>(_transfers.Values))
-                    {
-                        if (xt == null) continue;
-                        if (!exStables.Contains(StableOfPid(xt.SourcePid))
-                            && !exStables.Contains(StableOfPid(xt.DestPid))) continue;
-                        if (xt.Stage == "requested")
-                        {
-                            xt.Stage = "cancelled"; xt.Day = GameDayNow(); xt.Hour = GameHourNow();
-                            xCancelled++;
-                        }
-                        else if (xt.Stage == "adopting")
-                        {
-                            xt.Day = GameDayNow(); xt.Hour = GameHourNow();
-                            RelayReturn(xt);
-                            xBack++;
-                        }
-                    }
-                    if (xBack > 0 || xCancelled > 0)
-                        Plugin.Logger.LogInfo($"[Dissolve] transfers at leave: {xBack} held transfer(s) sent back to their source and "
-                                            + $"{xCancelled} un-released one(s) cancelled - the company that authorised them changed.");
-
-                    // DISSOLVE step 6 (D3) - HOST ONLY. An ABSENCE MARK is one member standing in for another
-                    // member's buildings while they are away; the moment that company changes the stand-in is
-                    // not a co-member of that owner any more, so the HAND-BACK runs NOW instead of waiting up
-                    // to 10 s for the reconcile's dead sweep (:835) to notice. HostDropMark IS the hand-back:
-                    // it drops the mark and sends the existing MergerHandover "Drop" leg, which is what makes
-                    // the stand-in lift the installed paperwork, give up the veil exception and hand the
-                    // promoted staff back (MergerAbsence.ApplyHandover -> UndoLocal) - no new message type.
-                    // Nothing has to be UPLOADED here: the stand-in's publishes were filed under the OWNER's
-                    // stable at every publish, so the host copy already is the owner's state, and the owner's
-                    // own return leg still runs when they come back. An OFFLINE owner is reached through their
-                    // simulator (their own pid is not in StableIdByPlayer, their stand-in's is).
-                    var deadMarks = new List<string>();
-                    foreach (var mk in MergerAbsence.Marks)
-                    {
-                        var mv = mk.Value;
-                        if (mv == null) continue;
-                        if (exPids.Contains(mv.OwnerPid) || exPids.Contains(mv.SimulatorPid)) deadMarks.Add(mk.Key);
-                    }
-                    foreach (var st in deadMarks)
-                        MergerAbsence.HostDropMark(st, "the company that made this stand-in was cancelled");
-                    if (deadMarks.Count > 0)
-                        Plugin.Logger.LogInfo($"[Dissolve] absence at leave: {deadMarks.Count} stand-in mark(s) handed back - "
-                                            + "the company that made them was cancelled.");
-                    // r4: a dissolving company's offer (and one the leaver had out that nobody can answer any
-                    // more) is retired by the validator AFTER the store change — a 3+ company keeps both.
-                    PruneOffers("unanswerable after a member left the company");
-                    RefreshGrantsAndBroadcast();
+                    if (string.IsNullOrEmpty(s) || MergerSync.GroupOfStable(s) == "") { PMergeReqDrop(action, actorPid, targetPid, string.IsNullOrEmpty(s) ? "leave with no stable id" : "leave while not in a company"); return; }
+                    HostMemberLeave(s, actorPid, payOut: true);   // T-35: settle, remove, membership update, THEN the company balance
                     break;
                 }
                 default:
                     PMergeReqDrop(action, actorPid, targetPid, "unknown action");   // P-MERGEREQ
                     break;
             }
+        }
+
+        /// <summary>T-35 / T-10 (a) - HOST, MAIN THREAD. The member-leave steps, shared by the 'leave' request (payOut =
+        /// true) and a ban's 'remove everything' (payOut = false: the member's share stays with the company and their
+        /// recorded cash becomes 0). Order: (1) settle money; (2) remove the member and run the clean-up; (3)
+        /// RefreshGrantsAndBroadcast; (4) THEN the surviving company's balance. A 2-member company dissolves and its wallet
+        /// is deleted - the remaining member keeps the rest (all of it when nothing is paid out). pid may be "" (an offline
+        /// member). Returns false, changing nothing, when the stable id is in no company.</summary>
+        internal static bool HostMemberLeave(string s, string pid, bool payOut)
+        {
+            string g0 = MergerSync.GroupOfStable(s ?? "");
+            if (string.IsNullOrEmpty(s) || g0 == "") return false;
+            // The player id answers the payout send, the press / candidate forgetting and the logs. An OFFLINE member
+            // (a ban's removal passes "") is looked up from the stable id and may have none this session.
+            string actorPid = pid ?? "";
+            if (actorPid.Length == 0)
+            {
+                if (s == MPConfig.StableId) actorPid = MPConfig.PlayerId;
+                else foreach (var kv in StableIdByPlayer) if (kv.Value == s) { actorPid = kv.Key; break; }
+            }
+            string who = actorPid.Length > 0 ? actorPid : MPConfig.IdTag(s);
+
+            // Slice 4 — settle the shared wallet BEFORE membership changes. Equal split: the
+            // leaver takes balance / memberCount; a dissolving pair's REMAINING member takes
+            // the rest as their personal wallet (combined entity — no contribution tracking
+            // by design; "this is ours" has no ledgers of whose money it was).
+            if (_walletBalance.TryGetValue(g0, out var bal))
+            {
+                int members = MergerSync.StoreGroups.TryGetValue(g0, out var set) ? set.Count : 0;
+                if (members > 0)
+                {
+                    float share = payOut ? bal / members : 0f;   // T-10 (a): no payout = the share stays with the company
+                    // FOLD b X2 (r1 F2): EVERY payout decided here is written into CashByStableId at once,
+                    // online or offline. Only the OFFLINE member's figure used to be recorded, so an ONLINE
+                    // member kept the full-pot MIRROR as their "last known cash" until the 3 s resync
+                    // (MPCanvasUI.cs:4359) — and a coordinated save or MergeSlot upload inside that window
+                    // stamped the WHOLE balance into their slot, handing each of them the full pot on the
+                    // next load. The leaver goes first: they are leaving the group, so from this instant
+                    // CashByStableId is the only thing that answers for them.
+                    // T-10 (a): with no payout the leaver's recorded cash becomes 0 - the figure the coordinated save
+                    // writes (MPSaveCoordinator.cs:4105) and the join path serves (MPSaveCoordinator.cs:1893).
+                    CashByStableId[s] = share;
+                    if (payOut)
+                    {
+                        var payout = new MergerWalletStatePayload { GroupId = "", Balance = share };
+                        if (actorPid == MPConfig.PlayerId) MergerWallet.ApplyState(payout);
+                        else if (actorPid.Length > 0) SendToPid(actorPid, MessageEnvelope.Create(MessageType.MergerWalletState, "host", payout));
+                        Plugin.Logger.LogInfo($"[EconProbe] wallet SPLIT '{g0}': '{who}' leaves with ${share:N0} of ${bal:N0} ({members} member(s)).");
+                    }
+                    else
+                        Plugin.Logger.LogInfo($"[EconProbe] wallet KEEP '{g0}': '{who}' leaves with nothing - the ${bal:N0} stays with the company ({members} member(s)).");
+                    if (members <= 2)
+                    {
+                        // Group dissolves — the other member gets the remainder as personal cash.
+                        string other = "";
+                        foreach (var mem in set) if (mem != s) { other = mem; break; }
+                        string otherPid = "";
+                        if (other == MPConfig.StableId) otherPid = MPConfig.PlayerId;
+                        else foreach (var kv in StableIdByPlayer) if (kv.Value == other) { otherPid = kv.Key; break; }
+                        var rest = new MergerWalletStatePayload { GroupId = "", Balance = bal - share };
+                        if (otherPid == MPConfig.PlayerId) MergerWallet.ApplyState(rest);
+                        else if (otherPid != "") SendToPid(otherPid, MessageEnvelope.Create(MessageType.MergerWalletState, "host", rest));
+                        // X2: the remaining member's figure regardless of who they are — the company is gone,
+                        // so CashByStableId is their only record, exactly as for the leaver above.
+                        if (other != "") CashByStableId[other] = bal - share;
+                        Plugin.Logger.LogInfo($"[EconProbe] wallet DISSOLVE '{g0}': remaining member gets ${bal - share:N0}.");
+                        _walletBalance.Remove(g0);
+                        _walletContributed.Remove(g0);
+                    }
+                    else
+                    {
+                        _walletBalance[g0] = bal - share;
+                        if (_walletContributed.TryGetValue(g0, out var cset)) cset.Remove(s);
+                        // X2: the company SURVIVES, so the members who stay are re-shared over the reduced
+                        // pot and count. Their live figure is written too, so CashByStableId never holds the
+                        // pre-leave full pot for anybody. The remainder holder is the founder, or — when the
+                        // founder is the one leaving — the next member in join order, which is exactly what
+                        // MergerSync.StoreRemove installs a few lines below.
+                        var stay = new List<string>();
+                        foreach (var mem in MergerSync.JoinOrderOfGroup(g0)) if (mem != s) stay.Add(mem);
+                        if (stay.Count > 0)
+                        {
+                            string keeper = MergerSync.FounderOfGroup(g0);
+                            if (keeper == s || !stay.Contains(keeper)) keeper = stay[0];
+                            foreach (var mem in stay)
+                                CashByStableId[mem] = MPSaveCoordinator.EqualShare(bal - share, stay.Count, mem == keeper);
+                        }
+                        // T-35: NO balance broadcast here - the leaver still counts as a member on every machine
+                        // until the membership update below, and would take the whole company balance as its own.
+                    }
+                }
+            }
+
+            // PHASE 5 / P7 (2026-09-12), narrowed by r2 (J7): a routed PRESS waiting on a partner must
+            // never run after the company that authorised it changed. The peer-departure path already
+            // forgets them (:1783); "leave" never did. WHOSE presses go depends on what the leave
+            // does to the company: a 3+ company SURVIVES it, so only the LEAVER loses their pending
+            // presses and the members who stay keep both their company and theirs; a leave that takes
+            // the member count below two DISSOLVES the company, and then every member loses it.
+            // Collected BEFORE the store changes, forgotten after it.
+            var exPids = new List<string>();
+            bool dissolves = !MergerSync.StoreGroups.TryGetValue(g0, out var lset) || lset.Count <= 2;
+            if (!dissolves) { if (actorPid.Length > 0) exPids.Add(actorPid); }
+            else if (lset != null)
+                foreach (var mem in lset)
+                {
+                    string mpid = mem == MPConfig.StableId ? MPConfig.PlayerId : "";
+                    if (mpid.Length == 0)
+                        foreach (var kv in StableIdByPlayer) if (kv.Value == mem) { mpid = kv.Key; break; }
+                    if (mpid.Length > 0 && !exPids.Contains(mpid)) exPids.Add(mpid);
+                }
+            // FOLD c C3 (r1 MINOR-3): the press list above must be pids (a press is held per pid), and
+            // the stable -> pid reverse lookup only answers for a pid this session has seen, taking the
+            // FIRST match - so a member who is offline, or who rejoined under a second pid, can be
+            // missed. The merger store keeps STABLE ids, so the TRANSFER step below matches on those
+            // instead: every stable in the group when the company dissolves, the leaver's alone when it
+            // survives. Collected BEFORE StoreRemove, like exPids (lset is the store's own set).
+            var exStables = new HashSet<string>(StringComparer.Ordinal);
+            if (!dissolves) exStables.Add(s);
+            else if (lset != null)
+                foreach (var mem in lset) if (!string.IsNullOrEmpty(mem)) exStables.Add(mem);
+
+            var rivalKeyMove = MPRivalAttention.BeginMembershipChange(lset != null ? new List<string>(lset) { s } : new List<string> { s });   // H-RIVALPARITY-1 D F3
+            MergerSync.StoreRemove(s);
+            MPRivalAttention.EndMembershipChange(rivalKeyMove, dissolves ? "dissolve" : "leave");
+            MarkMergerStateAuthoritative();   // X3: a leave — and the DISSOLVE it may be — is this process deciding the merger state, so the empty store it can leave behind must be persisted, not kept off disk
+            foreach (var xp in exPids)
+            {
+                GameStatePatcher.EnqueueOnMainThread(() => HostForgetPressesOf(xp));
+                Plugin.Logger.LogInfo($"[Merger] presses forgotten for '{xp}' — their company changed on leave ({(dissolves ? "the company dissolved" : "they left it")}).");
+            }
+            if (actorPid.Length > 0) HostForgetCandidatesOf(actorPid);   // phase 4b (people) r2 (MINOR-9): their pool rows and claims leave with them
+            Plugin.Logger.LogInfo($"[Merger] '{who}' left their merger group{(payOut ? "" : " (no payout - their share stays with the company)")}.");
+
+            // DISSOLVE step 5 (2026-09-12, user ruling) - HOST ONLY. An OPEN employee transfer the
+            // host is holding was authorised by a company that has just changed, so it must not land
+            // on a machine that is no longer a co-member. Value-based and idempotent: a transfer
+            // nobody has released yet has moved NOTHING and is simply cancelled (the entry is kept a
+            // game day exactly as the deadline path keeps it, so a release still in the air finds it);
+            // one the host is already holding goes HOME down the existing "return" leg. A transfer
+            // that is already going back is left alone, and an adoption that already COMPLETED is a
+            // real record on its new machine and is correct to keep - nothing here touches it.
+            // Fold c: the sides are matched on STABLE ids, so an OFFLINE member's held transfers are
+            // swept too. "Home" for an offline source is what RelayReturn already does - it hands the
+            // record to whoever runs the from-address as a stand-in, and with nobody there it logs
+            // "the host keeps '<employee>' until one of them is back" (:7687) and keeps holding it,
+            // re-offered once a game hour by the transfers tick. There is no queue for an absent pid.
+            int xBack = 0, xCancelled = 0;
+            foreach (var xt in new List<HostTransfer>(_transfers.Values))
+            {
+                if (xt == null) continue;
+                if (!exStables.Contains(StableOfPid(xt.SourcePid))
+                    && !exStables.Contains(StableOfPid(xt.DestPid))) continue;
+                if (xt.Stage == "requested")
+                {
+                    xt.Stage = "cancelled"; xt.Day = GameDayNow(); xt.Hour = GameHourNow();
+                    xCancelled++;
+                }
+                else if (xt.Stage == "adopting")
+                {
+                    xt.Day = GameDayNow(); xt.Hour = GameHourNow();
+                    RelayReturn(xt);
+                    xBack++;
+                }
+            }
+            if (xBack > 0 || xCancelled > 0)
+                Plugin.Logger.LogInfo($"[Dissolve] transfers at leave: {xBack} held transfer(s) sent back to their source and "
+                                    + $"{xCancelled} un-released one(s) cancelled - the company that authorised them changed.");
+
+            // DISSOLVE step 6 (D3) - HOST ONLY. An ABSENCE MARK is one member standing in for another
+            // member's buildings while they are away; the moment that company changes the stand-in is
+            // not a co-member of that owner any more, so the HAND-BACK runs NOW instead of waiting up
+            // to 10 s for the reconcile's dead sweep (:835) to notice. HostDropMark IS the hand-back:
+            // it drops the mark and sends the existing MergerHandover "Drop" leg, which is what makes
+            // the stand-in lift the installed paperwork, give up the veil exception and hand the
+            // promoted staff back (MergerAbsence.ApplyHandover -> UndoLocal) - no new message type.
+            // Nothing has to be UPLOADED here: the stand-in's publishes were filed under the OWNER's
+            // stable at every publish, so the host copy already is the owner's state, and the owner's
+            // own return leg still runs when they come back. An OFFLINE owner is reached through their
+            // simulator (their own pid is not in StableIdByPlayer, their stand-in's is).
+            var deadMarks = new List<string>();
+            foreach (var mk in MergerAbsence.Marks)
+            {
+                var mv = mk.Value;
+                if (mv == null) continue;
+                // T-10 (a): matched on STABLE ids too - an offline (banned) owner may have no pid this session.
+                if (exPids.Contains(mv.OwnerPid) || exPids.Contains(mv.SimulatorPid)
+                    || exStables.Contains(mk.Key ?? "") || exStables.Contains(mv.OwnerStable ?? "")
+                    || exStables.Contains(StableOfPid(mv.SimulatorPid ?? ""))) deadMarks.Add(mk.Key);
+            }
+            foreach (var st in deadMarks)
+                MergerAbsence.HostDropMark(st, "the company that made this stand-in was cancelled");
+            if (deadMarks.Count > 0)
+                Plugin.Logger.LogInfo($"[Dissolve] absence at leave: {deadMarks.Count} stand-in mark(s) handed back - "
+                                    + "the company that made them was cancelled.");
+            // r4: a dissolving company's offer (and one the leaver had out that nobody can answer any
+            // more) is retired by the validator AFTER the store change — a 3+ company keeps both.
+            PruneOffers("unanswerable after a member left the company");
+            bool membershipSent = false;
+            try { RefreshGrantsAndBroadcast(); membershipSent = true; }
+            catch (Exception rx) { Plugin.Logger.LogWarning($"[Merger] leave: membership broadcast failed - the company balance is NOT sent (a leaver that missed the update would take it): {rx.GetType().Name}: {rx.Message}"); }
+            // T-35: the surviving company's balance goes out only NOW, after the membership update. Every machine
+            // filters a group balance by its OWN membership copy (MergerWallet.ApplyState), so the leaver already
+            // knows it is out and drops it - the merge path orders state-then-balance the same way.
+            if (!dissolves && membershipSent) BroadcastWalletGroup(g0);
+            return true;
         }
 
         private static string StableOfPid(string pid)

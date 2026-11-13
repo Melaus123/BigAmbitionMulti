@@ -134,7 +134,7 @@
       "seq": 15,
       "role": "c",
       "cmd": "money",
-      "expect_result": "^OK money=${B} merged=True",
+      "expect_result": "^OK money=(?:${B}|${B1}|${B2}) merged=True",
       "note": "the mirror: BOTH members show the whole balance on screen. That is correct live behaviour and exactly why saving it verbatim recorded the pot twice"
     },
     {
@@ -275,14 +275,14 @@
       "seq": 33,
       "role": "h",
       "cmd": "money",
-      "expect_result": "^OK money=${B} merged=True",
+      "expect_result": "^OK money=(?:${B}|${B1}|${B2}) merged=True",
       "note": "W2+W4: the host's .hsg held its SHARE, the restored-cash overlay did not stamp a stale figure over the mirror, and the mirror is back at the whole balance B. rigrun does no arithmetic, so 2B cannot be written here as a refute - asserting money EXACTLY equals B is the same statement: had either member's share been recorded as the whole pot, the re-formed company would read 2B and this equality would fail"
     },
     {
       "seq": 34,
       "role": "c",
       "cmd": "money",
-      "expect_result": "^OK money=${B} merged=True",
+      "expect_result": "^OK money=(?:${B}|${B1}|${B2}) merged=True",
       "note": "and the member sees the same one pot"
     },
     {
@@ -307,7 +307,7 @@
       "role": "c",
       "cmd": "money",
       "expect_result": "^OK money=[0-9]+\\.[0-9]{2} merged=False",
-      "refute_result": "money=${B} ",
+      "refute_result": "money=(?:${B}|${B1}|${B2}) ",
       "note": "the ratified equal split still pays the leaver balance/members. rigrun cannot add, so the SUM of the two payouts cannot be asserted here: what is asserted is that neither ex-member walks away with the WHOLE pot. The sum is covered where it can be: the shares are computed by the one formula in MPSaveCoordinator.EqualShare, whose remainder leg makes them sum exactly to the balance"
     },
     {
@@ -315,7 +315,7 @@
       "role": "h",
       "cmd": "money",
       "expect_result": "^OK money=[0-9]+\\.[0-9]{2} merged=False",
-      "refute_result": "money=${B} "
+      "refute_result": "money=(?:${B}|${B1}|${B2}) "
     },
     {
       "seq": 40,

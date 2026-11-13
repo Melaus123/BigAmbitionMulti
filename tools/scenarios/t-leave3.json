@@ -1,0 +1,696 @@
+{
+  "id": "T-LEAVE3",
+  "title": "T-35 / T-10 (a): leaving a merged company settles money in the right order - a client leaves 3 (1/3 vs 2/3, the leaver never takes the company balance, still right after a save/reload), the host leaves 3, a 2-member leave (half each), and a ban's 'remove everything' takes an offline member out with no payout",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX) plus role d (Client2, joins as a NEW player - charconfirm armed before hostload), as T-P1-3. Build with HostMemberLeave (T-35/T-10) deployed. ONE mid-run host save into the rig's own save copy (fixture_reset re-prepares it before every run). The ban leg bans Client2 and unbans it again; ends dissolved with Client2 dropped. Exact thirds are not computable by the rig (derive adds constants only): leg A asserts leaver > 0, leaver != whole, remaining > leaver, every remaining member = the host ledger; the readout checks the SPLIT line's figures.",
+  "instances": 3,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "dPid": "Client2",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "\\[Forfeit\\] remove property .* REFUSED",
+    "\\[Wallet\\] apply:"
+  ],
+  "oracles_report": [
+    "\\[EconProbe\\] wallet",
+    "\\[Merger\\] '.+' left their merger group",
+    "\\[MPSave\\] merged share"
+  ],
+  "steps": [
+    {
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK",
+      "seq": 1
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 2
+    },
+    {
+      "role": "d",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 3
+    },
+    {
+      "role": "d",
+      "cmd": "charconfirm",
+      "expect_result": "^OK armed",
+      "note": "Client2 has no slot in save1: the character screen appears on load",
+      "seq": 4
+    },
+    {
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 300
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ],
+      "seq": 5
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST LEAVE3 START",
+      "expect_result": "OK MARK",
+      "seq": 6
+    },
+    {
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent",
+      "seq": 7
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 8
+    },
+    {
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] FORMED group",
+          "within_s": 20
+        }
+      ],
+      "seq": 9
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 10
+    },
+    {
+      "role": "h",
+      "cmd": "merge propose ${dPid}",
+      "expect_result": "OK merge propose sent",
+      "seq": 11
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 12
+    },
+    {
+      "role": "d",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] GROWN group",
+          "within_s": 20
+        }
+      ],
+      "seq": 13
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 14
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*founder=${hostPid} order=\\[[^,\\]]+,[^,\\]]+,[^,\\]]+\\]",
+      "seq": 15
+    },
+    {
+      "role": "h",
+      "cmd": "walletdump",
+      "expect_result": "balance=([0-9.]+) contributed=\\d+/3",
+      "capture": {
+        "B": "balance=([0-9.]+) contributed=\\d+/3"
+      },
+      "note": "LEG A premise: one company of three; B = its balance",
+      "seq": 16
+    },
+    {
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "money=${B} merged=True",
+      "seq": 17
+    },
+    {
+      "role": "d",
+      "cmd": "money",
+      "expect_result": "money=${B} merged=True",
+      "seq": 18
+    },
+    {
+      "role": "d",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[EconProbe\\] wallet SPLIT .*'${dPid}' leaves with .*\\(3 member\\(s\\)\\)",
+          "within_s": 20
+        },
+        {
+          "role": "d",
+          "regex": "\\[EconProbe\\] wallet SET .*leave payout",
+          "within_s": 20
+        }
+      ],
+      "note": "T-35: the leaver gets balance/3; the membership update now goes out BEFORE the company balance",
+      "seq": 19
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 20
+    },
+    {
+      "role": "d",
+      "cmd": "money",
+      "expect_result": "merged=False",
+      "refute_result": "money=${B} ",
+      "capture": {
+        "dLeft": "money=([0-9.]+)"
+      },
+      "expect_gt": {
+        "money=([0-9.]+)": 0
+      },
+      "note": "the leaver holds its third, not the whole balance",
+      "seq": 21
+    },
+    {
+      "role": "h",
+      "cmd": "walletdump",
+      "expect_result": "balance=([0-9.]+) contributed=\\d+/2",
+      "refute_result": "balance=${B} ",
+      "capture": {
+        "rem": "balance=([0-9.]+) contributed=\\d+/2"
+      },
+      "expect_gt": {
+        "balance=([0-9.]+) contributed=\\d+/2": "${dLeft}"
+      },
+      "note": "the company keeps two thirds: more than the leaver's third",
+      "seq": 22
+    },
+    {
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "money=${rem} merged=True",
+      "seq": 23
+    },
+    {
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "money=${rem} merged=True",
+      "seq": 24
+    },
+    {
+      "role": "h",
+      "sleep_s": 12,
+      "seq": 25
+    },
+    {
+      "role": "d",
+      "cmd": "money",
+      "expect_result": "money=${dLeft} merged=False",
+      "note": "T-35 core: after the 10 s wallet heartbeat the leaver STILL holds only its payout - no company balance applied on it after the leave payout (the bug left it holding the remaining 2/3)",
+      "seq": 26
+    },
+    {
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK",
+      "note": "ONE mid-run host save into the rig's own save copy (fixture_reset re-prepares it)",
+      "seq": 27
+    },
+    {
+      "role": "h",
+      "sleep_s": 15,
+      "seq": 28
+    },
+    {
+      "role": "h",
+      "drop": true,
+      "note": "the host goes down first, so no client departure starts an absence",
+      "seq": 29
+    },
+    {
+      "role": "c",
+      "drop": true,
+      "seq": 30
+    },
+    {
+      "role": "d",
+      "drop": true,
+      "seq": 31
+    },
+    {
+      "role": "h",
+      "relaunch": true,
+      "seq": 32
+    },
+    {
+      "role": "h",
+      "sleep_s": 20,
+      "seq": 33
+    },
+    {
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK",
+      "seq": 34
+    },
+    {
+      "role": "c",
+      "relaunch": true,
+      "seq": 35
+    },
+    {
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 36
+    },
+    {
+      "role": "d",
+      "relaunch": true,
+      "seq": 37
+    },
+    {
+      "role": "d",
+      "cmd": "join",
+      "expect_result": "^OK",
+      "seq": 38
+    },
+    {
+      "role": "d",
+      "cmd": "charconfirm",
+      "expect_result": "^OK armed",
+      "note": "harmless if Client2's new slot means no character screen",
+      "seq": 39
+    },
+    {
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 300
+        }
+      ],
+      "seq": 40
+    },
+    {
+      "role": "all",
+      "cmd": "mark TEST LEAVE3 RELOADED",
+      "expect_result": "OK MARK",
+      "seq": 41
+    },
+    {
+      "role": "h",
+      "sleep_s": 15,
+      "seq": 42
+    },
+    {
+      "role": "d",
+      "cmd": "money",
+      "expect_result": "money=${dLeft} merged=False",
+      "note": "the leaver's third survived the save/reload",
+      "seq": 43
+    },
+    {
+      "role": "h",
+      "cmd": "walletdump",
+      "expect_result": "balance=${rem} contributed=\\d+/2",
+      "seq": 44
+    },
+    {
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "money=${rem} merged=True",
+      "seq": 45
+    },
+    {
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "money=${rem} merged=True",
+      "seq": 46
+    },
+    {
+      "role": "h",
+      "cmd": "merge propose ${dPid}",
+      "expect_result": "OK merge propose sent",
+      "seq": 47
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 48
+    },
+    {
+      "role": "d",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] GROWN group",
+          "within_s": 20
+        }
+      ],
+      "seq": 49
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 50
+    },
+    {
+      "role": "h",
+      "cmd": "walletdump",
+      "expect_result": "balance=([0-9.]+) contributed=\\d+/3",
+      "capture": {
+        "B2": "balance=([0-9.]+) contributed=\\d+/3"
+      },
+      "seq": 51
+    },
+    {
+      "role": "d",
+      "cmd": "money",
+      "expect_result": "money=${B2} merged=True",
+      "seq": 52
+    },
+    {
+      "role": "h",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[EconProbe\\] wallet SPLIT .*'${hostPid}' leaves with .*\\(3 member\\(s\\)\\)",
+          "within_s": 20
+        }
+      ],
+      "seq": 53
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 54
+    },
+    {
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "merged=False",
+      "refute_result": "money=${B2} ",
+      "capture": {
+        "hLeft": "money=([0-9.]+)"
+      },
+      "expect_gt": {
+        "money=([0-9.]+)": 0
+      },
+      "seq": 55
+    },
+    {
+      "role": "h",
+      "cmd": "walletdump",
+      "expect_result": "balance=([0-9.]+) contributed=\\d+/2",
+      "refute_result": "balance=${B2} ",
+      "capture": {
+        "rem2": "balance=([0-9.]+) contributed=\\d+/2"
+      },
+      "expect_gt": {
+        "balance=([0-9.]+) contributed=\\d+/2": "${hLeft}"
+      },
+      "seq": 56
+    },
+    {
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "money=${rem2} merged=True",
+      "seq": 57
+    },
+    {
+      "role": "d",
+      "cmd": "money",
+      "expect_result": "money=${rem2} merged=True",
+      "seq": 58
+    },
+    {
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*founder=${clientPid}",
+      "note": "the next member in join order founds the surviving company",
+      "seq": 59
+    },
+    {
+      "role": "h",
+      "sleep_s": 12,
+      "seq": 60
+    },
+    {
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "money=${hLeft} merged=False",
+      "note": "the host's own mirror kept its payout after the heartbeat",
+      "seq": 61
+    },
+    {
+      "role": "d",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[EconProbe\\] wallet DISSOLVE",
+          "within_s": 20
+        }
+      ],
+      "seq": 62
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 63
+    },
+    {
+      "role": "d",
+      "cmd": "money",
+      "expect_result": "merged=False",
+      "capture": {
+        "dHalf": "money=([0-9.]+)"
+      },
+      "expect_gt": {
+        "money=([0-9.]+)": 0
+      },
+      "seq": 64
+    },
+    {
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "money=${dHalf} merged=False",
+      "note": "both halves equal (balance / 2 is exact)",
+      "seq": 65
+    },
+    {
+      "role": "h",
+      "cmd": "walletdump",
+      "expect_result": "groups=\\[\\]$",
+      "seq": 66
+    },
+    {
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent",
+      "seq": 67
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 68
+    },
+    {
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] FORMED group",
+          "within_s": 20
+        }
+      ],
+      "seq": 69
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 70
+    },
+    {
+      "role": "h",
+      "cmd": "merge propose ${dPid}",
+      "expect_result": "OK merge propose sent",
+      "seq": 71
+    },
+    {
+      "role": "h",
+      "sleep_s": 1,
+      "seq": 72
+    },
+    {
+      "role": "d",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] GROWN group",
+          "within_s": 20
+        }
+      ],
+      "seq": 73
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 74
+    },
+    {
+      "role": "h",
+      "cmd": "walletdump",
+      "expect_result": "balance=([0-9.]+) contributed=\\d+/3",
+      "capture": {
+        "B3": "balance=([0-9.]+) contributed=\\d+/3"
+      },
+      "seq": 75
+    },
+    {
+      "role": "d",
+      "drop": true,
+      "note": "Client2 goes offline (it owns no buildings: the 'nothing owned' branch)",
+      "seq": 76
+    },
+    {
+      "role": "h",
+      "sleep_s": 10,
+      "seq": 77
+    },
+    {
+      "role": "h",
+      "cmd": "ban offline ${dPid}",
+      "expect_result": "^OK banned offline '${dPid}' key=",
+      "capture": {
+        "banKey": "key=(\\S+)"
+      },
+      "seq": 78
+    },
+    {
+      "role": "h",
+      "cmd": "ban remove ${banKey}",
+      "expect_result": "^OK removed",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[EconProbe\\] wallet KEEP .*\\(3 member\\(s\\)\\)",
+          "within_s": 20
+        },
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] '.+' left their merger group \\(no payout",
+          "within_s": 20
+        }
+      ],
+      "note": "T-10 (a): member-leave steps run with NO payout, also when the banned member owns nothing",
+      "seq": 79
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 80
+    },
+    {
+      "role": "h",
+      "cmd": "cashof ${dPid}",
+      "expect_result": "^OK cashof stable=\\S+ cash=0\\.00$",
+      "note": "T-10 (a): the banned member's recorded cash is 0 after the no-payout removal (CashByStableId[s] = 0, not removed)",
+      "seq": 81
+    },
+    {
+      "role": "h",
+      "cmd": "walletdump",
+      "expect_result": "balance=${B3} contributed=\\d+/2",
+      "note": "the banned member's share stays with the company",
+      "seq": 82
+    },
+    {
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "money=${B3} merged=True",
+      "seq": 83
+    },
+    {
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "money=${B3} merged=True",
+      "seq": 84
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*order=\\[[^,\\]]+,[^,\\]]+\\]",
+      "seq": 85
+    },
+    {
+      "role": "h",
+      "cmd": "unban ${banKey}",
+      "expect_result": "^OK",
+      "note": "FIXTURE HYGIENE: the saved ban list is emptied again",
+      "seq": 86
+    },
+    {
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[EconProbe\\] wallet DISSOLVE",
+          "within_s": 20
+        }
+      ],
+      "note": "FIXTURE HYGIENE: ends dissolved",
+      "seq": 87
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 88
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST LEAVE3 END",
+      "expect_result": "OK MARK",
+      "seq": 89
+    }
+  ]
+}
