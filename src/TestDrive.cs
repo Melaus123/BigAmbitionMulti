@@ -6723,6 +6723,14 @@ namespace BigAmbitionsMP
                     return $"OK bench {bn}" + bsb.ToString();
                 }
 
+                // T-6 / T-7 (2026-11-12, DEV): hold the game's hourly cleaning pass in a shop - see HoldCleaningLever below.
+                case "holdcleaning":
+                    return HoldCleaningLever(arg);
+
+                // T-10 (a) (2026-11-12, DEV): the host's recorded per-player cash - see CashOfLever below.
+                case "cashof":
+                    return CashOfLever(arg);
+
                 // P-CLEANLOOP rig levers (2026-09-28, DEV): see MopLever below.
                 case "mopstation": case "handstate": case "mopcell": case "mopaway":
                 case "dirtstate": case "dirtseed": case "dirtdrip": case "clientgrant": case "dirtshrink":
@@ -6802,6 +6810,131 @@ namespace BigAmbitionsMP
                     try { bm.UpdateDirtinessInSpecificSpot(_dripIdx); } catch { }
             }
             catch (Exception ex) { Plugin.Logger.LogWarning("[TestDrive] dirtdrip: " + ex.Message); _dripReg = null; }
+        }
+
+        // -- T-10 (a) test lever (2026-11-12, DEV): `cashof` -----------------------------------------------------
+        // Read-only, HOST only. The host's recorded per-player cash: MPServer.CashByStableId, the live figure
+        // MPSaveCoordinator.BestCashFor serves first (MPSaveCoordinator.cs:1893) and the merger leave path writes
+        // (MPServer.cs, T-10 (a): a no-payout leave - a ban's removal - records 0 for the leaver). A <pid> is
+        // resolved through MPServer.StableIdByPlayer (kept after a disconnect); anything else is taken as a stable id.
+        //   cashof <pid|stable>   ->   OK cashof stable=<tag> cash=<F2|none>   (none = no record at all)
+        private static string CashOfLever(string arg)
+        {
+            if (!MPServer.IsRunning) return "ERR cashof host-only";
+            string who = (arg ?? "").Trim();
+            int sp = who.IndexOf(' '); if (sp > 0) who = who.Substring(0, sp);
+            if (who.Length == 0) return "ERR usage: cashof <pid|stable>";
+            string stable = MPServer.StableIdByPlayer.TryGetValue(who, out var st) && !string.IsNullOrEmpty(st) ? st : who;
+            string cash = MPServer.CashByStableId.TryGetValue(stable, out var c)
+                ? c.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) : "none";
+            return $"OK cashof stable={MPConfig.IdTag(stable)} cash={cash}";
+        }
+
+        // -- T-6 / T-7 test lever (2026-11-12, DEV): `holdcleaning` ------------------------------------------
+        // The game's ONLY dirt removal without a mop is the hourly pass: GameManager's hourly chain ->
+        // BuildingCleanlinessHelper.RunHourly (:29) -> BuildingCleanliness.SimulateCleaning (:112), which, for
+        // every rented, open shop with a cleaner on shift, subtracts the cleaners' skill from EVERY dirt spot.
+        // The cleaner employees seen walking the floor (CleanerEmployee) are animation only - they never write
+        // dirtiness. A held shop skips SimulateCleaning and nothing else (customer dirt bulks still land).
+        // The hold is in memory only (never written to a save) and bound to the loaded game
+        // (SaveGameManager.Current - replaced only by a load or a new game), so a load, a return to the menu
+        // or a quit drops it; `holdcleaning off` releases it. It acts on THIS machine's pass only: issue it on
+        // every machine that runs the shop's hourly pass (the owner; the host while it simulates an absence).
+        //   holdcleaning [status] [<num> <ba:street_x>]   the held set + skips (+ that shop's dirt census)
+        //   holdcleaning on [<num> <ba:street_x> | all]   no address = the building I am inside
+        //   holdcleaning off [<num> <ba:street_x>]        no address = release every held shop
+        private static readonly System.Collections.Generic.HashSet<string> _cleanHold = new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static object? _cleanHoldSave;
+        private static int _cleanHoldSkips;
+
+        /// <summary>True while a hold is armed for the game that is loaded now; a hold armed under another
+        /// loaded game (load / new game / menu since) is dropped here, logged, and reads false.</summary>
+        private static bool CleanHoldLive()
+        {
+            if (_cleanHold.Count == 0) return false;
+            if (_cleanHoldSave != null && ReferenceEquals(SaveGameManager.Current, _cleanHoldSave)) return true;
+            Plugin.Logger.LogWarning($"[TestDrive] holdcleaning: the loaded game changed - hold on [{string.Join(",", _cleanHold)}] released (skips={_cleanHoldSkips})");
+            _cleanHold.Clear();
+            _cleanHoldSave = null;
+            return false;
+        }
+
+        [HarmonyLib.HarmonyPatch(typeof(Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanliness), "SimulateCleaning")]
+        internal static class Patch_TestHoldCleaning
+        {
+            static bool Prefix(BuildingRegistration ____registration)
+            {
+                try
+                {
+                    if (_cleanHold.Count == 0 || ____registration == null || !CleanHoldLive()) return true;
+                    string key = GameStateReader.AddressKey(____registration);
+                    if (!_cleanHold.Contains("*") && !_cleanHold.Contains(key)) return true;
+                    _cleanHoldSkips++;
+                    Plugin.Logger.LogInfo($"[TestDrive] holdcleaning: skipped the hourly cleaning pass on '{key}' (skip #{_cleanHoldSkips})");
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning("[TestDrive] holdcleaning prefix: " + ex.Message); return true; }
+            }
+        }
+
+        private static string HoldCleaningLever(string arg)
+        {
+            const string usage = "ERR usage: holdcleaning [status] [<num> <ba:street_x>] | on [<num> <ba:street_x> | all] | off [<num> <ba:street_x>]";
+            try
+            {
+                var a = (arg ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                string mode = a.Length > 0 ? a[0].ToLowerInvariant() : "status";
+                int at = 1;
+                if (mode != "on" && mode != "off" && mode != "status") { mode = "status"; at = 0; }
+                int n = Math.Max(0, a.Length - at);
+                string key = "";
+                BuildingRegistration? reg = null;
+                if (n == 1 && a[at].Equals("all", StringComparison.OrdinalIgnoreCase)) key = "*";
+                else if (n == 2)
+                {
+                    reg = GameStatePatcher.FindRegistration(a[at] + " " + a[at + 1]);
+                    key = reg != null ? GameStateReader.AddressKey(reg) : a[at] + " " + a[at + 1];
+                }
+                else if (n == 0)
+                {
+                    if (mode != "off" && BuildingManager.IsInsideBuilding) reg = InstanceBehavior<BuildingManager>.Instance?.buildingRegistration;
+                    if (reg != null) key = GameStateReader.AddressKey(reg);
+                }
+                else return usage;
+
+                bool live = CleanHoldLive();   // drops a hold left over from another loaded game first
+                if (mode == "on")
+                {
+                    if (key.Length == 0) return "ERR holdcleaning on: name a shop (<num> <ba:street_x> | all) or stand inside one";
+                    if (SaveGameManager.Current == null) return "ERR holdcleaning on: no game loaded";
+                    if (!live) { _cleanHoldSave = SaveGameManager.Current; _cleanHoldSkips = 0; }
+                    _cleanHold.Add(key);
+                    Plugin.Logger.LogInfo($"[TestDrive] holdcleaning ON '{key}' - holds=[{string.Join(",", _cleanHold)}]");
+                }
+                else if (mode == "off")
+                {
+                    if (key.Length == 0) _cleanHold.Clear(); else _cleanHold.Remove(key);
+                    if (_cleanHold.Count == 0) _cleanHoldSave = null;
+                    Plugin.Logger.LogInfo($"[TestDrive] holdcleaning OFF '{(key.Length == 0 ? "(all)" : key)}' - holds=[{string.Join(",", _cleanHold)}] skips={_cleanHoldSkips}");
+                }
+                bool held = _cleanHold.Count > 0 && (key.Length == 0 || _cleanHold.Contains("*") || _cleanHold.Contains(key));
+                string census = "";
+                var spots = reg?.dirtSpots;
+                if (spots != null)
+                {
+                    int dirty = 0, over5 = 0; float sum = 0f;
+                    foreach (var s in spots)
+                    {
+                        if (s == null) continue;
+                        sum += s.dirtiness;
+                        if (s.dirtiness > 0.1f) dirty++;
+                        if (s.dirtiness >= 5f) over5++;
+                    }
+                    census = $" spots={spots.Count} dirty={dirty} over5={over5} sum={sum.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}";
+                }
+                return $"OK holdcleaning {mode} addr='{key}' held={held} holds=[{string.Join(",", _cleanHold)}] skips={_cleanHoldSkips}{census}";
+            }
+            catch (Exception ex) { return "ERR holdcleaning: " + ex.Message; }
         }
 
         private static string HandState()
