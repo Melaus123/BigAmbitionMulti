@@ -120,9 +120,10 @@ namespace BigAmbitionsMP
             }
             string head = "[PROBE T32-PRICES] agreement=" + id + " by=" + by + " hq=" + plan.headquartersAddress + " neighborhood=" + nb
                         + " manager=" + emp + " managerFoundHere=" + empFound + " skill=" + F(skill) + " supervisedStoresHere=" + stores
-                        + " displayCopy=" + display + " suggestions=" + list.Count + " settings: " + settings;
+                        + " displayCopy=" + display + " partnerCopy=" + CompanyPlans.IsOverlayPlan(plan) + " suggestions=" + list.Count + " settings: " + settings;
             _lastSummary = "agreement=" + id + " manager=" + emp + " managerFoundHere=" + empFound + " skill=" + F(skill)
-                         + " stores=" + stores + " suggestions=" + list.Count + " sugg=" + (sb.Length == 0 ? "-" : sb.ToString());
+                         + " stores=" + stores + " suggestions=" + list.Count + " sugg=" + (sb.Length == 0 ? "-" : sb.ToString())
+                         + " sig=" + PricingPlanCopies.Digest(PricingPlanCopies.Signature(plan)) + " copy=" + CompanyPlans.IsOverlayPlan(plan);
 
             if (by == "screen")
             {
@@ -161,7 +162,11 @@ namespace BigAmbitionsMP
         /// one plan first (DevMakePlan); `pricesuggest recruit` gets this machine a pricing-manager candidate for its
         /// headquarters first (DevRecruit). `first` = this machine's own REAL plan with a
         /// manager (lowest id), else a partner's copy with a manager. An id looks in the partner copies first
-        /// (CompanyPlans._rows, as CompanyPlans.PlanObjectOf does), then in this machine's own list.</summary>
+        /// (CompanyPlans._rows, as CompanyPlans.PlanObjectOf does), then in this machine's own list.
+        /// T-32: on a partner's copy the recompute is skipped (PricingPlanCopies), so the summary is the list that
+        /// copy's screen shows (`copy=True`, `sig=` the whole list's fingerprint); `pricesuggest ask <id>` (DevAsk)
+        /// does what opening that screen does - the routed `recompute` to the plan's runner; `pricesuggest peek <id>`
+        /// reports the plan's list as it stands, without recomputing.</summary>
         internal static string DevPriceSuggest(string arg)
         {
             try
@@ -173,6 +178,9 @@ namespace BigAmbitionsMP
                 if (want == "make" || want.StartsWith("make ", StringComparison.Ordinal)) return DevMakePlan(gi, want.Substring(4).Trim());
                 if (want == "recruit") return DevRecruit(gi);
                 if (want.StartsWith("shift ", StringComparison.Ordinal)) return DevShift(gi, want.Substring(6).Trim());
+                if (want.StartsWith("ask ", StringComparison.Ordinal)) return DevAsk(want.Substring(4).Trim());
+                bool peek = want.StartsWith("peek ", StringComparison.Ordinal);   // the list as it stands, no recompute
+                if (peek) want = want.Substring(5).Trim();
                 var partnerRows = PartnerPricingRows();
                 var own = new List<PricingManagerPlan>();
                 if (gi.pricingManagerPlans != null) foreach (var p in gi.pricingManagerPlans) if (p != null) own.Add(p);
@@ -196,9 +204,13 @@ namespace BigAmbitionsMP
                 }
                 if (pick == null) return "ERR pricesuggest: no pricing plan '" + want + "' here (own=" + own.Count + " partnerRows=" + partnerRows.Count + ")";
                 _lastSummary = "";
-                Arm(pick, "lever");
-                pick.RecomputeSuggestions();
-                _armedId = null;
+                if (peek) Describe(pick, "peek");
+                else
+                {
+                    Arm(pick, "lever");
+                    pick.RecomputeSuggestions();
+                    _armedId = null;
+                }
                 return "OK pricesuggest " + (_lastSummary.Length > 0 ? _lastSummary : "agreement=" + pick.id + " (probe wrote nothing)")
                      + " own=" + own.Count + " partnerRows=" + partnerRows.Count;
             }
@@ -569,6 +581,19 @@ namespace BigAmbitionsMP
                 if (++n == 3) break;
             }
             return sb.ToString();
+        }
+
+        /// <summary>DEV lever `pricesuggest ask <planId>` (T-32): PricingPlanCopies.AskRunner on a partner's copy,
+        /// exactly as opening its pricing screen does.  The answer arrives with the runner's next bundle
+        /// ([PricingCopies] plan ... the runner's list is in).</summary>
+        private static string DevAsk(string id)
+        {
+            foreach (var p in PartnerPricingRows())
+                if (p.id == id)
+                    return PricingPlanCopies.AskRunner(p, "lever: plan screen opened")
+                        ? "OK pricesuggest asked agreement=" + id
+                        : "ERR pricesuggest ask: '" + id + "' is not a partner's copy here";
+            return "ERR pricesuggest ask: no partner copy '" + id + "' here";
         }
 
         /// <summary>The partner pricing copies CompanyPlans holds (private `_rows`, read by reflection - this

@@ -14485,7 +14485,8 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerProductsScrollerController), "ApplySuggestedPrices")]
         public static class Patch_PricingApplyAll_MergerGate
         {
-            static bool Prefix(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerProductsScrollerController __instance)
+            static bool Prefix(UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerProductsScrollerController __instance,
+                               List<UI.Smartphone.Apps.BizMan.PricingManagers.PricingManagerProductModel> ____allModels)
             {
                 try
                 {
@@ -14512,6 +14513,11 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception rx) { Plugin.Logger.LogWarning($"[Merger] pricing suggestall targets: {rx.Message}"); }
                     if (names.Count == 0) return true;   // nothing on screen to price: native loops nothing either
+                    // T-32: every row of the partner's copy is a target -> the runner prices over ITS OWN full list
+                    // (the partner's copy may be older than the runner's)
+                    if (____allModels != null && names.Count >= ____allModels.Count)
+                        return !CompanyPlans.RoutePaneEdit("pricing", "ApplySuggestedPrices", pl, "suggestall",
+                                   PricingPlanCopies.AllTargets, names.Count);
                     return !CompanyPlans.RoutePaneEdit("pricing", "ApplySuggestedPrices", pl, "suggestall",
                                string.Join("|", names), names.Count);
                 }

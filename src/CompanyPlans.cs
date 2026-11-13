@@ -87,6 +87,7 @@ namespace BigAmbitionsMP
                 _byOwner[p.OwnerPid] = p;
                 foreach (var f in Families) _stale.Add(p.OwnerPid + "|" + f);   // r2 MINOR-4
                 RefreshOpenTabsFor(p.OwnerPid);
+                PricingPlanCopies.OnOwnerLists(p);   // T-32: the runner's pricing lists into its copies here
                 Plugin.Logger.LogInfo($"[Plans] received {p.OwnerPid}: pricing {p.PricingManagerPlans?.Count ?? 0} "
                                     + $"logistics {p.LogisticsManagerPlans?.Count ?? 0} purchasing {p.ImportPartnerships?.Count ?? 0} "
                                     + $"hr {p.HrManagerPlans?.Count ?? 0} headhunter {p.HeadhunterPlans?.Count ?? 0}");
@@ -388,6 +389,7 @@ namespace BigAmbitionsMP
         /// HQ-PARITY-5 A1: the owner's OWN deferred redraw waits on the same re-read and is replayed here too.</summary>
         public static void TickDeferredRedraw()
         {
+            try { PricingPlanCopies.TickPendingReload(); } catch { }   // T-32: a pricing copy's deferred screen reload
             try
             {
                 if (_pendingRedraw.Length == 0 && _pendingOwn.Count == 0) return;
@@ -485,7 +487,7 @@ namespace BigAmbitionsMP
         /// (d) the TRAINING SLIDER held - the mod's own EventTrigger pointer events (HrSliderHeld), not a
         ///     timer, because LoadPlan re-seats `trainingTargetSlider.value` from the plan (:98) and the
         ///     PointerUp commit would then publish the value the reload put there.</summary>
-        private static string EditWindowOpen()
+        internal static string EditWindowOpen()
         {
             try
             {
@@ -1773,21 +1775,7 @@ namespace BigAmbitionsMP
             // HQ-PARITY-1 P2.  The pane's product table is built ONE MODEL PER cachedSuggestion
             // (PricingManagerProductsScrollerController.LoadPlan :70-79), so an empty list is an empty
             // table - and the routed manualprice / suggestedprice ops then have no row to be clicked on.
-            if (pl.cachedSuggestions != null)
-            {
-                pl.cachedSuggestions.Clear();
-                foreach (var s in d.CachedSuggestions ?? new List<PwPriceSuggestion>())
-                {
-                    if (s == null || string.IsNullOrEmpty(s.ItemName)) continue;
-                    var sg = new PriceSuggestion
-                    {
-                        itemName = s.ItemName, suggestedMin = s.SuggestedMin, suggestedMax = s.SuggestedMax,
-                        rivalReferencePrice = s.RivalReferencePrice, isPlayerSelling = s.IsPlayerSelling,
-                        sellingBusinessTypes = new HashSet<string>(s.SellingBusinessTypes ?? new List<string>(), StringComparer.Ordinal),
-                    };
-                    pl.cachedSuggestions.Add(sg);
-                }
-            }
+            PricingPlanCopies.FillSuggestions(pl, d.CachedSuggestions);   // T-32: one fill, shared with the in-place update
             // The change-neighbourhood confirmation is a COUNT test and nothing else (PricingManagerPlanUI
             // :100 `if (_currentPlan.originalStorePrices.Count > 0)`), so the display copy carries that many
             // EMPTY entries: no entry of it is ever read on this machine.
@@ -1953,6 +1941,15 @@ namespace BigAmbitionsMP
         /// <summary>Is this plan object one of the DETACHED partner rows?  Reference identity, so a plan of
         /// this player's own is never mistaken for one.</summary>
         public static bool IsOverlayPlan(object plan) => plan != null && _rowOwner.ContainsKey(plan);
+
+        /// <summary>T-32: that owner's materialised pricing COPY with that id (the object the screen shows), or
+        /// null when the row is not drawn here.  Never one of this machine's own plans.</summary>
+        internal static PricingManagerPlan? PricingCopyOf(string owner, string planId)
+        {
+            if (string.IsNullOrEmpty(owner) || string.IsNullOrEmpty(planId)) return null;
+            if (!_rows.TryGetValue(owner + "|pricing|" + planId, out var o) || o == null || !IsOverlayPlan(o)) return null;
+            return o as PricingManagerPlan;
+        }
 
         /// <summary>U7 (HQ-UNION-2): how many PARTNER rows this family actually DREW on the page in its last
         /// draw.  It replaces HasOverlayRows, which read the row CACHE and answered a different question:
@@ -4026,7 +4023,10 @@ namespace BigAmbitionsMP
                 // r2 MAJOR-6: the helper logged the reason HERE; the sender is told too, so its optimistic
                 // row goes back to the registry's truth instead of waiting for the next fan-out.
                 if (!ok) { SendRefusal(p, _refusal.Length > 0 ? _refusal : $"{op}: the runner refused the edit"); return; }
-                SaveGameManager.MarkChange();
+                // T-32: a partner OPENING the pricing screen only asks the runner to recompute its cache - no save
+                // change and no redraw of the runner's own screen; the urgent bundle below carries the list back.
+                bool viewOnly = PricingPlanCopies.IsViewOp(fam, op);
+                if (!viewOnly) SaveGameManager.MarkChange();
                 // HO-1a H4: a routed plan edit is a button somebody is WATCHING, so this bundle does not wait
                 // out the 30 s dirty interval - MarkUrgent publishes at 2 s, and a burst coalesces into one.
                 PaperworkSync.MarkUrgent();
@@ -4039,7 +4039,7 @@ namespace BigAmbitionsMP
                 // stood here redrew the pane alone, ran under a half-typed edit, and left the row set behind;
                 // A1 does the family's own list refresh first and then that same pane refresh, or defers the
                 // whole thing when a control is open.
-                RefreshOwnTabsAfterRoutedEdit(fam, id, p.PlayerId ?? "", op);
+                if (!viewOnly) RefreshOwnTabsAfterRoutedEdit(fam, id, p.PlayerId ?? "", op);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED: {ex.Message}"); }
         }
@@ -4330,6 +4330,10 @@ namespace BigAmbitionsMP
                 case "neighborhood":   pl.SetSupervisedNeighborhood(p.StrValue ?? ""); return true;
                 case "manualprice":    pl.ApplyManualPrice(p.StrValue ?? "", p.Estimate); return true;
                 case "suggestedprice": pl.ApplySuggestedPrice(p.StrValue ?? "", p.Estimate); return true;
+                case PricingPlanCopies.RecomputeOp:
+                    // T-32: a partner opened this plan's screen.  The runner recomputes from ITS OWN shelves, as its
+                    // own screen does on open (PricingManagerPlanUI.LoadPlan:47); the partner's copy displays it.
+                    pl.RecomputeSuggestions(); return true;
                 case "suggestall":
                 {
                     // HO-1a H1 / HO-1c L4.6: ApplySuggestedPrices (decompile :91-99) loops over its ApplyTargets -
@@ -4342,18 +4346,20 @@ namespace BigAmbitionsMP
                     // manuallyPricedItems only).
                     var want = new HashSet<string>(StringComparer.Ordinal);
                     foreach (var nm in (p.StrValue ?? "").Split('|')) if (nm.Length > 0) want.Add(nm);
+                    // T-32: every row on the sender's screen (AllTargets) = every product of THIS runner's own list.
+                    bool all = PricingPlanCopies.IsAllTargets(p.StrValue);
                     // HO-1d (re-review MINOR-3): the button always names its targets (the visible rows, or all); a
                     // leg naming NONE prices nothing - otherwise an empty leg would price the whole cache (L4.6).
-                    if (want.Count == 0) { Plugin.Logger.LogInfo($"[Merger] pricing suggestall on plan '{id}': no items named - nothing applied."); return true; }
+                    if (!all && want.Count == 0) { Plugin.Logger.LogInfo($"[Merger] pricing suggestall on plan '{id}': no items named - nothing applied."); return true; }
                     var snap = pl.cachedSuggestions.GetRange(0, pl.cachedSuggestions.Count);
                     int applied = 0, skipped = 0;
                     foreach (var sg in snap)
                     {
                         if (sg == null) continue;
-                        if (!want.Contains(sg.itemName)) { skipped++; continue; }
+                        if (!all && !want.Contains(sg.itemName)) { skipped++; continue; }
                         pl.ApplySuggestedPrice(sg.itemName, sg.suggestedMax); applied++;
                     }
-                    Plugin.Logger.LogInfo($"[Merger] pricing suggestall on plan '{id}': {applied} applied, {skipped} skipped (not on the sender's screen), {want.Count} named.");
+                    Plugin.Logger.LogInfo($"[Merger] pricing suggestall on plan '{id}': {applied} applied, {skipped} skipped (not on the sender's screen), {(all ? "all" : want.Count.ToString())} named.");
                     return true;
                 }
                 case "manager":

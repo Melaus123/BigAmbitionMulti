@@ -1,6 +1,6 @@
 {
   "id": "T-PRICESUGGEST",
-  "title": "T-32 prices part, EVIDENCE only (probe P-T32-PRICES): the host CREATES a pricing-manager plan through the game's own creation path (lever `pricesuggest make`, premise asserted), then after a merge the host and the client each recompute the SUGGESTED prices of that SAME plan (the host's own plan; the client's partner copy of it) the way the pricing screen does on open, and the probe logs each machine's suggestions and the formula's inputs. Report-only: equal or different is the finding, not a pass/fail. Ends dissolved, NO save",
+  "title": "T-32 prices fix check: the host CREATES a pricing-manager plan through the game's own creation path (lever `pricesuggest make`, premise asserted); after a merge the client opens its partner copy of that plan the way the pricing screen does (lever `pricesuggest ask`: routed `recompute` to the runner), the host recomputes from its own shelves and its bundle carries the list back; the list the client's screen would show (lever `pricesuggest <id>` on the copy, where the local recompute is skipped) must EQUAL the host's: same count, same products and suggested prices (sugg= first 30, sig= fingerprint of the whole list). Ends dissolved, NO save",
   "preconditions": "Fixture save1 (host melaus, client Client1). Build with P-T32-PRICES deployed on BOTH machines (Dev build: the `pricesuggest` lever). The fixture has no pricing-manager plan (run T-PRICESUGGEST-20261113-150520 step 13: own=0 partnerRows=0), so step 5 creates one on the host BEFORE the merge, as a player would in BizMan > headquarters > Pricing Managers (PricingManagersPlanList.AddPlan :63-75, AssignEmployee :245, SetSupervisedNeighborhood PricingManagerPlanUI.cs:119). The fixture's host has NO employee with ba:skill_pricingmanager (run T-PRICESUGGEST-20261113-152356 step 5), so steps 5-7 get one the way a player does, BEFORE the plan: step 5 `pricesuggest recruit` runs the recruitment agency campaign's own candidate search (RecruitmentCampaign.CheckForCandidates :58-71 -> RecruitmentHelper.GenerateCandidate, campaign shaped as RecruitmentAgencyDialog.cs:163-176 with business = the rented headquarters; find time now, no fee) and names a free pricing-manager workstation, the first open day and its opening hour - when every suitable workstation is already on a shift (run T-PRICESUGGEST-20261113-154513 step 5: suitable=10, all on a shift) it first frees ONE as a player does on the Schedule tab (ScheduleHelper.RemoveWorkShift :334-355, the shift slider's remove WorkShiftSlider.cs:208-211), removing the shift of an employee who has no ba:skill_pricingmanager and is on no plan, and names it as freed=employee@station/from-to; step 6 hires the candidate (`hire`, EmployeeHelper.HireCandidate, address = the headquarters); step 7 puts it on a shift through the Schedule tab (`shiftat`, ScheduleHelper.AddWorkShift as ScheduleEmployeeSelection.cs:60). FIXTURE REQUIREMENT: the host rents a headquarters with an open schedule day and a workstation suitable for ba:skill_pricingmanager that is free or held by a removable shift (an employee without ba:skill_pricingmanager, on no plan), the city has a recruitment agency, and the host runs at least one manageable (revenue, priced) business; if not, step 5 (or 8) answers ERR naming what is missing and the run stops there. The plan then reaches the client the way any host plan does (CompanyPlans partner rows, BuildPricing); both machines run the lever on the captured id.",
   "instances": 2,
   "vars": {
@@ -13,11 +13,14 @@
     "HarmonyException",
     "Patching exception",
     "\\[PROBE T32-PRICES\\] (probe error|partner rows unreadable)",
-    "\\[Merger\\] accept .* REFUSED"
+    "\\[Merger\\] accept .* REFUSED",
+    "\\[PricingCopies\\] error",
+    "\\[Merger\\] plan edit REFUSED \\(pricing recompute"
   ],
   "oracles_report": [
     "\\[PROBE T32-PRICES\\]",
-    "\\[Plans\\] .* is not registered here"
+    "\\[Plans\\] .* is not registered here",
+    "\\[PricingCopies\\]"
   ],
   "steps": [
     {
@@ -144,12 +147,10 @@
       "seq": 17,
       "role": "h",
       "cmd": "pricesuggest ${t32Plan}",
-      "expect_result": "^OK pricesuggest agreement=${t32Plan} ",
+      "expect_result": "^OK pricesuggest agreement=${t32Plan} .* copy=False own=",
       "capture": {
         "hostSkill": "skill=(\\S+)",
-        "hostStores": "stores=(\\S+)",
-        "hostCount": "suggestions=(\\S+)",
-        "hostSugg": "sugg=(\\S+)"
+        "hostStores": "stores=(\\S+)"
       },
       "expect_log": [
         {
@@ -159,56 +160,105 @@
           "since_prev_step": true
         }
       ],
-      "note": "the HOST's own plan made at step 8, recomputed as the pricing screen does on open (PricingManagerPlanUI.LoadPlan:47)"
+      "note": "the HOST's own plan made at step 8, recomputed as the pricing screen does on open (PricingManagerPlanUI.LoadPlan:47); copy=False: the runner computes"
     },
     {
       "seq": 18,
       "role": "c",
+      "cmd": "pricesuggest ask ${t32Plan}",
+      "expect_result": "^OK pricesuggest asked agreement=${t32Plan}$",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Merger\\] pricing recompute routed to '${hostPid}' .*\\(${t32Plan}; seq",
+          "within_s": 10,
+          "since_prev_step": true
+        },
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied for .*\\(pricing recompute, plan ${t32Plan}, seq",
+          "within_s": 15,
+          "since_prev_step": true
+        }
+      ],
+      "note": "what opening the pricing screen on the client's copy does (PricingPlanCopies.AskRunner): the routed `recompute` reaches the host, which recomputes from its own shelves"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "mark TEST PRICESUGGEST ANSWER",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[PricingCopies\\] plan ${t32Plan} of '${hostPid}': the runner's list is in \\(n=\\d+, sig=\\S+,",
+          "within_s": 20,
+          "since_prev_step": true
+        }
+      ],
+      "note": "the host's urgent bundle after the recompute lands in the client's copy (CompanyPlans.Receive -> PricingPlanCopies.OnOwnerLists) with the host's count and fingerprint"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "pricesuggest peek ${t32Plan}",
+      "expect_result": "^OK pricesuggest agreement=${t32Plan} .* copy=False own=",
+      "capture": {
+        "hostCount": "suggestions=(\\S+)",
+        "hostSugg": "sugg=(\\S+)",
+        "hostSig": "sig=(\\S+)"
+      },
+      "note": "the host's list as its routed recompute (step 18) left it - captured AFTER that recompute, so shelf or rival-price moves before step 18 cannot fail the gate (review F3)"
+    },
+    {
+      "seq": 21,
+      "role": "c",
       "cmd": "pricesuggest ${t32Plan}",
-      "expect_result": "^OK pricesuggest agreement=${t32Plan} ",
+      "expect_result": "^OK pricesuggest agreement=${t32Plan} .* suggestions=${hostCount} sugg=${hostSugg} sig=${hostSig} copy=True own=",
       "capture": {
         "clientSkill": "skill=(\\S+)",
         "clientStores": "stores=(\\S+)",
         "clientCount": "suggestions=(\\S+)",
-        "clientSugg": "sugg=(\\S+)"
+        "clientSugg": "sugg=(\\S+)",
+        "clientSig": "sig=(\\S+)"
       },
       "expect_log": [
         {
           "role": "c",
-          "regex": "\\[PROBE T32-PRICES\\] agreement=${t32Plan} by=lever",
+          "regex": "\\[PricingCopies\\] plan ${t32Plan}: a partner's copy - kept the runner's list",
           "within_s": 10,
           "since_prev_step": true
         }
       ],
-      "note": "the CLIENT's copy of the same plan (CompanyPlans partner row), recomputed from the client's own data exactly as its screen would"
+      "note": "PASS GATE: the list the client's screen shows for its copy (the local recompute is skipped, T-32 (a)) EQUALS the host's: count, first-30 products/prices and the whole-list fingerprint"
     },
     {
-      "seq": 19,
+      "seq": 22,
       "role": "both",
-      "cmd": "mark T32 PRICES REPORT plan=${t32Plan} nb=${madeNeighborhood} stores=${madeStores} host skill=${hostSkill} stores=${hostStores} n=${hostCount} sugg=${hostSugg} | client skill=${clientSkill} stores=${clientStores} n=${clientCount} sugg=${clientSugg}",
+      "cmd": "mark T32 PRICES REPORT plan=${t32Plan} nb=${madeNeighborhood} stores=${madeStores} host skill=${hostSkill} stores=${hostStores} n=${hostCount} sig=${hostSig} sugg=${hostSugg} | client skill=${clientSkill} stores=${clientStores} n=${clientCount} sig=${clientSig} sugg=${clientSugg}",
       "expect_result": "OK MARK",
-      "note": "REPORT ONLY: writes both machines' captured suggestions side by side into both logs; equality is NOT asserted (evidence for T-32). The per-product inputs are the [PROBE T32-PRICES] product lines of steps 17/18"
+      "note": "both machines' lists side by side in both logs (equality is asserted at step 20)"
     },
     {
-      "seq": 20,
+      "seq": 23,
       "role": "c",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
       "note": "FIXTURE HYGIENE: end dissolved; NO save"
     },
     {
-      "seq": 21,
+      "seq": 24,
       "role": "h",
       "sleep_s": 5
     },
     {
-      "seq": 22,
+      "seq": 25,
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "member=False.*flipped=0"
     },
     {
-      "seq": 23,
+      "seq": 26,
       "role": "both",
       "cmd": "mark TEST PRICESUGGEST END",
       "expect_result": "OK MARK"
