@@ -78,7 +78,27 @@ namespace BigAmbitionsMP
             public PwLayout? Layout      { get; set; }
         }
 
-        private class HeldFile { public List<Held> Entries { get; set; } = new List<Held>(); }
+        /// <summary>T-24 slice 1B (owner decision 26): a booking a co-member ROUTED to this machine - who booked it, so their own
+        /// manage-contracts list shows it and only they cancel it. In play the record is BOUND to the game's contract object
+        /// (_bound); the game's delivery, moving and installation contracts carry no id field, so across a save the contract is
+        /// found again by its stable FINGERPRINT (SharedShopWorkTabs.RoutedFingerprint: fields the game never changes) and its
+        /// place among identical contracts in the save written beside this file (Ord). A record is dropped only when its bound
+        /// contract leaves the game's own list, or when the loaded save holds no such contract.</summary>
+        internal class RoutedRecord
+        {
+            public string BookingId { get; set; } = "";
+            public string Booker    { get; set; } = "";
+            public string Kind      { get; set; } = "";
+            public string Fp        { get; set; } = "";
+            public int    Ord       { get; set; } = -1;
+        }
+
+        private class HeldFile
+        {
+            public List<Held> Entries { get; set; } = new List<Held>();
+            public List<RoutedRecord> Routed { get; set; } = new List<RoutedRecord>();   // T-24 slice 1B (decision 26)
+            public List<string> Delivered { get; set; } = new List<string>();            // T-24 slice 1B: held job messages already shown here
+        }
 
         // T-24 fold 2: the held layouts are PER-SAVE state in a file BESIDE THE .hsg of every slot this machine's
         // coordinated save writes (MPSaveCoordinator.PerformLocalSave -> SaveWith(the slot's character folder)), so a
@@ -112,9 +132,13 @@ namespace BigAmbitionsMP
             {
                 if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder)) return;
                 string p = Path.Combine(folder, HeldFileName);
-                if (_held.Count == 0) { if (File.Exists(p)) File.Delete(p); return; }
+                if (_held.Count == 0 && _routed.Count == 0 && _deliveredOrder.Count == 0) { if (File.Exists(p)) File.Delete(p); return; }
+                // T-24 slice 1B: each bound record's place in the save just written (a record still waiting for its re-link
+                // keeps the place it was read back with).
+                if (!RelinkPending)
+                    foreach (var r in _routed) { var c = Bound(r.BookingId); r.Ord = c == null ? -1 : SharedShopWorkTabs.RoutedOrdinal(c); }
                 string tmp = p + ".tmp";
-                File.WriteAllText(tmp, Ser(new HeldFile { Entries = new List<Held>(_held.Values) }));
+                File.WriteAllText(tmp, Ser(new HeldFile { Entries = new List<Held>(_held.Values), Routed = new List<RoutedRecord>(_routed), Delivered = new List<string>(_deliveredOrder) }));
                 File.Copy(tmp, p, true);
                 File.Delete(tmp);
             }
@@ -127,6 +151,11 @@ namespace BigAmbitionsMP
         {
             _held.Clear();
             ResetAcked();
+            _routed.Clear();
+            _bound.Clear();
+            RelinkPending = false;
+            _delivered.Clear();
+            _deliveredOrder.Clear();
             try
             {
                 if (string.IsNullOrEmpty(folder)) return;
@@ -135,6 +164,13 @@ namespace BigAmbitionsMP
                 var hf = De<HeldFile>(File.ReadAllText(p));
                 if (hf?.Entries != null)
                     foreach (var e in hf.Entries) if (e != null && !string.IsNullOrEmpty(e.BookingId)) _held[e.BookingId] = e;
+                if (hf?.Routed != null)
+                    foreach (var r in hf.Routed) if (r != null && !string.IsNullOrEmpty(r.BookingId) && !string.IsNullOrEmpty(r.Booker) && !string.IsNullOrEmpty(r.Fp)) _routed.Add(r);
+                if (hf?.Delivered != null)
+                    foreach (var d in hf.Delivered) if (!string.IsNullOrEmpty(d) && _delivered.Add(d)) _deliveredOrder.Add(d);
+                RelinkPending = _routed.Count > 0;   // bound at the world-ready edge (SharedShopWorkTabs.RelinkRouted), never against the old world
+                if (_routed.Count > 0 || _deliveredOrder.Count > 0)
+                    Plugin.Logger.LogInfo($"[Merger] routed bookings read back from '{folder}': {_routed.Count} (held job messages already shown: {_deliveredOrder.Count}).");
                 Plugin.Logger.LogInfo($"[Merger] held interior layouts read back from '{folder}': {_held.Count}.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] held interior layouts could not be read back: {ex.Message}"); }
@@ -180,6 +216,92 @@ namespace BigAmbitionsMP
                 foreach (var k in gone) _held.Remove(k);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] held interior layouts prune: {ex.Message}"); }
+        }
+
+        // ── T-24 slice 1B (owner decision 26): who booked each ROUTED booking held here (per-save, beside the .hsg) ──
+
+        private static readonly List<RoutedRecord> _routed = new List<RoutedRecord>();
+        private static readonly Dictionary<string, object> _bound = new Dictionary<string, object>(StringComparer.Ordinal);   // booking -> the game's contract (in play only)
+
+        /// <summary>Records not yet bound: set by RestoreFor (read back with a save) and by RecordRoutedUnbound (a bundle
+        /// received before the world was ready), cleared by the re-link at the world-ready edge. While set nothing is
+        /// pruned, sent or cancelled.</summary>
+        internal static bool RelinkPending;
+
+        internal static int RoutedCount => _routed.Count;
+
+        internal static List<RoutedRecord> RoutedRecords() => new List<RoutedRecord>(_routed);
+
+        internal static object? Bound(string? id) => id != null && _bound.TryGetValue(id, out var c) ? c : null;
+
+        internal static void Bind(string id, object c) { if (!string.IsNullOrEmpty(id) && c != null) _bound[id] = c; }
+
+        internal static bool IsBoundObject(object c)
+        {
+            foreach (var v in _bound.Values) if (ReferenceEquals(v, c)) return true;
+            return false;
+        }
+
+        /// <summary>The record bound to this contract object (null = not a routed booking).</summary>
+        internal static RoutedRecord? RecordOf(object? c)
+        {
+            if (c == null) return null;
+            foreach (var kv in _bound)
+                if (ReferenceEquals(kv.Value, c)) return _routed.Find(r => r.BookingId == kv.Key);
+            return null;
+        }
+
+        internal static void RecordRouted(string bookingId, string booker, string kind, object contract)
+        {
+            if (string.IsNullOrEmpty(bookingId) || string.IsNullOrEmpty(booker) || contract == null) return;
+            string fp = SharedShopWorkTabs.RoutedFingerprint(contract);
+            if (fp.Length == 0) return;
+            _routed.RemoveAll(r => r.BookingId == bookingId);
+            _routed.Add(new RoutedRecord { BookingId = bookingId, Booker = booker, Kind = kind, Fp = fp });
+            _bound[bookingId] = contract;
+        }
+
+        /// <summary>A record whose contract came in a hand-over/hand-back bundle before the world was ready: kept UNBOUND (no
+        /// saved place: Ord -1) and bound at the world-ready re-link (SharedShopWorkTabs.RelinkRouted), never against a world
+        /// still loading.</summary>
+        internal static void RecordRoutedUnbound(string bookingId, string booker, string kind, string fp)
+        {
+            if (string.IsNullOrEmpty(bookingId) || string.IsNullOrEmpty(booker) || string.IsNullOrEmpty(fp)) return;
+            _routed.RemoveAll(r => r.BookingId == bookingId);
+            _bound.Remove(bookingId);
+            _routed.Add(new RoutedRecord { BookingId = bookingId, Booker = booker, Kind = kind, Fp = fp });
+            RelinkPending = true;
+        }
+
+        internal static void DropRouted(ICollection<string> ids, string why)
+        {
+            if (ids == null || ids.Count == 0) return;
+            int n = _routed.RemoveAll(r => ids.Contains(r.BookingId));
+            foreach (var id in ids) _bound.Remove(id);
+            if (n > 0) Plugin.Logger.LogInfo($"[Merger] {n} routed booking record(s) closed ({why}): {string.Join(", ", ids)}.");
+        }
+
+        /// <summary>A routed blueprint installation cancelled on its runner: its held layout goes with it (as F4 below).</summary>
+        internal static void DropHeldFor(Entities.InteriorInstallationFirmContract c)
+        {
+            var e = Find(c);
+            if (e != null) Drop(e);
+        }
+
+        // T-24 slice 1B fold: the held job messages (CompanyMessages.DeliverHeld) already shown on this machine. Kept with the
+        // per-save data, so it is exactly as old as the game's own contact messages it guards: a restart before the next save
+        // loses both together, and a restart after it keeps both - never shown twice.
+        private const int DeliveredCap = 1000;
+        private static readonly HashSet<string> _delivered = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly List<string> _deliveredOrder = new List<string>();
+
+        /// <summary>True the first time this save sees `messageId` (and records it); false after.</summary>
+        internal static bool FirstDelivery(string messageId)
+        {
+            if (string.IsNullOrEmpty(messageId) || !_delivered.Add(messageId)) return false;
+            _deliveredOrder.Add(messageId);
+            if (_deliveredOrder.Count > DeliveredCap) { _delivered.Remove(_deliveredOrder[0]); _deliveredOrder.RemoveAt(0); }
+            return true;
         }
 
         private static void Drop(Held e) => _held.Remove(e.BookingId);
@@ -637,7 +759,7 @@ namespace BigAmbitionsMP
                 var store = MPServer.PaperworkStore;
                 lock (store)
                     foreach (var e in store.Values)
-                        foreach (Match m in HashRef.Matches(e?.Json ?? "")) named.Add(m.Groups[1].Value);
+                        foreach (Match m in HashRef.Matches(e?.Text ?? "")) named.Add(m.Groups[1].Value);   // T-54 fold F3: through the one read
                 lock (_bodies)
                 {
                     var gone = new List<string>();

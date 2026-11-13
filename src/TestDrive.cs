@@ -3603,6 +3603,10 @@ namespace BigAmbitionsMP
                 case "mergerfood":      return DevServiceBooking(arg, food: true);
                 case "mergermove":      return DevMergerMove(arg);       // T-24 part 2
                 case "mergerinterior":  return DevMergerInterior(arg);   // T-24 part 2
+                case "mergerrename":    return SharedShopWorkTabs.DevRename(arg);   // T-24 slice 1B
+                case "mycontracts":     return SharedShopWorkTabs.DevMyContracts();         // T-24 slice 1B (decision 26)
+                case "cancelbooking":   return SharedShopWorkTabs.DevCancelBooking(arg);    // T-24 slice 1B (decision 26)
+                case "routedgate":      return SharedShopWorkTabs.DevRoutedGate(arg);       // T-24 slice 1B fold (F9/F10)
                 case "servicelists":    return DevServiceLists(arg);
                 case "pickercheck":     return DevPickerCheck(arg);
 
@@ -3927,6 +3931,32 @@ namespace BigAmbitionsMP
                     if (pwArg.Length > 0 && !MPServer.IsRunning) return "ERR 'paperwork <stableid>' is a host verb";
                     if (!MPServer.IsRunning) return "ERR paperwork: not the host (use 'paperwork push' on a member)";
                     return $"OK paperwork stored=[{MPServer.PaperworkCensus(pwArg)}]";
+                }
+
+                case "pwday":
+                {
+                    // T-54 (read-only): the newest day this machine's books hold for ONE address - the highest orderHistory
+                    // dayNumber of its registration (the game adds one entry per business at the day close,
+                    // BusinessHelper.cs:225-227; the paperwork bundle carries it and the returned owner's
+                    // ApplyReturnedBusinesses replaces it) - plus today's day. Nothing is written.
+                    string pdAddr = arg.Trim();
+                    if (pdAddr.Length == 0) return "ERR usage: pwday <addressKey>";
+                    var pdReg = GameStatePatcher.FindRegistration(pdAddr);
+                    if (pdReg == null) return $"ERR pwday: no registration at '{pdAddr}'";
+                    int pdNewest = -1, pdCount = 0, pdToday = 0;
+                    try { pdToday = GameStateReader.GetGameTime().day; } catch { }
+                    try
+                    {
+                        if (pdReg.orderHistory != null)
+                            foreach (var h in pdReg.orderHistory)
+                            {
+                                if (h == null) continue;
+                                pdCount++;
+                                if (h.dayNumber > pdNewest) pdNewest = h.dayNumber;
+                            }
+                    }
+                    catch { }
+                    return $"OK pwday addr={pdAddr} newest={pdNewest} entries={pdCount} today={pdToday}";
                 }
 
                 // -- merger phase 1 test levers (2026-09-11) -------------------

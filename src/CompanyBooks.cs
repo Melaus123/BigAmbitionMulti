@@ -89,6 +89,9 @@ namespace BigAmbitionsMP
         private static bool  _wasMember;
         private static int   _inertLoggedDay = -1;
         private static int   _lastPublishedDay = -1;
+        // T-54 fold F6: the last refusal logged ("why|day|bytes") - a 10 s re-try of the SAME held edge with the SAME bundle
+        // is not a new attempt and stays quiet; any other attempt that is refused logs. Cleared by a publish that goes out.
+        private static readonly Dictionary<string, string> _lastRefusal = new Dictionary<string, string>();   // per part (own = "", stood-in = owner stable id)
         private static int   _veilBuildLoggedDay = -1;   // MINOR (c): the build-under-veil note is once per DAY, not per call
 
         /// <summary>M0 (review r2): the membership EDGE this machine has already published for - the
@@ -280,30 +283,80 @@ namespace BigAmbitionsMP
 
                 var p = Build();
                 if (p == null) return false;
+                if (!MPServer.IsRunning && !MPClient.IsConnected) { Plugin.Logger.LogInfo($"[Books] publish ({why}) refused: not in a session."); return false; }
 
-                string json;
-                try { json = Newtonsoft.Json.JsonConvert.SerializeObject(p); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] publish ({why}) refused: serialise failed — {ex.Message}."); return false; }
-
-                int bytes = System.Text.Encoding.UTF8.GetByteCount(json);
-                if (bytes > MaxBundleBytes)
-                {
-                    if (p.Day != _lastPublishedDay)
-                        Plugin.Logger.LogWarning($"[Books] publish ({why}) REFUSED: {bytes} bytes > {MaxBundleBytes} cap — nothing sent; the host's previously stored books stand.");
-                    _lastPublishedDay = p.Day;
-                    return false;
-                }
-
-                if (MPServer.IsRunning)      HostStore(p, MPConfig.PlayerId);          // the host is a member too
-                else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.CompanyBooks, MPConfig.PlayerId, p));
-                else { Plugin.Logger.LogInfo($"[Books] publish ({why}) refused: not in a session."); return false; }
-
+                // T-54 fold F6: one bundle per OWNER, as the paperwork - each away owner's stood-in statements go as a part of
+                // their own (StoodInFor = that owner's STABLE id), so the own bundle carries only this member's shops.
+                foreach (var part in SplitStoodIn(p))
+                    SendOneBooks(part, $"{why}; stood-in part of '{part.StoodInFor}'");
+                if (!SendOneBooks(p, why)) { _lastPublishedDay = p.Day; return false; }
                 _lastPublishedDay = p.Day;
-                Plugin.Logger.LogInfo($"[Books] published day {p.Day}: {p.Statements.Count} statements ({bytes} bytes, {why}).");
                 return true;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] publish ({why}): {ex.Message}"); }
             return false;
+        }
+
+        /// <summary>T-54 fold F6: measure and send (on the host, store) ONE books bundle; true when it went out. Measured on the
+        /// size that travels, once: a client's real envelope frame (MessageEnvelope.Freeze - the send ships exactly those
+        /// bytes); the host's own bundle never travels, so it is the deflated JSON (PaperworkSync.TravelBytes).</summary>
+        private static bool SendOneBooks(CompanyBooksPayload p, string why)
+        {
+            int bytes; MessageEnvelope? env = null;
+            try
+            {
+                if (MPServer.IsRunning) bytes = PaperworkSync.TravelBytes(Newtonsoft.Json.JsonConvert.SerializeObject(p));
+                else { env = MessageEnvelope.Create(MessageType.CompanyBooks, MPConfig.PlayerId, p); bytes = env.Freeze().Length; }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] publish ({why}) refused: serialise failed — {ex.Message}."); return false; }
+            if (bytes > MaxBundleBytes)
+            {
+                // T-54: a refusal is never stamped once per day (a once-per-day stamp hid the paperwork twin of this cap, run
+                // 055625). Fold F6: logged once per real attempt - the membership edge's 10 s re-try of the same bundle is not one.
+                string sig = $"{why}|{p.Day}|{bytes}";
+                string part = p.StoodInFor ?? "";
+                if (!_lastRefusal.TryGetValue(part, out var last) || last != sig)
+                    Plugin.Logger.LogWarning($"[Books] publish ({why}) REFUSED: {bytes} bytes > {MaxBundleBytes} cap — nothing sent; the host's previously stored books stand.");
+                _lastRefusal[part] = sig;
+                return false;
+            }
+            if (MPServer.IsRunning) HostStore(p, MPConfig.PlayerId);   // the host is a member too
+            else MPClient.SendEnvelope(env!);                         // the frozen frame: exactly the bytes measured
+            _lastRefusal.Remove(p.StoodInFor ?? "");
+            Plugin.Logger.LogInfo($"[Books] published day {p.Day}: {p.Statements.Count} statements ({bytes} bytes, {why}).");
+            return true;
+        }
+
+        /// <summary>T-54 fold F6: lift each away owner's stood-in statements out of this machine's own books, grouped by the
+        /// owner's STABLE id (MergerAbsence.OwnerStableSimulatedFor - the host's mark key, as the paperwork). Exactly their
+        /// TotalProfit moves out of the own day totals into the part's - what the host's in-host split did to the combined
+        /// bundle before (HostFileSimulated). A stood-in address with no stable id stays in the own bundle, where the host
+        /// still files it by its marks.</summary>
+        private static List<CompanyBooksPayload> SplitStoodIn(CompanyBooksPayload p)
+        {
+            var parts = new List<CompanyBooksPayload>();
+            if (MergerAbsence.SimulatedCount == 0) return parts;
+            var byOwner = new Dictionary<string, CompanyBooksPayload>();
+            for (int i = p.Statements.Count - 1; i >= 0; i--)
+            {
+                var st = p.Statements[i];
+                if (st == null) continue;
+                string stable = MergerAbsence.OwnerStableSimulatedFor(st.AddressKey);
+                if (stable.Length == 0) continue;
+                p.Statements.RemoveAt(i);
+                if (!byOwner.TryGetValue(stable, out var part))
+                {
+                    part = new CompanyBooksPayload { OwnerPid = p.OwnerPid, StableId = p.StableId, Day = p.Day, StoodInFor = stable };
+                    byOwner[stable] = part; parts.Add(part);
+                }
+                part.Statements.Insert(0, st);
+                CbDayTotals? pt = part.Totals.Find(t => t != null && t.Day == st.Day);
+                if (pt == null) { pt = new CbDayTotals { Day = st.Day }; part.Totals.Add(pt); }
+                pt.BusinessProfit += st.TotalProfit; pt.TotalProfit += st.TotalProfit;
+                foreach (var t in p.Totals)
+                    if (t != null && t.Day == st.Day) { t.BusinessProfit -= st.TotalProfit; t.TotalProfit -= st.TotalProfit; }
+            }
+            return parts;
         }
 
         // ═══════════════════════════════════════════════════════════════════════════════════════
@@ -417,6 +470,7 @@ namespace BigAmbitionsMP
                 if (p == null || string.IsNullOrEmpty(senderPid)) { Plugin.Logger.LogWarning("[Books] store refused: empty payload or sender."); return; }
                 HostAdoptStables();   // m-c: a bundle restored for this sender (or for an owner it files for) is keyed by pid again before any lookup below
                 if (!MergerSync.InAnyGroup(senderPid)) { Plugin.Logger.LogInfo($"[Books] store refused for '{senderPid}': not in a company."); return; }
+                if (!string.IsNullOrEmpty(p.StoodInFor)) { HostFileStoodInBooks(p, senderPid); return; }   // T-54 fold F6: never under the sender
 
                 p.OwnerPid = senderPid;
                 foreach (var filed in HostFileSimulated(p, senderPid))
@@ -440,6 +494,51 @@ namespace BigAmbitionsMP
                 HostFanOut(p);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] store: {ex.Message}"); }
+        }
+
+        /// <summary>HOST, MAIN THREAD (T-54 fold F6): a stand-in's STOOD-IN books part, filed under the owner the way the
+        /// paperwork part is - against this host's own mark (live, or the 60 s hand-back mark) naming THIS sender, whose
+        /// OwnerStable agrees with StoodInFor; only the statements of that mark's addresses; the day totals rebuilt here from
+        /// exactly those statements' TotalProfit. Never stored under the sender; what no such mark names is logged, not stored.</summary>
+        private static void HostFileStoodInBooks(CompanyBooksPayload p, string senderPid)
+        {
+            string stable = p.StoodInFor ?? "";
+            int arrived = p.Statements.Count;
+            MergerAbsence.AbsenceMark? mark = null;
+            if (MergerAbsence.Marks.TryGetValue(stable, out var live) && live != null && live.SimulatorPid == senderPid) mark = live;
+            else foreach (var hb in MergerAbsence.HostHandbackMarksFor(senderPid)) if (hb != null && hb.OwnerStable == stable) { mark = hb; break; }
+            if (mark == null || string.IsNullOrEmpty(mark.OwnerPid) || mark.OwnerPid == senderPid)
+            {
+                Plugin.Logger.LogWarning($"[Books] stood-in books of '{stable}' from '{senderPid}': no live or hand-back mark of this sender names that owner - "
+                                       + $"{arrived} statement(s) not stored, and never filed under the sender.");
+                return;
+            }
+            var addrs = new HashSet<string>(mark.Addresses ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+            var filed = new CompanyBooksPayload { OwnerPid = mark.OwnerPid, StableId = mark.OwnerStable, Day = p.Day };
+            foreach (var st in p.Statements)
+            {
+                if (st == null || !addrs.Contains(st.AddressKey)) continue;
+                filed.Statements.Add(st);
+                CbDayTotals? t = filed.Totals.Find(x => x.Day == st.Day);
+                if (t == null) { t = new CbDayTotals { Day = st.Day }; filed.Totals.Add(t); }
+                t.BusinessProfit += st.TotalProfit; t.TotalProfit += st.TotalProfit;
+            }
+            if (filed.Statements.Count < arrived)
+                Plugin.Logger.LogWarning($"[Books] stood-in books of '{mark.OwnerPid}' from '{senderPid}': {arrived - filed.Statements.Count} of {arrived} statement(s) "
+                                       + "name an address that owner's mark does not - not stored.");
+            if (filed.Statements.Count == 0) return;
+            CompanyBooksPayload fanned;
+            lock (_store)
+            {
+                if (_store.TryGetValue(filed.OwnerPid, out var have) && have != null) { MergeFiled(have, filed); fanned = have; }
+                else
+                {
+                    PutStore(filed.OwnerPid, filed); fanned = filed;
+                    Plugin.Logger.LogInfo($"[Books] '{filed.OwnerPid}' had no stored bundle — the simulated statements become its first one (its wealth and tax figures stay 0 until it publishes).");
+                }
+            }
+            Plugin.Logger.LogInfo($"[Books] filed {filed.Statements.Count} statements of '{mark.OwnerPid}' from '{senderPid}' (stood-in part).");
+            HostFanOut(fanned);
         }
 
         /// <summary>Split out the statements of ABSENT owners this sender simulates and file each as
@@ -856,7 +955,7 @@ namespace BigAmbitionsMP
         {
             _overlaid.Clear(); _rowOwner.Clear(); _labelOwner.Clear(); _partner.Clear(); _nativeKept.Clear();
             _suspend = 0; _pending = false; _wasMember = false; _memberSig = ""; _edgeHeldSig = ""; _edgeRetryAt = 0f;
-            _lastPublishedDay = -1; _inertLoggedDay = -1; _veilBuildLoggedDay = -1;
+            _lastPublishedDay = -1; _inertLoggedDay = -1; _veilBuildLoggedDay = -1; _lastRefusal.Clear();
             LastFiledReturn = null; TaxRowTint = false; AnniversaryPending = -1;   // TAXBILL-ONE: session facts, cleared with _partner
             Plugin.Logger.LogInfo("[Books] reset: tracking cleared without touching any record (scene boundary).");
         }

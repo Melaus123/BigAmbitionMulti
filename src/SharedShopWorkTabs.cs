@@ -128,6 +128,7 @@ namespace BigAmbitionsMP
 
         public static void Reset()
         {
+            ResetRouted();   // T-24 slice 1B: the member's routed lists and the world-ready edge die with the scene
             CloseSession(); _logged.Clear(); _nextScan = 0f; _nextPoll = 0f; _nextCardPoll = 0f; _orderBaselineStale = false;
             _cardSlots.Clear(); _cardInv.Clear(); _cardSig.Clear(); _cardNext.Clear(); _whList = null; _renderCards = false;
             _insCapByAddr.Clear(); _insSigByAddr.Clear(); _insScalarsByAddr.Clear();
@@ -493,11 +494,13 @@ namespace BigAmbitionsMP
 
         /// <summary>RUNNER → the ONE member that asked: a routed COMMITMENT was refused, by CODE. The member
         /// maps the code to the game's own notification locally (r2 minor f) - no text is ever on the wire.</summary>
-        private static void SendRoutedRefusal(string toPid, string addr, string code)
+        private static void SendRoutedRefusal(string toPid, string addr, string code, string bookingId = "")
         {
             if (string.IsNullOrEmpty(toPid) || string.IsNullOrEmpty(code)) return;
             var reply = new SharedWorkInfoPayload
             { PlayerId = MPConfig.PlayerId, Action = "snapshot", Tab = "mergerack", AddressKey = addr, ToPid = toPid, AckCode = code };
+            // T-24 slice 1B: a "mergercancel" answer names its booking (the member may have more than one pending).
+            if (!string.IsNullOrEmpty(bookingId)) reply.RoutedBookings = new List<PwRoutedBooking> { new PwRoutedBooking { BookingId = bookingId } };
             // A stand-in's own booking is applied on the stand-in itself: the refusal is for this machine.
             if (toPid == MPConfig.PlayerId) { OnRoutedRefusal(reply); return; }
             if (MPServer.IsRunning) MPServer.HostRouteSharedWorkInfo(reply, MPConfig.PlayerId);
@@ -522,6 +525,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                if (OnCancelAnswer(p)) return;   // T-24 slice 1B: the runner's answer to my "mergercancel"
                 if (_contractRouteAddr.Length == 0 || p.AddressKey != _contractRouteAddr
                     || Time.unscaledTime - _contractRouteAt > SellQuoteWindow)
                 { Plugin.Logger.LogInfo($"[Merger] routed refusal '{p.AckCode}' for '{p.AddressKey}' matches no request of mine - ignored."); return; }
@@ -604,6 +608,7 @@ namespace BigAmbitionsMP
                     PassengerHud.Toast(line);
                     return;
                 }
+                else if (IsRenameRefusal(p.AckCode)) { ShowRenameRefusal(p.AckCode, p.AddressKey); return; }   // T-24 slice 1B
                 else if (p.AckCode == "offline" || p.AckCode == "norent" || p.AckCode == "store" || p.AckCode == "dest"
                       || p.AckCode == "catalogue" || p.AckCode == "max" || p.AckCode == "noid"
                       || p.AckCode == "busy" || p.AckCode == "mixed")   // T-24 part 2
@@ -2247,6 +2252,7 @@ namespace BigAmbitionsMP
         /// the native code defers its own first fill for the same scroller reason) + the 2 s edit scan.</summary>
         public static void Tick()
         {
+            try { TickRoutedBookings(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed bookings tick: {ex.Message}"); }   // T-24 slice 1B
             // The LIST cards live OUTSIDE any per-building session — they must run even when no building
             // page is open (field 2026-08-24: the session guard below starved them — a helper viewing the
             // list never re-rendered or polled its cards, so they stayed as the native empty first draw).
@@ -2664,6 +2670,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                if (p != null && p.Tab == "mergerbookings" && p.Action == "request") { OnRoutedBookings(p); return; }   // T-24 slice 1B: a member's world-ready ask
                 if (p == null || string.IsNullOrEmpty(p.AddressKey)) return;
                 if (p.Action == "request") OwnerAnswer(p);
                 else if (p.Action == "snapshot") ApplySnapshot(p);
@@ -3485,28 +3492,145 @@ namespace BigAmbitionsMP
             if (_openTab == "settings" && _openAddr == p.AddressKey && !typing) _renderSettings = true;
         }
 
+        // ── T-24 part 2 slice 1B: rename (decision 12 supersedes ruling 34 for the name) ──
+
+        /// <summary>Why the last ApplySettingsOp rename was refused ("" = not refused, or a no-op).</summary>
+        private static string _renameRefusal = "";
+
+        private static bool IsRenameRefusal(string? code)
+            => code == "rnempty" || code == "rndot" || code == "rnchars" || code == "rndupe" || code == "rnlong" || code == "rnfail";
+
+        /// <summary>A refused rename raises the game's OWN notice for that reason (BizManSettings.SaveBusinessInformation
+        /// :140-158). A reason the game has no notice for (too long - the game's field limit; the logo folder could not be
+        /// moved) shows the approved line.</summary>
+        private static void ShowRenameRefusal(string code, string? addr)
+        {
+            string key = code switch
+            {
+                "rnempty" => "bizman_settings_notification_name_empty",
+                "rndot"   => "bizman_notification_name_cannot_start_dot",
+                "rnchars" => "bizman_notification_invalid_business_name_characters",
+                "rndupe"  => "bizman_settings_notification_name_duplicated",
+                _ => "",
+            };
+            if (key.Length == 0)
+            {
+                Plugin.Logger.LogWarning($"[Merger] rename of '{addr}' refused ('{code}'): the game has no notice for this - the approved line is shown.");
+                PassengerHud.Toast("Your partner's shop couldn't take that order, so it wasn't placed.");
+                return;
+            }
+            if (code == "rndot") UI.Notification.Notifications.ShowError(key, key, trackOnSaveGame: false);
+            else if (code == "rnchars") UI.Notification.Notifications.ShowError(key, "name_invalid_characters", trackOnSaveGame: false);
+            else UI.Notification.Notifications.ShowError(key);
+            Plugin.Logger.LogInfo($"[Merger] rename of '{addr}' refused ('{code}'): game notice '{key}'.");
+        }
+
+        /// <summary>The settings screen's rename on a shared shop. A member routes it to the shop's runner. A STAND-IN runs
+        /// the shop for its absent owner and MAY rename it (decision 12, 2026-11-13): it applies it here with the game's own
+        /// checks (ApplySettingsOp), and the name goes home with the hand-back (BusinessPaperwork.BusinessName).</summary>
+        internal static string RenameFromScreen(BuildingRegistration reg, string addr, bool simulated, string typed)
+        {
+            if (!simulated)
+            {
+                SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "rename", StrValue = typed });
+                return "routed";
+            }
+            var lp = new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "rename", StrValue = typed };
+            if (ApplySettingsOp(reg, lp))
+            {
+                SaveGameManager.MarkChange();
+                PaperworkSync.MarkDirty();
+                UI.Notification.Notifications.Show(UI.Notification.NotificationType.Success, "bizman_settings_notification_save_successfull");
+                Plugin.Logger.LogInfo($"[Merger] stand-in renamed '{addr}' to '{typed}' for its absent owner - the name goes home with the hand-back.");
+                return "applied";
+            }
+            if (_renameRefusal.Length > 0) { ShowRenameRefusal(_renameRefusal, addr); return "refused " + _renameRefusal; }
+            return "unchanged";
+        }
+
+        /// <summary>RETURNED OWNER (PaperworkSync.ApplyReturnedBusinesses): the name and logo the stand-in left on a business
+        /// it ran for me, applied through the same path as a routed rename/logo edit (folder move, logo regenerate, pin).</summary>
+        internal static void ApplyReturnedIdentity(BuildingRegistration reg, BusinessPaperwork b)
+        {
+            try
+            {
+                if (reg == null || b == null) return;
+                string key = b.AddressKey ?? "";
+                string want = (b.BusinessName ?? "").Trim();
+                string had = reg.BusinessName ?? "";
+                if (want.Length > 0 && want != had)
+                {
+                    var rp = new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = key, Op = "rename", StrValue = want };
+                    if (ApplySettingsOp(reg, rp))
+                        Plugin.Logger.LogInfo($"[Absence] returned name for '{key}': '{had}' -> '{want}'.");
+                    else
+                        Plugin.Logger.LogWarning($"[Absence] returned name '{want}' for '{key}' not applied ('{_renameRefusal}') - my own name '{had}' stands.");
+                }
+                var lg = b.Logo;
+                var ls = reg.logoSettings;
+                if (lg != null && ls != null
+                    && ((ls.logoShape ?? "") != (lg.LogoShape ?? "") || (int)ls.font != lg.LogoFont || ls.logoColor.color != lg.LogoColor
+                        || ls.fontColor.color != lg.FontColor || ls.backgroundColor.color != lg.BackColor))
+                {
+                    var lp = new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = key, Op = "logo", Settings = lg };
+                    if (ApplySettingsOp(reg, lp)) Plugin.Logger.LogInfo($"[Absence] returned logo for '{key}' applied.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] returned identity: {ex.Message}"); }
+        }
+
+#if BAMP_DEV
+        /// <summary>TEST LEVER `mergerrename <addr> [name | =<addr2>]`: the settings screen's rename leg for that shop, as
+        /// this machine would send it (route, or a stand-in's own apply). `=<addr2>` takes that business's current name (a
+        /// duplicate). No name: reports the current name.</summary>
+        internal static string DevRename(string arg)
+        {
+            var a = (arg ?? "").Split(new[] { ' ' }, 3, StringSplitOptions.RemoveEmptyEntries);
+            if (a.Length < 2) return "ERR usage: mergerrename <addr> [name | =<addr2>]";
+            string key = a[0] + " " + a[1];
+            var reg = GameStatePatcher.FindRegistration(key);
+            if (reg == null) return $"ERR no registration '{key}'";
+            if (a.Length < 3) return $"OK name '{reg.BusinessName}'";
+            string want = a[2].Trim();
+            if (want.StartsWith("=", StringComparison.Ordinal))
+            {
+                var other = GameStatePatcher.FindRegistration(want.Substring(1).Trim());
+                if (other == null) return $"ERR no registration '{want.Substring(1)}'";
+                want = other.BusinessName ?? "";
+            }
+            if (!OwnersIdentity(reg, out var addr, out var simulated)) return $"ERR '{key}' is not a shared shop here";
+            if (want.Length == 0) { ShowRenameRefusal("rnempty", addr); return "OK mergerrename refused rnempty"; }
+            string r = RenameFromScreen(reg, addr, simulated, want);
+            return $"OK mergerrename {r} for '{addr}' (simulated={simulated}) name now '{reg.BusinessName}'";
+        }
+#endif
+
         /// <summary>OWNER: apply a routed rename or logo edit with the native checks.</summary>
         private static bool ApplySettingsOp(BuildingRegistration reg, SharedWorkEditPayload p)
         {
+            _renameRefusal = "";
             if (p.Op == "rename")
             {
                 string want = (p.StrValue ?? "").Trim();
                 string have = reg.BusinessName ?? "";
-                if (want.Length == 0 || want == have) return false;
+                if (want.Length == 0) { _renameRefusal = "rnempty"; return false; }
+                if (want == have) return false;
                 // Native's own guards (BizManSettings.SaveBusinessInformation): a leading dot and any
                 // character illegal in a file name are refused because the name IS a folder name, and a
                 // duplicate would collide with another business's logo folder.
                 if (want.StartsWith(".", StringComparison.Ordinal))
                 {
                     Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' tried to rename '{p.AddressKey}' to a name starting with '.' — refused.");
+                    _renameRefusal = "rndot";
                     return false;
                 }
-                try { if (want.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0) { Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' tried to rename '{p.AddressKey}' to a name with characters that cannot be a folder name — refused."); return false; } }
+                try { if (want.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0) { Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' tried to rename '{p.AddressKey}' to a name with characters that cannot be a folder name — refused."); _renameRefusal = "rnchars"; return false; } }
                 catch { }
                 var gi = SaveGameManager.Current;
                 if (gi?.BuildingRegistrations != null && gi.BuildingRegistrations.Exists(x => x != null && x.BusinessName == want))
                 {
                     Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' tried to rename '{p.AddressKey}' to '{want}', which is already taken — refused.");
+                    _renameRefusal = "rndupe";
                     return false;
                 }
                 if (want.Length > 64)
@@ -3514,6 +3638,7 @@ namespace BigAmbitionsMP
                     // Native relies on the input field's character limit, which a routed op bypasses; an
                     // over-long name throws inside the folder move (review M6).
                     Plugin.Logger.LogWarning($"{Tag} '{p.PlayerId}' tried to rename '{p.AddressKey}' to a {want.Length}-character name — refused.");
+                    _renameRefusal = "rnlong";
                     return false;
                 }
                 // The logo folder is named after the business; native moves it as part of the rename, and
@@ -3527,6 +3652,7 @@ namespace BigAmbitionsMP
                 catch (Exception ex)
                 {
                     Plugin.Logger.LogWarning($"{Tag} rename of '{p.AddressKey}' from '{have}' to '{want}' REFUSED — the logo folder could not be moved: {ex.Message}");
+                    _renameRefusal = "rnfail";
                     return false;
                 }
                 reg.BusinessName = want;
@@ -3817,17 +3943,9 @@ namespace BigAmbitionsMP
                     string typed = "";
                     if (AccessTools.Field(typeof(BizManSettings), "businessName")?.GetValue(__instance) is TMP_InputField f)
                         typed = (f.text ?? "").Trim();
-                    if (typed.Length > 0 && typed != (reg.BusinessName ?? ""))
-                    {
-                        // W3-0 r1 (F8): on the SIMULATOR there is nothing to route to (this machine is the route
-                        // target) and a stand-in never retypes the absent owner's business — refuse, do not send.
-                        if (simulated)
-                        {
-                            if (_logged.Add("st-rename-sim|" + addr))
-                                Plugin.Logger.LogInfo($"{Tag} rename refused on shared '{addr}' — reserved for the merger (ruling 34).");
-                        }
-                        else SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = addr, Op = "rename", StrValue = typed });
-                    }
+                    // T-24 slice 1B: the game's own empty-name notice (BizManSettings :140-143), which the skipped native would raise.
+                    if (typed.Length == 0) ShowRenameRefusal("rnempty", addr);
+                    else if (typed != (reg.BusinessName ?? "")) RenameFromScreen(reg, addr, simulated, typed);
                     // Clear the panel's own dirty flag (review MINOR). Left set, it makes every later tab
                     // click pop native's unsaved-changes confirm — and, worse, our snapshot apply reads it as
                     // "the helper is typing" and suppresses the repaint, so a REFUSED rename never snaps
@@ -4443,6 +4561,7 @@ namespace BigAmbitionsMP
             // commitment's refusal (minor f). Both are addressed to this machine alone and are handled
             // before any tab-session test.
             if (p.Tab == "sellquote") { OnSellQuote(p); return; }
+            if (p.Tab == "mergerbookings") { OnRoutedBookings(p); return; }   // T-24 slice 1B (decision 26)
             if (p.Tab == "mergerack") { OnRoutedRefusal(p); return; }
             var reg = GameStatePatcher.FindRegistration(p.AddressKey);
             if (reg == null) return;
@@ -4615,7 +4734,9 @@ namespace BigAmbitionsMP
         /// whose refusal comes back as a code (OnRoutedRefusal).</summary>
         internal static bool ArmsRoutedRefusal(string op)
             => op == "mergercontract" || op == "mergercampaign" || op == "mergerfurniture" || op == "mergerfood"
-               || op == "mergermove" || op == "mergerinterior";   // T-24 part 2
+               || op == "mergermove" || op == "mergerinterior"    // T-24 part 2
+               || op == "rename"                                   // T-24 slice 1B: a refused rename raises the game's notice
+               || op == "mergercancel";                            // T-24 slice 1B: the runner confirms or refuses a cancel
 
         /// <summary>The routed commitments a STAND-IN may make on the absent owner's building it runs: the host sends
         /// them back to the sender, which applies them and tags them to the owner (StandInOwnerFor).</summary>
@@ -4728,6 +4849,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Merger] moving booking for '{okey}' tagged to the absent owner '{standIn}' - it leaves with them.");
                 SaveGameManager.MarkChange();
                 PaperworkSync.MarkDirty();
+                RecordRoutedBooking(p, KindMove, mc);   // T-24 slice 1B (decision 26)
                 Plugin.Logger.LogInfo($"[Merger] moving booking applied for '{okey}' -> '{dkey}' from '{p.PlayerId}' (booking {p.BookingId}, "
                                     + $"day {p.SlotDay} {hour}h, transfer={p.Transfer}, company '{p.AgencyKey}')");
             }
@@ -4803,6 +4925,7 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Merger] interior installation booking for '{key}' tagged to the absent owner '{standIn}' - it leaves with them.");
                 SaveGameManager.MarkChange();
                 PaperworkSync.MarkDirty();
+                RecordRoutedBooking(p, KindInterior, ic);   // T-24 slice 1B (decision 26)
                 Plugin.Logger.LogInfo($"[Merger] interior installation booking applied for '{key}' from '{p.PlayerId}' (booking {p.BookingId}, "
                                     + $"day {p.SlotDay}, {(p.IsBlueprint ? "blueprint" : "preset")} '{name}', firm '{p.AgencyKey}')");
             }
@@ -4922,11 +5045,822 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogInfo($"[Merger] {what} booking for '{p.AddressKey}' tagged to the absent owner '{standIn}' - it leaves with them.");
                 SaveGameManager.MarkChange();
                 PaperworkSync.MarkDirty();
+                RecordRoutedBooking(p, food ? KindFood : KindFurniture, contract);   // T-24 slice 1B (decision 26)
                 Plugin.Logger.LogInfo($"[Merger] {what} booking applied for '{p.AddressKey}' from '{p.PlayerId}' (booking {p.BookingId}, "
                                     + $"{total} item(s), slot day {day} {hour}h, total {totalPrice}); the game charges it on delivery.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] {what} booking REFUSED for '{p.AddressKey}': {ex.Message}"); }
         }
+
+        // ── T-24 part 2 slice 1B (owner decision 26): a member's ROUTED bookings in its OWN manage-contracts lists ──
+        //
+        // RUNNER: each routed furniture / food / moving / interior booking is recorded with its booker and BOUND to the game's
+        // own contract object (MergerServiceLayouts: per-save beside the .hsg, and carried in the absence bundle beside its
+        // contract). A record leaves ONLY when its bound contract leaves the game's own list (the game ran, failed or cancelled
+        // it); after a load it is re-linked ONCE, at the world-ready edge, by the fields the game never changes plus its place
+        // among identical contracts in the save it was written with. The booker is sent its whole list (SharedWorkInfo Tab
+        // "mergerbookings", runner -> host -> that member) on the member's request (its own world-ready: join / resync /
+        // load), at a hand-over or hand-back (RebindRouted), at this machine's world-ready edge, and when the list changes -
+        // checked on the game's own events (the game hour, a moving / interior job, a cancel, a booking, a food removal).
+        // MEMBER: one list per RUNNER (a runner stays valid across a business move; a building key does not). The game's own
+        // list code shows each entry (SetUpContract); the game's cancel routes "mergercancel" and the entry leaves only when
+        // the runner confirms ("cxok") or its list no longer has it.
+
+        internal const string KindFurniture = "furniture", KindFood = "food", KindMove = "move", KindInterior = "interior";
+
+        private static string AK(Address? a) { try { return a == null ? "" : (GameStateReader.AddressKey(a) ?? ""); } catch { return ""; } }
+
+        private static string LinesSig(List<Entities.FurnitureDeliveryItem>? items)
+        {
+            if (items == null) return "";
+            var sb = new System.Text.StringBuilder();
+            foreach (var it in items) if (it != null) sb.Append(it.itemName).Append(':').Append(it.amount).Append(';');
+            return sb.ToString();
+        }
+
+        /// <summary>A contract's STABLE fingerprint: only fields the game never changes after booking ("" = not a routed kind).
+        /// Left out on purpose: a delivery's toAddress (a business move rewrites it - BizManTransfer.UpdateDeliveryContracts
+        /// :129-135, FoodDeliveryHelper.MoveContractsToAddress :82-90) and a move's movingDay (pushed a day while someone is
+        /// inside - MovingServiceContract.HandleIsInsideBuilding :56).</summary>
+        internal static string RoutedFingerprint(object? c)
+        {
+            switch (c)
+            {
+                case Entities.FurnitureDeliveryContract fu:
+                    return "fu|" + AK(fu.fromAddress) + "|" + fu.dayOfDelivery + "|" + fu.hourOfDelivery + "|" + LinesSig(fu.itemsToDeliver);
+                case Entities.FoodDeliveryContract fo:
+                    return "fo|" + fo.dayOfDelivery + "|" + fo.hourOfDelivery + "|" + LinesSig(fo.itemsToDeliver);
+                case Entities.MovingServiceContract mc:
+                    return "mv|" + AK(mc.originMovingAddress) + "|" + AK(mc.destinationMovingAddress) + "|" + mc.movingHour + "|" + mc.transferBizManSettings;
+                case Entities.InteriorInstallationFirmContract ic:
+                    return "in|" + AK(ic.interiorInstallationFirmAddress) + "|" + AK(ic.addressToDoTheInstallation) + "|" + ic.dayOfInstallation + "|" + (ic.designName ?? "");
+            }
+            return "";
+        }
+
+        private static System.Collections.IList? ListOfKind(GameInstance gi, string kind)
+        {
+            switch (kind)
+            {
+                case KindFurniture: return gi.FurnitureDeliveryContracts;
+                case KindFood:      return gi.FoodDeliveryContracts;
+                case KindMove:      return gi.movingServiceContracts;
+                case KindInterior:  return gi.interiorInstallationFirmContracts;
+            }
+            return null;
+        }
+
+        private static string KindOf(object? c) => c switch
+        {
+            Entities.FurnitureDeliveryContract _ => KindFurniture,
+            Entities.FoodDeliveryContract _ => KindFood,
+            Entities.MovingServiceContract _ => KindMove,
+            Entities.InteriorInstallationFirmContract _ => KindInterior,
+            _ => "",
+        };
+
+        /// <summary>The game's own list a contract lives in (null = not a routed kind, or no game).</summary>
+        internal static System.Collections.IList? RoutedListOf(object? c)
+        {
+            var gi = SaveGameManager.Current;
+            return gi == null || c == null ? null : ListOfKind(gi, KindOf(c));
+        }
+
+        /// <summary>SAVE (MergerServiceLayouts.SaveWith, right after the .hsg was written): the contract's place among the
+        /// contracts of its list with the same fingerprint that the save holds. An absence-installed item is stripped from
+        /// that save (MergerAbsence.StripInstalledForSave) and is not counted; it comes back with its hand-over. -1 = none.</summary>
+        internal static int RoutedOrdinal(object c)
+        {
+            var list = RoutedListOf(c);
+            if (list == null || MergerAbsence.IsInstalledItem(c)) return -1;
+            string fp = RoutedFingerprint(c);
+            int n = 0;
+            foreach (var o in list)
+            {
+                if (o == null || MergerAbsence.IsInstalledItem(o) || RoutedFingerprint(o) != fp) continue;
+                if (ReferenceEquals(o, c)) return n;
+                n++;
+            }
+            return -1;
+        }
+
+        /// <summary>RUNNER: a routed booking was just added to the game's list - remember who booked it, bound to that very
+        /// contract. A stand-in's own booking is not recorded: it is in this machine's own list already.</summary>
+        private static void RecordRoutedBooking(SharedWorkEditPayload p, string kind, object contract)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(p.PlayerId) || p.PlayerId == MPConfig.PlayerId) return;
+                MergerServiceLayouts.RecordRouted(p.BookingId, p.PlayerId, kind, contract);
+                RoutedChanged(p.PlayerId);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed booking record: {ex.Message}"); }
+        }
+
+        /// <summary>RECEIVER of a hand-over or hand-back (MergerAbsence.InstallListsFor), called for EVERY contract a bundle
+        /// installed (id "" = not a routed booking). In a ready world the booker that rode in the bundle with this contract is
+        /// bound to the contract just installed, and is sent its list. Before the world is ready (or while a load's re-link
+        /// is pending) nothing is bound: the record waits for the same re-link at the world-ready edge (RelinkRouted), and
+        /// the contract's fingerprint is noted - it joined the list after the save was written, so the saved places among
+        /// identical contracts no longer hold for that fingerprint.</summary>
+        internal static void RebindRouted(string? id, string? booker, string kind, object? item)
+        {
+            try
+            {
+                if (item == null) return;
+                bool ready = false;
+                try { ready = MPWorldReady.IsSettled; } catch { }
+                if (!ready || MergerServiceLayouts.RelinkPending)
+                {
+                    string fp = RoutedFingerprint(item);
+                    if (fp.Length > 0) _routedShifted.Add(fp);
+                    if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(booker) || fp.Length == 0) return;
+                    MergerServiceLayouts.RecordRoutedUnbound(id!, booker!, kind, fp);
+                    RoutedChanged(booker);
+                    Plugin.Logger.LogInfo($"[Merger] routed {kind} booking {id} (booked by '{booker}') came with its contract in a bundle before the world was ready - it is bound at the world-ready re-link.");
+                    return;
+                }
+                if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(booker)) return;
+                MergerServiceLayouts.RecordRouted(id!, booker!, kind, item);
+                RoutedChanged(booker);
+                Plugin.Logger.LogInfo($"[Merger] routed {kind} booking {id} (booked by '{booker}') came with its contract in the bundle - bound here.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed booking rebind: {ex.Message}"); }
+        }
+
+        /// <summary>RUNNER, at the world-ready edge after a load: each restored record finds its contract ONCE - same stable
+        /// fingerprint, same place among identical contracts as in the save written with it (so an identical contract this
+        /// machine booked itself is never taken). A record already bound by a hand-over is left alone. The saved place is
+        /// trusted only when no bundle added a contract with that fingerprint before the re-link (_routedShifted); a record
+        /// with no trusted place (or one that came in a bundle: Ord -1) binds only its ONE unclaimed match. More than one
+        /// unclaimed match is ambiguous: none is guessed, the record is closed and the contract stays this machine's own
+        /// (nothing is cancelled). A record with no such contract is closed: the loaded save holds none.</summary>
+        private static void RelinkRouted()
+        {
+            var gi = SaveGameManager.Current;
+            if (gi == null) return;
+            var gone = new List<string>();
+            var unsure = new List<string>();
+            int linked = 0;
+            foreach (var r in MergerServiceLayouts.RoutedRecords())
+            {
+                if (MergerServiceLayouts.Bound(r.BookingId) != null) continue;
+                var list = ListOfKind(gi, r.Kind);
+                bool trusted = r.Ord >= 0 && !_routedShifted.Contains(r.Fp);
+                object? hit = null, only = null;
+                int unclaimed = 0, n = 0;
+                if (list != null)
+                    foreach (var o in list)
+                    {
+                        if (o == null || RoutedFingerprint(o) != r.Fp) continue;
+                        bool installed = MergerAbsence.IsInstalledItem(o);
+                        if ((!installed || r.Ord < 0) && !MergerServiceLayouts.IsBoundObject(o)) { unclaimed++; only = o; }
+                        if (installed || r.Ord < 0) continue;
+                        if (n == r.Ord) hit = o;
+                        n++;
+                    }
+                if (!trusted) hit = unclaimed == 1 ? only : null;
+                if (hit == null || MergerServiceLayouts.IsBoundObject(hit)) { (!trusted && unclaimed > 1 ? unsure : gone).Add(r.BookingId); continue; }
+                MergerServiceLayouts.Bind(r.BookingId, hit);
+                linked++;
+            }
+            MergerServiceLayouts.RelinkPending = false;
+            _routedShifted.Clear();
+            if (gone.Count > 0) MergerServiceLayouts.DropRouted(gone, "the loaded save holds no such contract");
+            if (unsure.Count > 0) MergerServiceLayouts.DropRouted(unsure, "identical contracts could not be told apart after a bundle arrived - none was guessed; each stays this machine's own, nothing is cancelled");
+            Plugin.Logger.LogInfo($"[Merger] routed bookings re-linked after the load: {linked} bound, {gone.Count} closed, {unsure.Count} left unbound (ambiguous).");
+        }
+
+        /// <summary>RUNNER: a record whose bound contract is no longer in the game's own list was removed by the game.</summary>
+        private static void PruneRouted()
+        {
+            var gone = new List<string>();
+            foreach (var r in MergerServiceLayouts.RoutedRecords())
+            {
+                var c = MergerServiceLayouts.Bound(r.BookingId);
+                var list = c == null ? null : RoutedListOf(c);
+                if (c == null || list == null || !list.Contains(c)) gone.Add(r.BookingId);
+            }
+            if (gone.Count > 0) MergerServiceLayouts.DropRouted(gone, "the game removed its contract");
+        }
+
+        private static List<PwDeliveryLine> LinesOf(List<Entities.FurnitureDeliveryItem>? items)
+        {
+            var l = new List<PwDeliveryLine>();
+            if (items != null) foreach (var it in items) if (it != null) l.Add(new PwDeliveryLine { ItemName = it.itemName ?? "", Amount = it.amount, PricePerUnit = it.pricePerUnit });
+            return l;
+        }
+
+        private static PwRoutedBooking? RoutedInfo(MergerServiceLayouts.RoutedRecord r, object c)
+        {
+            var b = new PwRoutedBooking { BookingId = r.BookingId, Kind = r.Kind };
+            switch (c)
+            {
+                case Entities.FurnitureDeliveryContract fu:
+                    b.AgencyKey = AK(fu.fromAddress); b.AddressKey = AK(fu.toAddress); b.Day = fu.dayOfDelivery; b.Hour = fu.hourOfDelivery;
+                    b.Fee = fu.deliveryFee; b.Lines = LinesOf(fu.itemsToDeliver); break;
+                case Entities.FoodDeliveryContract fo:
+                    b.AddressKey = AK(fo.toAddress); b.Day = fo.dayOfDelivery; b.Hour = fo.hourOfDelivery; b.Fee = fo.deliveryFee; b.Lines = LinesOf(fo.itemsToDeliver); break;
+                case Entities.MovingServiceContract mc:
+                    b.AgencyKey = AK(mc.movingCompanyRegistration?.Address); b.AddressKey = AK(mc.originMovingAddress); b.DestKey = AK(mc.destinationMovingAddress);
+                    b.Day = mc.movingDay; b.Hour = mc.movingHour; b.Transfer = mc.transferBizManSettings; break;
+                case Entities.InteriorInstallationFirmContract ic:
+                    b.AgencyKey = AK(ic.interiorInstallationFirmAddress); b.AddressKey = AK(ic.addressToDoTheInstallation); b.Day = ic.dayOfInstallation;
+                    b.DesignName = MergerServiceLayouts.DisplayName(ic.designName); b.IsBlueprint = ic.isBlueprint; break;
+                default: return null;
+            }
+            return b;
+        }
+
+        private static bool _routedDirty, _routedSettled;
+        // Fingerprints a bundle added to the game's lists before the world-ready re-link: saved places for them no longer hold.
+        private static readonly HashSet<string> _routedShifted = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly HashSet<string> _routedForce = new HashSet<string>(StringComparer.Ordinal);    // bookers owed a full send ("*" = every booker)
+        // booker -> the list signature it holds from me. Kept across a scene reset: it is what the MEMBERS hold, so a booker
+        // whose last booking left during a reload is still sent its empty list.
+        private static readonly Dictionary<string, string> _routedSent = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        /// <summary>RUNNER: something that can change a booker's list happened; `forceBooker` is owed its list even if unchanged.</summary>
+        internal static void RoutedChanged(string? forceBooker = null)
+        {
+            _routedDirty = true;
+            if (!string.IsNullOrEmpty(forceBooker)) _routedForce.Add(forceBooker!);
+        }
+
+        /// <summary>The game ran a contract job (hour, move, installation message, a removal, a cancel): re-check the records.</summary>
+        internal static void RoutedJobRan() { if (MergerServiceLayouts.RoutedCount > 0 || _routedSent.Count > 0) _routedDirty = true; }
+
+        private static void OnGameHour() => RoutedJobRan();
+
+        /// <summary>MAIN THREAD (Tick): the world-ready edge, then the pending pushes. Nothing runs while the world is not ready
+        /// (a load in progress: the records may have been read back while the old world is still in memory).</summary>
+        private static void TickRoutedBookings()
+        {
+            bool settled = false;
+            try { settled = MPWorldReady.IsSettled; } catch { }
+            if (!settled) { _routedSettled = false; return; }
+            if (!_routedSettled)
+            {
+                _routedSettled = true;
+                try { global::GlobalEvents.onNewHour -= OnGameHour; global::GlobalEvents.onNewHour += OnGameHour; }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed bookings: the game-hour event could not be joined: {ex.Message}"); }
+                if (MergerServiceLayouts.RelinkPending) RelinkRouted();
+                RoutedChanged("*");
+                RequestMyRoutedBookings();
+            }
+            if (_routedDirty && !MergerServiceLayouts.RelinkPending) PushRouted();
+        }
+
+        private static void PushRouted()
+        {
+            _routedDirty = false;
+            PruneRouted();
+            if (!MPServer.IsRunning && !MPClient.IsConnected) { _routedForce.Clear(); return; }
+            var groups = new Dictionary<string, List<PwRoutedBooking>>(StringComparer.Ordinal);
+            foreach (var r in MergerServiceLayouts.RoutedRecords())
+            {
+                if (r.Booker == MPConfig.PlayerId) continue;   // a booking of mine this machine runs: it is in my own lists natively
+                var c = MergerServiceLayouts.Bound(r.BookingId);
+                var info = c == null ? null : RoutedInfo(r, c);
+                if (info == null) continue;
+                if (!groups.TryGetValue(r.Booker, out var l)) groups[r.Booker] = l = new List<PwRoutedBooking>();
+                l.Add(info);
+            }
+            bool all = _routedForce.Contains("*");
+            foreach (var bk in _routedSent.Keys) if (!groups.ContainsKey(bk)) groups[bk] = new List<PwRoutedBooking>();
+            foreach (var bk in _routedForce) if (bk != "*" && bk != MPConfig.PlayerId && !groups.ContainsKey(bk)) groups[bk] = new List<PwRoutedBooking>();
+            var forced = new HashSet<string>(_routedForce, StringComparer.Ordinal);
+            _routedForce.Clear();
+            foreach (var kv in groups)
+            {
+                var sb = new System.Text.StringBuilder();
+                foreach (var b in kv.Value) sb.Append(b.BookingId).Append('@').Append(b.AddressKey).Append('@').Append(b.Day).Append('/').Append(b.Hour).Append(';');
+                string sig = sb.ToString();
+                bool changed = !_routedSent.TryGetValue(kv.Key, out var had) || had != sig;
+                if (!changed && !all && !forced.Contains(kv.Key)) continue;
+                string anchor = RoutedAnchor(kv.Value);
+                if (anchor.Length == 0)
+                {
+                    if (_logged.Add("routed-noanchor|" + kv.Key)) Plugin.Logger.LogWarning($"[Merger] routed bookings for '{kv.Key}' not sent: this machine runs no building to send them by.");
+                    continue;
+                }
+                if (kv.Value.Count == 0) _routedSent.Remove(kv.Key); else _routedSent[kv.Key] = sig;
+                SendRoutedBookings(kv.Key, anchor, kv.Value);
+                Plugin.Logger.LogInfo($"[Merger] routed bookings at '{anchor}' sent to their booker '{kv.Key}': {kv.Value.Count} [{sig}]");
+            }
+        }
+
+        private static bool RunsHere(string? k)
+        {
+            if (string.IsNullOrEmpty(k)) return false;
+            try { if (MergerFlip.TrulyMine(GameStatePatcher.FindRegistration(k!))) return true; } catch { }
+            try { return MergerAbsence.SimulatesHere(k!); } catch { return false; }
+        }
+
+        /// <summary>The building a list rides by (the host lets only the machine that RUNS it send a snapshot under it): a
+        /// listed booking's building as it is NOW, else any building this machine runs.</summary>
+        private static string RoutedAnchor(List<PwRoutedBooking> list)
+        {
+            foreach (var b in list) if (RunsHere(b.AddressKey)) return b.AddressKey;
+            var gi = SaveGameManager.Current;
+            if (gi?.BuildingRegistrations != null)
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (reg == null) continue;
+                    string k = AK(reg.Address);
+                    if (k.Length > 0 && RunsHere(k)) return k;
+                }
+            return "";
+        }
+
+        private static void SendRoutedBookings(string toPid, string addr, List<PwRoutedBooking> list)
+        {
+            var msg = new SharedWorkInfoPayload
+            { PlayerId = MPConfig.PlayerId, Action = "snapshot", Tab = "mergerbookings", AddressKey = addr, ToPid = toPid, RoutedBookings = list };
+            if (MPServer.IsRunning) MPServer.HostRouteSharedWorkInfo(msg, MPConfig.PlayerId);
+            else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkInfo, MPConfig.PlayerId, msg));
+        }
+
+        /// <summary>MEMBER, at its world-ready edge (join / resync / load): ask every co-member for the bookings I routed
+        /// there (the host passes the ask on - MPServer.HostFanOutRoutedRequest).</summary>
+        private static void RequestMyRoutedBookings()
+        {
+            var msg = new SharedWorkInfoPayload { PlayerId = MPConfig.PlayerId, Action = "request", Tab = "mergerbookings", AddressKey = "" };
+            if (MPServer.IsRunning) MPServer.HostRouteSharedWorkInfo(msg, MPConfig.PlayerId);
+            else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkInfo, MPConfig.PlayerId, msg));
+        }
+
+        /// <summary>RUNNER, MAIN THREAD: "mergercancel" - the member that booked a routed booking cancels it from its own list.
+        /// Removed as the game's own cancel removes it (FurnitureStoreManagerDialog.OnCancelFurnitureDelivery :178,
+        /// FoodDeliveryDialog.OnCancelFoodDelivery :155, MovingServiceDialog.OnCancelMovingContract :188-190,
+        /// InteriorInstallationFirmAgentDialog.OnCancelInstallation :181-182; the dialog text is the member's, shown there on
+        /// this confirmation). Nothing is charged or refunded: the game charges these on the day. A routed contract is never a
+        /// compat install, so the game's compat-blueprint step (:185-190) never applies. Answered "cxok" / "cxno" over the
+        /// routed-refusal channel, and the member's list is refreshed.</summary>
+        private static void ApplyRoutedCancel(SharedWorkEditPayload p)
+        {
+            string code = "cxno";
+            try
+            {
+                var gi = SaveGameManager.Current;
+                var r = MergerServiceLayouts.RoutedRecords().Find(x => x.BookingId == p.BookingId);
+                var c = r == null ? null : MergerServiceLayouts.Bound(r.BookingId);
+                var list = c == null ? null : RoutedListOf(c);
+                if (gi == null || MergerServiceLayouts.RelinkPending)
+                    Plugin.Logger.LogInfo($"[Merger] cancel of routed booking {p.BookingId} from '{p.PlayerId}': my world is not ready - not cancelled.");
+                else if (r == null || c == null || list == null || !list.Contains(c))
+                    Plugin.Logger.LogInfo($"[Merger] cancel of routed booking {p.BookingId} from '{p.PlayerId}': no such booking is held here any more - their list is refreshed.");
+                else if (r.Booker != p.PlayerId)
+                    Plugin.Logger.LogWarning($"[Merger] cancel of routed booking {p.BookingId} by '{p.PlayerId}' REFUSED: it was booked by '{r.Booker}'.");
+                else
+                {
+                    bool removed = false;
+                    switch (c)
+                    {
+                        case Entities.FurnitureDeliveryContract fu: removed = gi.FurnitureDeliveryContracts.Remove(fu); break;
+                        case Entities.FoodDeliveryContract fo: removed = global::Buildings.BuildingTypes.Special.FoodDelivery.FoodDeliveryHelper.GetContracts().Remove(fo); break;
+                        case Entities.MovingServiceContract mc:
+                            removed = gi.movingServiceContracts.Remove(mc);
+                            global::BuildingManager.RefreshHamptonsHouseBlockerCollider(mc.originMovingAddress);
+                            global::BuildingManager.RefreshHamptonsHouseBlockerCollider(mc.destinationMovingAddress);
+                            break;
+                        case Entities.InteriorInstallationFirmContract ic:
+                            removed = gi.interiorInstallationFirmContracts.Remove(ic);
+                            global::BuildingManager.RefreshHamptonsHouseBlockerCollider(ic.addressToDoTheInstallation);
+                            MergerServiceLayouts.DropHeldFor(ic);
+                            break;
+                    }
+                    MergerServiceLayouts.DropRouted(new List<string> { r.BookingId }, "cancelled by its booker");
+                    if (removed) { SaveGameManager.MarkChange(); PaperworkSync.MarkDirty(); code = "cxok"; }
+                    Plugin.Logger.LogInfo($"[Merger] routed {r.Kind} booking {r.BookingId} at '{p.AddressKey}' cancelled by its booker '{p.PlayerId}' (removed={removed}); nothing charged.");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] cancel of routed booking {p.BookingId}: {ex.Message}"); }
+            RoutedChanged(p.PlayerId);
+            SendRoutedRefusal(p.PlayerId, p.AddressKey, code, p.BookingId);
+        }
+
+        // ── MEMBER side ──
+
+        private static readonly Dictionary<string, List<PwRoutedBooking>> _routedMine = new Dictionary<string, List<PwRoutedBooking>>(StringComparer.Ordinal);   // runner -> its list
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, string> _shownBooking
+            = new System.Runtime.CompilerServices.ConditionalWeakTable<object, string>();
+
+        private sealed class PendingCancel { public string Id = "", Runner = "", Addr = "", Agency = "", Kind = ""; public Type? DialogType; public object? Copy; }
+        private static readonly Dictionary<string, PendingCancel> _pendingCancel = new Dictionary<string, PendingCancel>(StringComparer.Ordinal);
+        private static bool _cancelPassThrough;
+
+        private static void ResetRouted()
+        {
+            _routedMine.Clear(); _pendingCancel.Clear(); _routedSettled = false; _routedDirty = false; _routedForce.Clear(); _routedShifted.Clear();
+        }
+
+        /// <summary>MAIN THREAD: Tab "mergerbookings". "request" (RUNNER): a member asks for its list. "snapshot" (MEMBER): a
+        /// runner's whole list of my bookings (empty = none left there). A booking lives on ONE runner: the list that names it
+        /// takes it from any other runner's (a hand-over or hand-back moved it).</summary>
+        private static void OnRoutedBookings(SharedWorkInfoPayload p)
+        {
+            if (p.Action == "request")
+            {
+                if (!string.IsNullOrEmpty(p.PlayerId) && p.PlayerId != MPConfig.PlayerId) RoutedChanged(p.PlayerId);
+                return;
+            }
+            string runner = p.PlayerId ?? "";
+            if (runner.Length == 0 || runner == MPConfig.PlayerId) return;
+            var list = (p.RoutedBookings ?? new List<PwRoutedBooking>()).FindAll(b => b != null && !string.IsNullOrEmpty(b.BookingId));
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var b in list) ids.Add(b.BookingId);
+            foreach (var other in new List<string>(_routedMine.Keys))
+            {
+                if (other == runner) continue;
+                var ol = _routedMine[other];
+                if (ol.RemoveAll(b => ids.Contains(b.BookingId)) > 0 && ol.Count == 0) _routedMine.Remove(other);
+            }
+            string Ids(List<PwRoutedBooking> l) { var s = new List<string>(); foreach (var b in l) s.Add(b.BookingId); return string.Join(",", s); }
+            string before = _routedMine.TryGetValue(runner, out var had) ? Ids(had) : "";
+            if (list.Count == 0) _routedMine.Remove(runner); else _routedMine[runner] = list;
+            string after = Ids(list);
+            if (before != after)
+                Plugin.Logger.LogInfo($"[Merger] my routed bookings run by '{runner}' (sent by '{p.AddressKey}'): {list.Count} [{after}]");
+        }
+
+        /// <summary>MEMBER (every machine's absence table - MergerAbsence.ApplyStateAbsences, the host's own state): a runner
+        /// that is now away runs nothing; its list is cleared (a stand-in that takes its contracts sends its own).</summary>
+        internal static void OnAbsences(List<AbsenceInfo>? absences)
+        {
+            if (absences == null) return;
+            foreach (var a in absences)
+                if (a != null && !string.IsNullOrEmpty(a.OwnerPid)) ForgetRunner(a.OwnerPid, "that player is away");
+        }
+
+        /// <summary>MEMBER, MAIN THREAD: the session's player-left event (host: MPServer.OnPeerDisconnectedCore). A runner
+        /// that left without an absence record runs nothing for me any more: its list is cleared.</summary>
+        internal static void OnPeerLeft(string? pid)
+        {
+            if (string.IsNullOrEmpty(pid) || pid == MPConfig.PlayerId) return;
+            ForgetRunner(pid!, "that player left the session");
+        }
+
+        /// <summary>MEMBER: a runner that runs nothing for me any more. Its list is cleared, and a cancel I sent it resolves
+        /// with it (the booking left my list with that runner; nothing is shown).</summary>
+        private static void ForgetRunner(string runner, string why)
+        {
+            bool had = _routedMine.Remove(runner);
+            int cx = 0;
+            foreach (var pc in new List<PendingCancel>(_pendingCancel.Values))
+                if (pc.Runner == runner) { _pendingCancel.Remove(pc.Id); cx++; }
+            if (had || cx > 0)
+                Plugin.Logger.LogInfo($"[Merger] my routed bookings run by '{runner}' cleared: {why}" + (cx > 0 ? $" ({cx} cancel(s) waiting on it closed, not done - the approved line is shown)." : "."));
+            if (cx > 0) PassengerHud.Toast(TextCancelNotDone);   // the booking stays with that runner (decision 46 a)
+        }
+
+        /// <summary>Owner-approved line (decision 46 a, 2026-11-13): a cancel the runner did not carry out.</summary>
+        internal const string TextCancelNotDone = "Your partner's shop couldn't cancel that booking, so it is still booked.";
+
+        /// <summary>MEMBER: my routed bookings of one kind, as their runners last listed them.</summary>
+        internal static List<PwRoutedBooking> MyRoutedBookings(string kind)
+        {
+            var res = new List<PwRoutedBooking>();
+            foreach (var kv in _routedMine)
+                foreach (var b in kv.Value) if (b != null && b.Kind == kind) res.Add(b);
+            return res;
+        }
+
+        /// <summary>MEMBER: the dialogs' opening gate - a routed booking of this kind with this contact (food: any).</summary>
+        internal static bool HasRoutedWith(string kind, string agencyKey)
+            => MyRoutedBookings(kind).Exists(b => kind == KindFood || b.AgencyKey == agencyKey);
+
+        /// <summary>MEMBER: the game's own contract object for one routed booking, for the game's own list code to show. It is
+        /// never added to my save. `agency` is the open dialog's own contact address (the store / company / firm).</summary>
+        private static object? RoutedDisplayCopy(PwRoutedBooking b, Address? agency)
+        {
+            var to = MergerAbsence.AddressOfKey(b.AddressKey ?? "");
+            if (to == null) return null;
+            var items = new List<Entities.FurnitureDeliveryItem>();
+            if (b.Lines != null)
+                foreach (var ln in b.Lines) if (ln != null) items.Add(new Entities.FurnitureDeliveryItem { itemName = ln.ItemName ?? "", amount = ln.Amount, pricePerUnit = ln.PricePerUnit });
+            switch (b.Kind)
+            {
+                case KindFurniture:
+                    if (agency == null) return null;
+                    return new Entities.FurnitureDeliveryContract
+                    { fromAddress = agency, toAddress = to, dayOfDelivery = b.Day, hourOfDelivery = b.Hour, deliveryFee = b.Fee, itemsToDeliver = items };
+                case KindFood:
+                    return new Entities.FoodDeliveryContract
+                    { toAddress = to, dayOfDelivery = b.Day, hourOfDelivery = b.Hour, deliveryFee = b.Fee, itemsToDeliver = items };
+                case KindMove:
+                {
+                    var dest = MergerAbsence.AddressOfKey(b.DestKey ?? "");
+                    var co = agency == null ? null : BuildingHelper.GetBuildingRegistration(agency);
+                    if (dest == null || co == null) return null;
+                    return new Entities.MovingServiceContract
+                    { movingCompanyRegistration = co, originMovingAddress = to, destinationMovingAddress = dest, movingDay = b.Day, movingHour = b.Hour, transferBizManSettings = b.Transfer };
+                }
+                case KindInterior:
+                    if (agency == null) return null;
+                    return new Entities.InteriorInstallationFirmContract
+                    {
+                        interiorInstallationFirmAddress = agency, addressToDoTheInstallation = to, dayOfInstallation = b.Day,
+                        designName = b.DesignName ?? "", isBlueprint = b.IsBlueprint, isCompatBlueprint = false, hasDiscontinuedItems = false,
+                    };
+            }
+            return null;
+        }
+
+        /// <summary>MEMBER: a list's Start postfix - my routed bookings with this contact go through the list's own
+        /// SetUpContract, after the game's own entries. Food has one company, and its list shows every food delivery.</summary>
+        private static void AddRoutedEntries(MonoBehaviour list, string kind)
+        {
+            try
+            {
+                var mine = MyRoutedBookings(kind);
+                if (mine.Count == 0) return;
+                Address? agency = kind == KindFood ? null : DialogController.current?.contact?.Address;
+                if (kind != KindFood && agency == null) return;
+                string here = AK(agency);
+                var setUp = AccessTools.Method(list.GetType(), "SetUpContract");
+                if (setUp == null) { if (_logged.Add("routed-nosetup|" + kind)) Plugin.Logger.LogWarning($"[Merger] {list.GetType().Name}.SetUpContract not found - my routed {kind} bookings are not listed."); return; }
+                int n = 0;
+                foreach (var b in mine)
+                {
+                    if (kind != KindFood && b.AgencyKey != here) continue;
+                    var c = RoutedDisplayCopy(b, agency);
+                    if (c == null) continue;
+                    _shownBooking.Add(c, b.BookingId);
+                    setUp.Invoke(list, new[] { c });
+                    n++;
+                }
+                if (n > 0) Plugin.Logger.LogInfo($"[Merger] {n} routed {kind} booking(s) of mine listed with '{(here.Length > 0 ? here : "food delivery")}'.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed {kind} entries: {ex.Message}"); }
+        }
+
+        /// <summary>MEMBER: the furniture store's Start() / the interior firm's Start(Action) is where the game opens a NEW
+        /// order because my own list has no contract with this contact (ctor :22-23 / :22-28). With a routed booking there,
+        /// the game's own "already has one" entry (with its manage-contracts option) is returned instead - exactly what the
+        /// constructor shows when my own list has one. My real contract list is never touched.</summary>
+        private static bool OpenOnManage(object dialog, string kind, string entryMethod, ref Entities.DialogEntry result)
+        {
+            try
+            {
+                string here = AK(DialogController.current?.contact?.Address);
+                if (here.Length == 0 || !HasRoutedWith(kind, here)) return false;
+                var m = AccessTools.Method(dialog.GetType(), entryMethod, new[] { typeof(bool) });
+                if (m == null) { if (_logged.Add("routed-noentry|" + kind)) Plugin.Logger.LogWarning($"[Merger] {dialog.GetType().Name}.{entryMethod} not found - the {kind} opening stays the game's."); return false; }
+                if (!(m.Invoke(dialog, new object[] { false }) is Entities.DialogEntry e)) return false;
+                result = e;
+                Plugin.Logger.LogInfo($"[Merger] {dialog.GetType().Name} opened on its manage entry: a routed {kind} booking of mine is with '{here}'.");
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed {kind} opening: {ex.Message}"); return false; }
+        }
+
+        /// <summary>MEMBER: the game's cancel button on one of my ROUTED entries (the list calls the dialog's OnCancel* and
+        /// shows what it returns, synchronously). The game's own cancel is NOT run: it would say "cancelled" before anything
+        /// happened. The cancel goes to the runner, and the dialog shows the game's own list again (the entry still in it).
+        /// When the runner confirms, the game's own cancel runs then (OnCancelAnswer) - its messages and its "cancelled" entry
+        /// - if that dialog is still open.</summary>
+        private static bool RoutedCancelClicked(object dialog, object? c, string listMethod, ref Entities.DialogEntry result)
+        {
+            if (_cancelPassThrough || c == null || !_shownBooking.TryGetValue(c, out var id)) return false;
+            try
+            {
+                SendRoutedCancel(id, dialog.GetType(), c);
+                result = null!;
+                var m = AccessTools.Method(dialog.GetType(), listMethod);
+                if (m == null) Plugin.Logger.LogWarning($"[Merger] {dialog.GetType().Name}.{listMethod} not found - the list is not shown again.");
+                else if (DialogController.current != null) result = (Entities.DialogEntry)m.Invoke(m.IsStatic ? null : dialog, null);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed cancel: {ex.Message}"); }
+            return true;
+        }
+
+        /// <summary>MEMBER: route "mergercancel" for one of my routed bookings to the game that runs its building (as its
+        /// runner listed it last). It stays in my list until the runner answers. Returns the building ("" = not mine).</summary>
+        internal static string SendRoutedCancel(string id, Type? dialogType, object? copy)
+        {
+            string runner = "";
+            PwRoutedBooking? bk = null;
+            foreach (var kv in _routedMine)
+                foreach (var b in kv.Value) if (b != null && b.BookingId == id) { runner = kv.Key; bk = b; }
+            if (bk == null) { Plugin.Logger.LogWarning($"[Merger] cancel of routed booking {id}: not in my lists."); return ""; }
+            _pendingCancel[id] = new PendingCancel { Id = id, Runner = runner, Addr = bk.AddressKey ?? "", Agency = bk.AgencyKey ?? "", Kind = bk.Kind ?? "", DialogType = dialogType, Copy = copy };
+            SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = bk.AddressKey ?? "", Op = "mergercancel", BookingId = id });
+            Plugin.Logger.LogInfo($"[Merger] cancel of my routed booking {id} sent to the runner of '{bk.AddressKey}' ('{runner}') - it stays listed until the runner answers.");
+            return bk.AddressKey ?? "";
+        }
+
+        private static string CancelMethodOf(string kind) => kind switch
+        {
+            KindFurniture => "OnCancelFurnitureDelivery",
+            KindFood => "OnCancelFoodDelivery",
+            KindMove => "OnCancelMovingContract",
+            KindInterior => "OnCancelInstallation",
+            _ => "",
+        };
+
+        /// <summary>MEMBER: the runner's answer to my "mergercancel" ("cxok" / "cxno", RoutedBookings naming the booking),
+        /// matched by booking id ONLY. The host's "offline" / "away" refusals carry no booking id, so they are never a
+        /// cancel's answer (they may concern another request for the same building); a cancel whose runner left resolves
+        /// when that runner's list is cleared (ForgetRunner). False = not a cancel answer.</summary>
+        private static bool OnCancelAnswer(SharedWorkInfoPayload p)
+        {
+            bool cancelCode = p.AckCode == "cxok" || p.AckCode == "cxno";
+            string id = p.RoutedBookings != null && p.RoutedBookings.Count > 0 ? (p.RoutedBookings[0]?.BookingId ?? "") : "";
+            PendingCancel? pc = null;
+            if (id.Length > 0) _pendingCancel.TryGetValue(id, out pc);
+            if (pc == null)
+            {
+                if (cancelCode) Plugin.Logger.LogInfo($"[Merger] cancel answer '{p.AckCode}' for {id} matches no cancel of mine - ignored.");
+                return cancelCode;
+            }
+            _pendingCancel.Remove(pc.Id);
+            if (p.AckCode != "cxok")
+            {
+                // No game notice exists for "could not cancel": the owner-approved line (decision 46 a, 2026-11-13).
+                PassengerHud.Toast(TextCancelNotDone);
+                Plugin.Logger.LogWarning($"[Merger] cancel of my routed booking {pc.Id} was not done ('{p.AckCode}') - it stays listed; the approved line is shown.");
+                return true;
+            }
+            foreach (var r in new List<string>(_routedMine.Keys))
+            {
+                var l = _routedMine[r];
+                if (l.RemoveAll(b => b != null && b.BookingId == pc.Id) > 0 && l.Count == 0) _routedMine.Remove(r);
+            }
+            Plugin.Logger.LogInfo($"[Merger] routed booking {pc.Id} confirmed cancelled by its runner '{p.PlayerId}' - it left my list.");
+            try
+            {
+                var dc = DialogController.current;
+                object? dlg = dc?.dialog;
+                string here = AK(dc?.contact?.Address);
+                if (dlg == null || pc.DialogType == null || pc.Copy == null || dlg.GetType() != pc.DialogType || (pc.Kind != KindFood && here != pc.Agency)) return true;
+                var m = AccessTools.Method(pc.DialogType, CancelMethodOf(pc.Kind));
+                if (m == null) return true;
+                _cancelPassThrough = true;
+                try { if (m.Invoke(dlg, new[] { pc.Copy }) is Entities.DialogEntry e) dc!.ShowEntry(e); }
+                finally { _cancelPassThrough = false; }
+                Plugin.Logger.LogInfo($"[Merger] the game's own cancel of {pc.Id} shown in the open {pc.DialogType.Name}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed cancel confirmation: {ex.Message}"); }
+            return true;
+        }
+
+        [HarmonyPatch(typeof(Dialogs.FurnitureDeliveriesList), "Start")]
+        public static class Patch_FurnitureList_RoutedEntries
+        { static void Postfix(Dialogs.FurnitureDeliveriesList __instance) => AddRoutedEntries(__instance, KindFurniture); }
+
+        [HarmonyPatch(typeof(Dialogs.FoodDeliveriesList), "Start")]
+        public static class Patch_FoodList_RoutedEntries
+        { static void Postfix(Dialogs.FoodDeliveriesList __instance) => AddRoutedEntries(__instance, KindFood); }
+
+        [HarmonyPatch(typeof(global::Buildings.BuildingTypes.Special.MovingCompany.MovingServiceContractList), "Start")]
+        public static class Patch_MovingList_RoutedEntries
+        { static void Postfix(global::Buildings.BuildingTypes.Special.MovingCompany.MovingServiceContractList __instance) => AddRoutedEntries(__instance, KindMove); }
+
+        [HarmonyPatch(typeof(Dialogs.InteriorInstallationContractsList), "Start")]
+        public static class Patch_InteriorList_RoutedEntries
+        { static void Postfix(Dialogs.InteriorInstallationContractsList __instance) => AddRoutedEntries(__instance, KindInterior); }
+
+        [HarmonyPatch(typeof(Dialogs.FurnitureStoreManagerDialog), "Start", new Type[0])]
+        public static class Patch_FurnitureDialog_RoutedOpening
+        {
+            static bool Prefix(Dialogs.FurnitureStoreManagerDialog __instance, ref Entities.DialogEntry __result)
+                => !OpenOnManage(__instance, KindFurniture, "AlreadyHasAPendingDelivery", ref __result);
+        }
+
+        [HarmonyPatch(typeof(Dialogs.InteriorInstallationFirmAgentDialog), "Start", new[] { typeof(Action) })]
+        public static class Patch_InteriorDialog_RoutedOpening
+        {
+            static bool Prefix(Dialogs.InteriorInstallationFirmAgentDialog __instance, ref Entities.DialogEntry __result)
+                => !OpenOnManage(__instance, KindInterior, "AlreadyHasContractActive", ref __result);
+        }
+
+        /// <summary>MovingServiceDialog :18 / :197 - "has a contract with this company" also counts my routed moves.</summary>
+        [HarmonyPatch(typeof(Dialogs.MovingServiceDialog), "HasActiveMovingContractForAddress")]
+        public static class Patch_MovingDialog_RoutedOpening
+        {
+            static void Postfix(Address __0, ref bool __result)
+            {
+                if (__result) return;
+                try { string k = AK(__0); __result = k.Length > 0 && HasRoutedWith(KindMove, k); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] routed moving opening test: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>FoodDeliveryDialog :44 - "has a pending delivery" also counts my routed food deliveries.</summary>
+        [HarmonyPatch(typeof(Dialogs.FoodDeliveryDialog), "HasPendingDelivery", MethodType.Getter)]
+        public static class Patch_FoodDialog_RoutedOpening
+        {
+            static void Postfix(ref bool __result) { if (!__result) __result = HasRoutedWith(KindFood, ""); }
+        }
+
+        [HarmonyPatch(typeof(Dialogs.FurnitureStoreManagerDialog), "OnCancelFurnitureDelivery")]
+        public static class Patch_FurnitureCancel_Routed
+        {
+            static bool Prefix(Dialogs.FurnitureStoreManagerDialog __instance, Entities.FurnitureDeliveryContract __0, ref Entities.DialogEntry __result)
+                => !RoutedCancelClicked(__instance, __0, "OnShowFurnitureDeliveriesList", ref __result);
+            static void Postfix() => RoutedJobRan();
+        }
+
+        [HarmonyPatch(typeof(Dialogs.FoodDeliveryDialog), "OnCancelFoodDelivery")]
+        public static class Patch_FoodCancel_Routed
+        {
+            static bool Prefix(Dialogs.FoodDeliveryDialog __instance, Entities.FoodDeliveryContract __0, ref Entities.DialogEntry __result)
+                => !RoutedCancelClicked(__instance, __0, "OnShowDeliveriesList", ref __result);
+            static void Postfix() => RoutedJobRan();
+        }
+
+        [HarmonyPatch(typeof(Dialogs.MovingServiceDialog), "OnCancelMovingContract")]
+        public static class Patch_MovingCancel_Routed
+        {
+            static bool Prefix(Dialogs.MovingServiceDialog __instance, Entities.MovingServiceContract __0, ref Entities.DialogEntry __result)
+                => !RoutedCancelClicked(__instance, __0, "OnShowMovingContractsList", ref __result);
+            static void Postfix() => RoutedJobRan();
+        }
+
+        [HarmonyPatch(typeof(Dialogs.InteriorInstallationFirmAgentDialog), "OnCancelInstallation")]
+        public static class Patch_InteriorCancel_Routed
+        {
+            static bool Prefix(Dialogs.InteriorInstallationFirmAgentDialog __instance, Entities.InteriorInstallationFirmContract __0, ref Entities.DialogEntry __result)
+                => !RoutedCancelClicked(__instance, __0, "OnShowRecruitmentList", ref __result);
+            static void Postfix() => RoutedJobRan();
+        }
+
+        /// <summary>FoodDeliveryHelper :64 - the game drops every food delivery for a building it lost.</summary>
+        [HarmonyPatch(typeof(global::Buildings.BuildingTypes.Special.FoodDelivery.FoodDeliveryHelper), "RemoveContractsForAddress")]
+        public static class Patch_FoodRemove_Routed
+        { static void Postfix() => RoutedJobRan(); }
+
+#if BAMP_DEV
+        /// <summary>TEST LEVER `mycontracts`: this machine's manage-contracts entries per list - its own contracts ("own|...")
+        /// and its routed bookings as the lists show them ("routed:&lt;booking&gt;|...").</summary>
+        internal static string DevMyContracts()
+        {
+            var gi = SaveGameManager.Current;
+            if (gi == null) return "ERR no game";
+            var sb = new System.Text.StringBuilder("OK mycontracts");
+            void Add(string label, string kind, List<string> own)
+            {
+                foreach (var b in MyRoutedBookings(kind))
+                    own.Add($"routed:{b.BookingId}|{b.AddressKey}|{b.Day}|{b.Hour}" + (kind == KindInterior ? "|" + b.DesignName : ""));
+                sb.Append($" {label}={own.Count} [{string.Join(", ", own)}]");
+            }
+            var fu = new List<string>();
+            if (gi.FurnitureDeliveryContracts != null) foreach (var c in gi.FurnitureDeliveryContracts) if (c != null) fu.Add($"own|{AK(c.toAddress)}|{c.dayOfDelivery}|{c.hourOfDelivery}");
+            var fo = new List<string>();
+            foreach (var c in global::Buildings.BuildingTypes.Special.FoodDelivery.FoodDeliveryHelper.GetContracts()) if (c != null) fo.Add($"own|{AK(c.toAddress)}|{c.dayOfDelivery}|{c.hourOfDelivery}");
+            var mv = new List<string>();
+            if (gi.movingServiceContracts != null) foreach (var c in gi.movingServiceContracts) if (c != null) mv.Add($"own|{AK(c.originMovingAddress)}|{c.movingDay}|{c.movingHour}");
+            var ii = new List<string>();
+            if (gi.interiorInstallationFirmContracts != null) foreach (var c in gi.interiorInstallationFirmContracts) if (c != null) ii.Add($"own|{AK(c.addressToDoTheInstallation)}|{c.dayOfInstallation}|-|{MergerServiceLayouts.DisplayName(c.designName)}");
+            Add("furniture", KindFurniture, fu);
+            Add("food", KindFood, fo);
+            Add("moving", KindMove, mv);
+            Add("interior", KindInterior, ii);
+            return sb.ToString();
+        }
+
+        /// <summary>TEST LEVER `cancelbooking &lt;bookingId&gt;`: the cancel button of that routed booking's list entry - the
+        /// entry's display copy (as the list's SetUpContract makes it) through the dialog's REAL, patched OnCancel* method. No
+        /// dialog is open on the rig, so the list is not re-shown and the confirmation shows no dialog entry.</summary>
+        internal static string DevCancelBooking(string arg)
+        {
+            string id = (arg ?? "").Trim();
+            if (id.Length == 0) return "ERR usage: cancelbooking <bookingId>";
+            PwRoutedBooking? bk = null;
+            foreach (var kv in _routedMine) foreach (var b in kv.Value) if (b != null && b.BookingId == id) bk = b;
+            if (bk == null) return $"ERR no routed booking '{id}' in my lists";
+            var copy = RoutedDisplayCopy(bk, bk.Kind == KindFood ? null : MergerAbsence.AddressOfKey(bk.AgencyKey ?? ""));
+            if (copy == null) return $"ERR routed booking '{id}': no display copy";
+            _shownBooking.Add(copy, id);
+            Type dt = bk.Kind switch
+            {
+                KindFurniture => typeof(Dialogs.FurnitureStoreManagerDialog),
+                KindFood => typeof(Dialogs.FoodDeliveryDialog),
+                KindMove => typeof(Dialogs.MovingServiceDialog),
+                _ => typeof(Dialogs.InteriorInstallationFirmAgentDialog),
+            };
+            string mn = CancelMethodOf(bk.Kind ?? "");
+            var m = AccessTools.Method(dt, mn);
+            if (m == null) return $"ERR {dt.Name}.{mn} not found";
+            var dlg = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(dt);
+            m.Invoke(dlg, new[] { copy });
+            return _pendingCancel.ContainsKey(id) ? $"OK cancelbooking sent for '{id}' through {dt.Name}.{mn}" : $"ERR cancelbooking '{id}': {dt.Name}.{mn} did not route it";
+        }
+
+        /// <summary>TEST LEVER `routedgate &lt;furniture|food|move|interior&gt; [agencyKey]`: the dialogs' opening gate exactly as
+        /// the patched Start() / Start(Action) / HasActiveMovingContractForAddress / HasPendingDelivery read it. No agency: the
+        /// first routed booking of that kind's own.</summary>
+        internal static string DevRoutedGate(string arg)
+        {
+            var a = (arg ?? "").Trim().Split(new[] { ' ' }, 2, StringSplitOptions.RemoveEmptyEntries);
+            if (a.Length == 0) return "ERR usage: routedgate <furniture|food|move|interior> [agencyKey]";
+            string kind = a[0];
+            string ag = a.Length > 1 ? a[1].Trim() : "";
+            if (ag.Length == 0) { var l = MyRoutedBookings(kind); if (l.Count > 0) ag = l[0].AgencyKey ?? ""; }
+            return $"OK routedgate {kind}={HasRoutedWith(kind, ag)} agency='{ag}'";
+        }
+#endif
 
         private static float _candMin, _candMax, _dayMin, _dayMax;   // the native sliders' own ranges, once found
         private static bool  _sliderRangesRead;
@@ -5392,6 +6326,7 @@ namespace BigAmbitionsMP
                 if (p.Op == "mergerfood")      { ApplyRoutedServiceBooking(reg, p, food: true); return; }
                 if (p.Op == "mergermove")      { ApplyRoutedMove(reg, p); return; }          // T-24 part 2
                 if (p.Op == "mergerinterior")  { ApplyRoutedInterior(reg, p); return; }      // T-24 part 2
+                if (p.Op == "mergercancel")    { ApplyRoutedCancel(p); return; }             // T-24 slice 1B (decision 26)
                 if (p.Op == "mergerplan")     { ApplyRoutedPlanEdit(reg, p); return; }
                 // 4c part 2a: the four NON-logistics HQ families. Unlike "mergerplan" this is not a
                 // replace-by-id install - the runner applies ONE op onto its own real plan with the game's
@@ -5409,6 +6344,8 @@ namespace BigAmbitionsMP
                 {
                     echoTab = "settings";
                     applied = ApplySettingsOp(reg, p);
+                    // T-24 slice 1B: a refused rename answers the member with a code its game has a notice for.
+                    if (!applied && p.Op == "rename" && _renameRefusal.Length > 0) SendRoutedRefusal(p.PlayerId, p.AddressKey, _renameRefusal);
                 }
                 else if (p.Op == "uniform" || p.Op == "uniformimport")
                 {

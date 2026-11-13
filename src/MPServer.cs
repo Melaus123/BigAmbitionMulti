@@ -565,7 +565,11 @@ namespace BigAmbitionsMP
             public string StableId    { get; set; } = "";
             public int    Day         { get; set; }       // the sender's game day at publish time
             public int    ReceivedDay { get; set; }       // the HOST's game day when it landed
-            public string Json        { get; set; } = "";
+            /// <summary>T-54 fold F3: the entry in its STORED form (PaperworkSync.StoreEntryText - deflated, or an older
+            /// manifest's plain JSON kept as it was). Written only through StoreEntryText, read only through Text.</summary>
+            public string Stored      { get; set; } = "";
+            /// <summary>T-54 fold F3: the entry's JSON text - the ONE read every reader goes through.</summary>
+            public string Text => PaperworkSync.ReadEntryText(Stored);
         }
 
         private static readonly Dictionary<string, PaperworkEntry> _paperwork = new();
@@ -580,7 +584,6 @@ namespace BigAmbitionsMP
             lock (_paperwork) _paperwork.Clear();
             MergerServiceLayouts.HostResetBodies();   // T-24 fold 2: the layout bodies ride the same boundary
             ResetPlanEditSeen();      // 4c part 2a r2 MAJOR-2: the plan-edit duplicate table is per session too
-            lock (_capWarnedDay) _capWarnedDay.Clear();
             lock (_resendServedAt) { _resendServedAt.Clear(); _resendThrottleLogged.Clear(); }   // r7: the throttle dies with the session too
         }
 
@@ -598,37 +601,41 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] give-back: {ex.Message}"); }
         }
 
-        /// <summary>HOST (r6 F2): true at most ONCE per owner per game day, so an entry that sits over the
-        /// 2 MB cap warns once instead of at every publish.</summary>
-        private static readonly Dictionary<string, int> _capWarnedDay = new();
-        private static bool CapWarnDue(string ownerStable, int day)
-        {
-            string k = ownerStable ?? "";
-            lock (_capWarnedDay)
-            {
-                if (_capWarnedDay.TryGetValue(k, out var d) && d == day) return false;
-                _capWarnedDay[k] = day;
-                return true;
-            }
-        }
-
         /// <summary>Host: take one member's bundle. Called from the receive case (a validated sender)
         /// and directly by PaperworkSync when the HOST itself is the member.</summary>
-        public static void StorePaperwork(BusinessPaperworkPayload p, string senderPid)
+        public static void StorePaperwork(BusinessPaperworkPayload p, string senderPid) => StorePaperwork(p, senderPid, -1, null, null);
+
+        /// <summary>T-54 fold F2: arrivedBytes = the size already measured on what travelled (a client's received frame,
+        /// MessageEnvelope.WireLength; the host's own bundle's stored form) - never re-measured here; -1 = measure the stored
+        /// form. arrivedJson = the payload text as it arrived (env.Data / the host's one serialise), reused while nothing below
+        /// changes the bundle; arrivedStored = that text's stored form when the caller already packed it.</summary>
+        public static void StorePaperwork(BusinessPaperworkPayload p, string senderPid, int arrivedBytes, string? arrivedJson, string? arrivedStored)
         {
             try
             {
                 if (p == null) return;
+                bool hadBodies = false;   // T-54 fold F2: a layout body the store takes out changes the text, so it is re-serialised
+                try { var ic = p.Lists?.InteriorInstallationFirmContracts; if (ic != null) foreach (var c in ic) if (c?.Layout != null) { hadBodies = true; break; } } catch { }
                 MergerServiceLayouts.HostTakeBodies(p, senderPid);   // T-24 fold 2: layout bodies go to the store by hash; the bundle keeps the hash
                 string json;
-                try { json = Newtonsoft.Json.JsonConvert.SerializeObject(p); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] store serialise for '{senderPid}': {ex.Message}"); return; }
-                int bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+                string? stored = null;   // the stored form of exactly `json`; null = not packed yet
+                if (!hadBodies && !string.IsNullOrEmpty(arrivedJson)) { json = arrivedJson!; stored = arrivedStored; }
+                else
+                {
+                    try { json = Newtonsoft.Json.JsonConvert.SerializeObject(p); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] store serialise for '{senderPid}': {ex.Message}"); return; }
+                }
+                // T-54 B / fold F2: the size that travelled, as the sender measured it; only a caller with no measure packs here.
+                int bytes = arrivedBytes;
+                if (bytes < 0) stored = PaperworkSync.StoreEntryText(json, out bytes);
                 if (bytes > PaperworkSync.MaxBundleBytes)
                 {
                     Plugin.Logger.LogWarning($"[Paperwork] REFUSED bundle from '{senderPid}': {bytes} bytes > {PaperworkSync.MaxBundleBytes} cap - the previous bundle stands.");
                     return;
                 }
+                // T-54 A: a stand-in's STOOD-IN PART is filed under the away owner and is never stored under the sender - the
+                // sender's own entry comes only from its own bundle, so an empty remainder can never overwrite it.
+                if (!string.IsNullOrEmpty(p.StoodInFor)) { HostFileStoodInPart(p, senderPid); return; }
                 // The durable key is the StableId (survives renames and offline members, like grants
                 // and the merger roster). A sender that somehow has none falls back to its pid.
                 string key = string.IsNullOrEmpty(p.StableId) ? (senderPid ?? "") : p.StableId;
@@ -645,8 +652,8 @@ namespace BigAmbitionsMP
                     _lastFiledOwners.Clear();
                     if (HostFileSimulatedPaperwork(p, senderPid))
                     {
-                        json  = Newtonsoft.Json.JsonConvert.SerializeObject(p);
-                        bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+                        json   = Newtonsoft.Json.JsonConvert.SerializeObject(p);
+                        stored = PaperworkSync.StoreEntryText(json, out bytes);   // fold F2/F3: packed once - the size and the stored form
                     }
                     filedOwners.AddRange(_lastFiledOwners);
                 }
@@ -670,7 +677,7 @@ namespace BigAmbitionsMP
                         && back.OwnerBack && !back.PaperworkAcked && back.Addresses.Count > 0)
                     {
                         string had;
-                        lock (_paperwork) had = _paperwork.TryGetValue(key, out var pe) ? (pe.Json ?? "") : "";
+                        lock (_paperwork) had = _paperwork.TryGetValue(key, out var pe) ? pe.Text : "";   // fold F3
                         var marked = new HashSet<string>(back.Addresses, StringComparer.OrdinalIgnoreCase);
                         marked.Remove("");
                         if (!string.IsNullOrEmpty(had) && marked.Count > 0)
@@ -686,18 +693,19 @@ namespace BigAmbitionsMP
                                     int simBiz = simulated.Businesses?.Count ?? 0;   // r7: counted BEFORE the merge empties `simulated`
                                     PaperworkSync.MergeAddresses(p, simulated, marked);
                                     string gjson = Newtonsoft.Json.JsonConvert.SerializeObject(p);
-                                    int gbytes = System.Text.Encoding.UTF8.GetByteCount(gjson);
+                                    string gstored = PaperworkSync.StoreEntryText(gjson, out int gbytes);   // T-54 B / fold F3: packed once
                                     if (gbytes > PaperworkSync.MaxBundleBytes)
                                     {
                                         // Never store over the cap, never drop the simulated record: the
                                         // owner's previous entry stands until P3-C consumes it.
-                                        if (CapWarnDue(key, hostDay))
-                                            Plugin.Logger.LogWarning($"[Paperwork] merged entry for returned owner '{senderPid}' would be "
-                                                                   + $"{gbytes} bytes > {PaperworkSync.MaxBundleBytes} cap - the previous entry stands.");
+                                        // T-54: logged on EVERY refusal (a once-per-day stamp hid the lost hand-back).
+                                        Plugin.Logger.LogWarning($"[Paperwork] merged entry for returned owner '{senderPid}' would be "
+                                                               + $"{gbytes} bytes > {PaperworkSync.MaxBundleBytes} cap - the previous entry stands.");
                                         return;
                                     }
                                     keptAddrs = simBiz; keptParts = simParts;   // r7: what the host's entry actually held, not the mark's size
                                     json  = gjson;
+                                    stored = gstored;
                                     bytes = gbytes;
                                 }
                             }
@@ -708,8 +716,9 @@ namespace BigAmbitionsMP
                 if (keptParts > 0)
                     Plugin.Logger.LogInfo($"[Paperwork] kept the simulated record of {keptAddrs} businesses ({keptParts} parts) for "
                                         + $"returned owner '{senderPid}' (return leg pending).");
+                stored ??= PaperworkSync.StoreEntryText(json);   // fold F3: the entry is kept deflated
                 lock (_paperwork)
-                    _paperwork[key] = new PaperworkEntry { StableId = key, Day = p.Day, ReceivedDay = hostDay, Json = json };
+                    _paperwork[key] = new PaperworkEntry { StableId = key, Day = p.Day, ReceivedDay = hostDay, Stored = stored };
                 Plugin.Logger.LogInfo($"[Paperwork] stored for '{senderPid}' (day {p.Day}, {bytes} bytes).");
                 // MERGER PHASE 2 WAVE 4 (V1, D18): the DISPLAY-COPY fan-out rides the D14 books hook's twin -
                 // every STORE of an owner's paperwork. This is the only event that carries the owner's live
@@ -721,6 +730,32 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] store: {ex.Message}"); }
         }
 
+        /// <summary>HOST, MAIN THREAD (T-54 A): a stand-in's STOOD-IN PART - one away owner's addresses in a bundle of their
+        /// own (fold F1: StoodInFor = that owner's STABLE id, the mark key). Filed exactly as before T-54 - by sender and
+        /// address against this host's own marks (the live mark, or the 60 s hand-back mark, naming THIS sender, so the
+        /// H-STANDINTILL-2 T5 window holds as it was) - and only through a mark whose OwnerStable agrees with StoodInFor.
+        /// Nothing of it is ever stored under the sender: whatever no such mark names is logged and not stored (the stand-in
+        /// still runs it; an address it cannot name an owner for rides its OWN bundle instead - PaperworkSync.Build).</summary>
+        private static void HostFileStoodInPart(BusinessPaperworkPayload p, string senderPid)
+        {
+            string owner = p.StoodInFor ?? "";
+            int arrived = p.Businesses?.Count ?? 0;
+            var filed = new List<string>();
+            try
+            {
+                _lastFiledOwners.Clear();
+                HostFileSimulatedPaperwork(p, senderPid, owner);
+                filed.AddRange(_lastFiledOwners);
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] stood-in part of '{owner}' from '{senderPid}': {ex.Message}"); }
+            int left = p.Businesses?.Count ?? 0;
+            if (left > 0)
+                Plugin.Logger.LogWarning($"[Paperwork] stood-in part of '{owner}' from '{senderPid}': {left} of {arrived} business(es) were not filed "
+                                       + "(no live or hand-back mark of this sender names them for that owner, or that owner's entry refused them) - "
+                                       + "not stored, and never filed under the sender.");
+            foreach (var ok in filed) FanOutCompanyLists(ok, "paperwork filed under its owner");
+        }
+
         /// <summary>HOST, MAIN THREAD (P3-B r4 F2): split one incoming bundle by OWNER. Every address in
         /// it that THIS host has marked as simulated BY THIS SENDER belongs to the absent owner of that
         /// mark: that address's business record, its owner-list items and its employee records are lifted
@@ -729,12 +764,13 @@ namespace BigAmbitionsMP
         /// stays TEXT - the owner's entry is deserialised, merged and re-serialised - so the manifest
         /// section is still the straight passthrough P3-A designed and no other reader changes. Returns
         /// true when anything moved (the caller then re-serialises what is left of the sender's).</summary>
-        private static bool HostFileSimulatedPaperwork(BusinessPaperworkPayload p, string senderPid)
+        private static bool HostFileSimulatedPaperwork(BusinessPaperworkPayload p, string senderPid, string? onlyOwnerStable = null)
         {
             if (p == null || string.IsNullOrEmpty(senderPid) || (MergerAbsence.MarkCount == 0 && !MergerAbsence.HostHasHandbacks)) return false;
             var mine = new List<MergerAbsence.AbsenceMark>();
             foreach (var kv in MergerAbsence.Marks)
-                if (kv.Value != null && kv.Value.SimulatorPid == senderPid && kv.Value.Addresses.Count > 0)
+                if (kv.Value != null && kv.Value.SimulatorPid == senderPid && kv.Value.Addresses.Count > 0
+                    && (onlyOwnerStable == null || kv.Value.OwnerStable == onlyOwnerStable))   // T-54 A / fold F1: the part names its owner's stable id
                     mine.Add(kv.Value);
             // H-STANDINTILL-2 T5: a stand-in's HAND-BACK publish (MergerAbsence.HandBackFlush) lands after the mark
             // stopped naming it; for 60 s after the drop its publish of those addresses is still the owner's.
@@ -742,6 +778,7 @@ namespace BigAmbitionsMP
             {
                 foreach (var hb in MergerAbsence.HostHandbackMarksFor(senderPid))
                 {
+                    if (onlyOwnerStable != null && hb.OwnerStable != onlyOwnerStable) continue;   // T-54 A / fold F1
                     bool dup = false;
                     foreach (var x in mine) if (x.OwnerStable == hb.OwnerStable) { dup = true; break; }
                     if (!dup) mine.Add(hb);
@@ -761,7 +798,7 @@ namespace BigAmbitionsMP
                 if (parts == 0) continue;
 
                 string have;
-                lock (_paperwork) have = _paperwork.TryGetValue(mark.OwnerStable, out var pe) ? (pe.Json ?? "") : "";
+                lock (_paperwork) have = _paperwork.TryGetValue(mark.OwnerStable, out var pe) ? pe.Text : "";   // fold F3
                 BusinessPaperworkPayload? owned = null;
                 if (!string.IsNullOrEmpty(have))
                 {
@@ -786,27 +823,29 @@ namespace BigAmbitionsMP
                     GiveBack(p, owned, addrs);
                     continue;
                 }
-                int mbytes = System.Text.Encoding.UTF8.GetByteCount(mjson);
+                string mstored = PaperworkSync.StoreEntryText(mjson, out int mbytes);   // T-54 B / fold F3: packed once - the size and the stored form
                 if (mbytes > PaperworkSync.MaxBundleBytes)
                 {
                     // r6 F2 (m-a): the same loss, and this one RECURRED at every publish while over the cap.
                     // The moved parts go BACK into the sender's bundle, so they live in exactly one entry
-                    // instead of none; the WARN is once per owner per game day. r7: taken back from `owned`
+                    // instead of none; T-54: the WARN logs on every refusal. r7: taken back from `owned`
                     // (the merge above MOVED them there; `moved` is empty by now).
                     GiveBack(p, owned, addrs);
-                    if (CapWarnDue(mark.OwnerStable, hostDay))
-                        Plugin.Logger.LogWarning($"[Paperwork] REFUSED merged entry for '{mark.OwnerPid}': {mbytes} bytes > "
-                                               + $"{PaperworkSync.MaxBundleBytes} cap - that owner's previous entry stands "
-                                               + $"and the {parts} moved parts stay with '{senderPid}'.");
+                    Plugin.Logger.LogWarning($"[Paperwork] REFUSED merged entry for '{mark.OwnerPid}': {mbytes} bytes > "
+                                           + $"{PaperworkSync.MaxBundleBytes} cap - that owner's previous entry stands "
+                                           + (string.IsNullOrEmpty(p.StoodInFor)
+                                              ? $"and the {parts} moved parts stay with '{senderPid}'."
+                                              : $"and the {parts} parts of this stood-in part are not stored ('{senderPid}' still runs them and publishes them again)."));
                     continue;
                 }
                 lock (_paperwork)
                     _paperwork[mark.OwnerStable] = new PaperworkEntry
-                    { StableId = mark.OwnerStable, Day = owned.Day, ReceivedDay = hostDay, Json = mjson };
+                    { StableId = mark.OwnerStable, Day = owned.Day, ReceivedDay = hostDay, Stored = mstored };
                 any = true;
                 _lastFiledOwners.Add(mark.OwnerStable);   // wave 4: this OWNER's display copies changed too
                 Plugin.Logger.LogInfo($"[Paperwork] filed {movedBiz} simulated businesses of "
-                                    + $"'{mark.OwnerPid}' from '{senderPid}'.");
+                                    + $"'{mark.OwnerPid}' from '{senderPid}'"
+                                    + (string.IsNullOrEmpty(p.StoodInFor) ? "." : " (stood-in part)."));   // T-54 fold F5: which path filed it
             }
             return any;
         }
@@ -822,7 +861,7 @@ namespace BigAmbitionsMP
                     if (!string.IsNullOrEmpty(filterStableId) && kv.Key != filterStableId) continue;
                     if (sb.Length > 0) sb.Append(',');
                     sb.Append("stable=").Append(kv.Key).Append(':').Append(kv.Value.Day).Append('/')
-                      .Append(System.Text.Encoding.UTF8.GetByteCount(kv.Value.Json ?? ""));
+                      .Append(PaperworkSync.StoredBytes(kv.Value.Stored));   // fold F3: the bytes held (deflated)
                 }
             return sb.ToString();
         }
@@ -837,7 +876,7 @@ namespace BigAmbitionsMP
         {
             if (string.IsNullOrEmpty(stable)) return "";
             string json;
-            lock (_paperwork) json = _paperwork.TryGetValue(stable, out var e) ? (e.Json ?? "") : "";
+            lock (_paperwork) json = _paperwork.TryGetValue(stable, out var e) ? e.Text : "";   // fold F3
             return MergerServiceLayouts.HostFillBodies(json);   // T-24 fold 2: the hand-over / hand-back carries the layout bodies its hashes name
         }
 
@@ -1134,7 +1173,7 @@ namespace BigAmbitionsMP
             var list = new List<MpPaperworkEntry>();
             lock (_paperwork)
                 foreach (var kv in _paperwork)
-                    list.Add(new MpPaperworkEntry { StableId = kv.Value.StableId, Day = kv.Value.Day, Json = kv.Value.Json });
+                    list.Add(new MpPaperworkEntry { StableId = kv.Value.StableId, Day = kv.Value.Day, Json = kv.Value.Stored });   // fold F3: the manifest carries the deflated form
             return list;
         }
 
@@ -1160,7 +1199,7 @@ namespace BigAmbitionsMP
                                 StableId    = e.StableId,
                                 Day         = e.Day,
                                 ReceivedDay = 0,
-                                Json        = e.Json ?? "",
+                                Stored      = e.Json ?? "",   // fold F3: either form - an older manifest's plain JSON is read as it is
                             };
                             n++;
                         }
@@ -2276,6 +2315,7 @@ namespace BigAmbitionsMP
                 GameStatePatcher.EnqueueOnMainThread(() => { MPRegisterSync.RemovePlayer(lp); MPRestSync.RemovePlayer(lp); });   // duty + time-skip vote both die with the player
                 GameStatePatcher.EnqueueOnMainThread(() => PruneOffers("'" + lp + "' left"));   // phase 1-A r4: the ONE validator; the RefreshGrantsAndBroadcast enqueued below carries the pruned table (r6: no second broadcast)
                 GameStatePatcher.EnqueueOnMainThread(() => HostForgetPressesOf(lp));   // phase 4b (people) P4 r2 (MAJOR-3): a press waiting on a departed owner is refused, never left in flight
+                GameStatePatcher.EnqueueOnMainThread(() => SharedShopWorkTabs.OnPeerLeft(lp));   // T-24 slice 1B (N3): a runner that left without an absence record leaves no stale routed list here
             }
 
             // A departed player drops out of every runtime grant relationship (their durable grants in
@@ -2404,6 +2444,7 @@ namespace BigAmbitionsMP
             try { if (_banLinks.ContainsKey(peer.Id)) return; } catch { }
             var env   = MessageEnvelope.Deserialize(bytes);
             if (env == null) return;
+            env.WireLength = bytes.Length;   // T-54 fold F2: the paperwork cap reads the frame that arrived, never a re-deflate
 
             // ── Identity gate ─────────────────────────────────────────────────
             // _peerNames (bound once at Hello) is the only reliable source of WHO
@@ -2736,7 +2777,10 @@ namespace BigAmbitionsMP
                     // session manifest at the next coordinated save - no gameplay effect in P3-A.
                     var pw = env.GetPayload<BusinessPaperworkPayload>();
                     if (pw != null && SenderIs(pw.PlayerId, senderPid, MessageType.BusinessPaperwork))
-                        GameStatePatcher.EnqueueOnMainThread(() => StorePaperwork(pw, senderPid));
+                    {
+                        int pwWire = env.WireLength; string pwText = env.Data;   // T-54 fold F2: measured and serialised once, by the sender
+                        GameStatePatcher.EnqueueOnMainThread(() => StorePaperwork(pw, senderPid, pwWire, pwText, null));
+                    }
                     break;
                 }
 
@@ -7905,6 +7949,7 @@ namespace BigAmbitionsMP
             HostReconcileAbsence();   // P3-B: departures/joins/membership changes all land here first
             var merger = BuildMergerState();
             MergerSync.ApplyState(merger);
+            { var abs = merger.Absences; GameStatePatcher.EnqueueOnMainThread(() => SharedShopWorkTabs.OnAbsences(abs)); }   // T-24 slice 1B (F5)
             Broadcast(MessageEnvelope.Create(MessageType.MergerState, "host", merger));
             Broadcast(MessageEnvelope.Create(MessageType.PermissionSnapshot, "host", GrantSync.BuildSnapshot()));
             GrantSync.SetMyGrantees(BuildOwnGrants(MPConfig.StableId).Grantees);
@@ -11596,10 +11641,29 @@ namespace BigAmbitionsMP
         /// <summary>Shared-shop slice 6: "request" → the building's owner; "snapshot" → the ONE helper that
         /// asked (ToPid), never a broadcast. Both directions are grant-gated on the address's owner — the exact
         /// shape of the slice-4 sales-history route.</summary>
+        /// <summary>T-24 slice 1B (F5): a member's world became ready (join / resync / load). Each ONLINE co-member - any of
+        /// them may run a booking it routed - gets the ask and answers with that member's list (SharedShopWorkTabs.OnRoutedBookings).</summary>
+        private static void HostFanOutRoutedRequest(SharedWorkInfoPayload p, string senderPid)
+        {
+            if (p.PlayerId != senderPid) return;
+            if (!SharedRateOk(senderPid, "work info", snapshotBucket: true)) return;
+            int n = 0;
+            foreach (var co in new List<string>(MergerSync.CoMembersOf(senderPid)))
+            {
+                if (string.IsNullOrEmpty(co) || co == senderPid) continue;
+                if (co == MPConfig.PlayerId) { GameStatePatcher.EnqueueOnMainThread(() => SharedShopWorkTabs.HandleWorkInfo(p)); n++; }
+                else if (IsOnlinePid(co)) { SendToPid(co, MessageEnvelope.Create(MessageType.SharedWorkInfo, "host", p)); n++; }
+            }
+            Plugin.Logger.LogInfo($"[Merger] routed-bookings ask from '{senderPid}' passed to {n} online co-member(s).");
+        }
+
         public static void HostRouteSharedWorkInfo(SharedWorkInfoPayload p, string senderPid)
         {
             try
             {
+                // T-24 slice 1B (F5): a member's world-ready ask for its routed bookings names no building - it goes to its co-members.
+                if (p != null && p.Tab == "mergerbookings" && p.Action == "request" && !string.IsNullOrEmpty(senderPid))
+                { HostFanOutRoutedRequest(p, senderPid); return; }
                 if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
                 // Review #4: BOTH directions ride the roomier snapshot bucket — a card round must never
                 // starve the 10/s edit bucket that schedule/staff/price edits depend on.
@@ -11705,7 +11769,8 @@ namespace BigAmbitionsMP
                        || p.Op == "mergerplanedit" || p.Op == "mergerterminate" || p.Op == "mergershutdown"
                        || p.Op == "mergercampaign"    // H-MERGERHIRE-1: the recruitment booking rides the same gate
                        || p.Op == "mergerfurniture" || p.Op == "mergerfood"    // furniture and food deliveries for a partner's shop
-                       || p.Op == "mergermove" || p.Op == "mergerinterior";    // T-24 part 2: moving and interior bookings
+                       || p.Op == "mergermove" || p.Op == "mergerinterior"     // T-24 part 2: moving and interior bookings
+                       || p.Op == "mergercancel";                              // T-24 slice 1B (decision 26): a member cancels its routed booking
                 if (w4 && !weMember)
                 { Plugin.Logger.LogWarning($"[Merger] {p.Op} by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
                 // 4c part 2a (E4): the host SERIALISES plan edits per plan id. A second leg carrying a
@@ -11751,6 +11816,8 @@ namespace BigAmbitionsMP
                     if (bseen)
                     { Plugin.Logger.LogInfo($"[Merger] {p.Op} booking {p.BookingId} from '{senderPid}' already routed - dropped."); return; }
                 }
+                if (p.Op == "mergercancel" && string.IsNullOrEmpty(p.BookingId))
+                { Plugin.Logger.LogWarning($"[Merger] mergercancel REFUSED for '{p.AddressKey}': the leg named no booking."); return; }
                 if (w4 && p.Op == "mergerplan")
                 {
                     if (p.Plan == null) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}': the payload carried no plan."); return; }
@@ -11769,7 +11836,8 @@ namespace BigAmbitionsMP
                 // (SharedShopWorkTabs.ApplyRoutedServiceBooking) still refuses a building that is not rented there.
                 bool skipAddrGate = p.Op == "mergerplan" || p.Op == "mergerterminate" || p.Op == "mergershutdown"
                                  || p.Op == "mergerfurniture" || p.Op == "mergerfood"
-                                 || p.Op == "mergermove" || p.Op == "mergerinterior";   // T-24 part 2: any rented building, as the game's pickers
+                                 || p.Op == "mergermove" || p.Op == "mergerinterior"    // T-24 part 2: any rented building, as the game's pickers
+                                 || p.Op == "mergercancel";                             // T-24 slice 1B: the building its booking was routed by
                 if (!skipAddrGate && !SharedWorkAddressAllowed(p.AddressKey, weMember))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                 string wtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
@@ -11829,6 +11897,8 @@ namespace BigAmbitionsMP
                     else if (p.Op == "mergermove" || p.Op == "mergerinterior")
                         Plugin.Logger.LogInfo($"[Merger] {p.Op} booking routed to '{wtarget}' for '{p.AddressKey}' (booking {p.BookingId}, day {p.SlotDay}"
                                             + (p.Op == "mergermove" ? $", to '{p.DestKey}')" : $", '{p.DesignName}', blueprint={p.IsBlueprint})"));
+                    else if (p.Op == "mergercancel")
+                        Plugin.Logger.LogInfo($"[Merger] cancel of routed booking {p.BookingId} routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergerfurniture" || p.Op == "mergerfood")
                         Plugin.Logger.LogInfo($"[Merger] {p.Op} booking routed to '{wtarget}' for '{p.AddressKey}' (booking {p.BookingId}, {p.Lines?.Count ?? 0} line(s), day {p.SlotDay} {p.Hour}h)");
                     else if (p.Op == "mergerplanedit") Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' ({p.Family} {p.PlanOp}, plan {p.PlanId}, seq {p.EditSeq})");
@@ -11926,6 +11996,7 @@ namespace BigAmbitionsMP
             HostReconcileAbsence();   // P3-B: the 10 s cadence is also the re-designation safety net
             var pay = BuildMergerState();
             MergerSync.ApplyState(pay);
+            { var abs = pay.Absences; GameStatePatcher.EnqueueOnMainThread(() => SharedShopWorkTabs.OnAbsences(abs)); }   // T-24 slice 1B (F5)
             Broadcast(MessageEnvelope.Create(MessageType.MergerState, "host", pay));
             BroadcastAllWalletGroups();   // slice 4: the wallet heartbeat rides the same 10s cadence
         }
@@ -12251,7 +12322,7 @@ namespace BigAmbitionsMP
         private static CompanyListsPayload? BuildCompanyLists(string stable, string ownerPid)
         {
             string had;
-            lock (_paperwork) had = _paperwork.TryGetValue(stable, out var pe) ? (pe.Json ?? "") : "";
+            lock (_paperwork) had = _paperwork.TryGetValue(stable, out var pe) ? pe.Text : "";   // fold F3
             if (string.IsNullOrEmpty(had)) return null;
             BusinessPaperworkPayload? pw = null;
             try { pw = Newtonsoft.Json.JsonConvert.DeserializeObject<BusinessPaperworkPayload>(had); }

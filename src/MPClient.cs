@@ -1911,6 +1911,8 @@ namespace BigAmbitionsMP
                 // A departed worker must not leave a phantom "staffed" register
                 // (buyers would be charged with no owner to receive the sale).
                 MPRegisterSync.RemovePlayer(payload.PlayerId);
+                // T-24 slice 1B (N3): a runner that left leaves no stale routed-bookings list here.
+                SharedShopWorkTabs.OnPeerLeft(payload.PlayerId);
             });
         }
 

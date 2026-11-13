@@ -571,6 +571,10 @@ namespace BigAmbitionsMP
         public SettingsInfo?          Settings  { get; set; }             // v18 7d: the Settings tab's name + logo settings
         public float                  Quote     { get; set; }             // wave 4 r2 (D21): Tab "sellquote" — the RUNNER's own recomputed sell-all total for this warehouse, the number the member's native confirmation then shows
         public string                 AckCode   { get; set; } = "";       // wave 4 r2 (minor f): Tab "mergerack" — a short CODE for a routed refusal ("dupe" / "shelf" / "funds" / "away" / "ranges"), never a text: the member maps it to the game's OWN notification key locally, so nothing on the wire can put words on a screen
+        // T-24 part 2 slice 1B (v28, additive; owner decision 26): Tab "mergerbookings" - the RUNNER of AddressKey tells ONE member (ToPid)
+        // the bookings that member routed there, as the runner holds them; the member's own manage-contracts lists show them. A whole-list
+        // replace per (runner, building): an empty list clears it. NULL on every other tab.
+        public List<PwRoutedBooking>? RoutedBookings { get; set; }
     }
 
     /// <summary>H-BIZ-1: on-demand estimate of another PLAYER's shop, computed by its owner with the game's own closure
@@ -1552,6 +1556,18 @@ namespace BigAmbitionsMP
         [Newtonsoft.Json.JsonIgnore]
         public byte[]? Attachment { get; set; }
 
+        /// <summary>T-54 fold F2 (no wire change): the frame length this envelope ARRIVED as - set by the host's receive
+        /// (MPServer.OnReceive); 0 when it did not come off the wire. The paperwork cap reads it instead of re-deflating.</summary>
+        [Newtonsoft.Json.JsonIgnore]
+        public int WireLength { get; set; }
+
+        // T-54 fold F2: the frame Freeze() produced; Serialize() then returns exactly these bytes (never re-serialised).
+        private byte[]? _frozen;
+
+        /// <summary>T-54 fold F2: serialise and deflate ONCE and keep the frame, so a sender that measured an envelope's
+        /// real size sends exactly the bytes it measured. The envelope and its Data must not change afterwards.</summary>
+        public byte[] Freeze() { _frozen = null; _frozen = Serialize(); return _frozen; }
+
         // ── T1 (2026-08 throughput audit): wire compression ─────────────────────────────
         // Everything above this threshold deflates before it ships. Measured on the real
         // payloads: -65% traffic snapshot, -91% business snapshot, -95% market table.
@@ -1563,6 +1579,7 @@ namespace BigAmbitionsMP
 
         public byte[] Serialize()
         {
+            if (_frozen != null) return _frozen;   // T-54 fold F2: measured once, sent as measured
             // v9 attachment frame: 0x02 'B' 'Z' 'A' + type(2 LE, same offset as 'BZP' so the
             // one six-byte peek serves NetStats and lane routing) + jsonLen(4 LE) + envelope
             // JSON + raw attachment bytes. The attachment is already gzip — deflating it
@@ -1890,6 +1907,20 @@ namespace BigAmbitionsMP
         //      T-26 fold (same unreleased 28): CargoTransferPayload gains IsExport (a partner-run source's EXPORT leg is handed
         //      to its runner too, and paid once on the plan's game), and a "report" with RemaindersOnly set carries the ack's
         //      leftovers to the plan's game.
+        //      T-24 part 2 slice 1B (same unreleased 28, owner decision 26): SharedWorkInfoPayload gains RoutedBookings (Tab
+        //      "mergerbookings": a runner tells a member the bookings it routed there) with the new DTO PwRoutedBooking, and the op
+        //      "mergercancel" (SharedWorkEditPayload, BookingId) cancels one on its runner; BusinessPaperwork gains BusinessName/Logo and
+        //      PaperworkOwnerLists gains HeldMessages (decisions 12 and 27). Fold: PwInstallContract / PwMovingContract /
+        //      PwServiceDelivery gain RoutedBookingId + RoutedBooker (a routed booking's booker rides the absence bundle with its
+        //      contract); Tab "mergerbookings" also takes Action "request" (a member's world-ready ask, which the host passes to
+        //      its online co-members); Tab "mergerack" answers "mergercancel" with "cxok" / "cxno", RoutedBookings naming it.
+        //      T-54 (2026-11-13, same unreleased 28, owner decision 47 a): BusinessPaperworkPayload gains StoodInFor (a stand-in
+        //      sends each away owner's stood-in part as a bundle of its own, filed under that owner). The paperwork and books
+        //      size caps are measured on the compressed size that travels (PaperworkSync.TravelBytes) - no wire change for that.
+        //      T-54 fold: StoodInFor names the owner's STABLE id (never a player name); CompanyBooksPayload gains StoodInFor (the
+        //      books split per owner the same way); the host's stored paperwork entries - and so the manifest's Paperwork section -
+        //      hold the deflated form ("dz1:" + base64; plain JSON from an older manifest still loads). The envelope frame is
+        //      unchanged (Freeze/WireLength are local, never serialised).
         public const int Version = 28;
     }
 
@@ -4270,6 +4301,9 @@ namespace BigAmbitionsMP
         public bool   HasDiscontinuedItems { get; set; }
         public int    DayOfInstallation    { get; set; }
         public string BusinessTypeName     { get; set; } = "";
+        // T-24 slice 1B (v28, additive): the co-member that ROUTED this booking here ("" = not routed) - it rides with its contract.
+        public string RoutedBookingId      { get; set; } = "";
+        public string RoutedBooker         { get; set; } = "";
         /// <summary>T-24 part 2 (bug B): a blueprint install's layout as mod data, so the machine that receives the
         /// contract never looks the name up on its own disk (MergerServiceLayouts). Null for a firm preset.</summary>
         public PwLayout? Layout { get; set; }
@@ -4372,6 +4406,9 @@ namespace BigAmbitionsMP
         public int    MovingDay               { get; set; }
         public int    MovingHour              { get; set; }
         public bool   TransferBizManSettings  { get; set; }
+        // T-24 slice 1B (v28, additive): the co-member that ROUTED this booking here ("" = not routed) - it rides with its contract.
+        public string RoutedBookingId         { get; set; } = "";
+        public string RoutedBooker            { get; set; } = "";
     }
 
     /// <summary>One item row of a furniture or food delivery (Entities.FurnitureDeliveryItem, which both
@@ -4392,6 +4429,30 @@ namespace BigAmbitionsMP
         public int    Day            { get; set; }
         public int    Hour           { get; set; }
         public float  Fee            { get; set; }
+        public List<PwDeliveryLine> Lines { get; set; } = new();
+        // T-24 slice 1B (v28, additive): the co-member that ROUTED this booking here ("" = not routed) - it rides with its contract.
+        public string RoutedBookingId { get; set; } = "";
+        public string RoutedBooker    { get; set; } = "";
+    }
+
+    /// <summary>T-24 part 2 slice 1B (v28, additive; owner decision 26): one booking a member ROUTED to the game that runs a
+    /// partner's building, as that runner holds it (SharedWorkInfoPayload.RoutedBookings). Kind "furniture" | "food" | "move" |
+    /// "interior". AgencyKey: the furniture store / moving company / interior firm ("" for food). AddressKey: the delivery /
+    /// origin / installation building; DestKey the move's destination. DesignName is the design as the player picked it
+    /// (never the reserved held form). Lines: a delivery's items as the runner priced them.</summary>
+    public class PwRoutedBooking
+    {
+        public string BookingId   { get; set; } = "";
+        public string Kind        { get; set; } = "";
+        public string AgencyKey   { get; set; } = "";
+        public string AddressKey  { get; set; } = "";
+        public string DestKey     { get; set; } = "";
+        public int    Day         { get; set; }
+        public int    Hour        { get; set; }
+        public float  Fee         { get; set; }
+        public bool   Transfer    { get; set; }
+        public string DesignName  { get; set; } = "";
+        public bool   IsBlueprint { get; set; }
         public List<PwDeliveryLine> Lines { get; set; } = new();
     }
 
@@ -4440,12 +4501,22 @@ namespace BigAmbitionsMP
         // T-26 (v28, additive): the facts of every warehouse the sender RUNS (PwWarehouseFacts) - for a co-member
         // whose own logistics plan draws from one of them.
         public List<PwWarehouseFacts> Warehouses { get; set; } = new();
+
+        // T-24 part 2 slice 1B (v28, additive; decision 27): the moving company's and interior firm's job messages that a
+        // STAND-IN relayed for an absent owner's building. They ride the hand-back and are shown to the owner once on return
+        // (CompanyMessages.DeliverHeld). NULL = not carried.
+        public List<CompanyMessagePayload>? HeldMessages { get; set; }
     }
 
     /// <summary>One business's own books (the BuildingRegistration half of the paperwork).</summary>
     public class BusinessPaperwork
     {
         public string AddressKey { get; set; } = "";
+        // T-24 part 2 slice 1B (v28, additive; decision 12): the business's name and logo as the sender holds them. The
+        // absence hand-back carries a stand-in's rename/logo edit home (SharedShopWorkTabs.ApplyReturnedIdentity).
+        // "" / null = not carried (an older bundle): the owner's own name and logo stand.
+        public string BusinessName { get; set; } = "";
+        public SettingsInfo? Logo { get; set; }
         public List<PwOrderHistoryEntry> OrderHistory { get; set; } = new();
         public List<PwOrder>   UnprocessedCompletedOrders { get; set; } = new();
         public List<PwFactoryExport>     FactoryExports { get; set; } = new();
@@ -4464,6 +4535,10 @@ namespace BigAmbitionsMP
         // K3 fold (2026-09-28): the client's bundle sequence number (1, 2, ... per connection); the host's RECEIPT echoes it
         // so the client matches receipts by number. 0 = an older peer (no number): the client falls back to queue order.
         public int    Seq      { get; set; }
+        // T-54 A (v28, additive; owner decision 47 a): "" = the sender's OWN bundle. An away owner's STABLE id (fold F1: the
+        // absence mark's OwnerStable, never a player name) = a stand-in's STOOD-IN PART - only the addresses it runs for that
+        // owner; the host files it against its own marks for this sender, checks the stable id agrees, never under the sender.
+        public string StoodInFor { get; set; } = "";
         public List<BusinessPaperwork>   Businesses { get; set; } = new();
         public PaperworkOwnerLists       Lists      { get; set; } = new();
         public List<EmployeeEditPayload> Employees  { get; set; } = new();
@@ -4603,6 +4678,10 @@ namespace BigAmbitionsMP
         /// <summary>This member's CURRENT filed return, as filed (a later partial payment lowers what is
         /// owed, carried in TaxCurrentDue, and never this).</summary>
         public CbTaxReturn? TaxReturn { get; set; }
+        /// <summary>T-54 fold F6 (v28, additive): "" = the sender's OWN books. An away owner's STABLE id = a stand-in's
+        /// STOOD-IN PART: only the statements of the addresses it runs for that owner, with exactly their TotalProfit as the
+        /// day totals (moved out of the stand-in's own totals by the sender). The host files it under that owner, never the sender.</summary>
+        public string StoodInFor { get; set; } = "";
     }
 
     /// <summary>TAXBILL-ONE T1: one line of a filed return.  Entities.Taxes holds these as

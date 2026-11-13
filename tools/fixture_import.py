@@ -169,7 +169,21 @@ def main(argv):
 
     # ---- manifest re-key -------------------------------------------------
     changes = []
-    new_raw = raw
+    # T-54 fold F3: a host now stores each paperwork entry as "dz1:" + base64 of the raw-deflated JSON
+    # (PaperworkSync.StoreEntryText), so a plain text replace cannot see the ids inside it. Re-key those
+    # entries inside their compressed form first (unpack, replace, re-pack the same way), then the rest.
+    import base64, zlib
+    packed_hits = [0]
+    def _rekey_packed(m):
+        txt = zlib.decompress(base64.b64decode(m.group(1)), -15).decode("utf-8")
+        for old, new in idmap.items():
+            packed_hits[0] += txt.count(old)
+            txt = txt.replace(old, new)
+        co = zlib.compressobj(9, zlib.DEFLATED, -15)
+        return '"dz1:' + base64.b64encode(co.compress(txt.encode("utf-8")) + co.flush()).decode("ascii") + '"'
+    new_raw = re.sub(r'"dz1:([A-Za-z0-9+/=]+)"', _rekey_packed, raw)
+    if packed_hits[0]:
+        changes.append(("*packed paperwork entries*", "%d id occurrence(s) re-keyed inside dz1: entries" % packed_hits[0]))
     for old, new in idmap.items():
         n = new_raw.count(old)
         new_raw = new_raw.replace(old, new)

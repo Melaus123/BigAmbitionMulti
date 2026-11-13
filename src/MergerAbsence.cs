@@ -1068,6 +1068,9 @@ namespace BigAmbitionsMP
 
         // ══ SIMULATOR SIDE (any machine, main thread) ══════════════════════════
         private static readonly Dictionary<string, string> _simHere = new(StringComparer.OrdinalIgnoreCase);   // addressKey → owner pid
+        // T-54 fold F1: addressKey → the absent owner's STABLE id, from the hand-over that started the stint (the host's mark
+        // key). Kept beside _simHere and emptied with it; an address with no stable id in its hand-over has no entry here.
+        private static readonly Dictionary<string, string> _simStable = new(StringComparer.OrdinalIgnoreCase);
         private static readonly List<AbsenceInfo> _known = new();          // every machine's view (UI/P3-C)
         private static readonly Dictionary<string, string> _promotedStaff = new();   // employee id -> OWNER pid
         private static readonly List<(string Owner, string List, object Item)> _installed = new();
@@ -1169,6 +1172,21 @@ namespace BigAmbitionsMP
         public static string OwnerSimulatedFor(string addressKey)
             => !string.IsNullOrEmpty(addressKey) && _simHere.Count > 0 && _simHere.TryGetValue(addressKey, out var o) ? (o ?? "") : "";
 
+        /// <summary>T-54 fold F1: the absent owner's STABLE id for an address this machine stands in for - the host's mark
+        /// key, which a player rename or a re-pointed pid never changes. "" when the address is not simulated here or its
+        /// hand-over named no stable id (the paperwork and books then keep it in this machine's OWN bundle, as before T-54).</summary>
+        public static string OwnerStableSimulatedFor(string addressKey)
+            => !string.IsNullOrEmpty(addressKey) && _simHere.ContainsKey(addressKey) && _simStable.TryGetValue(addressKey, out var s) ? (s ?? "") : "";
+
+        /// <summary>T-54 fold F1: the stable id of an owner this machine stands in for, by the pid its hand-over named ("" when
+        /// none of that owner's stood-in addresses carries one).</summary>
+        public static string StableOfOwnerSimulated(string ownerPid)
+        {
+            foreach (var kv in _simHere)
+                if (kv.Value == (ownerPid ?? "") && _simStable.TryGetValue(kv.Key, out var s) && !string.IsNullOrEmpty(s)) return s;
+            return "";
+        }
+
         /// <summary>WAVE 4 r2 (review MAJOR-3): the STAND-IN's own replay of a routed edit. The same installer
         /// the hand-over uses, TAGGED with the ABSENT OWNER's pid - the items are that owner's agreements:
         /// stripped from this machine's save, published back under the owner by the filing, and lifted by the
@@ -1230,6 +1248,7 @@ namespace BigAmbitionsMP
             if (s?.Absences != null) _known.AddRange(s.Absences);
             StopSimulatingWhatNoMarkNames();   // P3-C C3
             RequestResendIfInstallsLost();     // r4 F3
+            SharedShopWorkTabs.OnAbsences(s?.Absences);   // T-24 slice 1B (F5): an away runner's routed list is cleared
         }
 
         private static readonly HashSet<string> _resendAsked = new();   // "ownerPid|address" (G3): ONE re-ask per hand-over when the building is missing
@@ -1473,6 +1492,7 @@ namespace BigAmbitionsMP
                     if (MPServer.IsRunning && !_hostStint.Contains(addr) && !tillAlreadyHere.Contains(addr))
                     { _hostStint.Add(addr); InteriorSync.HostAlignStandInStart(addr, owner); }
                     _simHere[addr] = owner;                  // (a)+(b)+(e): the veil exception, the interior
+                    if (!string.IsNullOrEmpty(p.OwnerStable)) _simStable[addr] = p.OwnerStable; else _simStable.Remove(addr);   // T-54 fold F1
                                                               // publisher and the paperwork publish all read this
                     if (!tillAlreadyHere.Contains(addr))
                     {
@@ -1586,9 +1606,14 @@ namespace BigAmbitionsMP
                 int n = 0;
                 foreach (var kv in _simHere) if (kv.Value == owner) n++;
                 if (n == 0) return;
-                var pub = PaperworkSync.FlushNow($"hand-back of '{owner}'");
+                // T-54 A: only THAT owner's stood-in part - a bundle of its own, filed under the owner through the host's
+                // hand-back window; this machine's own bundle and any other owner's part are not sent here. Fold F1: the part is
+                // named by the owner's STABLE id; an owner with none known rides this machine's own bundle, so that one goes.
+                string stable = StableOfOwnerSimulated(owner);
+                var pub = stable.Length > 0 ? PaperworkSync.FlushStoodIn(stable, $"hand-back of '{owner}'")
+                                            : PaperworkSync.FlushNow($"hand-back of '{owner}' (no stable id known - its addresses ride the own bundle)");
                 Plugin.Logger.LogInfo($"[Absence] hand-back publish for '{owner}' ({n} stood-in address(es), {why}): "
-                                    + (pub != null ? $"published day {pub.Day}." : "NOT published (world not settled, not a member, or no session)."));
+                                    + (pub != null ? $"published day {pub.Day}." : "NOT published (world not settled, not a member, no session, or over the size cap - see '[Paperwork] bundle REFUSED')."));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] hand-back publish for '{ownerPid}': {ex.Message}"); }
         }
@@ -1681,7 +1706,7 @@ namespace BigAmbitionsMP
             int items = 0, demoted = 0;
             try { items = RemoveInstalled(owner); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] undo lists: {ex.Message}"); }
             try { demoted = RemovePromoted(staff); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] undo staff: {ex.Message}"); }
-            foreach (var a in addrs) _simHere.Remove(a);
+            foreach (var a in addrs) { _simHere.Remove(a); _simStable.Remove(a); }   // T-54 fold F1: the stable id goes with it
             foreach (var id in staff) _promotedStaff.Remove(id);
             Plugin.Logger.LogInfo($"[Absence] stopped simulating {addrs.Count} address(es) for '{owner}' ({why}) - "
                                 + $"{demoted}/{staff.Count} staff + {items} list item(s) released.");
@@ -1702,7 +1727,7 @@ namespace BigAmbitionsMP
             int addrs = _simHere.Count, staff = _promotedStaff.Count, items = 0, demoted = 0;
             try { items = RemoveInstalled(null); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] undo lists: {ex.Message}"); }
             try { demoted = RemovePromoted(new List<string>(_promotedStaff.Keys)); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] undo staff: {ex.Message}"); }
-            _simHere.Clear();
+            _simHere.Clear(); _simStable.Clear();   // T-54 fold F1
             _promotedStaff.Clear();
             Plugin.Logger.LogInfo($"[Absence] stopped simulating {addrs} address(es) for every owner ({why}) - "
                                 + $"{demoted}/{staff} staff + {items} list item(s) released.");
@@ -1716,7 +1741,7 @@ namespace BigAmbitionsMP
         {
             RememberHeld();   // H-STANDINTILL-2 T1: BEFORE the undo empties _simHere
             try { UndoLocalAll("session/scene reset"); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] reset undo: {ex.Message}"); }
-            _simHere.Clear(); _known.Clear(); _promotedStaff.Clear(); _installed.Clear();
+            _simHere.Clear(); _simStable.Clear(); _known.Clear(); _promotedStaff.Clear(); _installed.Clear();
             _snapQueue.Clear(); _idWarned.Clear(); _fieldWarned.Clear(); _resendAsked.Clear(); _resendStopped.Clear(); _resendLastAsk.Clear();
             // P3-C (C5): a held return payload dies with the connection - the host clears a mark only
             // after a SEND, so the next return re-sends the whole thing.
@@ -1899,6 +1924,7 @@ namespace BigAmbitionsMP
                             // T-24 part 2, bug B: a blueprint install's layout came with the contract. The stand-in holds
                             // it and serves it at install - never a same-named file of its own, never a free install.
                             MergerServiceLayouts.OnHandedOver(item, c, _tagInstalls);
+                            SharedShopWorkTabs.RebindRouted(c.RoutedBookingId, c.RoutedBooker, SharedShopWorkTabs.KindInterior, item);   // T-24 slice 1B (F4)
                         }
                     }
 
@@ -1919,7 +1945,8 @@ namespace BigAmbitionsMP
                         SetField(item, "movingDay", c.MovingDay);
                         SetField(item, "movingHour", c.MovingHour);
                         SetField(item, "transferBizManSettings", c.TransferBizManSettings);
-                        if (Install("movingServiceContracts", gi.movingServiceContracts as IList, item)) n++;
+                        if (Install("movingServiceContracts", gi.movingServiceContracts as IList, item))
+                        { n++; SharedShopWorkTabs.RebindRouted(c.RoutedBookingId, c.RoutedBooker, SharedShopWorkTabs.KindMove, item); }   // T-24 slice 1B (F4)
                     }
 
                 if (l.FurnitureDeliveryContracts != null)
@@ -1935,7 +1962,8 @@ namespace BigAmbitionsMP
                             deliveryFee = c.Fee, itemsToDeliver = DeliveryItems(c.Lines),
                         };
                         if (gi.FurnitureDeliveryContracts == null) gi.FurnitureDeliveryContracts = new List<Entities.FurnitureDeliveryContract>();
-                        if (Install("FurnitureDeliveryContracts", gi.FurnitureDeliveryContracts, item)) n++;
+                        if (Install("FurnitureDeliveryContracts", gi.FurnitureDeliveryContracts, item))
+                        { n++; SharedShopWorkTabs.RebindRouted(c.RoutedBookingId, c.RoutedBooker, SharedShopWorkTabs.KindFurniture, item); }   // T-24 slice 1B (F4)
                     }
 
                 if (l.FoodDeliveryContracts != null)
@@ -1950,7 +1978,8 @@ namespace BigAmbitionsMP
                             deliveryFee = c.Fee, itemsToDeliver = DeliveryItems(c.Lines),
                         };
                         if (gi.FoodDeliveryContracts == null) gi.FoodDeliveryContracts = new List<Entities.FoodDeliveryContract>();
-                        if (Install("FoodDeliveryContracts", gi.FoodDeliveryContracts, item)) n++;
+                        if (Install("FoodDeliveryContracts", gi.FoodDeliveryContracts, item))
+                        { n++; SharedShopWorkTabs.RebindRouted(c.RoutedBookingId, c.RoutedBooker, SharedShopWorkTabs.KindFood, item); }   // T-24 slice 1B (F4)
                     }
 
                 if (l.DisabledLicensingFees != null)
@@ -2686,6 +2715,9 @@ namespace BigAmbitionsMP
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return lists: {ex.Message}"); }
                     try { ApplyReturnedStaff(bundle, addrs, out staffUpd, out staffAdd); }       // (d)
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return staff: {ex.Message}"); }
+                    // T-24 slice 1B (decision 27): the job messages that fired while I was away, shown once.
+                    try { CompanyMessages.DeliverHeld(bundle.Lists?.HeldMessages, addrs); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Absence] return messages: {ex.Message}"); }
                 }
                 else
                     Plugin.Logger.LogInfo($"[Absence] return for {addrs.Count} address(es) carried no paperwork - "
@@ -2828,7 +2860,7 @@ namespace BigAmbitionsMP
             catch { return ""; }
         }
 
-        private static bool IsInstalledItem(object item)
+        internal static bool IsInstalledItem(object item)   // internal: T-24 slice 1B (a routed record's place in the save)
         {
             if (_installed.Count == 0) return false;
             foreach (var e in _installed) if (ReferenceEquals(e.Item, item)) return true;

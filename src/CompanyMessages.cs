@@ -319,6 +319,7 @@ namespace BigAmbitionsMP
             }
 
             if (!PayloadSane(p, "sender")) return null;
+            if (IsServiceJobKey(p.MessageKey)) HoldIfOwnerAway(p);   // T-24 slice 1B (decision 27)
             if (firstTime) Track(id, contact, msg, null, personId);
             Send(p);
             Plugin.Logger.LogInfo($"{Tag} relaying '{p.MessageKey}' on '{p.ContactId}' as {id} ({p.Buttons.Count} button(s), context={p.CtxType}) to my company.");
@@ -433,7 +434,149 @@ namespace BigAmbitionsMP
                 }
             }
 
+            // T-24 part 2 slice 1B (decision 14): the MOVING COMPANY's and the INTERIOR FIRM's job messages fire only on the
+            // machine that holds the contract, addressed to the service's own contact. The shop they are about is taken from
+            // the contract the game is running at that instant (the DoMove / contract SendMessage context below), never from
+            // the text - the "unrented" key is shared with the vehicle store, which has no context and so never relays here.
+            if (MovingJobKeys.Contains(key))
+            {
+                var mc = _moveCtx;
+                if (mc == null) { why = "no move is running"; return null; }
+                return JobShopKey(mc.destinationMovingAddress, mc.originMovingAddress, "move", out why);
+            }
+            if (InteriorJobKeys.Contains(key))
+            {
+                var ic = _installCtx;
+                if (ic == null) { why = "no installation is running"; return null; }
+                return JobShopKey(ic.addressToDoTheInstallation, null, "installation", out why);
+            }
+
             return null;
+        }
+
+        // ── T-24 part 2 slice 1B: moving / interior job messages (decisions 14 and 27) ──
+
+        /// <summary>MovingServiceHelper :169 (not_enough_money), :941 (done / done_items_sold); MovingServiceContract :55
+        /// (inside the building) and :62 (not rented).</summary>
+        internal static readonly HashSet<string> MovingJobKeys = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "ba:messagetype_dialog_moving_service_done",
+            "ba:messagetype_dialog_moving_service_done_items_sold",
+            "ba:messagetype_dialog_moving_service_not_enough_money",
+            "ba:messagetype_dialog_moving_service_cant_move_while_inside_building",
+            "ba:messagetype_dialog_moving_service_cant_move_in_non_rented_building",
+        };
+
+        /// <summary>InteriorInstallationFirmContract :183-196 (the four done variants), :76 (not_enough_money), :85
+        /// (unrented - the game reuses the vehicle store's key), :101 (inside the building), :112 (layout not found).</summary>
+        internal static readonly HashSet<string> InteriorJobKeys = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "ba:messagetype_dialog_interior_installation_done",
+            "ba:messagetype_dialog_interior_installation_done_items_sold",
+            "ba:messagetype_dialog_interior_installation_done_compat",
+            "ba:messagetype_dialog_interior_installation_done_compat_discontinued_items",
+            "ba:messagetype_dialog_interior_installation_not_enough_money",
+            "ba:messagetype_dialog_vehicle_store_cant_deliver_in_unrented_building",
+            "ba:messagetype_dialog_interior_installation_cant_install_while_inside_building",
+            "ba:messagetype_dialog_interior_installation_couldnt_find_layout",
+        };
+
+        internal static bool IsServiceJobKey(string? key) => key != null && (MovingJobKeys.Contains(key) || InteriorJobKeys.Contains(key));
+
+        private static global::Entities.MovingServiceContract? _moveCtx;
+        private static global::Entities.InteriorInstallationFirmContract? _installCtx;
+
+        /// <summary>The shop a job message travels under: the first named address this machine RUNS - truly mine, or one I
+        /// stand in for (a stand-in counts). Fail closed: a building nobody here runs is never relayed as mine.</summary>
+        private static string? JobShopKey(Address? first, Address? second, string what, out string? why)
+        {
+            why = null;
+            foreach (var a in new[] { first, second })
+            {
+                if (a == null) continue;
+                string k;
+                try { k = GameStateReader.AddressKey(a); } catch { continue; }
+                if (string.IsNullOrEmpty(k)) continue;
+                var reg = GameStatePatcher.FindRegistration(k);
+                bool runs = MergerFlip.TrulyMine(reg);
+                if (!runs) { try { runs = MergerAbsence.SimulatesHere(k); } catch { } }
+                if (runs) return k;
+            }
+            why = $"that {what} is for a building this machine does not run";
+            return null;
+        }
+
+        /// <summary>DoMove is synchronous: every moving message it raises (through MovingServiceHelper.MoveBusiness and
+        /// the contract's own Handle* paths) is sent inside this call.</summary>
+        [HarmonyLib.HarmonyPatch(typeof(global::Entities.MovingServiceContract), nameof(global::Entities.MovingServiceContract.DoMove))]
+        public static class Patch_MovingContract_DoMove_JobContext
+        {
+            static void Prefix(global::Entities.MovingServiceContract __instance) { _moveCtx = __instance; }
+            static Exception? Finalizer(Exception? __exception) { _moveCtx = null; SharedShopWorkTabs.RoutedJobRan(); return __exception; }
+        }
+
+        /// <summary>DoInstallation is async, so its messages are matched at the one private SendMessage (:118-130) every
+        /// interior message goes through - synchronous, and its `this` IS the contract the message is about.</summary>
+        [HarmonyLib.HarmonyPatch(typeof(global::Entities.InteriorInstallationFirmContract), "SendMessage")]
+        public static class Patch_InteriorContract_SendMessage_JobContext
+        {
+            static void Prefix(global::Entities.InteriorInstallationFirmContract __instance) { _installCtx = __instance; }
+            static Exception? Finalizer(Exception? __exception) { _installCtx = null; SharedShopWorkTabs.RoutedJobRan(); return __exception; }
+        }
+
+        /// <summary>STAND-IN: job messages relayed for an absent owner's building, per owner. They ride this machine's
+        /// paperwork bundle (PaperworkSync.BuildLists -> HeldFor) into the hand-back; an entry whose building this machine
+        /// no longer stands in for is dropped there (the hand-back has happened).</summary>
+        private static readonly List<(string Owner, CompanyMessagePayload P)> _heldForAway = new();
+        private const int HeldCap = 200;
+
+        private static void HoldIfOwnerAway(CompanyMessagePayload p)
+        {
+            try
+            {
+                string k = p.AddressKey ?? "";
+                if (k.Length == 0 || !MergerAbsence.SimulatesHere(k)) return;
+                string owner = MergerAbsence.OwnerSimulatedFor(k) ?? "";
+                if (owner.Length == 0 || owner == MPConfig.PlayerId) return;
+                foreach (var e in _heldForAway) if (e.P.MessageId == p.MessageId) return;
+                if (_heldForAway.Count >= HeldCap) _heldForAway.RemoveAt(0);
+                _heldForAway.Add((owner, p));
+                PaperworkSync.MarkDirty();   // F7: the next bundle carries it, even one published just before the hand-back
+                Plugin.Logger.LogInfo($"{Tag} job message '{p.MessageKey}' for '{k}' held for its absent owner '{owner}' - it goes home with the hand-back.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} hold for absent owner: {ex.Message}"); }
+        }
+
+        /// <summary>The held messages for the addresses being published. NULL when there are none (the list is then not
+        /// carried at all).</summary>
+        internal static List<CompanyMessagePayload>? HeldFor(ICollection<string> addrs)
+        {
+            _heldForAway.RemoveAll(e => { try { return !MergerAbsence.SimulatesHere(e.P.AddressKey ?? ""); } catch { return true; } });
+            List<CompanyMessagePayload>? list = null;
+            foreach (var e in _heldForAway)
+                if (addrs != null && addrs.Contains(e.P.AddressKey ?? "")) (list ??= new List<CompanyMessagePayload>()).Add(e.P);
+            return list;
+        }
+
+        private static readonly HashSet<string> _heldDelivered = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>RETURNED OWNER, MAIN THREAD (MergerAbsence.ApplyReturn): the job messages a stand-in held for me, each
+        /// raised once through the ordinary copy path (ApplyRelayed - the game's own contact and toast).</summary>
+        internal static void DeliverHeld(List<CompanyMessagePayload>? list, HashSet<string> addrs)
+        {
+            if (list == null || list.Count == 0) return;
+            int n = 0;
+            foreach (var p in list)
+            {
+                if (p == null || addrs == null || !addrs.Contains(p.AddressKey ?? "")) continue;
+                if (!IsServiceJobKey(p.MessageKey) || !PayloadSane(p, "hand-back")) continue;
+                if (!_heldDelivered.Add(p.MessageId ?? "") || !MergerServiceLayouts.FirstDelivery(p.MessageId ?? "")) continue;   // fold: per-save, survives a restart
+                p.Action = "msg"; p.Kind = "";
+                ApplyRelayed(p);
+                n++;
+                Plugin.Logger.LogInfo($"{Tag} held job message '{p.MessageKey}' for '{p.AddressKey}' delivered on my return (from '{p.OwnerPid}', {p.MessageId}).");
+            }
+            if (n > 0) Plugin.Logger.LogInfo($"{Tag} {n} job message(s) held while I was away were delivered.");
         }
 
         private static EmployeeInstance FindOwnPerson(GameInstance gi, string name)
@@ -518,6 +661,8 @@ namespace BigAmbitionsMP
                 return;
             }
             if (_copies.ContainsKey(p.MessageId)) return;                      // a resend
+            if (IsServiceJobKey(p.MessageKey))
+                Plugin.Logger.LogInfo($"{Tag} job message '{p.MessageKey}' for '{p.AddressKey}' arrived from '{p.OwnerPid}' ({p.MessageId}).");
 
             var ad = new AdditionalMessageData { contextButtonData = new List<TextMessage.ContextButtonData>() };
             string mid = p.MessageId;

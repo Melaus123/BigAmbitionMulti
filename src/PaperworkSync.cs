@@ -27,8 +27,99 @@ namespace BigAmbitionsMP
     /// </summary>
     public static class PaperworkSync
     {
-        /// <summary>A bundle bigger than this is refused rather than shipped (design A3 size guard).</summary>
+        /// <summary>A bundle bigger than this is refused rather than shipped (design A3 size guard). T-54 B: measured on
+        /// TravelBytes - the size that actually travels - never on the uncompressed JSON.</summary>
         public const int MaxBundleBytes = 2 * 1024 * 1024;
+
+        /// <summary>T-54 B (owner decision 47 a): THE size every paperwork and books cap is measured on - the bytes that
+        /// travel. The UTF-8 JSON deflated exactly as MessageEnvelope.Serialize ships an envelope over 4 KB (DeflateStream,
+        /// CompressionLevel.Fastest, plus its 6-byte frame head; shipped raw when that saves nothing, so never more than the
+        /// raw length). The bulk of a bundle - the day's till orders - is repetitive JSON (run T-MERGERSERVICE-20261113-055625:
+        /// 2.28-2.81 MB of text, refused by a cap measured on that text). A failed compression answers the raw length - the
+        /// larger number, so it can only refuse more, never ship more.</summary>
+        public static int TravelBytes(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return 0;
+            byte[] raw = System.Text.Encoding.UTF8.GetBytes(json);
+            try
+            {
+                long framed = Deflate(raw).Length + 6;
+                return framed >= raw.Length ? raw.Length : (int)framed;
+            }
+            catch { return raw.Length; }
+        }
+
+        /// <summary>The wire's own compression (MessageEnvelope.Serialize): raw deflate, CompressionLevel.Fastest.</summary>
+        private static byte[] Deflate(byte[] raw)
+        {
+            using var ms = new System.IO.MemoryStream(raw.Length / 4 + 64);
+            using (var dz = new System.IO.Compression.DeflateStream(ms, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
+                dz.Write(raw, 0, raw.Length);
+            return ms.ToArray();
+        }
+
+        // ── T-54 fold F3: THE accessor pair for a host-stored paperwork entry (MPServer.PaperworkEntry.Stored) ──
+        // The host keeps every member's entry DEFLATED, and the manifest's Paperwork section - copied to every member at each
+        // roster / grant / loan change - carries that form, so neither grows by the day's till orders as text (up to ~20 MB per
+        // member before). Every reader goes through ReadEntryText (MPServer.PaperworkEntry.Text). An entry written by an older
+        // build is plain JSON, which always starts '{' and never with the mark, so it is read exactly as it was.
+        private const string PackedMark = "dz1:";
+
+        /// <summary>T-54 fold F3: the STORED form of one entry's JSON ("dz1:" + base64 of the deflated UTF-8). packedBytes =
+        /// the deflated length, the size every host-side cap measures. A failed compression stores the plain JSON (still a
+        /// valid stored form) and answers its length - the larger number, so it can only refuse more.</summary>
+        public static string StoreEntryText(string json, out int packedBytes)
+        {
+            packedBytes = 0;
+            if (string.IsNullOrEmpty(json)) return "";
+            byte[] raw = System.Text.Encoding.UTF8.GetBytes(json);
+            try
+            {
+                byte[] z = Deflate(raw);
+                packedBytes = z.Length;
+                return PackedMark + System.Convert.ToBase64String(z);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Paperwork] entry compression failed ({ex.Message}) - stored as plain text.");
+                packedBytes = raw.Length;
+                return json;
+            }
+        }
+
+        public static string StoreEntryText(string json) => StoreEntryText(json, out _);
+
+        /// <summary>T-54 fold F3: an entry's JSON from its stored form - either form ("" for an empty or unreadable entry,
+        /// which every reader already treats as "no entry").</summary>
+        public static string ReadEntryText(string stored)
+        {
+            if (string.IsNullOrEmpty(stored)) return "";
+            if (!stored.StartsWith(PackedMark, StringComparison.Ordinal)) return stored;   // an older manifest's plain JSON
+            try
+            {
+                byte[] z = System.Convert.FromBase64String(stored.Substring(PackedMark.Length));
+                using var src = new System.IO.MemoryStream(z);
+                using var dz  = new System.IO.Compression.DeflateStream(src, System.IO.Compression.CompressionMode.Decompress);
+                using var outMs = new System.IO.MemoryStream(z.Length * 6 + 64);
+                dz.CopyTo(outMs);
+                return System.Text.Encoding.UTF8.GetString(outMs.GetBuffer(), 0, (int)outMs.Length);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Paperwork] stored entry unreadable ({ex.Message}) - read as no entry.");
+                return "";
+            }
+        }
+
+        /// <summary>T-54 fold F3: the bytes one stored entry holds (the deflated length; an older plain entry's UTF-8 length).</summary>
+        public static int StoredBytes(string stored)
+        {
+            if (string.IsNullOrEmpty(stored)) return 0;
+            if (!stored.StartsWith(PackedMark, StringComparison.Ordinal)) return System.Text.Encoding.UTF8.GetByteCount(stored);
+            int b64 = stored.Length - PackedMark.Length;
+            int pad = stored.EndsWith("==", StringComparison.Ordinal) ? 2 : stored.EndsWith("=", StringComparison.Ordinal) ? 1 : 0;
+            return b64 / 4 * 3 - pad;
+        }
 
         private const float MinPublishInterval = 30f;   // while merely dirty
 
@@ -138,6 +229,10 @@ namespace BigAmbitionsMP
         /// Returns the bundle that went out, or null when nothing was published.</summary>
         public static BusinessPaperworkPayload? FlushNow(string why) => Publish(why);
 
+        /// <summary>T-54 A: publish ONLY the stood-in part of one away owner (fold F1: named by that owner's STABLE id), now
+        /// (MergerAbsence.HandBackFlush). Null when nothing went out.</summary>
+        public static BusinessPaperworkPayload? FlushStoodIn(string ownerStable, string why) => Publish(why, ownerStable ?? "");
+
         // -- H-STANDINTILL-1 remnant (R2, 2026-09-28): one final publish when the player DELIBERATELY leaves --
         private static bool _leaveFlushed;   // one leave publishes once; cleared in Reset and on every connect
         private static bool _quitHooked;
@@ -188,7 +283,11 @@ namespace BigAmbitionsMP
 
         /// <summary>H5, HOST: every bundle a client delivers is answered with a receipt (StorePaperwork runs on the main
         /// thread for a bundle whose sender checked out; the host's own local store is not answered).</summary>
-        [HarmonyLib.HarmonyPatch(typeof(MPServer), nameof(MPServer.StorePaperwork))]
+        // T-54 fold: StorePaperwork has two overloads now; the 5-argument one is the one every store runs through (the
+        // 2-argument form delegates to it), so the receipt patch names it - an unnamed target is an ambiguous match and the
+        // patch class failed to load (run T-MERGERSERVICE 2026-11-13 15:05, host log :779).
+        [HarmonyLib.HarmonyPatch(typeof(MPServer), nameof(MPServer.StorePaperwork),
+            new[] { typeof(BusinessPaperworkPayload), typeof(string), typeof(int), typeof(string), typeof(string) })]
         internal static class Patch_StorePaperwork_Receipt
         {
             static void Postfix(BusinessPaperworkPayload p, string senderPid)
@@ -262,71 +361,142 @@ namespace BigAmbitionsMP
             return true;
         }
 
-        private static BusinessPaperworkPayload? Publish(string why)
+        private static BusinessPaperworkPayload? Publish(string why) => Publish(why, null);
+
+        /// <summary>T-54 fold F1: stood-in addresses already logged as riding the own bundle (no owner stable id) - once each.</summary>
+        private static readonly HashSet<string> _unnamedLogged = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>T-54 A (owner decision 47 a): one bundle per OWNER. A stand-in sends each away owner's stood-in part as a
+        /// bundle of its own (StoodInFor = that owner; the host files it under the owner, never under the sender), then its
+        /// own bundle, which carries only its own addresses - so no bundle grows by the shops it stands in for, and each is
+        /// held to the cap on its own (run 055625: 14 own + 15 stood-in shops in ONE bundle, refused every time, the
+        /// hand-back flush included). The own bundle goes LAST, so the newest sequence number - the one LeaveFlush's receipt
+        /// waits on - is the bundle that went out last. onlyStoodInFor: send only that owner's part (the hand-back flush);
+        /// the own bundle's cadence stamps are then left alone. Returns the own bundle when it went out, else the last part
+        /// that went out, else null.</summary>
+        private static BusinessPaperworkPayload? Publish(string why, string? onlyStoodInFor)
         {
             if (!MPWorldReady.IsSettled) { Plugin.Logger.LogInfo($"[Paperwork] publish ({why}) skipped - world not settled"); return null; }   // r3: see Tick
             try
             {
                 if (!MergerSync.IAmMember) return null;
-                var p = Build();
-                if (p == null) return null;
-
-                string json;
-                try { json = Newtonsoft.Json.JsonConvert.SerializeObject(p); }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] serialise: {ex.Message}"); return null; }
-                int bytes = System.Text.Encoding.UTF8.GetByteCount(json);
-                // T-24 fold F2: blueprint layouts count against the cap - over it, layouts are left out (largest first,
-                // each logged) so the rest of the owner's paperwork still travels; never the whole bundle refused for them.
-                // Fold 2: a body rides until the host has receipted it; after that the bundle carries the layout's hash only.
-                while (bytes > MaxBundleBytes && MergerServiceLayouts.TrimLayouts(p, bytes - MaxBundleBytes, why))
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return null;   // not in a session: nothing to publish to
+                BusinessPaperworkPayload? lastPart = null;
+                foreach (var owner in StoodInOwners())
                 {
-                    try { json = Newtonsoft.Json.JsonConvert.SerializeObject(p); }
-                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] serialise: {ex.Message}"); return null; }
-                    bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+                    if (onlyStoodInFor != null && owner != onlyStoodInFor) continue;
+                    var part = Build(owner);
+                    if (part != null && SendOne(part, why)) lastPart = part;
                 }
-                if (bytes > MaxBundleBytes)
-                {
-                    // Review r1 MAJOR-6: stamp the DAY as well. Without it the day-change branch
-                    // re-fired on every 1 Hz tick for the rest of that day — a full rebuild plus this
-                    // WARN once a second. The bundle stays UN-SENT (the host keeps the last one that
-                    // fit); the next day, or the next change once the interval passes, tries again.
-                    if (p.Day != _lastPublishedDay)
-                        Plugin.Logger.LogWarning($"[Paperwork] bundle REFUSED: {bytes} bytes > {MaxBundleBytes} cap ({why}) — nothing sent; the host's previously stored bundle stands.");
-                    _dirty = false; _urgent = false; _lastPublishAt = UnityEngine.Time.unscaledTime;
-                    _lastPublishedDay = p.Day;
-                    return null;
-                }
+                if (onlyStoodInFor != null) return lastPart;
 
-                // r7: counted BEFORE the store - on the host, StorePaperwork may MOVE parts out of this very
-                // bundle (filing for an absent owner; the return guard), and the log should say what was built.
-                int nBiz = p.Businesses.Count, nItems = CountListItems(p.Lists), nEmp = p.Employees.Count;
-                if (MPServer.IsRunning)
-                    MPServer.StorePaperwork(p, MPConfig.PlayerId);   // the host is a member too — applied locally
-                else if (MPClient.IsConnected)
-                {
-                    int seqOut = _bundleSeq + 1;
-                    try { p.Seq = seqOut; } catch { }   // K3: the number the host's receipt echoes
-                    MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.BusinessPaperwork, MPConfig.PlayerId, p));
-                    try
-                    {   // H5: awaiting the host's receipt (bounded: a host that never answers cannot grow this)
-                        _bundleSeq = seqOut;
-                        MergerServiceLayouts.NoteSent(p, seqOut);   // T-24 fold 2: the layout bodies this bundle carries await its receipt
-                        _unreceipted.Enqueue(new System.Collections.Generic.KeyValuePair<int, float>(_bundleSeq, UnityEngine.Time.unscaledTime));
-                        while (_unreceipted.Count > 64) _unreceipted.Dequeue();
-                    }
-                    catch { }
-                }
-                else
-                    return null;   // not in a session: nothing to publish to
-
+                var p = Build(null);
+                if (p == null) return lastPart;
+                bool sent = SendOne(p, why);
+                // A refusal stamps too. Review r1 MAJOR-6: without the DAY stamp the day-change branch re-fired on every
+                // 1 Hz tick for the rest of that day - a full rebuild plus the REFUSED warning once a second. A refused bundle
+                // stays UN-SENT (the host keeps the last one that fit); the next day, or the next change once the interval
+                // passes, tries again.
                 _dirty = false; _urgent = false;
                 _lastPublishAt = UnityEngine.Time.unscaledTime;
                 _lastPublishedDay = p.Day;
-                Plugin.Logger.LogInfo($"[Paperwork] published day {p.Day}: {nBiz} businesses, "
-                    + $"{nItems} list items, {nEmp} employees, {bytes} bytes ({why}).");
-                return p;
+                return sent ? p : lastPart;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] publish: {ex.Message}"); return null; }
+        }
+
+        /// <summary>T-54 A: the away owners this machine stands in for right now, by STABLE id (fold F1:
+        /// MergerAbsence.OwnerStableSimulatedFor - the host's mark key, never a player name) over this world's
+        /// registrations, each once, in registration order. An address with no stable id is not here: it rides the own bundle.</summary>
+        private static List<string> StoodInOwners()
+        {
+            var owners = new List<string>();
+            if (MergerAbsence.SimulatedCount == 0) return owners;
+            var regs = SaveGameManager.Current?.BuildingRegistrations;
+            if (regs == null) return owners;
+            foreach (var reg in regs)
+            {
+                if (reg == null) continue;
+                string key; try { key = GameStateReader.AddressKey(reg); } catch { continue; }
+                string o = MergerAbsence.OwnerStableSimulatedFor(key);   // fold F1
+                if (o.Length > 0 && !owners.Contains(o)) owners.Add(o);
+            }
+            return owners;
+        }
+
+        /// <summary>T-54: measure, trim, then send (or, on the host, store) ONE bundle. True when it went out.
+        /// Fold F2: ONE serialise and ONE deflate per attempt, and the size measured is the size that goes out - a client's
+        /// real envelope frame (MessageEnvelope.Freeze; the send then ships exactly those bytes, and the host reads the frame
+        /// length it received instead of re-deflating), the host's own bundle's stored form (StoreEntryText; handed to the
+        /// store, which keeps it). Runs at the publish cadence (30 s / urgent / flush / day), never per frame.</summary>
+        private static bool SendOne(BusinessPaperworkPayload p, string why)
+        {
+            string tag = string.IsNullOrEmpty(p.StoodInFor) ? why : $"{why}; stood-in part of '{p.StoodInFor}'";
+            bool host = MPServer.IsRunning;
+            if (!host && !MPClient.IsConnected) return false;   // not in a session: nothing to publish to
+            int seqOut = _bundleSeq + 1;
+            if (!host) { try { p.Seq = seqOut; } catch { } }   // K3: the number the host's receipt echoes - set BEFORE the one serialise
+            if (!Measure(p, host, tag, out var env, out var json, out var stored, out int bytes)) return false;
+            // T-24 fold F2: blueprint layouts count against the cap - over it, layouts are left out (largest first,
+            // each logged) so the rest of the owner's paperwork still travels; never the whole bundle refused for them.
+            // Fold 2: a body rides until the host has receipted it; after that the bundle carries the layout's hash only.
+            while (bytes > MaxBundleBytes && MergerServiceLayouts.TrimLayouts(p, bytes - MaxBundleBytes, tag))
+                if (!Measure(p, host, tag, out env, out json, out stored, out bytes)) return false;
+            if (bytes > MaxBundleBytes)
+            {
+                // Logged on EVERY refusal: each one is a real publish attempt (dirty / urgent / flush / day), never a
+                // per-tick repeat (Publish's stamps stop the day branch re-firing), and a refusal later in a day whose
+                // first publish fit was silent before - which hid a stand-in's lost hand-back (T-24 1B run 053832).
+                Plugin.Logger.LogWarning($"[Paperwork] bundle REFUSED: {bytes} bytes > {MaxBundleBytes} cap ({tag}; "
+                                       + $"{System.Text.Encoding.UTF8.GetByteCount(json)} bytes before compression) — nothing sent; the host's previously stored bundle stands.");
+                return false;
+            }
+
+            // r7: counted BEFORE the store - on the host, StorePaperwork may MOVE parts out of this very
+            // bundle (filing for an absent owner; the return guard), and the log should say what was built.
+            int nBiz = p.Businesses.Count, nItems = CountListItems(p.Lists), nEmp = p.Employees.Count;
+            if (host)
+                MPServer.StorePaperwork(p, MPConfig.PlayerId, bytes, json, stored);   // the host is a member too — applied locally, measured once
+            else
+            {
+                MPClient.SendEnvelope(env!);   // the frozen frame: exactly the bytes measured above
+                try
+                {   // H5: awaiting the host's receipt (bounded: a host that never answers cannot grow this)
+                    _bundleSeq = seqOut;
+                    MergerServiceLayouts.NoteSent(p, seqOut);   // T-24 fold 2: the layout bodies this bundle carries await its receipt
+                    _unreceipted.Enqueue(new System.Collections.Generic.KeyValuePair<int, float>(_bundleSeq, UnityEngine.Time.unscaledTime));
+                    while (_unreceipted.Count > 64) _unreceipted.Dequeue();
+                }
+                catch { }
+            }
+
+            Plugin.Logger.LogInfo($"[Paperwork] published day {p.Day}: {nBiz} businesses, "
+                + $"{nItems} list items, {nEmp} employees, {bytes} bytes ({tag}).");
+            return true;
+        }
+
+        /// <summary>T-54 fold F2: one serialise + one deflate of a bundle. Client: the envelope, frozen - bytes = the frame that
+        /// is sent. Host: the JSON and its stored form - bytes = the deflated length the store keeps and the manifest carries.
+        /// json is the payload text either way (the refusal line's "before compression" figure).</summary>
+        private static bool Measure(BusinessPaperworkPayload p, bool host, string tag, out MessageEnvelope? env, out string json, out string? stored, out int bytes)
+        {
+            env = null; json = ""; stored = null; bytes = 0;
+            try
+            {
+                if (host)
+                {
+                    json   = Newtonsoft.Json.JsonConvert.SerializeObject(p);
+                    stored = StoreEntryText(json, out bytes);
+                }
+                else
+                {
+                    env   = MessageEnvelope.Create(MessageType.BusinessPaperwork, MPConfig.PlayerId, p);
+                    json  = env.Data;
+                    bytes = env.Freeze().Length;
+                }
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] serialise ({tag}): {ex.Message}"); return false; }
         }
 
         public static int CountListItems(PaperworkOwnerLists? l)
@@ -346,7 +516,12 @@ namespace BigAmbitionsMP
         /// <summary>Build this machine's bundle: the businesses that are TRULY this player's (never a
         /// merger-flipped partner shop — that shop's own owner publishes it), the owner lists filtered
         /// to those addresses, and the full records of the staff assigned to them.</summary>
-        public static BusinessPaperworkPayload? Build()
+        public static BusinessPaperworkPayload? Build() => Build(null);
+
+        /// <summary>T-54 A: stoodInFor null = this machine's OWN bundle (its TrulyMine addresses, plus - fold F1 - any stood-in
+        /// address whose owner has no stable id here, logged once: never dropped); an owner's STABLE id = that away owner's
+        /// STOOD-IN PART (exactly the addresses this machine simulates for them), flagged StoodInFor.</summary>
+        private static BusinessPaperworkPayload? Build(string? stoodInFor)
         {
             var gi = SaveGameManager.Current;
             if (gi?.BuildingRegistrations == null) return null;
@@ -356,6 +531,7 @@ namespace BigAmbitionsMP
                 PlayerId = MPConfig.PlayerId,
                 StableId = MPConfig.StableId,
                 Day      = 0,
+                StoodInFor = stoodInFor ?? "",
             };
             try { p.Day = GameStateReader.GetGameTime().day; } catch { }
 
@@ -370,13 +546,26 @@ namespace BigAmbitionsMP
                 // books. The settled gate is INHERITED, not re-implemented: Build() is reached only
                 // through Publish(), which returns before this whenever MPWorldReady.IsSettled is false
                 // (P3-A r3) - so a marked address can never refill the store from an abandoned timeline.
-                if (!MergerFlip.TrulyMine(reg) && !MergerAbsence.SimulatesHere(key)) continue;
+                // T-54 A: no longer ONE bundle for both - the own bundle takes the TrulyMine addresses only, and each away
+                // owner's stood-in addresses travel in that owner's own part.
+                // Fold F1: grouped by the owner's STABLE id (the host's mark key), never by a player name a rename changes.
+                bool sim = MergerAbsence.SimulatesHere(key);
+                string simStable = sim ? MergerAbsence.OwnerStableSimulatedFor(key) : "";
+                if (stoodInFor == null)
+                {
+                    if (sim ? simStable.Length > 0 : !MergerFlip.TrulyMine(reg)) continue;
+                    if (sim && _unnamedLogged.Add(key))
+                        Plugin.Logger.LogWarning($"[Paperwork] stood-in '{key}' (for '{MergerAbsence.OwnerSimulatedFor(key)}') has no owner stable id - "
+                                               + "it rides this machine's own bundle, and the host files it by its marks as before T-54.");
+                }
+                else if (!sim || simStable != stoodInFor) continue;
                 if (!mine.Add(key)) continue;
                 p.Businesses.Add(BuildOne(reg, key));
             }
 
             p.Lists     = BuildLists(gi, mine);
             p.Employees = BuildEmployees(gi, mine);
+            if (stoodInFor != null) return p;   // T-54 A: the tasks and campaigns below are owner-only - never in a stood-in part
             // MIRROR-1 (2026-09-17): the OBJECTIVE-PANEL alerts of my own businesses. Filled here and not
             // in CompanyLists.Extract, because Extract runs on the HOST off a bundle this machine merely
             // STORED - SaveGameManager.Current.TodoTasks there is the HOST's own list, never the owner's.
@@ -448,6 +637,9 @@ namespace BigAmbitionsMP
             n += Move(l.ImportPartnerships,    t?.ImportPartnerships,    x => A(x.HeadquartersAddressKey));
             n += Move(l.LogisticsManagerPlans, t?.LogisticsManagerPlans, x => A(x.HeadquartersAddressKey));
             n += Move(l.Warehouses,            t?.Warehouses,            x => A(x.AddressKey));   // T-26
+            // T-24 slice 1B (decision 27): a stand-in's held job messages belong to the building they are about.
+            if (t != null && l.HeldMessages != null) t.HeldMessages ??= new List<CompanyMessagePayload>();
+            if (l.HeldMessages != null) n += Move(l.HeldMessages, t?.HeldMessages, x => A(x.AddressKey));
             n += Move(l.PricingManagerPlans,   t?.PricingManagerPlans,   x => A(x.HeadquartersAddressKey));
             n += Move(l.HrManagerPlans,        t?.HrManagerPlans,        x => A(x.HeadquartersAddressKey));
             n += Move(l.HeadhunterPlans,       t?.HeadhunterPlans,       x => A(x.HeadquartersAddressKey));
@@ -489,9 +681,30 @@ namespace BigAmbitionsMP
             Surgery(moved, into, addrs);     // and the simulator's fresh one takes its place
         }
 
+        /// <summary>T-24 slice 1B (F4): a routed delivery's booker rides the bundle with its contract.</summary>
+        private static PwServiceDelivery WithRouted(object c, PwServiceDelivery d)
+        {
+            var r = MergerServiceLayouts.RecordOf(c);
+            if (r != null) { d.RoutedBookingId = r.BookingId; d.RoutedBooker = r.Booker; }
+            return d;
+        }
+
         private static BusinessPaperwork BuildOne(BuildingRegistration reg, string key)
         {
             var b = new BusinessPaperwork { AddressKey = key };
+            // T-24 slice 1B (decision 12): the name and logo travel, so a stand-in's rename goes home with the hand-back.
+            try
+            {
+                b.BusinessName = reg.BusinessName ?? "";
+                var ls = reg.logoSettings;
+                if (ls != null)
+                    b.Logo = new SettingsInfo
+                    {
+                        BusinessName = b.BusinessName, LogoShape = ls.logoShape ?? "", LogoFont = (int)ls.font,
+                        LogoColor = ls.logoColor.color, FontColor = ls.fontColor.color, BackColor = ls.backgroundColor.color,
+                    };
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] identity '{key}': {ex.Message}"); }
             try
             {
                 if (reg.orderHistory != null)
@@ -790,6 +1003,8 @@ namespace BigAmbitionsMP
                         // T-24 part 2 / fold 2: the design name as picked, the Routed mark, the layout's hash, and its body only
                         // while the host is not known to hold it (MergerServiceLayouts.FillHandOver).
                         MergerServiceLayouts.FillHandOver(ipc, c);
+                        var irr = MergerServiceLayouts.RecordOf(c);   // T-24 slice 1B (F4): its booker goes with it
+                        if (irr != null) { ipc.RoutedBookingId = irr.BookingId; ipc.RoutedBooker = irr.Booker; }
                         l.InteriorInstallationFirmContracts.Add(ipc);
                     }
 
@@ -806,6 +1021,8 @@ namespace BigAmbitionsMP
                                 ? "" : SafeRegKey(c.movingCompanyRegistration),
                             MovingDay = c.movingDay, MovingHour = c.movingHour,
                             TransferBizManSettings = c.transferBizManSettings,
+                            RoutedBookingId = MergerServiceLayouts.RecordOf(c)?.BookingId ?? "",   // T-24 slice 1B (F4)
+                            RoutedBooker = MergerServiceLayouts.RecordOf(c)?.Booker ?? "",
                         });
                     }
 
@@ -817,17 +1034,20 @@ namespace BigAmbitionsMP
                     foreach (var c in gi.FurnitureDeliveryContracts)
                     {
                         if (c == null || !mine.Contains(Key(c.toAddress))) continue;
-                        l.FurnitureDeliveryContracts.Add(ServiceDelivery(Key(c.fromAddress), Key(c.toAddress),
-                            c.dayOfDelivery, c.hourOfDelivery, c.deliveryFee, c.itemsToDeliver));
+                        l.FurnitureDeliveryContracts.Add(WithRouted(c, ServiceDelivery(Key(c.fromAddress), Key(c.toAddress),
+                            c.dayOfDelivery, c.hourOfDelivery, c.deliveryFee, c.itemsToDeliver)));
                     }
                 l.FoodDeliveryContracts = new List<PwServiceDelivery>();
                 if (gi.FoodDeliveryContracts != null)
                     foreach (var c in gi.FoodDeliveryContracts)
                     {
                         if (c == null || !mine.Contains(Key(c.toAddress))) continue;
-                        l.FoodDeliveryContracts.Add(ServiceDelivery("", Key(c.toAddress),
-                            c.dayOfDelivery, c.hourOfDelivery, c.deliveryFee, c.itemsToDeliver));
+                        l.FoodDeliveryContracts.Add(WithRouted(c, ServiceDelivery("", Key(c.toAddress),
+                            c.dayOfDelivery, c.hourOfDelivery, c.deliveryFee, c.itemsToDeliver)));
                     }
+
+                // T-24 slice 1B (decision 27): job messages this machine relayed while standing in for an absent owner.
+                l.HeldMessages = CompanyMessages.HeldFor(mine);
 
                 if (gi.disabledLicensingFees != null)
                     foreach (var f in gi.disabledLicensingFees)
@@ -945,6 +1165,7 @@ namespace BigAmbitionsMP
                                                + "machine - skipped (my own state stands for it).");
                         continue;
                     }
+                    SharedShopWorkTabs.ApplyReturnedIdentity(reg, b);   // T-24 slice 1B (decision 12): a stand-in's rename/logo
                     int oh = PwFill<PwOrderHistoryEntry>(reg, "orderHistory", b.OrderHistory, (o, h) =>
                     {
                         PwSet(o, "dayNumber", h.DayNumber);
@@ -1129,6 +1350,7 @@ namespace BigAmbitionsMP
         {
             _dirty = false; _urgent = false; _wasMember = false; _lastPublishedDay = -1; _lastPublishAt = -999f;
             _leaveFlushed = false;   // R2: a new world / session may publish its own leave once
+            _unnamedLogged.Clear();  // T-54 fold F1
             try { ResetReceipts(); } catch { }   // H5
         }
 

@@ -1080,7 +1080,13 @@ namespace BigAmbitionsMP
                 if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(p.EntryId)) return;
                 try { NoteLife(p.PlayerId, p.AddressKey, "walk-out report (220)"); } catch { }   // H-HOURROLL H3
                 if (p.EntryId.Length > MaxUnsoldIdLen) { Plugin.Logger.LogInfo($"[Stock] unsold walk-out from {p.PlayerId}: an id over {MaxUnsoldIdLen} chars - dropped."); return; }   // L3
-                if (p.Items != null && p.Items.Count > MaxUnsoldItems) p.Items = p.Items.GetRange(0, MaxUnsoldItems);   // L3
+                if (p.Items != null && p.Items.Count > MaxUnsoldItems)   // L3
+                {
+                    // T-54 sibling: the cut is logged - the items past the limit are not matched for return to the shelves here.
+                    Plugin.Logger.LogWarning($"[Stock] unsold walk-out {p.EntryId} for '{p.AddressKey}' from {p.PlayerId}: {p.Items.Count} item(s), over the "
+                                           + $"{MaxUnsoldItems}-item limit - only the first {MaxUnsoldItems} are matched for return to the shelves.");
+                    p.Items = p.Items.GetRange(0, MaxUnsoldItems);
+                }
                 BuildingRegistration? reg = null;
                 var regs = SaveGameManager.Current?.BuildingRegistrations;
                 if (regs != null) foreach (var r in regs) if (r != null && GameStateReader.AddressKey(r) == p.AddressKey) { reg = r; break; }
@@ -1168,7 +1174,13 @@ namespace BigAmbitionsMP
                 // U1 (re-check of f132da7, 2026-09-28): a visit that took NOTHING still ends on the owner - the early notice
                 // and the release report (no lines) go out, or the owner's entry stays open and his own hourly pass (no
                 // completed filter, RetailBusinessSimulator.cs:199-211) bills it while he is outside.
-                if (items.Count > MaxUnsoldItems) items.RemoveRange(MaxUnsoldItems, items.Count - MaxUnsoldItems);   // L3
+                if (items.Count > MaxUnsoldItems)   // L3
+                {
+                    // T-54 sibling: the cut is logged - the owner hears of the first MaxUnsoldItems units only.
+                    Plugin.Logger.LogWarning($"[Stock] {id} leaving unsold here @{addr}: {items.Count} processed unit(s), over the {MaxUnsoldItems}-unit "
+                                           + $"limit - only the first {MaxUnsoldItems} are reported to the owner for return to its shelves.");
+                    items.RemoveRange(MaxUnsoldItems, items.Count - MaxUnsoldItems);
+                }
                 if (_unsoldPending.Count >= 200) FlushUnsoldHoldCap();
                 _unsoldPending[id!] = new PendingUnsold { Order = o, Body = c, Id = id!, Addr = addr, Items = items, At = Time.unscaledTime };
                 Plugin.Logger.LogInfo($"[Stock] {id} leaving unsold here @{addr}: {items.Count} processed unit(s) held for the owner until the body is released (a checkout already serving it may still pay){(taken == 0 ? " - it took nothing; the owner still ends the visit" : "")}.");
