@@ -5407,7 +5407,7 @@ namespace BigAmbitionsMP
 
                 // ── Buy marketplace (gi.buildingsForSale) ───────────────────
                 // Wipe the client's local list and rebuild from host's payload.
-                // With Patch_RealEstateHelper_RunDaily_SkipOnClient active, the
+                // With the client's UpdateBuildingsForSale held host-only (MPPatches.cs), the
                 // client's list shouldn't be growing on its own — but wiping
                 // first guarantees a clean mirror.
                 ApplyBuildingsForSale(payload.BuildingsForSale);

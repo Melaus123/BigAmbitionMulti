@@ -425,7 +425,10 @@ namespace BigAmbitionsMP
         }
 
         // ── Patch: RealEstateHelper.SimulateCompetitorBuyingPlayerBuildings ───
-        // Runs in EVERY sim but only ever sells the LOCAL owner's listed buildings (the AI
+        // Runs in EVERY sim - host, single player AND clients (T-11 2026-11-13 removed the old
+        // client-wide RunDaily skip that used to stop it on clients; see the RunDaily note further
+        // down) - but only ever sells the LOCAL owner's listed buildings (BuildingOwnedByPlayer =
+        // the address is in THIS machine's gi.realEstate; RealEstateHelper.cs:89-95; the AI
         // pays the owner natively in their own sim — correct + per-player).  We don't gate
         // it; we route the RESULT: a prefix snapshots the owner's for-sale buildings, the
         // postfix sees which the AI bought, and tells the host to drop them from the
@@ -467,6 +470,73 @@ namespace BigAmbitionsMP
         public static class Patch_SimulateCompetitorBuyingAIBuildings_HostOnly
         {
             static bool Prefix() => !MPClient.IsClientInWorld;
+        }
+
+        // ── Host market steps: a building ANOTHER player owns counts as player-owned (F1/F2, 2026-11-13) ──
+        // UpdateBuildingsForSale (RealEstateHelper.cs:172-193; candidate test :200 in
+        // GetPossibleBuildingsToSetForSale) and SimulateCompetitorBuyingAIBuildings (:154-170; candidate test
+        // :159) decide "player-owned" with BuildingOwnedByPlayer (BuildingRegistration.cs:217-229) = the address
+        // is in THIS machine's gi.realEstate. On the host that is the host's own deeds only, so a joiner's
+        // bought building looked like an AI building there:
+        //   F1 the host could LIST it (SetBuildingForSale also blanks its rival stamp); the market sync copies
+        //      the listing to the joiner, whose own AI-buys-player-listing step (runs on clients since T-11)
+        //      then sells it at market value without the joiner ever listing it.
+        //   F2 the AI-to-AI step could hand a joiner's deliberate listing to a rival: listing gone, joiner
+        //      unpaid, the host's copy names a rival while the deed ledger still names the joiner.
+        // Fix at the cause: while - and ONLY while - one of those two steps runs on the host, the ownership
+        // test also answers true for an address the deed ledger (MPServer.BuildingRealEstateOwners) gives to
+        // another player (a connected pid or an absent owner's reserved stable id; the host's own "host"/pid
+        // entries are already native). Nothing else sees the change: UI, rent, deposit, the
+        // AI-buys-player-listing step, single player and clients get the vanilla answer (the scope only opens
+        // when MPServer.IsRunning). A joiner's own listing stays on the market and the joiner's own sim still
+        // lets the AI buy it at the joiner's price (reported to the host by Patch_SimulateCompetitorBuyingPlayerBuildings
+        // above). Another PLAYER cannot buy it: the host refuses a guest's buy while the ledger names the seller
+        // (MPServer HandleBuyRequest), and the host's own buy is T-33 - player-to-player building sales do not exist yet.
+        internal static class HostMarketLedgerScope
+        {
+            internal static int Depth;   // main thread only (NewDay chain -> RealEstateHelper.RunDaily)
+            internal static bool Enter() { if (!MPServer.IsRunning) return false; Depth++; return true; }
+            internal static void Exit(bool entered) { if (entered && Depth > 0) Depth--; }
+        }
+
+        [HarmonyPatch(typeof(Helpers.RealEstateHelper), "UpdateBuildingsForSale")]
+        public static class Patch_UpdateBuildingsForSale_LedgerScope
+        {
+            static void Prefix(out bool __state) { __state = HostMarketLedgerScope.Enter(); }
+            static void Finalizer(bool __state) { HostMarketLedgerScope.Exit(__state); }
+        }
+
+        [HarmonyPatch(typeof(Helpers.RealEstateHelper), "SimulateCompetitorBuyingAIBuildings")]
+        public static class Patch_SimulateCompetitorBuyingAIBuildings_LedgerScope
+        {
+            static void Prefix(out bool __state) { __state = HostMarketLedgerScope.Enter(); }
+            static void Finalizer(bool __state) { HostMarketLedgerScope.Exit(__state); }
+        }
+
+        [HarmonyPatch(typeof(BuildingRegistration), nameof(BuildingRegistration.BuildingOwnedByPlayer), MethodType.Getter)]
+        public static class Patch_BuildingOwnedByPlayer_HostMarketLedger
+        {
+            private static int _hits, _errs;
+            static void Postfix(BuildingRegistration __instance, ref bool __result)
+            {
+                if (__result || HostMarketLedgerScope.Depth <= 0) return;   // out of scope: vanilla answer, no cost beyond this test
+                try
+                {
+                    if (__instance == null || MPServer.BuildingRealEstateOwners.IsEmpty) return;
+                    string addr = GameStateReader.AddressKey(__instance);
+                    if (string.IsNullOrEmpty(addr)) return;
+                    if (!MPServer.BuildingRealEstateOwners.TryGetValue(addr, out var deed)
+                        || string.IsNullOrEmpty(deed) || GameStatePatcher.IsHostLedgerId(deed)) return;
+                    __result = true;
+                    if (_hits < 5 || _hits % 200 == 0)
+                        Plugin.Logger.LogInfo($"[RealEstate] host market step: '{addr}' is deeded to '{deed}' - treated as player-owned (not listed, not sold AI-to-AI) (#{_hits + 1}).");
+                    _hits++;
+                }
+                catch (System.Exception ex)
+                {
+                    if (_errs++ < 3) Plugin.Logger.LogWarning($"[RealEstate] host market ledger test: {ex.Message}");
+                }
+            }
         }
 
         // ── Patch: GameManager.Update ─────────────────────────────────────────
@@ -5037,32 +5107,22 @@ namespace BigAmbitionsMP
             }
         }
 
-        // ── Suppression: RealEstateHelper.RunDaily (buy marketplace) ──────────
-        // RealEstateHelper.RunDaily is the orchestrator for the daily real-estate
-        // tick: UpdateBuildingsForSale (picks ~3 new buildings per neighborhood
-        // for the buy marketplace), UpdatePlayerRealEstate, and the two
-        // SimulateCompetitorBuying* methods.  All four make RNG-based choices —
-        // running them on the client diverges from host's choices.
-        //
-        // Suppressing the whole RunDaily on client means: client never mutates
-        // gi.buildingsForSale or gi.realEstate locally; host's snapshot is the
-        // sole authority.  BusinessSync.CheckBuildingsForSaleChange polls the
-        // host's list each Tick and re-broadcasts on change.
-        [HarmonyPatch]
-        public static class Patch_RealEstateHelper_RunDaily_SkipOnClient
-        {
-            static System.Reflection.MethodBase? TargetMethod() =>
-                VehicleManager.FindGameType("Helpers.RealEstateHelper")?.GetMethod("RunDaily",
-                    System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic
-                  | System.Reflection.BindingFlags.Static  | System.Reflection.BindingFlags.DeclaredOnly);
-
-            static bool Prefix()
-            {
-                if (!MPClient.IsClientInWorld) return true;
-                Plugin.Logger.LogInfo("[Suppress] RealEstateHelper.RunDaily skipped on client.");
-                return false;
-            }
-        }
+        // ── RealEstateHelper.RunDaily on clients (T-11, 2026-11-13) ───────────
+        // RunDaily (RealEstateHelper.cs:33-42) used to be skipped WHOLE on clients (commit 97fee28,
+        // 2026-05-22) so a client's random choices could not change the shared for-sale market.
+        // That also froze the client's OWN buildings: no daily rent income, no occupancy change, no
+        // new rent price, and the AI never bought a building the client listed (the host never runs
+        // those for a joiner's building - it only records the deed). RunDaily now runs on every
+        // machine, and each sub-step that must NOT run on a client has its own narrow patch:
+        //   UpdatePlayerRealEstate (:44-84)                  runs - only THIS machine's own gi.realEstate
+        //       (rent price, occupancy, rent income via ChangeMoneySafe; a merger member's income
+        //       reaches the shared wallet once, through MergerWallet's ChangeMoney postfix).
+        //   SimulateCompetitorBuyingAIBuildings (:154-170)   HOST-ONLY - Patch_SimulateCompetitorBuyingAIBuildings_HostOnly.
+        //   SimulateCompetitorBuyingPlayerBuildings (:86-152) runs - only the local owner's own listings;
+        //       the sale is reported to the host by Patch_SimulateCompetitorBuyingPlayerBuildings.
+        //   UpdateBuildingsForSale (:172-193)                HOST-ONLY - Patch_UpdateBuildingsForSale_HostOnly.
+        // So no market listing and no AI-to-AI building trade is decided on a client; the host's
+        // market stays the sole authority (BusinessSync.CheckBuildingsForSaleChange re-broadcasts it).
 
         // NOTE (2026-08-29): 1.0's new RestockCurrentBusinessIfNeeded is handled by the MERGER
         // AUTHORITY VEIL above, not by a client-side skip. See the Steps entry for the reasoning —

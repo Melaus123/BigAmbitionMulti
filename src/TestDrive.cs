@@ -4868,6 +4868,47 @@ namespace BigAmbitionsMP
                     return MPRivalAttention.RentLever(arg);
                 }
 
+                // T-11 (2026-11-13). Read-only. THIS machine's own real estate (gi.realEstate): per building
+                // the occupancy, rent price per sqm, DailyIncome, and the rent revenue the game booked for it
+                // for the PREVIOUS day (RealEstateHelper.UpdatePlayerRealEstate books ba:transaction_rentrevenue
+                // with day = Day-1, RealEstateHelper.cs:81). With an address key: that building only.
+                // paidmatch = the booked rent equals the summed DailyIncome (to 0.5). Nothing is written.
+                case "myrealestate":
+                {
+                    var rgi = SaveGameManager.Current;
+                    if (rgi == null) return "ERR no world loaded";
+                    var rinv = System.Globalization.CultureInfo.InvariantCulture;
+                    string rwant = arg.Trim();
+                    int rprev = rgi.Day - 1;
+                    var rpaidBy = new System.Collections.Generic.Dictionary<string, float>();
+                    try
+                    {
+                        if (rgi.Transactions != null)
+                            foreach (var rt in rgi.Transactions)
+                            {
+                                if (rt == null || rt.address == null || rt.transactionType != "ba:transaction_rentrevenue" || rt.timestamp.Day != rprev) continue;
+                                string rtk = GameStateReader.AddressKey(rt.address);
+                                rpaidBy[rtk] = (rpaidBy.TryGetValue(rtk, out var rp0) ? rp0 : 0f) + rt.amount;
+                            }
+                    }
+                    catch (Exception ex) { return $"ERR myrealestate transactions: {ex.Message}"; }
+                    var rrows = new System.Collections.Generic.List<string>();
+                    int rn = 0; float rinc = 0f, rpaid = 0f;
+                    if (rgi.realEstate != null)
+                        foreach (var re in rgi.realEstate)
+                        {
+                            if (re == null) continue;
+                            string rk = GameStateReader.AddressKey(re.address);
+                            if (rwant.Length > 0 && rk != rwant) continue;
+                            float inc = 0f; try { inc = re.DailyIncome; } catch { }
+                            float pd = rpaidBy.TryGetValue(rk, out var rp1) ? rp1 : 0f;
+                            rn++; rinc += inc; rpaid += pd;
+                            rrows.Add($"{rk}{{occ={re.occupancy.ToString("F1", rinv)} price={re.pricePerSqm.ToString("F3", rinv)} income={inc.ToString("F2", rinv)} paid={pd.ToString("F2", rinv)}}}");
+                        }
+                    if (rwant.Length > 0 && rn == 0) return $"ERR '{rwant}' is not owned on this machine";
+                    return $"OK myrealestate day={rgi.Day} money={rgi.Money.ToString("F2", rinv)} n={rn} income={rinc.ToString("F2", rinv)} paid={rpaid.ToString("F2", rinv)} paidmatch={(rn > 0 && System.Math.Abs(rpaid - rinc) < 0.5f)} [{string.Join(" ; ", rrows)}]";
+                }
+
                 // -- H-RIVALPARITY-1 item C levers (user-approved 2026-09-27). ALL READ-ONLY. -----------
                 // Do a CLIENT's shops count as sellers in the HOST's market/demand calculation?  The game builds
                 // its seller count per (item, neighbourhood) in ProductMarketHelper.FillProvidersDictionary
@@ -6726,6 +6767,29 @@ namespace BigAmbitionsMP
                 // T-6 / T-7 (2026-11-12, DEV): hold the game's hourly cleaning pass in a shop - see HoldCleaningLever below.
                 case "holdcleaning":
                     return HoldCleaningLever(arg);
+                // F1/F2 (2026-11-13, DEV, read-only): `marketowned <num> <ba:street_x>` - HOST only. The building's
+                // BuildingOwnedByPlayer with the host market scope closed (plain) and again with the scope opened
+                // through the patch's own entry point (MPPatches.HostMarketLedgerScope.Enter/Exit - the same calls
+                // the UpdateBuildingsForSale / SimulateCompetitorBuyingAIBuildings prefixes make), closed in a finally
+                // (scoped). ledger = the host deed ledger's entry for the address. Deterministic, unlike the daily
+                // random listing pick.
+                case "marketowned":
+                {
+                    if (!MPServer.IsRunning) return "ERR marketowned host-only";
+                    string moArg = arg.Trim();
+                    if (moArg.Length == 0) return "ERR usage: marketowned <num> <ba:street_x>";
+                    var moReg = GameStatePatcher.FindRegistration(moArg);
+                    if (moReg == null) return $"ERR no registration at '{moArg}'";
+                    string moKey = moArg; try { moKey = GameStateReader.AddressKey(moReg); } catch { }
+                    if (MPPatches.HostMarketLedgerScope.Depth > 0) return "ERR marketowned: the market scope is already open";
+                    bool moPlain = moReg.BuildingOwnedByPlayer;
+                    bool moScoped;
+                    bool moIn = MPPatches.HostMarketLedgerScope.Enter();
+                    try { moScoped = moReg.BuildingOwnedByPlayer; }
+                    finally { MPPatches.HostMarketLedgerScope.Exit(moIn); }
+                    string moDeed = MPServer.BuildingRealEstateOwners.TryGetValue(moKey, out var moD) && !string.IsNullOrEmpty(moD) ? moD : "none";
+                    return $"OK marketowned addr='{moKey}' plain={moPlain} scoped={moScoped} ledger='{moDeed}'";
+                }
 
                 // T-10 (a) (2026-11-12, DEV): the host's recorded per-player cash - see CashOfLever below.
                 case "cashof":

@@ -1,0 +1,225 @@
+{
+  "id": "T-CLIENTREALESTATE",
+  "title": "T-11 (2026-11-13): a joining player's OWN real estate runs its daily pass - RealEstateHelper.RunDaily is no longer skipped whole on clients; the client's building is paid its daily rent (booked rent revenue == DailyIncome), while the market sub-steps (UpdateBuildingsForSale, SimulateCompetitorBuyingAIBuildings) stay host-only - the client creates no listing",
+  "preconditions": "Fixture save1 (host melaus, client Client1; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA== owns for-rent buildings). Dev build with the myrealestate lever (TestDrive.cs) and rivalrent buy (client, no money). NOTHING is saved (fixture reset): the bought building is not kept.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "rival": "ju1yVbREcE2B5ymg6q5tyA=="
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Suppress\\] RealEstateHelper\\.RunDaily skipped on client",
+    "\\[Server\\] ListForSale: .* by Client1",
+    "\\[TestDrive\\] .*myrealestate.*ERR"
+  ],
+  "oracles_report": [
+    "\\[TestDrive\\] .* 'myrealestate",
+    "\\[TestDrive\\] .* 'rivalrent ",
+    "\\[TestDrive\\] .* 'money",
+    "\\[Server\\] (BuyRequest|ListForSale|CancelSale|SaleCompleted)",
+    "\\[EconProbe\\] wallet .*rentrevenue",
+    "\\[RealEstate\\] host market step: ",
+    "\\[TestDrive\\] .* 'marketowned"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "the host's world loads"
+    },
+    {
+      "seq": 4,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "sleep_s": 110,
+      "note": "the client is served its save and settles"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 9,
+      "role": "both",
+      "cmd": "mark TEST CLIENTRE BUY",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "rivalrent find ${rival}",
+      "expect_result": "^OK rivalrent find rival=${rival} owned=\\d+ forrent=[1-9]",
+      "capture": {
+        "addr": "first=(.+?) \\["
+      },
+      "note": "a free building to give the client (the existing DEV buy lever takes any registration)"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "rivalrent buy ${addr}",
+      "expect_result": "^OK rivalrent buy sent addr='${addr}' .*owned=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] BuyRequest: ${addr} \\S+ owned by ${clientPid}",
+          "within_s": 15
+        }
+      ],
+      "note": "Client1 owns the building on its own machine (occupancy 50, market rent price) and the host records the deed"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "sleep_s": 3
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "myrealestate ${addr}",
+      "expect_result": "^OK myrealestate day=\\d+ money=\\S+ n=1 income=[1-9][0-9]*\\.[0-9]{2} paid=0\\.00 ",
+      "capture": {
+        "day0": "day=(\\d+)",
+        "money0": "money=(\\S+)",
+        "income0": "income=(\\S+)"
+      },
+      "note": "PREMISE: the building has tenants (DailyIncome > 0) and no rent was booked for it yet (bought today)"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "myrealestate",
+      "expect_result": "^OK myrealestate ",
+      "note": "REPORT: every building Client1 owns"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "myrealestate",
+      "expect_result": "^OK myrealestate ",
+      "note": "REPORT: the host's own buildings (the client's building must NOT be listed here)"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "marketowned ${addr}",
+      "expect_result": "^OK marketowned addr='${addr}' plain=False scoped=True ledger='${clientPid}'$",
+      "note": "TEST (F1/F2 2026-11-13, deterministic): on the host the client's building is not the host's own (plain=False), but with the market scope opened the way UpdateBuildingsForSale / SimulateCompetitorBuyingAIBuildings open it the ownership test answers True because the deed ledger gives it to Client1 - so neither market step can list it or sell it AI-to-AI"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "marketowned ${addr}",
+      "expect_result": "^ERR marketowned host-only",
+      "note": "the lever (and the scope) are host-only; a client gets the refusal"
+    },
+    {
+      "seq": 18,
+      "role": "both",
+      "cmd": "mark TEST CLIENTRE MIDNIGHT",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "clock 23:57",
+      "expect_result": "^OK clock "
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "live time crosses midnight on both machines: NewDay -> RealEstateHelper.RunDaily (now NOT skipped on the client)"
+    },
+    {
+      "seq": 21,
+      "role": "both",
+      "cmd": "mark TEST CLIENTRE AFTER",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "myrealestate ${addr}",
+      "expect_result": "^OK myrealestate day=\\d+ money=\\S+ n=1 income=[1-9][0-9]*\\.[0-9]{2} paid=[1-9][0-9]*\\.[0-9]{2} paidmatch=True",
+      "note": "TEST: the client booked the building's rent for the day just ended, equal to its DailyIncome (UpdatePlayerRealEstate -> ChangeMoneySafe adds it to the money); the day number is past ${day0}; the money went up by that amount on top of the other midnight changes (was ${money0})"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "money",
+      "expect_result": "^OK money=",
+      "note": "REPORT"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "myrealestate",
+      "expect_result": "^OK myrealestate ",
+      "note": "REPORT: occupancy may have moved (the daily occupancy roll ran on the client)"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "myrealestate",
+      "expect_result": "^OK myrealestate ",
+      "note": "REPORT: the host still does not hold the client's building"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "bldgstate ${addr}",
+      "expect_result": "^OK bldg .* owned=False forSale=False .* deed=${clientPid}",
+      "note": "TEST (F1/F2 2026-11-13): after the host's midnight market steps the client's building is NOT on the host's for-sale market and the deed still names Client1; owned=False also shows the host's ownership test is unchanged outside those two steps. Weak alone: the host's daily listing pick is random - the deterministic check is the 'marketowned' step before midnight (see the '[RealEstate] host market step' report line for whether the guard was consulted)"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "cmd": "bldgstate ${addr}",
+      "expect_result": "^OK bldg .* owned=True forSale=False ",
+      "note": "TEST: the client still owns its building and nothing listed it on its machine (no unasked AI sale)"
+    },
+    {
+      "seq": 28,
+      "role": "both",
+      "cmd": "mark TEST CLIENTRE END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
