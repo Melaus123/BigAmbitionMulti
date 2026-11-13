@@ -5700,6 +5700,245 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>FURNITURE DELIVERY BOOKING FOR A MERGED COMPANY. FurnitureStoreManagerDialog.OnDeliveryContractSettingsSet
+        /// is the game's only booking point: it adds the contract to SaveGameManager.Current.FurnitureDeliveryContracts,
+        /// and FurnitureDeliveryHelper's hourly pass delivers it and charges it then. On a member's machine a booking
+        /// for a partner's shop would deliver into a replica and be charged here, so it is ROUTED (op
+        /// "mergerfurniture") to the machine that runs the shop - its owner, or the stand-in while the owner is away -
+        /// which rebuilds it from its own catalogue, prices and clock (SharedShopWorkTabs.ApplyRoutedServiceBooking).
+        /// NOTHING is added or charged here. The native validations are re-run with the game's own keys and its own
+        /// null answer; on a successful route the native conversation tail is produced. NO NEW ON-SCREEN TEXT.
+        /// The first validation (no address picked) is left to native: this prefix bows out before it.
+        /// INERT without a merger, and on a shop that is truly mine (MergerFlip.TrulyMine).</summary>
+        [HarmonyPatch(typeof(Dialogs.FurnitureStoreManagerDialog), "OnDeliveryContractSettingsSet")]
+        public static class Patch_FurnitureDeliveryCreate_MergerGate
+        {
+            static bool Prefix(Dialogs.FurnitureStoreManagerDialog __instance, ref Entities.DialogEntry? __result)
+            {
+                bool sent = false;   // true once the routed leg may be on the wire
+                bool partner = false;   // F6: true once the building is known to be a partner's (routed, never native)
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;   // inert without a merger
+                    var ctrl = DialogController.current;
+                    var settings = ctrl?.GetInputComponent<UI.Dialog.FurnitureDeliveryContractSettings>();
+                    var addr = settings?.selectedAddress;
+                    if (ctrl == null || settings == null || addr == null) return true;   // native raises its own "select an address"
+                    var reg = BuildingHelper.GetBuildingRegistration(addr);
+                    if (reg == null) return true;
+                    bool rented; try { rented = reg.RentedByPlayer; } catch { return true; }
+                    if (!rented || MergerFlip.TrulyMine(reg)) return true;
+                    partner = true;
+
+                    // The remaining native validations, with the game's own keys and its own null answer.
+                    var slot = settings.selectedDeliverySlot;
+                    if (slot.Item1 == -1 && slot.Item2 == -1)
+                    {
+                        UI.Notification.Notifications.ShowError("common_notification_select_delivery_time", "common_notification_select_delivery_time");
+                        __result = null; return false;
+                    }
+                    if (settings.TotalItemsToDeliverAmount <= 0)
+                    {
+                        UI.Notification.Notifications.ShowError("dialog_furniture_delivery_select_items_notification", "dialog_furniture_delivery_select_items_notification");
+                        __result = null; return false;
+                    }
+                    var lines = new List<PwDeliveryLine>();
+                    float total = SharedShopWorkTabs.FurnitureFee;
+                    foreach (var it in settings.itemsToDeliver)
+                    {
+                        if (it == null) continue;
+                        lines.Add(new PwDeliveryLine { ItemName = it.itemName ?? "", Amount = it.amount, PricePerUnit = it.price });
+                        total += (float)it.amount * it.price;
+                    }
+                    if (total < SharedShopWorkTabs.FurnitureMinimum)
+                    {
+                        var nd = new Dictionary<string, string> { { "minimumCost", SharedShopWorkTabs.FurnitureMinimum.ToShortCurrencyFormat() } };
+                        UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "dialog_furniture_delivery_minimum_price_not_reached",
+                                                           nd, 4f, "dialog_furniture_delivery_minimum_price_not_reached");
+                        __result = null; return false;
+                    }
+
+                    string bizKey = GameStateReader.AddressKey(reg);
+                    string storeKey = ""; try { storeKey = GameStateReader.AddressKey(ctrl.contact.Address); } catch { }
+                    if (storeKey.Length == 0)
+                    { Plugin.Logger.LogWarning($"[Merger] furniture delivery booking REFUSED for '{bizKey}': the dialog's store contact has no address."); __result = null; return false; }
+                    if (!MPServer.IsRunning && !MPClient.IsConnected)
+                    { Plugin.Logger.LogWarning($"[Merger] furniture delivery booking REFUSED for '{bizKey}': no session to route it over."); __result = null; return false; }
+
+                    int day = slot.Item1, hour = slot.Item2;
+                    string id = Guid.NewGuid().ToString("N");
+                    sent = true;   // from here on native must NEVER run (see the catch below)
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    {
+                        PlayerId = MPConfig.PlayerId, AddressKey = bizKey, Op = "mergerfurniture", AgencyKey = storeKey,
+                        BookingId = id, Lines = lines, SlotDay = day, Hour = hour,
+                    });
+                    Plugin.Logger.LogInfo($"[Merger] furniture delivery routed for '{bizKey}' (store '{storeKey}', {lines.Count} line(s), day {day} {hour}h, booking {id})");
+                    // F8: on the host that is also the stand-in the booking is applied or refused INSIDE SendEdit. A refusal
+                    // there has already raised its notice (or logged): nothing was ordered, so no "order placed" tail.
+                    if (SharedShopWorkTabs.LastRefusedBookingId == id)
+                    { Plugin.Logger.LogInfo($"[Merger] furniture delivery booking {id} for '{bizKey}' was refused at once - no order tail."); __result = null; return false; }
+
+                    // The native conversation tail, word for word: the player's order line and the manager's answer.
+                    try
+                    {
+                        string businessName = reg.BusinessName ?? "";
+                        string text = "";
+                        foreach (var ln in lines) text += $"{ln.Amount}x {ln.ItemName.GetLocalization()}<br>";
+                        string value = text.Length >= 4 ? text.Substring(0, text.Length - 4) : text;
+                        var messageData = new Dictionary<string, string>
+                        {
+                            { "amount", settings.TotalItemsToDeliverAmount.ToString() },
+                            { "address", global::Streets.AddressHelper.ToFormattedString(addr) },
+                            { "text", value },
+                            { "day", day.ToString() },
+                            { "hour", global::TimeHelper.GetFormattedTime(hour) },
+                            { "businessName", businessName },
+                        };
+                        ctrl.contact.ReceivePlayerMessage(new Entities.TextMessage(string.IsNullOrEmpty(businessName)
+                            ? "ba:messagetype_dialog_furniture_store_on_contract_settings_set_player"
+                            : "ba:messagetype_dialog_furniture_store_on_contract_settings_set_player_business_name", messageData, read: true));
+                        ctrl.contact.SendMessage(new Entities.TextMessage("ba:messagetype_dialog_furniture_store_on_contract_settings_set_manager", null, read: true));
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] furniture delivery conversation tail: {ex.Message}"); }
+
+                    // The native follow-up entry. Its two buttons call the dialog's own private entries. Its "manage
+                    // deliveries" option lists the LOCAL save, which holds no copy of a routed booking.
+                    var t = typeof(Dialogs.FurnitureStoreManagerDialog);
+                    var miOrder = AccessTools.Method(t, "FurnitureDeliveryContract");
+                    var miList = AccessTools.Method(t, "OnShowFurnitureDeliveriesList");
+                    if (miOrder == null || miList == null)
+                        Plugin.Logger.LogWarning("[Merger] furniture delivery tail: the dialog's own entries are not where they were.");
+                    __result = new Entities.DialogEntry
+                    {
+                        messageData = "dialog_furniture_store_on_contract_settings_set_manager".Localize(),
+                        InputTemplate = Entities.DialogEntry.InputTemplateName.None,
+                        OnConfirm = miOrder == null ? null! : (Func<Entities.DialogEntry>)Delegate.CreateDelegate(typeof(Func<Entities.DialogEntry>), __instance, miOrder),
+                        ConfirmTextOverride = "dialog_more_help_new_order".Localize(),
+                        OnSecondOption = miList == null ? null! : (Func<Entities.DialogEntry>)Delegate.CreateDelegate(typeof(Func<Entities.DialogEntry>), __instance, miList),
+                        SecondOptionTextOverride = "dialog_furniture_deliveries_manage_deliveries",
+                        OnCancel = ctrl.CancelDialog,
+                        onCancelMessage = new Entities.TextMessage("ba:messagetype_contacts_message_player_cancel_call"),
+                    };
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    // Once the routed leg may be on the wire, the native method would book a second delivery here; and on a
+                    // partner's building it would book on the display copy (F6). Only a building that is truly mine falls back.
+                    if (sent || partner)
+                    { Plugin.Logger.LogWarning($"[Merger] furniture delivery booking gate failed on a partner building - not booked here: {ex.Message}"); __result = null; return false; }
+                    Plugin.Logger.LogWarning($"[Merger] furniture delivery booking gate: {ex.Message}");
+                    return true;
+                }
+            }
+        }
+
+        /// <summary>FOOD DELIVERY BOOKING FOR A MERGED COMPANY. FoodDeliveryDialog.OnOrderSettingsSet is the game's only
+        /// booking point: it adds the contract to FoodDeliveryHelper.GetContracts(), whose hourly pass delivers and
+        /// charges it. ROUTED exactly as the furniture booking above (op "mergerfood"); nothing is added or charged
+        /// here. The native validations (ValidateOrder) are re-run with the game's own keys; the first (no address)
+        /// is left to native. On a successful route the dialog's own message sender runs on a THROWAWAY contract
+        /// built by the dialog's own CreateContract (never added to any list), so the words are the game's.
+        /// INERT without a merger, and on a shop that is truly mine.</summary>
+        [HarmonyPatch(typeof(Dialogs.FoodDeliveryDialog), "OnOrderSettingsSet")]
+        public static class Patch_FoodDeliveryCreate_MergerGate
+        {
+            static bool Prefix(Dialogs.FoodDeliveryDialog __instance, ref Entities.DialogEntry? __result)
+            {
+                bool sent = false;   // true once the routed leg may be on the wire
+                bool partner = false;   // F6: true once the building is known to be a partner's (routed, never native)
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;   // inert without a merger
+                    var ctrl = DialogController.current;
+                    var settings = ctrl?.GetInputComponent<UI.Dialog.FoodDeliveryContractSettings>();
+                    var addr = settings?.selectedAddress;
+                    if (ctrl == null || settings == null || addr == null) return true;   // native raises its own "select an address"
+                    var reg = BuildingHelper.GetBuildingRegistration(addr);
+                    if (reg == null) return true;
+                    bool rented; try { rented = reg.RentedByPlayer; } catch { return true; }
+                    if (!rented || MergerFlip.TrulyMine(reg)) return true;
+                    partner = true;
+
+                    if (!settings.HasSelectedDeliverySlot)
+                    {
+                        UI.Notification.Notifications.ShowError("common_notification_select_delivery_time", "common_notification_select_delivery_time", trackOnSaveGame: false);
+                        __result = null; return false;
+                    }
+                    if (settings.TotalItemsToDeliverAmount <= 0)
+                    {
+                        UI.Notification.Notifications.ShowError("dialog_furniture_delivery_select_items_notification", "dialog_furniture_delivery_select_items_notification", trackOnSaveGame: false);
+                        __result = null; return false;
+                    }
+                    if (settings.MinimumOrderCost > 0f && settings.TotalPrice < settings.MinimumOrderCost)
+                    {
+                        var nd = new Dictionary<string, string> { { "minimumOrderCost", settings.MinimumOrderCost.ToShortCurrencyFormat() } };
+                        UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "dialog_food_delivery_minimum_not_reached", nd, 4f,
+                                                           "dialog_food_delivery_minimum_not_reached", null, notificationSound: true, trackOnSaveGame: false);
+                        __result = null; return false;
+                    }
+
+                    string bizKey = GameStateReader.AddressKey(reg);
+                    if (!MPServer.IsRunning && !MPClient.IsConnected)
+                    { Plugin.Logger.LogWarning($"[Merger] food delivery booking REFUSED for '{bizKey}': no session to route it over."); __result = null; return false; }
+                    var lines = new List<PwDeliveryLine>();
+                    foreach (var it in settings.itemsToDeliver)
+                        if (it != null) lines.Add(new PwDeliveryLine { ItemName = it.itemName ?? "", Amount = it.amount, PricePerUnit = it.price });
+
+                    int day = settings.selectedDeliverySlot.Item1, hour = settings.selectedDeliverySlot.Item2;
+                    string id = Guid.NewGuid().ToString("N");
+                    sent = true;   // from here on native must NEVER run (see the catch below)
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    {
+                        PlayerId = MPConfig.PlayerId, AddressKey = bizKey, Op = "mergerfood",
+                        BookingId = id, Lines = lines, SlotDay = day, Hour = hour,
+                    });
+                    Plugin.Logger.LogInfo($"[Merger] food delivery routed for '{bizKey}' ({lines.Count} line(s), day {day} {hour}h, booking {id})");
+                    // F8: as the furniture booking above.
+                    if (SharedShopWorkTabs.LastRefusedBookingId == id)
+                    { Plugin.Logger.LogInfo($"[Merger] food delivery booking {id} for '{bizKey}' was refused at once - no order tail."); __result = null; return false; }
+
+                    var t = typeof(Dialogs.FoodDeliveryDialog);
+                    try
+                    {
+                        var miCreate = AccessTools.Method(t, "CreateContract");
+                        var miMsgs = AccessTools.Method(t, "SendOrderMessages");
+                        var shape = miCreate?.Invoke(null, new object[] { settings });
+                        if (shape != null && miMsgs != null) miMsgs.Invoke(null, new object[] { shape });
+                        else Plugin.Logger.LogWarning("[Merger] food delivery tail: the dialog's own message sender is not where it was.");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] food delivery conversation tail: {ex.Message}"); }
+
+                    // The native follow-up entry. Its "manage deliveries" option lists the LOCAL save, which holds no
+                    // copy of a routed booking.
+                    var miOrder = AccessTools.Method(t, "OrderEntry");
+                    var miList = AccessTools.Method(t, "OnShowDeliveriesList");
+                    if (miOrder == null || miList == null)
+                        Plugin.Logger.LogWarning("[Merger] food delivery tail: the dialog's own entries are not where they were.");
+                    __result = new Entities.DialogEntry
+                    {
+                        messageData = "dialog_food_delivery_on_contract_set_manager".Localize(),
+                        InputTemplate = Entities.DialogEntry.InputTemplateName.None,
+                        OnConfirm = miOrder == null ? null! : (Func<Entities.DialogEntry>)Delegate.CreateDelegate(typeof(Func<Entities.DialogEntry>), __instance, miOrder),
+                        ConfirmTextOverride = "furniture_delivery_dialog_order".Localize(),
+                        OnSecondOption = miList == null ? null! : (Func<Entities.DialogEntry>)Delegate.CreateDelegate(typeof(Func<Entities.DialogEntry>), miList),
+                        SecondOptionTextOverride = "dialog_furniture_deliveries_manage_deliveries",
+                        OnCancel = ctrl.CancelDialog,
+                        onCancelMessage = new Entities.TextMessage("ba:messagetype_contacts_message_player_cancel_call"),
+                    };
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    if (sent || partner)   // F6: as the furniture gate above
+                    { Plugin.Logger.LogWarning($"[Merger] food delivery booking gate failed on a partner building - not booked here: {ex.Message}"); __result = null; return false; }
+                    Plugin.Logger.LogWarning($"[Merger] food delivery booking gate: {ex.Message}");
+                    return true;
+                }
+            }
+        }
+
         /// <summary>THE CROSS-MEMBER DELIVERY ENTRY (4c part 2, D20-7) — was STOP-GAP S3, HQ LOGISTICS PLAN LEG.
         /// LogisticsManagerPlan.cs:74 `public void DeliverDestination(LogisticsManagerPlanDestination
         /// destination)` moves the goods for ONE leg. It checks only RAW RentedByPlayer on the plan's own

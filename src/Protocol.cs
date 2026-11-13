@@ -757,6 +757,18 @@ namespace BigAmbitionsMP
         /// the candidate find-times read (RecruitmentAgencyDialog.cs:192-198).</summary>
         public bool   PartTime  { get; set; }
         public int    Days      { get; set; }
+        /// <summary>"mergerfurniture" / "mergerfood": a furniture or food delivery booked on a partner's shop.
+        /// BookingId is minted at the dialog's commit and lets the host drop a resend. Lines are the dialog's item
+        /// rows; the member's PricePerUnit is informational only - the runner prices every line from its own
+        /// catalogue. SlotDay is the slot's ABSOLUTE game day and Hour its hour;
+        /// each stays -1 when absent. The runner accepts the pair only when it is one of its own slots, so a leg that
+        /// crosses midnight is refused, never landed a day late. An absent slot or item list is a
+        /// refusal on the runner, never read as "nothing to change". AgencyKey carries the furniture store's
+        /// address key (empty for food, which has no store building).</summary>
+        public string BookingId { get; set; } = "";
+        public List<PwDeliveryLine>? Lines { get; set; }
+        public int    SlotDay   { get; set; } = -1;
+        public int    Hour      { get; set; } = -1;
         public PwLogisticsPlan? Plan { get; set; }     // wave 4: "mergerplan" — the whole plan, replace-by-id on the target
         /// <summary>HQ-PARITY-5 B1, ADDITIVE (Version stays 23; an older sender leaves it null, and only the
         /// logistics "destset" op reads it).  THE WHOLE DESIRED DESTINATION LIST of one logistics plan.  The
@@ -1849,7 +1861,11 @@ namespace BigAmbitionsMP
         //      so per the freeze rule a wire-visible change bumps: a v26 client would drop 221 as "Unknown message type" and
         //      keep its own economy settings while everyone else runs the host's. No capability gate and no old-peer branch
         //      (project rule 2026-09-18): mixed sessions refuse at Hello.
-        public const int Version = 27;
+        // v28 (2026-11-12, T-24 part 1, owner decision 11): partner booking routing - SharedWorkEditPayload gains BookingId,
+        //      Lines, SlotDay and Hour (furniture/food bookings routed to the game that runs a merged partner's shop), and the
+        //      absent-owner paperwork bundle gains the furniture/food delivery lists. 27 shipped in v0.3.3, so the change bumps;
+        //      no capability gate and no old-peer branch (project rule 2026-09-18): mixed sessions refuse at Hello.
+        public const int Version = 28;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -4210,6 +4226,27 @@ namespace BigAmbitionsMP
         public bool   TransferBizManSettings  { get; set; }
     }
 
+    /// <summary>One item row of a furniture or food delivery (Entities.FurnitureDeliveryItem, which both
+    /// contract kinds use for their items).</summary>
+    public class PwDeliveryLine
+    {
+        public string ItemName     { get; set; } = "";
+        public int    Amount       { get; set; }
+        public float  PricePerUnit { get; set; }
+    }
+
+    /// <summary>gi.FurnitureDeliveryContracts / gi.FoodDeliveryContracts. FromAddressKey is the furniture store
+    /// (empty for food). Day/Hour are the game's own absolute slot, as moving and interior contracts carry theirs.</summary>
+    public class PwServiceDelivery
+    {
+        public string FromAddressKey { get; set; } = "";
+        public string ToAddressKey   { get; set; } = "";
+        public int    Day            { get; set; }
+        public int    Hour           { get; set; }
+        public float  Fee            { get; set; }
+        public List<PwDeliveryLine> Lines { get; set; } = new();
+    }
+
     /// <summary>gi.disabledLicensingFees (address + itemId + weekday) and gi.paidLicensingFeesToday
     /// (an (Address, itemId) tuple - Day = -1 there, the list is a single day by definition).</summary>
     public class PwLicensingFee
@@ -4233,6 +4270,10 @@ namespace BigAmbitionsMP
         public List<PwHeadhunterPlan>    HeadhunterPlans       { get; set; } = new();
         public List<PwInstallContract>   InteriorInstallationFirmContracts { get; set; } = new();
         public List<PwMovingContract>    MovingServiceContracts { get; set; } = new();
+        // Furniture and food deliveries to the sender's own buildings. NULL when the bundle predates them: the
+        // return leg then leaves the owner's own lists alone instead of reading "none" (MergerAbsence.ListCarried).
+        public List<PwServiceDelivery>?  FurnitureDeliveryContracts { get; set; }
+        public List<PwServiceDelivery>?  FoodDeliveryContracts { get; set; }
         public List<PwLicensingFee>      DisabledLicensingFees  { get; set; } = new();
         public List<PwLicensingFee>      PaidLicensingFeesToday { get; set; } = new();
 

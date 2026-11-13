@@ -289,7 +289,8 @@ namespace BigAmbitionsMP
                  + (l.PricingManagerPlans?.Count ?? 0) + (l.HrManagerPlans?.Count ?? 0)
                  + (l.HeadhunterPlans?.Count ?? 0) + (l.InteriorInstallationFirmContracts?.Count ?? 0)
                  + (l.MovingServiceContracts?.Count ?? 0) + (l.DisabledLicensingFees?.Count ?? 0)
-                 + (l.PaidLicensingFeesToday?.Count ?? 0);
+                 + (l.PaidLicensingFeesToday?.Count ?? 0)
+                 + (l.FurnitureDeliveryContracts?.Count ?? 0) + (l.FoodDeliveryContracts?.Count ?? 0);
         }
 
         // ── Bundle builder ────────────────────────────────────────────────────
@@ -407,6 +408,16 @@ namespace BigAmbitionsMP
             n += Move(l.MovingServiceContracts, t?.MovingServiceContracts, x => A(x.OriginAddressKey) || A(x.DestinationAddressKey));
             n += Move(l.DisabledLicensingFees,  t?.DisabledLicensingFees,  x => A(x.AddressKey));
             n += Move(l.PaidLicensingFeesToday, t?.PaidLicensingFeesToday, x => A(x.AddressKey));
+            // Furniture and food deliveries belong to the building they deliver to.
+            // F3: a target list is created only when the SOURCE has that list. A bundle stored before these lists existed
+            // keeps null, which the absence hand-over reads as "not carried" (MergerAbsence.ListCarried) - so the
+            // owner's own pending deliveries are not deleted on the strength of an empty list nobody filled.
+            if (t != null && l.FurnitureDeliveryContracts != null) t.FurnitureDeliveryContracts ??= new List<PwServiceDelivery>();
+            if (t != null && l.FoodDeliveryContracts != null) t.FoodDeliveryContracts ??= new List<PwServiceDelivery>();
+            if (l.FurnitureDeliveryContracts != null)
+                n += Move(l.FurnitureDeliveryContracts, t?.FurnitureDeliveryContracts, x => A(x.ToAddressKey));
+            if (l.FoodDeliveryContracts != null)
+                n += Move(l.FoodDeliveryContracts, t?.FoodDeliveryContracts, x => A(x.ToAddressKey));
             n += Move(l.ItemsOrderedThisWeekByImporter, t?.ItemsOrderedThisWeekByImporter, x => imp.Contains(x.AddressKey ?? ""));
             return n;
         }
@@ -512,6 +523,17 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] campaigns '{key}': {ex.Message}"); }
 
             return b;
+        }
+
+        /// <summary>One furniture or food delivery as the bundle carries it.</summary>
+        private static PwServiceDelivery ServiceDelivery(string from, string to, int day, int hour, float fee,
+                                                         List<Entities.FurnitureDeliveryItem> items)
+        {
+            var d = new PwServiceDelivery { FromAddressKey = from ?? "", ToAddressKey = to ?? "", Day = day, Hour = hour, Fee = fee };
+            if (items != null)
+                foreach (var i in items)
+                    if (i != null) d.Lines.Add(new PwDeliveryLine { ItemName = i.itemName ?? "", Amount = i.amount, PricePerUnit = i.pricePerUnit });
+            return d;
         }
 
         private static PaperworkOwnerLists BuildLists(GameInstance gi, HashSet<string> mine)
@@ -721,6 +743,26 @@ namespace BigAmbitionsMP
                             MovingDay = c.movingDay, MovingHour = c.movingHour,
                             TransferBizManSettings = c.transferBizManSettings,
                         });
+                    }
+
+                // Furniture and food deliveries booked for one of my buildings. They are paid and delivered by
+                // whichever machine holds them, so they ride the absence hand-over like the moving and interior
+                // contracts: a stand-in delivers them while I am away, and hands back what is still pending.
+                l.FurnitureDeliveryContracts = new List<PwServiceDelivery>();
+                if (gi.FurnitureDeliveryContracts != null)
+                    foreach (var c in gi.FurnitureDeliveryContracts)
+                    {
+                        if (c == null || !mine.Contains(Key(c.toAddress))) continue;
+                        l.FurnitureDeliveryContracts.Add(ServiceDelivery(Key(c.fromAddress), Key(c.toAddress),
+                            c.dayOfDelivery, c.hourOfDelivery, c.deliveryFee, c.itemsToDeliver));
+                    }
+                l.FoodDeliveryContracts = new List<PwServiceDelivery>();
+                if (gi.FoodDeliveryContracts != null)
+                    foreach (var c in gi.FoodDeliveryContracts)
+                    {
+                        if (c == null || !mine.Contains(Key(c.toAddress))) continue;
+                        l.FoodDeliveryContracts.Add(ServiceDelivery("", Key(c.toAddress),
+                            c.dayOfDelivery, c.hourOfDelivery, c.deliveryFee, c.itemsToDeliver));
                     }
 
                 if (gi.disabledLicensingFees != null)

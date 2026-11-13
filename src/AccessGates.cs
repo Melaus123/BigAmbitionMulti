@@ -194,18 +194,25 @@ namespace BigAmbitionsMP
         //   RecruitmentSettings                     campaign-target picker - ONLY PARTLY since H-MERGERHIRE-1
         //                                           (2026-09-19): a merger-FLIPPED partner shop whose owner is
         //                                           in the session is offered again and the booking is ROUTED
-        //   FurnitureDeliveryContractSettings       delivery destination (calls the base method)
-        //   FoodDeliveryContractSettings            delivery destination (inherits the base method)
-        // Each books a PER-MACHINE contract: written on the booking machine, paid from the shared wallet and
-        // executed there against that machine's replica of the shop - the owner never hears of it, and these
-        // bookings are not in the absence hand-over lists, so a stand-in's booking would strand on its own
-        // machine at the owner's return. Patched in the G5 region at the foot of this file. TWO service dialogs
-        // are ROUTED instead of narrowed: the WHOLESALE dialog's DeliveryContractSettings is a SEPARATE class
-        // and was never among them (its deliveries route as "mergercontract"), and RECRUITMENT joined it
-        // (H-MERGERHIRE-1, op "mergercampaign"). Recruitment's picker still hides a partner shop whenever the
-        // booking could not reach the shop's REAL OWNER: an ABSENT owner's shop (someone is standing in for
+        //   FurnitureDeliveryContractSettings       delivery destination (calls the base method) - ONLY PARTLY:
+        //                                           a partner shop that some machine runs is offered, ROUTED
+        //   FoodDeliveryContractSettings            delivery destination (inherits the base method) - the same
+        // Moving and interior each book a PER-MACHINE contract: written on the booking machine, paid from the
+        // shared wallet and executed there against that machine's replica of the shop - the owner never hears
+        // of it. Both of those lists DO ride the absence hand-over (PaperworkSync.BuildLists,
+        // MergerAbsence.InstallListsFor), but only as the OWNER's own published paperwork: a contract another
+        // machine books natively sits in that machine's save, and nothing files it to the owner. Patched in the
+        // G5 region at the foot of this file. FOUR service dialogs are ROUTED instead of narrowed: the WHOLESALE
+        // dialog's DeliveryContractSettings is a SEPARATE class and was never among them (its deliveries route
+        // as "mergercontract"), RECRUITMENT joined it (H-MERGERHIRE-1, op "mergercampaign"), and FURNITURE and
+        // FOOD delivery joined it (ops "mergerfurniture" / "mergerfood": the machine that runs the shop books
+        // it with its own catalogue, prices and clock). Recruitment's picker still hides a partner shop whenever
+        // the booking could not reach the shop's REAL OWNER: an ABSENT owner's shop (someone is standing in for
         // them, MergerAbsence.AwayAnywhere) stays hidden, because the campaign's hourly tick reads the owner's
-        // own RecruitmentCampaigns list and a booking is in no absence hand-over list.
+        // own RecruitmentCampaigns list and a campaign is in no absence hand-over list. The furniture and food
+        // pickers offer a partner shop whenever SOME machine runs it - the owner in the session, or a stand-in
+        // (this machine included) - because both delivery lists ride the absence hand-over and a stand-in's
+        // booking is tagged to the absent owner, so it goes home with them (ServiceRoutable).
 
         /// <summary>The name of the dialog the game currently has open, when it is one of the TWO whose picker may
         /// be widened (the table above); else null. R3: the cheap MP gates run first, so single-player and a
@@ -485,6 +492,75 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>May a furniture or food delivery be booked on this partner shop from HERE? Only a merger-FLIPPED
+        /// company shop, or one this machine stands in for, qualifies (a plain foreign business has no route), and
+        /// only while some machine runs it: this machine as the stand-in, a stand-in elsewhere, or the owner in the
+        /// session. Both delivery lists ride the absence hand-over, so a stand-in may take the booking. The host
+        /// decides again at the commitment (RouteTargetFor) and refuses back if nobody runs it by then.</summary>
+        private static bool ServiceRoutable(BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg == null) return false;
+                string key = GameStateReader.AddressKey(reg);
+                if (string.IsNullOrEmpty(key)) return false;
+                if (MergerAbsence.SimulatesHere(key)) return true;
+                if (MergerFlip.FlippedCount == 0 || !MergerFlip.IsFlipped(key)) return false;
+                // F5(a): the owner is away - routable only while the STAND-IN that runs it is online; otherwise the
+                // host refuses the booking back ("offline", which has no game notice) after the order tail showed.
+                var away = AbsenceFor(key);
+                if (away != null) return PidOnline(away.SimulatorPid);
+                string owner = MergerFlip.ParkedRunner(key);
+                if (string.IsNullOrEmpty(owner)) return false;
+                if (MPServer.IsRunning)
+                {
+                    if (MPServer.IsOnlinePid(owner)) return true;
+                    foreach (var kv in MPServer.StableIdByPlayer)   // a reserved ledger value is the stable id
+                        if (kv.Value == owner && MPServer.IsOnlinePid(kv.Key)) return true;
+                    return false;
+                }
+                var lobby = MPClient.LobbyPlayers;
+                if (lobby == null) return false;
+                foreach (var pid in lobby) if (pid == owner) return true;
+                return false;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>F5(a): the absence entry (host: its own table; client: the broadcast copy - the same tables
+        /// MergerAbsence.AwayAnywhere reads) that lists this address, or null.</summary>
+        private static AbsenceInfo? AbsenceFor(string key)
+        {
+            IEnumerable<AbsenceInfo> table = MPServer.IsRunning ? MergerAbsence.HostSnapshot() : MergerAbsence.Known;
+            foreach (var a in table)
+            {
+                if (a?.Addresses == null) continue;
+                foreach (var ad in a.Addresses)
+                    if (string.Equals(ad, key, StringComparison.OrdinalIgnoreCase)) return a;
+            }
+            return null;
+        }
+
+        /// <summary>F5(a): is that pid in the session now (host: its live connections; client: the lobby list)?</summary>
+        private static bool PidOnline(string pid)
+        {
+            if (string.IsNullOrEmpty(pid)) return false;
+            if (pid == MPConfig.PlayerId) return true;
+            if (MPServer.IsRunning) return MPServer.IsOnlinePid(pid);
+            var lobby = MPClient.LobbyPlayers;
+            if (lobby == null) return false;
+            foreach (var x in lobby) if (x == pid) return true;
+            return false;
+        }
+
+        /// <summary>The furniture/food destination picker's own answer for one building, as the postfix above
+        /// gives it: a non-partner building passes, a partner shop only when its booking is routable.</summary>
+        internal static bool DeliveryPickerOffers(BuildingRegistration reg)
+        {
+            try { return reg != null && (!PartnerShop(reg) || ServiceRoutable(reg)); }
+            catch { return false; }
+        }
+
         private static readonly HashSet<string> _recruitRouteLogged = new HashSet<string>(StringComparer.Ordinal);
 
         /// <summary>One INFO line per partner shop per session, the first time the recruitment picker offers it.</summary>
@@ -499,7 +575,8 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Furniture delivery overrides this and calls base (FurnitureDeliveryContractSettings.cs:25-27),
-        /// food delivery inherits it unchanged - one patch on the base covers both. The wholesale dialog's
+        /// food delivery inherits it unchanged - one patch on the base covers both. A partner shop stays listed
+        /// when its booking can be routed to the machine that runs it (ServiceRoutable). The wholesale dialog's
         /// DeliveryContractSettings is a separate MonoBehaviour with its own filter and is not touched.</summary>
         [HarmonyPatch(typeof(global::UI.Dialog.DeliveryContractSettingsBase), "GetDeliveryDestinations")]
         public static class Patch_DeliveryContractSettingsBase_Destinations
@@ -510,7 +587,7 @@ namespace BigAmbitionsMP
                 {
                     if (__result == null || __result.Count == 0) return;
                     int before = __result.Count;
-                    __result.RemoveAll(r => PartnerShop(r));   // M6: the flip parks the stamp
+                    __result.RemoveAll(r => PartnerShop(r) && !ServiceRoutable(r));   // M6: the flip parks the stamp; a routable shop stays
                     if (__result.Count != before) LogPickerOnce("DeliveryContract");
                 }
                 catch { }

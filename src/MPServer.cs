@@ -11329,6 +11329,7 @@ namespace BigAmbitionsMP
         /// a new world must not inherit the old world's seq numbers, and a sender's seq is seeded per session
         /// from the clock (CompanyPlans.NewSeqBase), so within one session it only climbs.</summary>
         private static readonly HashSet<string> _planEditSeen = new HashSet<string>(StringComparer.Ordinal);
+        private static readonly HashSet<string> _bookingSeen = new HashSet<string>(StringComparer.Ordinal);   // furniture/food booking ids already routed
 
         internal static void ResetPlanEditSeen() { lock (_planEditSeen) _planEditSeen.Clear(); }
 
@@ -11373,7 +11374,8 @@ namespace BigAmbitionsMP
                 // a shop down (ruling 34), whatever grant they hold.
                 bool w4 = p.Op == "mergercontract" || p.Op == "mergersellall" || p.Op == "mergerplan"
                        || p.Op == "mergerplanedit" || p.Op == "mergerterminate" || p.Op == "mergershutdown"
-                       || p.Op == "mergercampaign";   // H-MERGERHIRE-1: the recruitment booking rides the same gate
+                       || p.Op == "mergercampaign"    // H-MERGERHIRE-1: the recruitment booking rides the same gate
+                       || p.Op == "mergerfurniture" || p.Op == "mergerfood";   // furniture and food deliveries for a partner's shop
                 if (w4 && !weMember)
                 { Plugin.Logger.LogWarning($"[Merger] {p.Op} by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
                 // 4c part 2a (E4): the host SERIALISES plan edits per plan id. A second leg carrying a
@@ -11398,6 +11400,27 @@ namespace BigAmbitionsMP
                     if (seen)
                     { Plugin.Logger.LogInfo($"[Merger] plan edit {p.Family} {p.PlanOp} ({p.PlanId}, seq {p.EditSeq}) from '{senderPid}' already routed - dropped."); return; }
                 }
+                // Furniture and food bookings carry a fresh id minted at the dialog's commit. A leg whose id was
+                // already routed is a resend (a second press, a reconnect) and is dropped here, so one booking can
+                // reach its runner only once - the game itself has no duplicate test for these deliveries.
+                if (p.Op == "mergerfurniture" || p.Op == "mergerfood")
+                {
+                    if (string.IsNullOrEmpty(p.BookingId))
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] {p.Op} REFUSED for '{p.AddressKey}': the leg carried no booking id.");
+                        SharedShopWorkTabs.SendRoutedRefusalTo(senderPid, p.AddressKey, "noid");
+                        return;
+                    }
+                    string bkey = p.Op + "|" + p.BookingId + "|" + senderPid;
+                    bool bseen;
+                    lock (_bookingSeen)
+                    {
+                        if (_bookingSeen.Count > 4000) _bookingSeen.Clear();   // a session-long cap, applied before the add
+                        bseen = !_bookingSeen.Add(bkey);
+                    }
+                    if (bseen)
+                    { Plugin.Logger.LogInfo($"[Merger] {p.Op} booking {p.BookingId} from '{senderPid}' already routed - dropped."); return; }
+                }
                 if (w4 && p.Op == "mergerplan")
                 {
                     if (p.Plan == null) { Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED for '{p.AddressKey}': the payload carried no plan."); return; }
@@ -11411,13 +11434,20 @@ namespace BigAmbitionsMP
                 // game lets its owner shut down, so both were being dropped here. These two act on the
                 // TENANCY and on the BUSINESS itself, not on a work tab, and every other gate still holds:
                 // the membership check above, RouteTargetFor below, and the runner's own refusals.
-                bool skipAddrGate = p.Op == "mergerplan" || p.Op == "mergerterminate" || p.Op == "mergershutdown";
+                // F2: a furniture/food delivery may go to ANY rented building - the game's destination picker lists
+                // empty premises and warehouses too - so the two booking ops skip it as well; the runner
+                // (SharedShopWorkTabs.ApplyRoutedServiceBooking) still refuses a building that is not rented there.
+                bool skipAddrGate = p.Op == "mergerplan" || p.Op == "mergerterminate" || p.Op == "mergershutdown"
+                                 || p.Op == "mergerfurniture" || p.Op == "mergerfood";
                 if (!skipAddrGate && !SharedWorkAddressAllowed(p.AddressKey, weMember))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                 string wtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
                 if (wtarget.Length == 0)
                 {
                     if (w4) Plugin.Logger.LogWarning($"[Merger] {p.Op} REFUSED for '{p.AddressKey}': nobody is running that building (RouteTargetFor).");
+                    // The sender is waiting on an answer for a routed commitment: tell it, so its pending
+                    // request clears. The game has no notice for this, so the sender only logs it.
+                    if (SharedShopWorkTabs.ArmsRoutedRefusal(p.Op)) SharedShopWorkTabs.SendRoutedRefusalTo(senderPid, p.AddressKey, "offline");
                     return;
                 }
                 // H-MERGERHIRE-1: a recruitment campaign is charged to the shop's owner and ticks in that owner's
@@ -11431,7 +11461,20 @@ namespace BigAmbitionsMP
                     SharedShopWorkTabs.SendRoutedRefusalTo(senderPid, p.AddressKey, "away");
                     return;
                 }
-                if (wtarget == senderPid) return;
+                if (wtarget == senderPid)
+                {
+                    // The sender RUNS this building: it is the stand-in for the absent owner, booking on the
+                    // owner's shop it simulates. Its own dialog routed the booking (the shop is flipped there), so
+                    // the commitment is applied on the sender itself - where the runner's checks run and the
+                    // booking is tagged to the absent owner, so it goes home with them.
+                    if (SharedShopWorkTabs.SelfRoutableOp(p.Op))
+                    {
+                        Plugin.Logger.LogInfo($"[Merger] {p.Op} for '{p.AddressKey}' applied on its sender '{senderPid}', the stand-in that runs it.");
+                        if (senderPid == MPConfig.PlayerId) SharedShopWorkTabs.OwnerApplyEdit(p);
+                        else SendToPid(senderPid, MessageEnvelope.Create(MessageType.SharedWorkEdit, "host", p));
+                    }
+                    return;
+                }
                 if (w4)
                 {
                     if (p.Op == "mergerterminate")     Plugin.Logger.LogInfo($"[Merger] terminate-rental routed to '{wtarget}' for '{p.AddressKey}'");
@@ -11439,6 +11482,8 @@ namespace BigAmbitionsMP
                     else if (p.Op == "mergercontract") Plugin.Logger.LogInfo($"[Merger] contract create routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergersellall")  Plugin.Logger.LogInfo($"[Merger] sell-all routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergercampaign") Plugin.Logger.LogInfo($"[Merger] campaign booking routed to '{wtarget}' for '{p.AddressKey}' ({p.SkillName}, {p.IntValue} candidates, {p.Days} days)");
+                    else if (p.Op == "mergerfurniture" || p.Op == "mergerfood")
+                        Plugin.Logger.LogInfo($"[Merger] {p.Op} booking routed to '{wtarget}' for '{p.AddressKey}' (booking {p.BookingId}, {p.Lines?.Count ?? 0} line(s), day {p.SlotDay} {p.Hour}h)");
                     else if (p.Op == "mergerplanedit") Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' ({p.Family} {p.PlanOp}, plan {p.PlanId}, seq {p.EditSeq})");
                     else                               Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' (plan {p.Plan?.Id})");
                 }

@@ -3420,6 +3420,11 @@ namespace BigAmbitionsMP
                     return $"OK campaign booking routed for '{kshop}' (agency '{kagency}', {kargs[4]}, {kcand} candidates, {kdays} days)";
                 }
 
+                case "mergerfurniture": return DevServiceBooking(arg, food: false);
+                case "mergerfood":      return DevServiceBooking(arg, food: true);
+                case "servicelists":    return DevServiceLists(arg);
+                case "pickercheck":     return DevPickerCheck(arg);
+
                 case "campaigns":
                 {
                     // H-MERGERHIRE-1 - TEST LEVER. Read-only: this machine's own recruitment campaigns, the list
@@ -8259,6 +8264,183 @@ namespace BigAmbitionsMP
                 ConfirmCustomizerArmed = false;
                 Plugin.Logger.LogWarning($"[TestDrive] charconfirm: {ex.Message} — disarmed.");
             }
+        }
+
+        /// <summary>TEST LEVERS `mergerfurniture` / `mergerfood`: send exactly the leg FurnitureStoreManagerDialog /
+        /// FoodDeliveryDialog send for a merger-flipped partner shop (MPPatches Patch_FurnitureDeliveryCreate_MergerGate /
+        /// Patch_FoodDeliveryCreate_MergerGate), WITHOUT the dialog's own checks, so the runner's checks are what
+        /// a run exercises. Address keys are two tokens each, like every other lever.
+        ///   mergerfurniture &lt;shop num&gt; &lt;street&gt; &lt;store num&gt; &lt;street&gt; &lt;item|auto&gt; &lt;qty|min&gt; &lt;dayOffset|next&gt; &lt;hour|-&gt; [bookingId]
+        ///   mergerfood      &lt;shop num&gt; &lt;street&gt; &lt;item|auto&gt; &lt;qty|min&gt; &lt;dayOffset|next&gt; &lt;hour|-&gt; [bookingId]
+        /// `auto` = the dearest item of the catalogue as this machine sees it; `min` = the fewest units that reach the
+        /// game's minimum order; `next` = this machine's own first delivery slot (the dialog's first entry). A
+        /// bookingId repeats an earlier booking (the resend case).</summary>
+        private static string DevServiceBooking(string arg, bool food)
+        {
+            string verb = food ? "mergerfood" : "mergerfurniture";
+            string usage = food
+                ? "ERR usage: mergerfood <num> <street> <item|auto> <qty|min> <dayOffset|next> <hour|-> [bookingId]"
+                : "ERR usage: mergerfurniture <num> <street> <num> <street> <item|auto> <qty|min> <dayOffset|next> <hour|-> [bookingId]";
+            try
+            {
+                var a = (arg ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                int i = food ? 2 : 4;
+                if (a.Length < i + 4) return usage;
+                string shop = a[0] + " " + a[1];
+                string store = food ? "" : a[2] + " " + a[3];
+                string item = a[i], qtyS = a[i + 1], dayS = a[i + 2], hourS = a[i + 3];
+                string id = a.Length > i + 4 ? a[i + 4] : Guid.NewGuid().ToString("N");
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                if (!MergerFlip.IsFlipped(shop) && !MergerAbsence.SimulatesHere(shop)) return $"ERR '{shop}' is not a merger-flipped company building here";
+
+                System.Collections.Generic.List<string> cat;
+                float mult, fee, minimum;
+                int max;
+                if (food)
+                {
+                    var s = SharedShopWorkTabs.FoodSettings;
+                    if (s == null) return "ERR no food delivery settings";
+                    cat = new System.Collections.Generic.List<string>(BigAmbitions.Items.ItemsGetter.GetAllItemNamesByTag(BigAmbitions.Tags.TagRef.Itemtag.fooddelivery));
+                    mult = s.ItemPriceMultiplier; fee = s.DeliveryFee; minimum = s.MinimumOrderCost; max = s.MaxItemsPerOrder;
+                }
+                else
+                {
+                    if (MergerAbsence.AddressOfKey(store) == null) return $"ERR unknown store '{store}'";
+                    cat = SharedShopWorkTabs.FurnitureCatalogue(store, out mult);
+                    fee = SharedShopWorkTabs.FurnitureFee; minimum = SharedShopWorkTabs.FurnitureMinimum; max = SharedShopWorkTabs.FurnitureMaxItems;
+                }
+                if (item == "auto")
+                {
+                    float best = -1f; item = "";
+                    foreach (var n in cat) { float pr = global::ItemHelper.GetDefaultMarketPrice(n) * mult; if (pr > best) { best = pr; item = n; } }
+                    if (item.Length == 0) return "ERR the catalogue is empty here";
+                }
+                float price = global::ItemHelper.GetDefaultMarketPrice(item) * mult;
+                int qty;
+                if (qtyS == "min")
+                {
+                    qty = price > 0f ? (int)Math.Ceiling((minimum - fee) / price) : 1;
+                    if (qty < 1) qty = 1;
+                    if (qty > max) qty = max;
+                }
+                else if (!int.TryParse(qtyS, out qty)) return usage;
+                int day, hour;
+                if (dayS == "next")
+                {
+                    var slots = food ? SharedShopWorkTabs.FoodSlots() : SharedShopWorkTabs.FurnitureSlots();
+                    if (slots.Count == 0) return "ERR no delivery slot here";
+                    day = slots[0].day - global::TimeHelper.CurrentDay; hour = slots[0].hour;
+                }
+                else if (!int.TryParse(dayS, out day) || !int.TryParse(hourS, out hour)) return usage;
+
+                SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                {
+                    PlayerId = MPConfig.PlayerId, AddressKey = shop, Op = verb, AgencyKey = store, BookingId = id,
+                    Lines = new System.Collections.Generic.List<PwDeliveryLine> { new PwDeliveryLine { ItemName = item, Amount = qty, PricePerUnit = price } },
+                    SlotDay = global::TimeHelper.CurrentDay + day, Hour = hour,   // F7: the leg carries the ABSOLUTE day
+                });
+                return $"OK {verb} routed for '{shop}' (store '{store}', {item} x{qty} at {price:0.##}, day+{day} {hour}h, id {id})";
+            }
+            catch (Exception ex) { return $"ERR {verb}: {ex.Message}"; }
+        }
+
+        /// <summary>TEST LEVER `servicelists [&lt;num&gt; &lt;street&gt;]` (read-only): this machine's furniture and food delivery
+        /// lists, optionally for one destination, each row tagged `own` or `standin:&lt;absent owner&gt;`, plus the cargo
+        /// count at that destination's delivery spot. `servicelists stores [&lt;num&gt; &lt;street&gt;]`: the furniture stores
+        /// whose catalogue is not empty here (and, with a shop, that deliver to it), as key|catalogue size.</summary>
+        private static string DevServiceLists(string arg)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return "ERR no game instance";
+                var a = (arg ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length >= 1 && a[0] == "stores")
+                {
+                    global::BuildingRegistration? shopReg = a.Length >= 3 ? GameStatePatcher.FindRegistration(a[1] + " " + a[2]) : null;
+                    var sbS = new StringBuilder();
+                    int ns = 0;
+                    foreach (var r in gi.BuildingRegistrations)
+                    {
+                        if (r == null) continue;
+                        bool isStore = r.businessTypeName == "ba:businesstype_furniturestore";
+                        if (!isStore)
+                        {
+                            var b = global::Helpers.BuildingHelper.GetBuilding(r.Address);   // null while the building is not streamed in
+                            isStore = b != null && b.SpecialService != null && b.SpecialService.settings is FurnitureStoreSettings;
+                        }
+                        if (!isStore) continue;
+                        string k = GameStateReader.AddressKey(r);
+                        if (shopReg != null && !SharedShopWorkTabs.FurnitureAllowsDestination(k, shopReg)) continue;
+                        var cat = SharedShopWorkTabs.FurnitureCatalogue(k, out _);
+                        if (cat.Count == 0) continue;
+                        sbS.Append(ns++ == 0 ? "" : ";").Append(k).Append('|').Append(cat.Count);
+                    }
+                    return $"OK servicelists stores={ns} [{sbS}]";
+                }
+                string filter = a.Length >= 2 ? a[0] + " " + a[1] : "";
+                string Items(System.Collections.Generic.List<Entities.FurnitureDeliveryItem> items)
+                {
+                    var s = new StringBuilder();
+                    if (items != null) foreach (var it in items) if (it != null) s.Append(s.Length == 0 ? "" : ",").Append(it.itemName).Append('x').Append(it.amount);
+                    return s.ToString();
+                }
+                string Tag(object c) { string o = MergerAbsence.InstalledOwnerOf(c); return o.Length == 0 ? "own" : "standin:" + o; }
+                var sbF = new StringBuilder(); int nf = 0;
+                if (gi.FurnitureDeliveryContracts != null)
+                    foreach (var c in gi.FurnitureDeliveryContracts)
+                    {
+                        if (c == null) continue;
+                        string to = GameStateReader.AddressKey(c.toAddress);
+                        if (filter.Length > 0 && to != filter) continue;
+                        sbF.Append(nf++ == 0 ? "" : ";").Append(to).Append('|').Append(c.dayOfDelivery).Append('|').Append(c.hourOfDelivery)
+                           .Append('|').Append(Tag(c)).Append('|').Append(Items(c.itemsToDeliver));
+                    }
+                var sbD = new StringBuilder(); int nd = 0;
+                if (gi.FoodDeliveryContracts != null)
+                    foreach (var c in gi.FoodDeliveryContracts)
+                    {
+                        if (c == null) continue;
+                        string to = GameStateReader.AddressKey(c.toAddress);
+                        if (filter.Length > 0 && to != filter) continue;
+                        sbD.Append(nd++ == 0 ? "" : ";").Append(to).Append('|').Append(c.dayOfDelivery).Append('|').Append(c.hourOfDelivery)
+                           .Append('|').Append(Tag(c)).Append('|').Append(Items(c.itemsToDeliver));
+                    }
+                int spot = -1;
+                if (filter.Length > 0)
+                {
+                    try
+                    {
+                        var reg = GameStatePatcher.FindRegistration(filter);
+                        var inst = reg == null ? null : global::Buildings.BuildingTypes.Special.FurnitureStore.FurnitureDeliveryHelper.GetDeliverySpotInstance(reg);
+                        if (inst != null && inst.cargoInstances != null) spot = inst.cargoInstances.Count;
+                    }
+                    catch { spot = -2; }
+                }
+                return $"OK servicelists day={(global::TimeHelper.CurrentDay)} hour={(global::TimeHelper.CurrentHour)} furniture={nf} [{sbF}] food={nd} [{sbD}] spot={spot}";
+            }
+            catch (Exception ex) { return $"ERR servicelists: {ex.Message}"; }
+        }
+
+        /// <summary>TEST LEVER `pickercheck furniture|food &lt;num&gt; &lt;street&gt;` (read-only): would the delivery dialog's
+        /// destination picker offer this building here? listed = among this machine's rented buildings (the game's
+        /// own source list); offered = also passes the merger filter (AccessGates.DeliveryPickerOffers). Both
+        /// dialogs share that filter; furniture adds only the store's own building-type filter.</summary>
+        private static string DevPickerCheck(string arg)
+        {
+            try
+            {
+                var a = (arg ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 3 || (a[0] != "furniture" && a[0] != "food")) return "ERR usage: pickercheck furniture|food <num> <street>";
+                string key = a[1] + " " + a[2];
+                var reg = GameStatePatcher.FindRegistration(key);
+                if (reg == null) return $"ERR no registration '{key}'";
+                bool listed = false;
+                foreach (var r in global::Helpers.BuildingHelper.GetPlayerBuildingRegistrations()) if (ReferenceEquals(r, reg)) { listed = true; break; }
+                bool offered = listed && AccessGates.DeliveryPickerOffers(reg);
+                return $"OK pickercheck {a[0]} key='{key}' listed={listed} offered={offered}";
+            }
+            catch (Exception ex) { return $"ERR pickercheck: {ex.Message}"; }
         }
     }
     /// <summary>DEV lever state for `tillhold` (H-REFRESHSEAT-1 review pass 2).</summary>

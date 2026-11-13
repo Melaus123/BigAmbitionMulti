@@ -498,6 +498,8 @@ namespace BigAmbitionsMP
             if (string.IsNullOrEmpty(toPid) || string.IsNullOrEmpty(code)) return;
             var reply = new SharedWorkInfoPayload
             { PlayerId = MPConfig.PlayerId, Action = "snapshot", Tab = "mergerack", AddressKey = addr, ToPid = toPid, AckCode = code };
+            // A stand-in's own booking is applied on the stand-in itself: the refusal is for this machine.
+            if (toPid == MPConfig.PlayerId) { OnRoutedRefusal(reply); return; }
             if (MPServer.IsRunning) MPServer.HostRouteSharedWorkInfo(reply, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkInfo, MPConfig.PlayerId, reply));
         }
@@ -511,7 +513,11 @@ namespace BigAmbitionsMP
         /// nothing at all; the game's OWN notification for that exact reason is raised here
         /// (WholesaleStoreManagerDialog.cs:72 and :85). Only a refusal for a creation THIS machine routed in
         /// the last few seconds is shown. Codes: "dupe"/"shelf" (contract), "funds" (campaign) raise the game's own
-        /// notice; "away"/"ranges" (campaign) have none and are log-only.</summary>
+        /// notice; "away"/"ranges" (campaign) have none and are log-only. Furniture and food deliveries:
+        /// "furnmin"/"foodmin"/"slot"/"noitems" raise the game's own booking notice; "norent"/"store"/"dest"/
+        /// "catalogue"/"max"/"noid" have none: the mod's own short notice (decision 22) is shown. "offline" (any
+        /// routed commitment whose building nobody runs) shows that notice only for a furniture/food booking,
+        /// otherwise it is log-only.</summary>
         private static void OnRoutedRefusal(SharedWorkInfoPayload p)
         {
             try
@@ -520,6 +526,9 @@ namespace BigAmbitionsMP
                     || Time.unscaledTime - _contractRouteAt > SellQuoteWindow)
                 { Plugin.Logger.LogInfo($"[Merger] routed refusal '{p.AckCode}' for '{p.AddressKey}' matches no request of mine - ignored."); return; }
                 _contractRouteAddr = "";
+                bool wasBooking = _routeBookingId.Length > 0;   // a furniture/food delivery booking (decision 22)
+                if (_routeBookingId.Length > 0) LastRefusedBookingId = _routeBookingId;   // F8
+                _routeBookingId = "";
                 if (p.AckCode == "dupe")
                     UI.Notification.Notifications.ShowError("wholesalestoremanagerdialog_notification_already_have_contract",
                                                            "wholesalestoremanagerdialog_notification_already_have_contract");
@@ -553,6 +562,37 @@ namespace BigAmbitionsMP
                                            + "cannot hold a campaign. The game has no notice for this, so nothing is shown.");
                     return;
                 }
+                // Furniture and food deliveries: one of the game's own booking checks failed on the runner. The
+                // notice is the game's own, with its own data (FurnitureStoreManagerDialog.OnDeliveryContractSettingsSet,
+                // FoodDeliveryDialog.ValidateOrder).
+                else if (p.AckCode == "furnmin")
+                {
+                    var nd = new Dictionary<string, string> { { "minimumCost", global::Extensions.GenericExtensions.ToShortCurrencyFormat(FurnitureMinimum) } };
+                    UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "dialog_furniture_delivery_minimum_price_not_reached",
+                                                       nd, 4f, "dialog_furniture_delivery_minimum_price_not_reached");
+                }
+                else if (p.AckCode == "foodmin")
+                {
+                    var fs = FoodSettings;
+                    var nd = new Dictionary<string, string> { { "minimumOrderCost", global::Extensions.GenericExtensions.ToShortCurrencyFormat(fs != null ? fs.MinimumOrderCost : 0f) } };
+                    UI.Notification.Notifications.Show(UI.Notification.NotificationType.Error, "dialog_food_delivery_minimum_not_reached", nd, 4f,
+                                                       "dialog_food_delivery_minimum_not_reached", null, notificationSound: true, trackOnSaveGame: false);
+                }
+                else if (p.AckCode == "slot")
+                    UI.Notification.Notifications.ShowError("common_notification_select_delivery_time", "common_notification_select_delivery_time");
+                else if (p.AckCode == "noitems")
+                    UI.Notification.Notifications.ShowError("dialog_furniture_delivery_select_items_notification", "dialog_furniture_delivery_select_items_notification");
+                else if (p.AckCode == "offline" || p.AckCode == "norent" || p.AckCode == "store" || p.AckCode == "dest"
+                      || p.AckCode == "catalogue" || p.AckCode == "max" || p.AckCode == "noid")
+                {
+                    Plugin.Logger.LogWarning($"[Merger] routed booking for '{p.AddressKey}' was refused ('{p.AckCode}'). The game has no notice for this; the decision-22 toast is shown for a delivery booking.");
+                    // Decision 22 (2026-11-12): owner-approved wording. Shown once: the route address was cleared above,
+                    // so a repeat refusal is ignored, and F8 (LastRefusedBookingId) keeps the booking patches silent.
+                    // "offline" also answers contract/campaign routes, so it is shown only for a delivery booking.
+                    if (p.AckCode != "offline" || wasBooking)
+                        PassengerHud.Toast("Your partner's shop couldn't take that order, so it wasn't placed.");
+                    return;
+                }
                 else { Plugin.Logger.LogWarning($"[Merger] routed refusal for '{p.AddressKey}': unknown code '{p.AckCode}' - nothing shown."); return; }
                 Plugin.Logger.LogInfo($"[Merger] routed creation for '{p.AddressKey}' was refused on its runner ('{p.AckCode}') - the game's own notice raised here.");
             }
@@ -560,6 +600,11 @@ namespace BigAmbitionsMP
         }
 
         private static string _contractRouteAddr = "";   // the last contract creation this machine routed
+        private static string _routeBookingId = "";      // F8: that request's furniture/food booking id ("" for other ops)
+        /// <summary>F8: the booking id of the last routed furniture/food booking a refusal came back for. When this
+        /// machine is the host AND the stand-in, the booking is applied or refused synchronously inside SendEdit, so
+        /// the booking patches read this right after SendEdit and show nothing further.</summary>
+        internal static string LastRefusedBookingId = "";
         private static float  _contractRouteAt;
 
         /// <summary>WAVE 4 (V2b) — WAREHOUSE SELL-ALL ROUTE. `private void OnConfirmSellAllInventory(float
@@ -2145,8 +2190,9 @@ namespace BigAmbitionsMP
             // itself notifies about. Remember which one we sent, so only a refusal of OUR request shows.
             // H-MERGERHIRE-1: a routed CAMPAIGN BOOKING can be refused the same way (no funds on the owner, or
             // the owner turned out to be away), so it arms the same one-shot window.
-            if (p != null && (p.Op == "mergercontract" || p.Op == "mergercampaign"))
-            { _contractRouteAddr = p.AddressKey ?? ""; _contractRouteAt = Time.unscaledTime; }
+            // Furniture and food delivery bookings arm it too (ArmsRoutedRefusal).
+            if (p != null && ArmsRoutedRefusal(p.Op))
+            { _contractRouteAddr = p.AddressKey ?? ""; _contractRouteAt = Time.unscaledTime; _routeBookingId = p.BookingId ?? ""; }
             if (MPServer.IsRunning) MPServer.HostRouteSharedWorkEdit(p, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedWorkEdit, MPConfig.PlayerId, p));
         }
@@ -4525,6 +4571,198 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] contract create REFUSED for '{p.AddressKey}': {ex.Message}"); }
         }
 
+        // ── Furniture and food deliveries booked for a partner's shop (ops "mergerfurniture" / "mergerfood"). ──
+        // The member's dialog adds and charges nothing (MPPatches Patch_FurnitureDeliveryCreate_MergerGate /
+        // Patch_FoodDeliveryCreate_MergerGate); the machine that runs the shop books it here, as the game's own
+        // commit would, from its OWN catalogue, prices and clock. The game pays on delivery, from this machine's
+        // money (FurnitureDeliveryHelper.PayDelivery / FoodDeliveryHelper.TryPayDelivery).
+
+        internal const float FurnitureMinimum  = 2000f;   // FurnitureStoreManagerDialog.MinimumPurchaseCost
+        internal const float FurnitureFee      = 250f;    // FurnitureDeliveryContractSettings.deliveryFee
+        internal const int   FurnitureMaxItems = 100;     // FurnitureDeliveryContractSettings.ContractMaxAmount
+        private static readonly int[] FurnitureHours = { 10, 14 };   // FurnitureDeliveryContractSettings.deliveryHours
+
+        /// <summary>The game's food delivery settings (GlobalReferences.foodDeliverySettings); null when not loaded.</summary>
+        internal static global::Buildings.BuildingTypes.Special.FoodDelivery.FoodDeliverySettings? FoodSettings
+        {
+            get { try { return InstanceBehavior<GlobalReferences>.Instance?.foodDeliverySettings; } catch { return null; } }
+        }
+
+        /// <summary>The ops a member arms its one-shot refusal window for (SendEdit) - the routed commitments
+        /// whose refusal comes back as a code (OnRoutedRefusal).</summary>
+        internal static bool ArmsRoutedRefusal(string op)
+            => op == "mergercontract" || op == "mergercampaign" || op == "mergerfurniture" || op == "mergerfood";
+
+        /// <summary>The routed commitments a STAND-IN may make on the absent owner's building it runs: the host sends
+        /// them back to the sender, which applies them and tags them to the owner (StandInOwnerFor).</summary>
+        internal static bool SelfRoutableOp(string op)
+            => op == "mergercontract" || op == "mergerfurniture" || op == "mergerfood";
+
+        /// <summary>FurnitureDeliveryContractSettings.GenerateDeliverySlots, on THIS machine's clock.</summary>
+        internal static List<(int day, int hour)> FurnitureSlots()
+        {
+            var list = new List<(int day, int hour)>();
+            int day = global::TimeHelper.CurrentDay, hour = global::TimeHelper.CurrentHour;
+            if (hour < 12)
+            {
+                if (hour < 8) list.Add((day, FurnitureHours[0]));
+                list.Add((day, FurnitureHours[1]));
+            }
+            for (int i = 1; i < 3; i++)
+                foreach (int h in FurnitureHours) list.Add((day + i, h));
+            return list;
+        }
+
+        /// <summary>FoodDeliveryContractSettings.GenerateDeliverySlots, on THIS machine's clock.</summary>
+        internal static List<(int day, int hour)> FoodSlots()
+        {
+            var s = FoodSettings;
+            if (s == null) return new List<(int day, int hour)>();
+            return global::TimeHelper.GetUpcomingHourSlots(s.MinutesUntilEarliestDelivery, s.DeliverySlotsToShow);
+        }
+
+        /// <summary>FurnitureDeliveryContractSettings.GetItemsForSale for the store at that key: a contact-driven
+        /// catalogue at price multiplier 1, else the store's own list at its price index.</summary>
+        internal static List<string> FurnitureCatalogue(string storeKey, out float multiplier)
+        {
+            multiplier = 1f;
+            var store = MergerAbsence.AddressOfKey(storeKey ?? "");
+            if (store == null) return new List<string>();
+            if (global::Services.ContractItemsForSaleService.TryGetContactIdForAddress(store, out var cid) && !string.IsNullOrEmpty(cid)
+                && global::Services.ContractItemsForSaleService.TryGetItemsForContact(cid, out var names) && names != null)
+                return new List<string>(names);
+            var sreg = BuildingHelper.GetBuildingRegistration(store);
+            if (sreg == null) return new List<string>();
+            multiplier = (float)sreg.GetPriceIndex() / 100f;
+            return sreg.GetListOfItemsForSale() ?? new List<string>();
+        }
+
+        /// <summary>FurnitureDeliveryContractSettings.GetDeliveryDestinations' own filter: a store may restrict
+        /// which building types it delivers to (FurnitureStoreSettings.allowedDeliveryBuildingTypes).</summary>
+        internal static bool FurnitureAllowsDestination(string storeKey, BuildingRegistration reg)
+        {
+            var store = MergerAbsence.AddressOfKey(storeKey ?? "");
+            if (store == null || reg == null) return false;
+            var st = BuildingHelper.GetBuilding(store)?.SpecialService?.settings as FurnitureStoreSettings;
+            if (st == null || st.allowedDeliveryBuildingTypes == null || st.allowedDeliveryBuildingTypes.Count == 0) return true;
+            return st.allowedDeliveryBuildingTypes.Contains(reg.GetBuildingType());
+        }
+
+        /// <summary>RUNNER, MAIN THREAD: a merged co-member (or this machine, as the stand-in) booked a furniture or
+        /// food delivery for a shop run HERE. Re-runs the game's own booking: the slot must be one of this
+        /// machine's own delivery slots, every item must be in this machine's catalogue and is priced from it, the
+        /// store's destination filter and the item cap hold, and the game's minimum order is checked on this
+        /// machine's figures. The contract is added to the game's own list (FoodDeliveryHelper.GetContracts for
+        /// food). Nothing is charged now: the game charges on delivery. The game has no duplicate test for these
+        /// bookings; a resend is dropped at the host by its booking id. On a stand-in the booking is tagged to
+        /// the absent owner, so the absence hand-over takes it home with them.</summary>
+        private static void ApplyRoutedServiceBooking(BuildingRegistration? reg, SharedWorkEditPayload p, bool food)
+        {
+            string what = food ? "food delivery" : "furniture delivery";
+            void Refuse(string code, string why)
+            {
+                Plugin.Logger.LogWarning($"[Merger] {what} booking REFUSED for '{p.AddressKey}' (booking {p.BookingId}): {why}");
+                SendRoutedRefusal(p.PlayerId, p.AddressKey, code);
+            }
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || reg == null) { Refuse("norent", "no business registration here."); return; }
+                // The game's destination picker lists rented buildings only (BuildingHelper.GetPlayerBuildingRegistrations).
+                if (!reg.RentedByPlayer) { Refuse("norent", "that building is not rented here."); return; }
+
+                var lines = p.Lines;
+                int total = 0;
+                if (lines != null) foreach (var ln in lines) if (ln != null && ln.Amount > 0) total += ln.Amount;
+                if (lines == null || total <= 0) { Refuse("noitems", "the leg carried no items."); return; }
+                if (p.Hour < 0 || p.SlotDay < 0) { Refuse("slot", "the leg carried no delivery slot (day or hour missing)."); return; }
+
+                // F7: the slot's ABSOLUTE day, as the member's dialog listed it. Accepted only when it is one of THIS
+                // machine's own slots now, so a leg that crosses midnight is refused instead of landing a day late.
+                int day = p.SlotDay, hour = p.Hour;
+                var slots = food ? FoodSlots() : FurnitureSlots();
+                if (!slots.Contains((day, hour)))
+                {
+                    Refuse("slot", $"day {day} {hour}h is not one of my delivery slots now (today is day {(global::TimeHelper.CurrentDay)}, "
+                                 + $"{(global::TimeHelper.CurrentHour)}h).");
+                    return;
+                }
+
+                List<string> catalogue;
+                float mult;
+                int max;
+                string storeKey = p.AgencyKey ?? "";
+                var fs = FoodSettings;
+                if (food)
+                {
+                    if (fs == null) { Refuse("catalogue", "the game's food delivery settings are not loaded here."); return; }
+                    catalogue = new List<string>(BigAmbitions.Items.ItemsGetter.GetAllItemNamesByTag(BigAmbitions.Tags.TagRef.Itemtag.fooddelivery));
+                    mult = fs.ItemPriceMultiplier;
+                    max = fs.MaxItemsPerOrder;
+                }
+                else
+                {
+                    if (MergerAbsence.AddressOfKey(storeKey) == null) { Refuse("store", $"unknown furniture store '{storeKey}'."); return; }
+                    if (!FurnitureAllowsDestination(storeKey, reg)) { Refuse("dest", $"store '{storeKey}' does not deliver to this kind of building."); return; }
+                    catalogue = FurnitureCatalogue(storeKey, out mult);
+                    max = FurnitureMaxItems;
+                }
+                if (total > max) { Refuse("max", $"{total} items, the most one order takes is {max}."); return; }
+
+                var items = new List<Entities.FurnitureDeliveryItem>(lines.Count);
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var ln in lines)
+                {
+                    if (ln == null || ln.Amount <= 0) continue;
+                    string name = ln.ItemName ?? "";
+                    if (!catalogue.Contains(name) || !seen.Add(name)) { Refuse("catalogue", $"'{name}' is not (once) in my catalogue."); return; }
+                    float price = ItemHelper.GetDefaultMarketPrice(name) * mult;   // DeliveryContractSettingsBase.AddItemToList
+                    if (Math.Abs(price - ln.PricePerUnit) > 0.005f)
+                        Plugin.Logger.LogInfo($"[Merger] {what} booking for '{p.AddressKey}': '{name}' was {ln.PricePerUnit} on the member, {price} here - mine is used.");
+                    items.Add(new Entities.FurnitureDeliveryItem { itemName = name, amount = ln.Amount, pricePerUnit = price });
+                }
+
+                object contract;
+                float totalPrice;
+                if (food)
+                {
+                    var fc = new Entities.FoodDeliveryContract
+                    {
+                        toAddress = reg.Address, dayOfDelivery = day, hourOfDelivery = hour,
+                        deliveryFee = fs!.DeliveryFee, itemsToDeliver = items,
+                    };
+                    totalPrice = fc.TotalDeliveryPrice;
+                    if (fs.MinimumOrderCost > 0f && totalPrice < fs.MinimumOrderCost)
+                    { Refuse("foodmin", $"total {totalPrice} is under the game's minimum order {fs.MinimumOrderCost}."); return; }
+                    global::Buildings.BuildingTypes.Special.FoodDelivery.FoodDeliveryHelper.GetContracts().Add(fc);
+                    contract = fc;
+                }
+                else
+                {
+                    var fu = new Entities.FurnitureDeliveryContract
+                    {
+                        fromAddress = MergerAbsence.AddressOfKey(storeKey), toAddress = reg.Address,
+                        dayOfDelivery = day, itemsToDeliver = items, hourOfDelivery = hour, deliveryFee = FurnitureFee,
+                    };
+                    totalPrice = fu.TotalDeliveryPrice;
+                    if (totalPrice < FurnitureMinimum)
+                    { Refuse("furnmin", $"total {totalPrice} is under the game's minimum order {FurnitureMinimum}."); return; }
+                    gi.FurnitureDeliveryContracts.Add(fu);
+                    contract = fu;
+                }
+
+                string standIn = StandInOwnerFor(p.AddressKey, reg);
+                string listName = food ? "FoodDeliveryContracts" : "FurnitureDeliveryContracts";
+                if (standIn.Length > 0 && MergerAbsence.RegisterInstalledFor(standIn, listName, contract))
+                    Plugin.Logger.LogInfo($"[Merger] {what} booking for '{p.AddressKey}' tagged to the absent owner '{standIn}' - it leaves with them.");
+                SaveGameManager.MarkChange();
+                PaperworkSync.MarkDirty();
+                Plugin.Logger.LogInfo($"[Merger] {what} booking applied for '{p.AddressKey}' from '{p.PlayerId}' (booking {p.BookingId}, "
+                                    + $"{total} item(s), slot day {day} {hour}h, total {totalPrice}); the game charges it on delivery.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] {what} booking REFUSED for '{p.AddressKey}': {ex.Message}"); }
+        }
+
         private static float _candMin, _candMax, _dayMin, _dayMax;   // the native sliders' own ranges, once found
         private static bool  _sliderRangesRead;
 
@@ -4956,7 +5194,11 @@ namespace BigAmbitionsMP
                 // address is the plan's headquarters, which this machine by definition does not run).
                 if (p.Op == "mergerplanedit" && p.PlanOp == "refused")
                 { CompanyPlans.ReceiveRefusal(p.Family ?? "", p.PlanId ?? "", p.StrValue ?? ""); return; }
-                if (!GrantSync.IsGranted(GrantKind.Business, MPConfig.PlayerId, p.PlayerId))   // W3-2: the UNION the host gate now uses
+                // A stand-in's own booking on the absent owner's building it runs, sent back here by the host
+                // (MPServer.HostRouteSharedWorkEdit): my own commitment, so no grant is involved. The runs-here
+                // test below still decides.
+                bool selfRoute = p.PlayerId == MPConfig.PlayerId && SelfRoutableOp(p.Op);
+                if (!selfRoute && !GrantSync.IsGranted(GrantKind.Business, MPConfig.PlayerId, p.PlayerId))   // W3-2: the UNION the host gate now uses
                 {
                     if (_logged.Add("edit-nogrant|" + p.PlayerId))
                         Plugin.Logger.LogInfo($"{Tag} work edit from '{p.PlayerId}' but they hold no Business grant from me and are not a company member — ignored.");
@@ -4981,6 +5223,8 @@ namespace BigAmbitionsMP
                 if (p.Op == "mergercontract") { ApplyRoutedContractCreate(reg, p); return; }
                 if (p.Op == "mergersellall")  { ApplyRoutedSellAll(reg, p); return; }
                 if (p.Op == "mergercampaign") { ApplyRoutedCampaignCreate(reg, p); return; }   // H-MERGERHIRE-1
+                if (p.Op == "mergerfurniture") { ApplyRoutedServiceBooking(reg, p, food: false); return; }
+                if (p.Op == "mergerfood")      { ApplyRoutedServiceBooking(reg, p, food: true); return; }
                 if (p.Op == "mergerplan")     { ApplyRoutedPlanEdit(reg, p); return; }
                 // 4c part 2a: the four NON-logistics HQ families. Unlike "mergerplan" this is not a
                 // replace-by-id install - the runner applies ONE op onto its own real plan with the game's

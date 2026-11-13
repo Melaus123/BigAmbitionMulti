@@ -1916,6 +1916,37 @@ namespace BigAmbitionsMP
                         if (Install("movingServiceContracts", gi.movingServiceContracts as IList, item)) n++;
                     }
 
+                if (l.FurnitureDeliveryContracts != null)
+                    foreach (var c in l.FurnitureDeliveryContracts)
+                    {
+                        if (c == null || !Same(c.ToAddressKey, addr)) continue;   // toAddress
+                        var to = AddressOfKey(c.ToAddressKey);
+                        var from = AddressOfKey(c.FromAddressKey);
+                        if (to == null || from == null) continue;
+                        var item = new Entities.FurnitureDeliveryContract
+                        {
+                            fromAddress = from, toAddress = to, dayOfDelivery = c.Day, hourOfDelivery = c.Hour,
+                            deliveryFee = c.Fee, itemsToDeliver = DeliveryItems(c.Lines),
+                        };
+                        if (gi.FurnitureDeliveryContracts == null) gi.FurnitureDeliveryContracts = new List<Entities.FurnitureDeliveryContract>();
+                        if (Install("FurnitureDeliveryContracts", gi.FurnitureDeliveryContracts, item)) n++;
+                    }
+
+                if (l.FoodDeliveryContracts != null)
+                    foreach (var c in l.FoodDeliveryContracts)
+                    {
+                        if (c == null || !Same(c.ToAddressKey, addr)) continue;   // toAddress
+                        var to = AddressOfKey(c.ToAddressKey);
+                        if (to == null) continue;
+                        var item = new Entities.FoodDeliveryContract
+                        {
+                            toAddress = to, dayOfDelivery = c.Day, hourOfDelivery = c.Hour,
+                            deliveryFee = c.Fee, itemsToDeliver = DeliveryItems(c.Lines),
+                        };
+                        if (gi.FoodDeliveryContracts == null) gi.FoodDeliveryContracts = new List<Entities.FoodDeliveryContract>();
+                        if (Install("FoodDeliveryContracts", gi.FoodDeliveryContracts, item)) n++;
+                    }
+
                 if (l.DisabledLicensingFees != null)
                     foreach (var f in l.DisabledLicensingFees)
                     {
@@ -2070,6 +2101,35 @@ namespace BigAmbitionsMP
             catch { }
         }
 
+        /// <summary>The item rows of a furniture or food delivery, back in the game's own shape.</summary>
+        private static List<Entities.FurnitureDeliveryItem> DeliveryItems(List<PwDeliveryLine> lines)
+        {
+            var list = new List<Entities.FurnitureDeliveryItem>();
+            if (lines != null)
+                foreach (var ln in lines)
+                    if (ln != null) list.Add(new Entities.FurnitureDeliveryItem { itemName = ln.ItemName ?? "", amount = ln.Amount, pricePerUnit = ln.PricePerUnit });
+            return list;
+        }
+
+        /// <summary>Does the returned bundle carry this list at all? The furniture and food lists are NULL in a
+        /// bundle that predates them; the owner's own entries then stay rather than being replaced by "none".</summary>
+        private static PaperworkOwnerLists? ListsOf(BusinessPaperworkPayload bundle) => bundle?.Lists;
+
+        private static bool ListCarried(PaperworkOwnerLists? lists, string name)
+        {
+            if (name == "FurnitureDeliveryContracts") return lists?.FurnitureDeliveryContracts != null;
+            if (name == "FoodDeliveryContracts")      return lists?.FoodDeliveryContracts != null;
+            return true;
+        }
+
+        /// <summary>Read-only: the absent owner an installed entry was tagged to ("" = not installed for anyone).</summary>
+        internal static string InstalledOwnerOf(object item)
+        {
+            if (item == null) return "";
+            foreach (var e in _installed) if (ReferenceEquals(e.Item, item)) return e.Owner ?? "";
+            return "";
+        }
+
         private static IList ListByName(GameInstance gi, string name)
         {
             if (gi == null) return null;
@@ -2085,6 +2145,8 @@ namespace BigAmbitionsMP
                 case "movingServiceContracts":             return gi.movingServiceContracts as IList;
                 case "disabledLicensingFees":              return gi.disabledLicensingFees as IList;
                 case "paidLicensingFeesToday":             return gi.paidLicensingFeesToday as IList;
+                case "FurnitureDeliveryContracts":         return gi.FurnitureDeliveryContracts as IList;
+                case "FoodDeliveryContracts":              return gi.FoodDeliveryContracts as IList;
                 default: return null;
             }
         }
@@ -2654,7 +2716,7 @@ namespace BigAmbitionsMP
         {
             var gi = SaveGameManager.Current;
             if (gi == null) return 0;
-            int removed = RemoveOwnItemsFor(gi, addrs);
+            int removed = RemoveOwnItemsFor(gi, addrs, ListsOf(bundle));
             int n = 0;
             bool wasTagged = _tagInstalls, wasUpsert = _returnUpsert;
             _tagInstalls = false; _returnUpsert = true;   // r2 F2: a returned dict row REPLACES mine
@@ -2677,6 +2739,8 @@ namespace BigAmbitionsMP
             ("headhunterPlans",                   new[] { "headquartersAddress" }),
             ("interiorInstallationFirmContracts", new[] { "addressToDoTheInstallation" }),
             ("movingServiceContracts",            new[] { "originMovingAddress", "destinationMovingAddress" }),
+            ("FurnitureDeliveryContracts",        new[] { "toAddress" }),
+            ("FoodDeliveryContracts",             new[] { "toAddress" }),
             ("disabledLicensingFees",             new[] { "address" }),
             ("paidLicensingFeesToday",            new[] { "Item1" }),
         };
@@ -2684,7 +2748,7 @@ namespace BigAmbitionsMP
         /// <summary>Take MY pre-absence items for exactly these addresses back out, so the returned ones
         /// replace them instead of doubling them. An item this machine INSTALLED for some OTHER absent
         /// owner is tagged and is never touched here (it is theirs; UndoLocal is what lifts it).</summary>
-        private static int RemoveOwnItemsFor(GameInstance gi, HashSet<string> addrs)
+        private static int RemoveOwnItemsFor(GameInstance gi, HashSet<string> addrs, PaperworkOwnerLists? lists = null)
         {
             int n = 0;
             // r2 F2: itemsOrderedThisWeekByImporter is deliberately NOT cleared here. Its rows are keyed by
@@ -2699,6 +2763,7 @@ namespace BigAmbitionsMP
             // nothing is lost and nothing is doubled.
             foreach (var (name, fields) in _addrFields)
             {
+                if (!ListCarried(lists, name)) continue;   // a list the returned bundle does not carry keeps my own entries
                 try
                 {
                     var list = ListByName(gi, name);
