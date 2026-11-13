@@ -1,7 +1,7 @@
 {
   "id": "T-PRICESUGGEST",
   "title": "T-32 prices part, EVIDENCE only (probe P-T32-PRICES): the host CREATES a pricing-manager plan through the game's own creation path (lever `pricesuggest make`, premise asserted), then after a merge the host and the client each recompute the SUGGESTED prices of that SAME plan (the host's own plan; the client's partner copy of it) the way the pricing screen does on open, and the probe logs each machine's suggestions and the formula's inputs. Report-only: equal or different is the finding, not a pass/fail. Ends dissolved, NO save",
-  "preconditions": "Fixture save1 (host melaus, client Client1). Build with P-T32-PRICES deployed on BOTH machines (Dev build: the `pricesuggest` lever). The fixture has no pricing-manager plan (run T-PRICESUGGEST-20261113-150520 step 13: own=0 partnerRows=0), so step 5 creates one on the host BEFORE the merge, as a player would in BizMan > headquarters > Pricing Managers (PricingManagersPlanList.AddPlan :63-75, AssignEmployee :245, SetSupervisedNeighborhood PricingManagerPlanUI.cs:119). The fixture's host has NO employee with ba:skill_pricingmanager (run T-PRICESUGGEST-20261113-152356 step 5), so steps 5-7 get one the way a player does, BEFORE the plan: step 5 `pricesuggest recruit` runs the recruitment agency campaign's own candidate search (RecruitmentCampaign.CheckForCandidates :58-71 -> RecruitmentHelper.GenerateCandidate, campaign shaped as RecruitmentAgencyDialog.cs:163-176 with business = the rented headquarters; find time now, no fee) and names a free pricing-manager workstation, the first open day and its opening hour; step 6 hires the candidate (`hire`, EmployeeHelper.HireCandidate, address = the headquarters); step 7 puts it on a shift through the Schedule tab (`shiftat`, ScheduleHelper.AddWorkShift as ScheduleEmployeeSelection.cs:60). FIXTURE REQUIREMENT: the host rents a headquarters with an open schedule day and a free workstation suitable for ba:skill_pricingmanager, the city has a recruitment agency, and the host runs at least one manageable (revenue, priced) business; if not, step 5 (or 8) answers ERR naming what is missing and the run stops there. The plan then reaches the client the way any host plan does (CompanyPlans partner rows, BuildPricing); both machines run the lever on the captured id.",
+  "preconditions": "Fixture save1 (host melaus, client Client1). Build with P-T32-PRICES deployed on BOTH machines (Dev build: the `pricesuggest` lever). The fixture has no pricing-manager plan (run T-PRICESUGGEST-20261113-150520 step 13: own=0 partnerRows=0), so step 5 creates one on the host BEFORE the merge, as a player would in BizMan > headquarters > Pricing Managers (PricingManagersPlanList.AddPlan :63-75, AssignEmployee :245, SetSupervisedNeighborhood PricingManagerPlanUI.cs:119). The fixture's host has NO employee with ba:skill_pricingmanager (run T-PRICESUGGEST-20261113-152356 step 5), so steps 5-7 get one the way a player does, BEFORE the plan: step 5 `pricesuggest recruit` runs the recruitment agency campaign's own candidate search (RecruitmentCampaign.CheckForCandidates :58-71 -> RecruitmentHelper.GenerateCandidate, campaign shaped as RecruitmentAgencyDialog.cs:163-176 with business = the rented headquarters; find time now, no fee) and names a free pricing-manager workstation, the first open day and its opening hour - when every suitable workstation is already on a shift (run T-PRICESUGGEST-20261113-154513 step 5: suitable=10, all on a shift) it first frees ONE as a player does on the Schedule tab (ScheduleHelper.RemoveWorkShift :334-355, the shift slider's remove WorkShiftSlider.cs:208-211), removing the shift of an employee who has no ba:skill_pricingmanager and is on no plan, and names it as freed=employee@station/from-to; step 6 hires the candidate (`hire`, EmployeeHelper.HireCandidate, address = the headquarters); step 7 puts it on a shift through the Schedule tab (`shiftat`, ScheduleHelper.AddWorkShift as ScheduleEmployeeSelection.cs:60). FIXTURE REQUIREMENT: the host rents a headquarters with an open schedule day and a workstation suitable for ba:skill_pricingmanager that is free or held by a removable shift (an employee without ba:skill_pricingmanager, on no plan), the city has a recruitment agency, and the host runs at least one manageable (revenue, priced) business; if not, step 5 (or 8) answers ERR naming what is missing and the run stops there. The plan then reaches the client the way any host plan does (CompanyPlans partner rows, BuildPricing); both machines run the lever on the captured id.",
   "instances": 2,
   "vars": {
     "clientPid": "Client1",
@@ -48,15 +48,16 @@
       "seq": 5,
       "role": "h",
       "cmd": "pricesuggest recruit",
-      "expect_result": "^OK pricesuggest recruit candidate=\\S+ skill=\\S+ day=[1-7] station=\\S+ from=\\d+ .* hq=\\S+ \\S+$",
+      "expect_result": "^OK pricesuggest recruit candidate=\\S+ skill=\\S+ day=[1-7] station=\\S+ from=\\d+ suitable=[1-9]\\d* freed=\\S+ .* hq=\\S+ \\S+$",
       "capture": {
         "t32Cand": "candidate=(\\S+)",
         "t32Day": "day=(\\S+)",
         "t32Station": "station=(\\S+)",
         "t32From": "from=(\\S+)",
+        "t32Freed": "freed=(\\S+)",
         "t32Hq": "hq=(\\S+ \\S+)$"
       },
-      "note": "PREMISE: a ba:skill_pricingmanager candidate for the host's rented headquarters, produced by the recruitment campaign's own candidate search; ERR names a missing headquarters, agency, open day or free workstation"
+      "note": "PREMISE: a ba:skill_pricingmanager candidate for the host's rented headquarters, produced by the recruitment campaign's own candidate search, and a free suitable workstation for it - freed=none when one was already free, else freed=employee@station/from-to names the ONE shift removed through ScheduleHelper.RemoveWorkShift (employee without ba:skill_pricingmanager, on no plan; also logged as [PROBE T32-PRICES] recruit freed a workstation); ERR names a missing headquarters, agency, open day, or why no shift could be freed"
     },
     {
       "seq": 6,
@@ -68,9 +69,9 @@
     {
       "seq": 7,
       "role": "h",
-      "cmd": "shiftat ${t32Hq} ${t32Day} ${t32Station} ${t32Cand} ${t32From} auto",
-      "expect_result": "^OK shiftat .* emp=${t32Cand} .*shift=${t32From}-\\d+ .*addErr=none",
-      "note": "PREMISE: the new pricing manager on a work shift at the headquarters, through the Schedule tab's own ScheduleHelper.AddWorkShift (a headquarters desk shift spans the opening slot on every open day)"
+      "cmd": "pricesuggest shift ${t32Station} ${t32Cand} ${t32From}",
+      "expect_result": "^OK pricesuggest shift st=${t32Station} emp=${t32Cand} day=${t32Day} .*shift=${t32From}-\\d+ .*assigned=True addErr=none hq=",
+      "note": "PREMISE: the new pricing manager on a work shift at the headquarters, at DATA level with no screen (the Schedule-tab lever `shiftat` threw NullReference headless, run T-PRICESUGGEST-20261113-161858 step 7): what ScheduleHelper.AddWorkShift :292-327 does for a headquarters desk - a copy of the shift spanning the first opening slot on every open day by ScheduleDay.AddWorkShift, then the game's employee/HQ-plan update; also logged as [PROBE T32-PRICES] shift added"
     },
     {
       "seq": 8,
