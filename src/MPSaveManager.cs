@@ -104,6 +104,9 @@ namespace BigAmbitionsMP
         /// exactly - written with the slot, replaced from the loaded slot on every load, never carried
         /// over in memory. Empty/absent on manifests written before the field existed.</summary>
         public List<MpPaperworkEntry> Paperwork { get; set; } = new();
+        /// <summary>T-24 fold 2: the interior LAYOUT BODIES the stored Paperwork bundles name by hash (PwInstallContract.LayoutHash),
+        /// each kept while some bundle names it (MergerServiceLayouts.HostSnapshotBodies). Same timeline as Paperwork.</summary>
+        public List<MpLayoutBody> PaperworkLayouts { get; set; } = new();
         /// <summary>Merger phase 3-B: the host's ABSENCE MARKS as of this save moment - whose
         /// businesses are being run for them, and since which game day. Rides the model like Paperwork
         /// and follows the same timeline exactly - written with the slot, replaced from the loaded
@@ -214,6 +217,13 @@ namespace BigAmbitionsMP
         public string StableId { get; set; } = "";
         public int    Day      { get; set; }   // the sender's game day at publish time
         public string Json     { get; set; } = "";
+    }
+
+    /// <summary>T-24 fold 2: one interior layout body (PwLayout as the mod's own JSON) under its content hash.</summary>
+    public class MpLayoutBody
+    {
+        public string Hash { get; set; } = "";
+        public string Json { get; set; } = "";
     }
 
     /// <summary>Merger phase 4a (G1) - one member's stored COMPANY BOOKS, mirroring MpPaperworkEntry:

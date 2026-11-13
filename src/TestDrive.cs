@@ -3599,6 +3599,8 @@ namespace BigAmbitionsMP
 
                 case "mergerfurniture": return DevServiceBooking(arg, food: false);
                 case "mergerfood":      return DevServiceBooking(arg, food: true);
+                case "mergermove":      return DevMergerMove(arg);       // T-24 part 2
+                case "mergerinterior":  return DevMergerInterior(arg);   // T-24 part 2
                 case "servicelists":    return DevServiceLists(arg);
                 case "pickercheck":     return DevPickerCheck(arg);
 
@@ -8791,9 +8793,255 @@ namespace BigAmbitionsMP
                     }
                     catch { spot = -2; }
                 }
-                return $"OK servicelists day={(global::TimeHelper.CurrentDay)} hour={(global::TimeHelper.CurrentHour)} furniture={nf} [{sbF}] food={nd} [{sbD}] spot={spot}";
+                // T-24 part 2: moving (origin>dest|day|hour|transfer|tag) and interior (addr|day|bp/preset|compat|held|tag|design).
+                var sbM = new StringBuilder(); int nm = 0;
+                if (gi.movingServiceContracts != null)
+                    foreach (var c in gi.movingServiceContracts)
+                    {
+                        if (c == null) continue;
+                        string ok = GameStateReader.AddressKey(c.originMovingAddress), dk = GameStateReader.AddressKey(c.destinationMovingAddress);
+                        if (filter.Length > 0 && ok != filter && dk != filter) continue;
+                        sbM.Append(nm++ == 0 ? "" : ";").Append(ok).Append('>').Append(dk).Append('|').Append(c.movingDay).Append('|').Append(c.movingHour)
+                           .Append('|').Append(c.transferBizManSettings ? "transfer" : "-").Append('|').Append(Tag(c));
+                    }
+                var sbI = new StringBuilder(); int ni = 0;
+                if (gi.interiorInstallationFirmContracts != null)
+                    foreach (var c in gi.interiorInstallationFirmContracts)
+                    {
+                        if (c == null) continue;
+                        string to = GameStateReader.AddressKey(c.addressToDoTheInstallation);
+                        if (filter.Length > 0 && to != filter) continue;
+                        bool held = MergerServiceLayouts.Find(c) != null;
+                        sbI.Append(ni++ == 0 ? "" : ";").Append(to).Append('|').Append(c.dayOfInstallation).Append('|').Append(c.isBlueprint ? "bp" : "preset")
+                           .Append("|compat=").Append(c.isCompatBlueprint).Append('|').Append(held ? "held" : "-").Append('|').Append(Tag(c)).Append('|').Append(MergerServiceLayouts.DisplayName(c.designName));
+                    }
+                return $"OK servicelists day={(global::TimeHelper.CurrentDay)} hour={(global::TimeHelper.CurrentHour)} furniture={nf} [{sbF}] food={nd} [{sbD}] spot={spot} moving={nm} [{sbM}] interior={ni} [{sbI}]";
             }
             catch (Exception ex) { return $"ERR servicelists: {ex.Message}"; }
+        }
+
+        /// <summary>T-24 part 2 TEST LEVER `mergermove &lt;num&gt; &lt;street&gt; &lt;num&gt; &lt;street&gt; &lt;dayOffset&gt; [transfer|-] [bookingId]`:
+        /// send exactly the leg MovingServiceDialog's gate sends (origin, destination, absolute day = today + offset,
+        /// the first moving company found here). offered= is what the pickers would say about the pair.</summary>
+        private static string DevMergerMove(string arg)
+        {
+            const string usage = "ERR usage: mergermove <num> <street> <num> <street> <dayOffset> [transfer|-] [bookingId]";
+            try
+            {
+                var a = (arg ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 5 || !int.TryParse(a[4], out int off)) return usage;
+                var oreg = GameStatePatcher.FindRegistration(a[0] + " " + a[1]);
+                var dreg = GameStatePatcher.FindRegistration(a[2] + " " + a[3]);
+                if (oreg == null || dreg == null) return "ERR unknown origin or destination";
+                bool transfer = a.Length > 5 && a[5] == "transfer";
+                string id = a.Length > 6 ? a[6] : Guid.NewGuid().ToString("N");
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                string co = DevFindServiceCompany(moving: true);
+                if (co.Length == 0) return "ERR no moving company found here";
+                string o = GameStateReader.AddressKey(oreg), d = GameStateReader.AddressKey(dreg);
+                bool offered = AccessGates.MovingOriginOffered(oreg) && AccessGates.MovingDestinationOffered(oreg, dreg);
+                int day = global::TimeHelper.CurrentDay + off;
+                SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                {
+                    PlayerId = MPConfig.PlayerId, AddressKey = o, Op = "mergermove", AgencyKey = co, DestKey = d,
+                    BookingId = id, SlotDay = day, Hour = -1, Transfer = transfer,
+                });
+                return $"OK mergermove routed for '{o}' -> '{d}' (company '{co}', day {day}, transfer={transfer}, offered={offered}, id {id})";
+            }
+            catch (Exception ex) { return $"ERR mergermove: {ex.Message}"; }
+        }
+
+        /// <summary>T-24 part 2 TEST LEVER `mergerinterior &lt;num&gt; &lt;street&gt; &lt;preset|auto|bp:fixture&gt; &lt;dayOffset&gt; [bookingId]`:
+        /// send exactly the leg the interior firm dialog's gate sends. bp:&lt;name&gt; is a FIXTURE built in code (never a file):
+        /// 3 storage items for this building; a name containing "wrongsize" claims another building size; one containing
+        /// "big" has MaxItems+1 items. On a building that is truly mine the contract is booked HERE, natively, with the
+        /// fixture held as this machine's own layout (the owner's own blueprint install that a hand-over carries).</summary>
+        private static string DevMergerInterior(string arg)
+        {
+            const string usage = "ERR usage: mergerinterior <num> <street> <preset|auto|bp:fixture> <dayOffset> [bookingId]";
+            try
+            {
+                var a = (arg ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length < 4 || !int.TryParse(a[3], out int off)) return usage;
+                var reg = GameStatePatcher.FindRegistration(a[0] + " " + a[1]);
+                if (reg == null) return "ERR unknown building";
+                string key = GameStateReader.AddressKey(reg);
+                string design = a[2];
+                string id = a.Length > 4 ? a[4] : Guid.NewGuid().ToString("N");
+                string firm = DevInteriorFirmFor(reg, out _);
+                if (firm.Length == 0) return $"ERR no interior firm here installs in a {reg.GetBuildingType()}";
+                bool isBp = design.StartsWith("bp:", StringComparison.Ordinal);
+                string name = isBp ? design.Substring(3) : design;
+                PwLayout? layout = isBp ? DevFixtureLayout(reg, name) : null;
+                if (isBp && layout == null) return "ERR no storage item to build the fixture from";
+                if (design == "auto")
+                {
+                    var names = global::Buildings.InteriorInstallationFirmHelper.GetInteriorDesignsNamesForBuilding(reg.BuildingCached.BuildingType,
+                                    new global::Blueprints.BuildingSizeInfo(reg), reg.businessTypeName);
+                    if (names == null || names.Length == 0) return "ERR no firm preset for that building";
+                    name = names[0];
+                }
+                int day = global::TimeHelper.CurrentDay + off;
+                if (MergerFlip.TrulyMine(reg))
+                {
+                    var gi = SaveGameManager.Current;
+                    if (gi == null) return "ERR no game instance";
+                    var lic = new Entities.InteriorInstallationFirmContract
+                    {
+                        interiorInstallationFirmAddress = MergerAbsence.AddressOfKey(firm), addressToDoTheInstallation = reg.Address,
+                        dayOfInstallation = day, designName = name, isBlueprint = isBp, businessTypeName = reg.businessTypeName,
+                    };
+                    gi.interiorInstallationFirmContracts.Add(lic);
+                    if (isBp) MergerServiceLayouts.Mark(lic, id, name, native: false, ownerCompat: false, layout);
+                    PaperworkSync.MarkDirty();
+                    return $"OK mergerinterior booked locally for '{key}' ('{name}', blueprint={isBp}, {layout?.Items.Count ?? 0} item(s), day {day}, id {id})";
+                }
+                if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+                SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                {
+                    PlayerId = MPConfig.PlayerId, AddressKey = key, Op = "mergerinterior", AgencyKey = firm,
+                    BookingId = id, SlotDay = day, Hour = -1, DesignName = name, IsBlueprint = isBp, Layout = layout,
+                });
+                return $"OK mergerinterior routed for '{key}' ('{name}', blueprint={isBp}, {layout?.Items.Count ?? 0} item(s), day {day}, "
+                     + $"offered={AccessGates.InteriorOffered(reg)}, id {id})";
+            }
+            catch (Exception ex) { return $"ERR mergerinterior: {ex.Message}"; }
+        }
+
+        /// <summary>The first moving company / interior firm registration here, by its special service's settings type,
+        /// else by its business type name.</summary>
+        private static string DevFindServiceCompany(bool moving)
+        {
+            var gi = SaveGameManager.Current;
+            if (gi == null) return "";
+            foreach (var r in gi.BuildingRegistrations)
+            {
+                if (r == null) continue;
+                bool hit = false;
+                try
+                {
+                    var st = global::Helpers.BuildingHelper.GetBuilding(r.Address)?.SpecialService?.settings;
+                    hit = moving ? st is global::Buildings.MovingServiceSettings : st is global::Buildings.InteriorInstallationFirmSettings;
+                }
+                catch { }
+                if (!hit) hit = (r.businessTypeName ?? "").IndexOf(moving ? "moving" : "interior", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (hit) return GameStateReader.AddressKey(r);
+            }
+            return "";
+        }
+
+        /// <summary>The interior firm `mergerinterior` books with and `pickercheck interior` filters with: the first firm whose
+        /// own accepted building types hold this building's type - the game's own lookup (InteriorInstallationFirmHelper.
+        /// GetContactByBuildingType :179-203), and the check the host applies (buildingTypesThatCanInstall, picker :128).</summary>
+        private static string DevInteriorFirmFor(BuildingRegistration reg, out global::Buildings.InteriorInstallationFirmSettings? settings)
+        {
+            settings = null;
+            string type = reg.GetBuildingType();
+            foreach (var b in global::Helpers.BuildingHelper.allBuildings)
+                if (b != null && b.SpecialService != null && b.SpecialService.settings is global::Buildings.InteriorInstallationFirmSettings s0
+                    && s0.buildingTypesThatCanInstall != null && s0.buildingTypesThatCanInstall.Contains(type))
+                {
+                    var fr = b.GetRegistration();
+                    if (fr == null) continue;
+                    settings = s0;
+                    return GameStateReader.AddressKey(fr);
+                }
+            return "";
+        }
+
+        /// <summary>A fixture layout built in code from a small known shape (never a file on disk).</summary>
+        private static PwLayout? DevFixtureLayout(BuildingRegistration reg, string name)
+        {
+            string item = "";
+            foreach (var n in BigAmbitions.Items.ItemsGetter.GetAllItemNamesByTag(BigAmbitions.Tags.TagRef.Itemtag.isbusinessstorage)) { item = n; break; }
+            if (item.Length == 0) return null;
+            var si = new global::Blueprints.BuildingSizeInfo(reg);
+            var d = new PwLayout
+            {
+                BuildingType = reg.BuildingCached.BuildingType,
+                BuildingSize = name.Contains("wrongsize") ? si.buildingSize + "-other" : si.buildingSize,
+                BuildingVersion = si.buildingVersion,
+                SetBusinessType = reg.businessTypeName ?? "", SetBuildingSize = si.buildingSize, SetBuildingVersion = si.buildingVersion,
+                LayoutName = "bamp-fixture-" + name,
+            };
+            int count = name.Contains("big") ? MergerServiceLayouts.MaxItems + 1 : 3;
+            for (int i = 0; i < count; i++)
+                d.Items.Add(new PwLayoutItem
+                {
+                    Id = Guid.NewGuid().ToString("N"), ItemName = item,
+                    Px = 1.5f + (i % 40) * 1.5f, Py = 0f, Pz = 1.5f + (i / 40) * 1.5f, Rw = 1f,
+                });
+            return d;
+        }
+
+        /// <summary>T-24 part 2 TEST LEVER `pickercheck moving|interior` (read-only): what the pickers offer here. moving:
+        /// origins=N [origin&gt;dest,dest;...] for every offered origin, pair=&lt;o&gt;&gt;&lt;d&gt;; the first offered pair of two
+        /// partner buildings (or pair=none), blocked=&lt;o&gt;&gt;&lt;d&gt;; the first same-type pair with a partner building that
+        /// is NOT offered because another game (or owner) runs one of them (or blocked=none). interior &lt;num&gt; &lt;street&gt;: the
+        /// picker of the firm `mergerinterior` books that building with (DevInteriorFirmFor): firm='key' offered=N [key;...].</summary>
+        private static string DevPickerCheckService(string kind, string[] a)
+        {
+            try
+            {
+                // T-24 fold: the pickers' OWN filter methods (patched), on a dialog object built without the scene - the
+                // game's lists are GetPlayerBuildingRegistrations(filter) over exactly these methods.
+                var regs = global::Helpers.BuildingHelper.GetPlayerBuildingRegistrations();
+                if (kind == "interior")
+                {
+                    var it = typeof(global::UI.Dialog.InteriorInstallationFirmDesignSettings);
+                    var idlg = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(it);
+                    if (a.Length < 3) return "ERR usage: pickercheck interior <num> <street>";
+                    var target = GameStatePatcher.FindRegistration(a[1] + " " + a[2]);
+                    if (target == null) return $"ERR no registration '{a[1]} {a[2]}'";
+                    string firmKey = DevInteriorFirmFor(target, out var fs);
+                    if (fs == null) return $"ERR pickercheck: no interior firm here installs in a {target.GetBuildingType()}";
+                    HarmonyLib.Traverse.Create(idlg).Field("_interiorInstallationFirmSettings").SetValue(fs);
+                    var ifilter = HarmonyLib.AccessTools.Method(it, "PlayerBuildingFilter");
+                    var sbI = new StringBuilder(); int n = 0;
+                    foreach (var r in regs)
+                        if (r != null && (bool)ifilter.Invoke(idlg, new object[] { r }))
+                            sbI.Append(n++ == 0 ? "" : ";").Append(GameStateReader.AddressKey(r)).Append(AccessGates.IsPartnerShop(r) ? "|partner" : "|mine");
+                    return $"OK pickercheck interior firm='{firmKey}' offered={n} [{sbI}]";
+                }
+                var mt = typeof(global::UI.Dialog.MovingServiceContractSettings);
+                var mdlg = (global::UI.Dialog.MovingServiceContractSettings)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(mt);
+                var ofilter = HarmonyLib.AccessTools.Method(mt, "PlayerBuildingFilterOrigin");
+                var dfilter = HarmonyLib.AccessTools.Method(mt, "PlayerBuildingFilterDestination");
+                var gim = SaveGameManager.Current;
+                bool InMove(BuildingRegistration r)
+                {
+                    if (gim?.movingServiceContracts != null)
+                        foreach (var c in gim.movingServiceContracts)
+                            if (c != null && (c.originMovingAddress == r.Address || c.destinationMovingAddress == r.Address)) return true;
+                    return false;
+                }
+                var sb = new StringBuilder(); int no = 0;
+                string pair = "none", blocked = "none";
+                foreach (var o in regs)
+                {
+                    if (o == null || !(bool)ofilter.Invoke(null, new object[] { o })) continue;
+                    string ok = GameStateReader.AddressKey(o);
+                    sb.Append(no++ == 0 ? "" : ";").Append(ok).Append('>');
+                    mdlg.selectedOriginAddress = o.Address;
+                    HarmonyLib.Traverse.Create(mdlg).Field("_originBuildingType").SetValue(o.GetBuildingType());
+                    int nd = 0;
+                    foreach (var d in regs)
+                    {
+                        // blocked = the game's own filter would offer it (same type, another building, no move booked) and the patch did not
+                        if (d == null || ReferenceEquals(d, o) || d.GetBuildingType() != o.GetBuildingType() || InMove(d)) continue;
+                        string dk = GameStateReader.AddressKey(d);
+                        bool partnerPair = AccessGates.IsPartnerShop(o) || AccessGates.IsPartnerShop(d);
+                        if ((bool)dfilter.Invoke(mdlg, new object[] { d }))
+                        {
+                            sb.Append(nd++ == 0 ? "" : ",").Append(dk);
+                            if (pair == "none" && AccessGates.IsPartnerShop(o) && AccessGates.IsPartnerShop(d)) pair = ok + ">" + dk;
+                        }
+                        else if (partnerPair && blocked == "none") blocked = ok + ">" + dk;
+                    }
+                }
+                return $"OK pickercheck moving origins={no} [{sb}] pair={pair}; blocked={blocked};";
+            }
+            catch (Exception ex) { return $"ERR pickercheck: {ex.Message}"; }
         }
 
         /// <summary>TEST LEVER `pickercheck furniture|food &lt;num&gt; &lt;street&gt;` (read-only): would the delivery dialog's
@@ -8805,6 +9053,7 @@ namespace BigAmbitionsMP
             try
             {
                 var a = (arg ?? "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (a.Length >= 1 && (a[0] == "moving" || a[0] == "interior")) return DevPickerCheckService(a[0], a);   // T-24 part 2
                 if (a.Length < 3 || (a[0] != "furniture" && a[0] != "food")) return "ERR usage: pickercheck furniture|food <num> <street>";
                 string key = a[1] + " " + a[2];
                 var reg = GameStatePatcher.FindRegistration(key);

@@ -1893,7 +1893,13 @@ namespace BigAmbitionsMP
                         SetField(item, "hasDiscontinuedItems", c.HasDiscontinuedItems);
                         SetField(item, "dayOfInstallation", c.DayOfInstallation);
                         SetField(item, "businessTypeName", c.BusinessTypeName);
-                        if (Install("interiorInstallationFirmContracts", gi.interiorInstallationFirmContracts as IList, item)) n++;
+                        if (Install("interiorInstallationFirmContracts", gi.interiorInstallationFirmContracts as IList, item))
+                        {
+                            n++;
+                            // T-24 part 2, bug B: a blueprint install's layout came with the contract. The stand-in holds
+                            // it and serves it at install - never a same-named file of its own, never a free install.
+                            MergerServiceLayouts.OnHandedOver(item, c, _tagInstalls);
+                        }
                     }
 
                 if (l.MovingServiceContracts != null)
@@ -2173,6 +2179,24 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        /// <summary>True only when the game's own list/dictionary is there and no longer holds this entry (the game
+        /// finished or removed it). A missing list or an error is NOT "gone" - the record is kept.</summary>
+        private static bool GoneFromGame(GameInstance gi, string name, object item)
+        {
+            try
+            {
+                if (gi == null) return false;
+                if (item is InstalledDictEntry de)
+                {
+                    var d = DictByName(gi, name);
+                    return d != null && de.Key != null && !d.Contains(de.Key);
+                }
+                var list = ListByName(gi, name);
+                return list != null && !list.Contains(item);
+            }
+            catch { return false; }
+        }
+
         /// <summary>Put one taken entry back (the save strip's finally). Never duplicates.</summary>
         private static bool ReAddOne(GameInstance gi, string name, object item)
         {
@@ -2204,9 +2228,18 @@ namespace BigAmbitionsMP
         {
             if (_installed.Count == 0 && _promotedStaff.Count == 0) return () => { };
             var gi = SaveGameManager.Current;
-            var taken = new List<(string Owner, string List, object Item)>(_installed);
-            int removed = 0;
-            foreach (var e in taken) if (TakeOne(gi, e.List, e.Item)) removed++;
+            // Only what is ACTUALLY taken out is put back (T-24, 2026-11-13, run T-MERGERSERVICE-20261113-025045): an entry
+            // the GAME has already removed - a finished or cancelled install, move or delivery (e.g. the decompile's
+            // InteriorInstallationFirmContract Remove(this) at :79/:86/:113) - is forgotten here, never revived by the
+            // restore below (it came back after every save, ran again daily and went home with the owner).
+            var taken = new List<(string Owner, string List, object Item)>();
+            int removed = 0, gone = 0;
+            foreach (var e in new List<(string Owner, string List, object Item)>(_installed))
+            {
+                if (TakeOne(gi, e.List, e.Item)) { taken.Add(e); removed++; }
+                else if (GoneFromGame(gi, e.List, e.Item)) { _installed.Remove(e); gone++; }
+            }
+            if (gone > 0) Plugin.Logger.LogInfo($"[Absence] {gone} simulated list item(s) the game already finished or removed - forgotten, not put back after the save.");
 
             var takenStaff = new List<Entities.EmployeeInstance>();
             try

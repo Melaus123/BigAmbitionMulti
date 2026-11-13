@@ -6115,6 +6115,216 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>T-24 part 2: MOVING SERVICE BOOKING FOR A MERGED COMPANY. MovingServiceDialog.SetMovingContract
+        /// (:139-150) is the game's only booking point: it adds the contract to SaveGameManager.Current.movingServiceContracts,
+        /// and the hourly MovingServiceContract.DoMove moves and charges it on the day (MovingServiceHelper.PayMove). A move
+        /// that names a partner's building is ROUTED (op "mergermove") to the one game that runs BOTH buildings - the pickers
+        /// offer nothing else (AccessGates) - which re-runs the booking with its own checks and clock
+        /// (SharedShopWorkTabs.ApplyRoutedMove). NOTHING is added or charged here; on a successful route the native
+        /// conversation tail is produced. NO NEW ON-SCREEN TEXT beyond the owner-approved line. INERT without a merger,
+        /// and when both buildings are truly mine.</summary>
+        [HarmonyPatch(typeof(Dialogs.MovingServiceDialog), "SetMovingContract")]
+        public static class Patch_MovingServiceCreate_MergerGate
+        {
+            static bool Prefix(Dialogs.MovingServiceDialog __instance, ref Entities.DialogEntry? __result)
+            {
+                bool sent = false;      // true once the routed leg may be on the wire
+                bool partner = false;   // true once a building is known to be a partner's (routed, never native)
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;   // inert without a merger
+                    var ctrl = DialogController.current;
+                    var settings = Traverse.Create(__instance).Field("_movingServiceContractSettings").GetValue<UI.Dialog.MovingServiceContractSettings>();
+                    if (ctrl == null || settings == null || settings.selectedOriginAddress == null || settings.selectedDestinationAddress == null) return true;
+                    var oreg = BuildingHelper.GetBuildingRegistration(settings.selectedOriginAddress);
+                    var dreg = BuildingHelper.GetBuildingRegistration(settings.selectedDestinationAddress);
+                    if (oreg == null || dreg == null) return true;
+                    bool oPartner, dPartner;
+                    try
+                    {
+                        oPartner = oreg.RentedByPlayer && !MergerFlip.TrulyMine(oreg);
+                        dPartner = dreg.RentedByPlayer && !MergerFlip.TrulyMine(dreg);
+                    }
+                    catch { return true; }
+                    if (!oPartner && !dPartner) return true;
+                    partner = true;
+
+                    string okey = GameStateReader.AddressKey(oreg), dkey = GameStateReader.AddressKey(dreg);
+                    // The pickers pair a partner's building only with one run by the same game for the same owner; a pair
+                    // that reached here anyway (a runner changed after the list was built) is not booked.
+                    if (!AccessGates.MovingDestinationOffered(oreg, dreg))
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] moving booking NOT SENT for '{okey}' -> '{dkey}': one game does not run both buildings now.");
+                        PassengerHud.Toast(MergerServiceLayouts.TextNotPlaced);
+                        __result = null; return false;
+                    }
+                    string coKey = ""; try { coKey = GameStateReader.AddressKey(ctrl.contact.Address); } catch { }
+                    if (coKey.Length == 0)
+                    { Plugin.Logger.LogWarning($"[Merger] moving booking REFUSED for '{okey}': the dialog's moving company has no address."); __result = null; return false; }
+                    if (!MPServer.IsRunning && !MPClient.IsConnected)
+                    { Plugin.Logger.LogWarning($"[Merger] moving booking REFUSED for '{okey}': no session to route it over."); __result = null; return false; }
+
+                    int day = settings.selectedDay;
+                    string id = Guid.NewGuid().ToString("N");
+                    sent = true;   // from here on native must NEVER run (see the catch below)
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    {
+                        PlayerId = MPConfig.PlayerId, AddressKey = okey, Op = "mergermove", AgencyKey = coKey, DestKey = dkey,
+                        BookingId = id, SlotDay = day, Hour = -1, Transfer = settings.transferBizManSettings,
+                    });
+                    Plugin.Logger.LogInfo($"[Merger] moving booking routed for '{okey}' -> '{dkey}' (company '{coKey}', day {day}, transfer={settings.transferBizManSettings}, booking {id})");
+                    if (SharedShopWorkTabs.LastRefusedBookingId == id)
+                    { Plugin.Logger.LogInfo($"[Merger] moving booking {id} for '{okey}' was refused at once - no order tail."); __result = null; return false; }
+
+                    // The native conversation tail, word for word (MovingServiceDialog.SetMovingContract :153-170).
+                    try
+                    {
+                        var md = new Dictionary<string, string>
+                        {
+                            { "businessName", oreg.GetComposedName() },
+                            { "businessName2", dreg.GetComposedName() },
+                            { "day", day.ToString() },
+                        };
+                        ctrl.contact.ReceivePlayerMessage(new Entities.TextMessage("ba:messagetype_dialog_moving_service_contract_set_player", md, read: true));
+                        ctrl.contact.SendMessage(new Entities.TextMessage("ba:messagetype_dialog_moving_service_contract_set_manager", md, read: true));
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] moving booking conversation tail: {ex.Message}"); }
+
+                    var t = typeof(Dialogs.MovingServiceDialog);
+                    var miOrder = AccessTools.Method(t, "MovingSettings");
+                    var miList = AccessTools.Method(t, "OnShowMovingContractsList");
+                    if (miOrder == null || miList == null)
+                        Plugin.Logger.LogWarning("[Merger] moving booking tail: the dialog's own entries are not where they were.");
+                    __result = new Entities.DialogEntry
+                    {
+                        messageData = "dialog_moving_service_contract_set_manager".Localize(new { day = day }),
+                        Template = Entities.DialogEntry.TemplateType.Text,
+                        OnConfirm = miOrder == null ? null! : (Func<Entities.DialogEntry>)Delegate.CreateDelegate(typeof(Func<Entities.DialogEntry>), __instance, miOrder),
+                        ConfirmTextOverride = "dialog_more_help_new_order".Localize(),
+                        OnSecondOption = miList == null ? null! : (Func<Entities.DialogEntry>)Delegate.CreateDelegate(typeof(Func<Entities.DialogEntry>), __instance, miList),
+                        SecondOptionTextOverride = "ba:messagetype_dialog_moving_service_manage_contracts",
+                        OnCancel = ctrl.CancelDialog,
+                        onCancelMessage = new Entities.TextMessage("ba:messagetype_contacts_message_player_cancel_call"),
+                    };
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    if (sent || partner)
+                    { Plugin.Logger.LogWarning($"[Merger] moving booking gate failed on a partner building - not booked here: {ex.Message}"); __result = null; return false; }
+                    Plugin.Logger.LogWarning($"[Merger] moving booking gate: {ex.Message}");
+                    return true;
+                }
+            }
+        }
+
+        /// <summary>T-24 part 2: INTERIOR INSTALLATION BOOKING FOR A MERGED COMPANY. InteriorInstallationFirmAgentDialog
+        /// .SetDesignContract (:129-142) is the game's only booking point; DoInstallation charges and installs on the day.
+        /// A booking on a partner's building is ROUTED (op "mergerinterior") to the game that runs it
+        /// (SharedShopWorkTabs.ApplyRoutedInterior). A firm preset travels by name (the runner's own StreamingAssets); a
+        /// BLUEPRINT is read here from this machine's own file and travels as mod data (MergerServiceLayouts), checked here
+        /// first so a layout that cannot fit is never sent. Never a free (compat) install. NOTHING is added or charged here.
+        /// INERT without a merger, and on a building that is truly mine.</summary>
+        [HarmonyPatch(typeof(Dialogs.InteriorInstallationFirmAgentDialog), "SetDesignContract")]
+        public static class Patch_InteriorInstallCreate_MergerGate
+        {
+            static bool Prefix(Dialogs.InteriorInstallationFirmAgentDialog __instance, ref Entities.DialogEntry? __result)
+            {
+                bool sent = false, partner = false;
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;   // inert without a merger
+                    var ctrl = DialogController.current;
+                    var settings = Traverse.Create(__instance).Field("_interiorInstallationFirmDesignSettings").GetValue<UI.Dialog.InteriorInstallationFirmDesignSettings>();
+                    var addr = settings?.selectedAddress;
+                    if (ctrl == null || settings == null || addr == null) return true;
+                    var reg = settings.BuildingRegistration;
+                    if (reg == null) return true;
+                    bool rented; try { rented = reg.RentedByPlayer; } catch { return true; }
+                    if (!rented || MergerFlip.TrulyMine(reg)) return true;
+                    partner = true;
+
+                    string key = GameStateReader.AddressKey(reg);
+                    string name = settings.designName ?? "";
+                    PwLayout? layout = null;
+                    if (settings.isBlueprint)
+                    {
+                        layout = MergerServiceLayouts.ReadOwnBlueprint(name, out string rwhy);
+                        if (layout == null)
+                        {
+                            // T-24 fold F6: a READ failure (list or layout still loading, no layout file) is not the blueprint's fault.
+                            Plugin.Logger.LogWarning($"[Merger] interior installation booking NOT SENT for '{key}': blueprint '{name}' could not be read - {rwhy}");
+                            PassengerHud.Toast(MergerServiceLayouts.TextNotPlaced);
+                            __result = null; return false;
+                        }
+                        if (!MergerServiceLayouts.Validate(layout, reg, checkMods: false, out string code, out string vwhy))
+                        {
+                            Plugin.Logger.LogWarning($"[Merger] interior installation booking NOT SENT for '{key}': blueprint '{name}' - {vwhy}");
+                            PassengerHud.Toast(MergerServiceLayouts.TextBlueprintBad);
+                            __result = null; return false;
+                        }
+                    }
+                    string firmKey = ""; try { firmKey = GameStateReader.AddressKey(ctrl.contact.Address); } catch { }
+                    if (firmKey.Length == 0)
+                    { Plugin.Logger.LogWarning($"[Merger] interior installation booking REFUSED for '{key}': the dialog's firm has no address."); __result = null; return false; }
+                    if (!MPServer.IsRunning && !MPClient.IsConnected)
+                    { Plugin.Logger.LogWarning($"[Merger] interior installation booking REFUSED for '{key}': no session to route it over."); __result = null; return false; }
+
+                    int day = settings.selectedDay;
+                    string id = Guid.NewGuid().ToString("N");
+                    sent = true;   // from here on native must NEVER run (see the catch below)
+                    SharedShopWorkTabs.SendEdit(new SharedWorkEditPayload
+                    {
+                        PlayerId = MPConfig.PlayerId, AddressKey = key, Op = "mergerinterior", AgencyKey = firmKey,
+                        BookingId = id, SlotDay = day, Hour = -1, DesignName = name, IsBlueprint = settings.isBlueprint, Layout = layout,
+                    });
+                    Plugin.Logger.LogInfo($"[Merger] interior installation routed for '{key}' (firm '{firmKey}', {(settings.isBlueprint ? "blueprint" : "preset")} '{name}', "
+                                        + $"{layout?.Items.Count ?? 0} item(s), day {day}, booking {id})");
+                    if (SharedShopWorkTabs.LastRefusedBookingId == id)
+                    { Plugin.Logger.LogInfo($"[Merger] interior installation booking {id} for '{key}' was refused at once - no order tail."); __result = null; return false; }
+
+                    // The native conversation tail, word for word (InteriorInstallationFirmAgentDialog.SetDesignContract :149-162).
+                    try
+                    {
+                        var md = new Dictionary<string, string>
+                        {
+                            { "text", name },
+                            { "address", global::Streets.AddressHelper.ToFormattedString(addr) },
+                            { "day", day.ToString() },
+                        };
+                        ctrl.contact.ReceivePlayerMessage(new Entities.TextMessage("ba:messagetype_dialog_interior_installation_firm_contract_set_player", md, read: true));
+                        ctrl.contact.SendMessage(new Entities.TextMessage("ba:messagetype_dialog_interior_installation_firm_contract_set_manager", md, read: true));
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] interior installation conversation tail: {ex.Message}"); }
+
+                    var t = typeof(Dialogs.InteriorInstallationFirmAgentDialog);
+                    var miOrder = AccessTools.Method(t, "DesignSettings");
+                    var miList = AccessTools.Method(t, "OnShowRecruitmentList");
+                    if (miOrder == null || miList == null)
+                        Plugin.Logger.LogWarning("[Merger] interior installation tail: the dialog's own entries are not where they were.");
+                    __result = new Entities.DialogEntry
+                    {
+                        messageData = "dialog_interior_installation_firm_contract_set_manager".Localize(new { day = day }),
+                        Template = Entities.DialogEntry.TemplateType.Text,
+                        OnConfirm = miOrder == null ? null! : (Func<Entities.DialogEntry>)Delegate.CreateDelegate(typeof(Func<Entities.DialogEntry>), __instance, miOrder),
+                        ConfirmTextOverride = "dialog_more_help_new_order".Localize(),
+                        OnSecondOption = miList == null ? null! : (Func<Entities.DialogEntry>)Delegate.CreateDelegate(typeof(Func<Entities.DialogEntry>), __instance, miList),
+                        SecondOptionTextOverride = "dialog_installation_firm_manage_contracts",
+                        OnCancel = ctrl.CancelDialog,
+                        onCancelMessage = new Entities.TextMessage("ba:messagetype_contacts_message_player_cancel_call"),
+                    };
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    if (sent || partner)
+                    { Plugin.Logger.LogWarning($"[Merger] interior installation gate failed on a partner building - not booked here: {ex.Message}"); __result = null; return false; }
+                    Plugin.Logger.LogWarning($"[Merger] interior installation gate: {ex.Message}");
+                    return true;
+                }
+            }
+        }
+
         /// <summary>FOOD DELIVERY BOOKING FOR A MERGED COMPANY. FoodDeliveryDialog.OnOrderSettingsSet is the game's only
         /// booking point: it adds the contract to FoodDeliveryHelper.GetContracts(), whose hourly pass delivers and
         /// charges it. ROUTED exactly as the furniture booking above (op "mergerfood"); nothing is added or charged

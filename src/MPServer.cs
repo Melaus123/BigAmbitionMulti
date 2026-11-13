@@ -578,6 +578,7 @@ namespace BigAmbitionsMP
             try { CompanyBooks.HostReset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] host store reset: {ex.Message}"); }   // phase 4a rides the same world boundary
             try { CompanyFeed.HostReset(); } catch (Exception ex) { Plugin.Logger.LogWarning($"[Feed] host ring reset: {ex.Message}"); }      // phase 4b: the feed ring is memory-only and rides the same boundary
             lock (_paperwork) _paperwork.Clear();
+            MergerServiceLayouts.HostResetBodies();   // T-24 fold 2: the layout bodies ride the same boundary
             ResetPlanEditSeen();      // 4c part 2a r2 MAJOR-2: the plan-edit duplicate table is per session too
             lock (_capWarnedDay) _capWarnedDay.Clear();
             lock (_resendServedAt) { _resendServedAt.Clear(); _resendThrottleLogged.Clear(); }   // r7: the throttle dies with the session too
@@ -618,6 +619,7 @@ namespace BigAmbitionsMP
             try
             {
                 if (p == null) return;
+                MergerServiceLayouts.HostTakeBodies(p, senderPid);   // T-24 fold 2: layout bodies go to the store by hash; the bundle keeps the hash
                 string json;
                 try { json = Newtonsoft.Json.JsonConvert.SerializeObject(p); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] store serialise for '{senderPid}': {ex.Message}"); return; }
@@ -834,7 +836,9 @@ namespace BigAmbitionsMP
         public static string PaperworkJsonForStable(string stable)
         {
             if (string.IsNullOrEmpty(stable)) return "";
-            lock (_paperwork) return _paperwork.TryGetValue(stable, out var e) ? (e.Json ?? "") : "";
+            string json;
+            lock (_paperwork) json = _paperwork.TryGetValue(stable, out var e) ? (e.Json ?? "") : "";
+            return MergerServiceLayouts.HostFillBodies(json);   // T-24 fold 2: the hand-over / hand-back carries the layout bodies its hashes name
         }
 
         // ══ MERGER PHASE 3-B - DESIGNATION (2026-09-11, plan §9, D1/D13/D15) ══════════════════
@@ -1142,6 +1146,7 @@ namespace BigAmbitionsMP
         public static void RestorePaperworkFromManifest(MpManifest m)
         {
             ResetPaperwork();
+            MergerServiceLayouts.HostRestoreBodies(m?.PaperworkLayouts);   // T-24 fold 2
             try
             {
                 int n = 0;
@@ -11539,7 +11544,8 @@ namespace BigAmbitionsMP
                 bool w4 = p.Op == "mergercontract" || p.Op == "mergersellall" || p.Op == "mergerplan"
                        || p.Op == "mergerplanedit" || p.Op == "mergerterminate" || p.Op == "mergershutdown"
                        || p.Op == "mergercampaign"    // H-MERGERHIRE-1: the recruitment booking rides the same gate
-                       || p.Op == "mergerfurniture" || p.Op == "mergerfood";   // furniture and food deliveries for a partner's shop
+                       || p.Op == "mergerfurniture" || p.Op == "mergerfood"    // furniture and food deliveries for a partner's shop
+                       || p.Op == "mergermove" || p.Op == "mergerinterior";    // T-24 part 2: moving and interior bookings
                 if (w4 && !weMember)
                 { Plugin.Logger.LogWarning($"[Merger] {p.Op} by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
                 // 4c part 2a (E4): the host SERIALISES plan edits per plan id. A second leg carrying a
@@ -11567,7 +11573,7 @@ namespace BigAmbitionsMP
                 // Furniture and food bookings carry a fresh id minted at the dialog's commit. A leg whose id was
                 // already routed is a resend (a second press, a reconnect) and is dropped here, so one booking can
                 // reach its runner only once - the game itself has no duplicate test for these deliveries.
-                if (p.Op == "mergerfurniture" || p.Op == "mergerfood")
+                if (p.Op == "mergerfurniture" || p.Op == "mergerfood" || p.Op == "mergermove" || p.Op == "mergerinterior")
                 {
                     if (string.IsNullOrEmpty(p.BookingId))
                     {
@@ -11602,7 +11608,8 @@ namespace BigAmbitionsMP
                 // empty premises and warehouses too - so the two booking ops skip it as well; the runner
                 // (SharedShopWorkTabs.ApplyRoutedServiceBooking) still refuses a building that is not rented there.
                 bool skipAddrGate = p.Op == "mergerplan" || p.Op == "mergerterminate" || p.Op == "mergershutdown"
-                                 || p.Op == "mergerfurniture" || p.Op == "mergerfood";
+                                 || p.Op == "mergerfurniture" || p.Op == "mergerfood"
+                                 || p.Op == "mergermove" || p.Op == "mergerinterior";   // T-24 part 2: any rented building, as the game's pickers
                 if (!skipAddrGate && !SharedWorkAddressAllowed(p.AddressKey, weMember))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                 string wtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
@@ -11613,6 +11620,19 @@ namespace BigAmbitionsMP
                     // request clears. The game has no notice for this, so the sender only logs it.
                     if (SharedShopWorkTabs.ArmsRoutedRefusal(p.Op)) SharedShopWorkTabs.SendRoutedRefusalTo(senderPid, p.AddressKey, "offline");
                     return;
+                }
+                // T-24 part 2: a move is routed only when ONE game runs both buildings (owner decision 24 = B: moves between
+                // buildings run by different games are slice 2). The member's picker offers nothing else; decided again here.
+                if (p.Op == "mergermove")
+                {
+                    string dtarget = string.IsNullOrEmpty(p.DestKey) ? "" : RouteTargetFor(p.DestKey);
+                    if (dtarget != wtarget)
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] mergermove not routed for '{p.AddressKey}' -> '{p.DestKey}': the origin runs on '{wtarget}', "
+                                               + $"the destination on '{(dtarget.Length == 0 ? "nobody" : dtarget)}'.");
+                        SharedShopWorkTabs.SendRoutedRefusalTo(senderPid, p.AddressKey, "mixed");
+                        return;
+                    }
                 }
                 // H-MERGERHIRE-1: a recruitment campaign is charged to the shop's owner and ticks in that owner's
                 // own save (RecruitmentHelper.RunHourly reads SaveGameManager.Current.RecruitmentCampaigns), and no
@@ -11646,6 +11666,9 @@ namespace BigAmbitionsMP
                     else if (p.Op == "mergercontract") Plugin.Logger.LogInfo($"[Merger] contract create routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergersellall")  Plugin.Logger.LogInfo($"[Merger] sell-all routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergercampaign") Plugin.Logger.LogInfo($"[Merger] campaign booking routed to '{wtarget}' for '{p.AddressKey}' ({p.SkillName}, {p.IntValue} candidates, {p.Days} days)");
+                    else if (p.Op == "mergermove" || p.Op == "mergerinterior")
+                        Plugin.Logger.LogInfo($"[Merger] {p.Op} booking routed to '{wtarget}' for '{p.AddressKey}' (booking {p.BookingId}, day {p.SlotDay}"
+                                            + (p.Op == "mergermove" ? $", to '{p.DestKey}')" : $", '{p.DesignName}', blueprint={p.IsBlueprint})"));
                     else if (p.Op == "mergerfurniture" || p.Op == "mergerfood")
                         Plugin.Logger.LogInfo($"[Merger] {p.Op} booking routed to '{wtarget}' for '{p.AddressKey}' (booking {p.BookingId}, {p.Lines?.Count ?? 0} line(s), day {p.SlotDay} {p.Hour}h)");
                     else if (p.Op == "mergerplanedit") Plugin.Logger.LogInfo($"[Merger] plan edit routed to '{wtarget}' for '{p.AddressKey}' ({p.Family} {p.PlanOp}, plan {p.PlanId}, seq {p.EditSeq})");

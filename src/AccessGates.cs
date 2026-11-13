@@ -410,6 +410,9 @@ namespace BigAmbitionsMP
             catch { }
         }
 
+        // T-24 part 2: the moving and interior pickers offer a partner's building when its booking can be routed
+        // (ServiceRoutable); a move only between buildings ONE game runs for ONE owner (MovingRunnerKey) - moves between
+        // games are slice 2 (owner decision 24 = B) and are simply not offered.
         [HarmonyPatch(typeof(global::UI.Dialog.MovingServiceContractSettings), "PlayerBuildingFilterOrigin")]
         public static class Patch_MovingServiceContractSettings_FilterOrigin
         {
@@ -417,7 +420,7 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!__result || !PartnerShop(buildingRegistration)) return;   // M6: the flip parks the stamp
+                    if (!__result || MovingOriginOffered(buildingRegistration)) return;   // M6: the flip parks the stamp
                     __result = false;
                     LogPickerOnce("MovingService");
                 }
@@ -428,11 +431,14 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(global::UI.Dialog.MovingServiceContractSettings), "PlayerBuildingFilterDestination")]
         public static class Patch_MovingServiceContractSettings_FilterDestination
         {
-            static void Postfix(BuildingRegistration buildingRegistration, ref bool __result)
+            static void Postfix(global::UI.Dialog.MovingServiceContractSettings __instance, BuildingRegistration buildingRegistration, ref bool __result)
             {
                 try
                 {
-                    if (!__result || !PartnerShop(buildingRegistration)) return;   // M6: the flip parks the stamp
+                    if (!__result) return;
+                    var o = __instance?.selectedOriginAddress;
+                    var oreg = o == null ? null : global::Helpers.BuildingHelper.GetBuildingRegistration(o);
+                    if (MovingDestinationOffered(oreg, buildingRegistration)) return;
                     __result = false;
                     LogPickerOnce("MovingService");
                 }
@@ -447,12 +453,63 @@ namespace BigAmbitionsMP
             {
                 try
                 {
-                    if (!__result || !PartnerShop(buildingRegistration)) return;   // M6: the flip parks the stamp
+                    if (!__result || InteriorOffered(buildingRegistration)) return;   // M6: the flip parks the stamp
                     __result = false;
                     LogPickerOnce("InteriorInstallationFirm");
                 }
                 catch { }
             }
+        }
+
+        internal static bool IsPartnerShop(BuildingRegistration reg) => PartnerShop(reg);
+
+        /// <summary>T-24 part 2: may this building be the origin of a move booked from HERE (mine, or a routable partner's)?</summary>
+        internal static bool MovingOriginOffered(BuildingRegistration reg)
+        {
+            try { return reg != null && (!PartnerShop(reg) || ServiceRoutable(reg)); }
+            catch { return false; }
+        }
+
+        /// <summary>T-24 part 2: may an interior installation be booked on this building from HERE?</summary>
+        internal static bool InteriorOffered(BuildingRegistration reg) => MovingOriginOffered(reg);
+
+        /// <summary>T-24 part 2: may this building be the destination of a move from that origin? Two of mine stay native;
+        /// otherwise both must be routable and run by the same game for the same owner (MovingRunnerKey). With no origin
+        /// picked, only my own buildings.</summary>
+        internal static bool MovingDestinationOffered(BuildingRegistration? origin, BuildingRegistration dest)
+        {
+            try
+            {
+                if (dest == null) return false;
+                bool dp = PartnerShop(dest);
+                if (origin == null) return !dp;
+                bool op = PartnerShop(origin);
+                if (!op && !dp) return true;
+                if ((op && !ServiceRoutable(origin)) || (dp && !ServiceRoutable(dest))) return false;
+                string ro = MovingRunnerKey(origin), rd = MovingRunnerKey(dest);
+                return ro.Length > 0 && ro == rd;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>T-24 part 2: "which game runs it | for which absent owner", as seen from here. "self|" is a building
+        /// truly mine; "self|owner" one I stand in for; "runner|owner" one a stand-in elsewhere runs; "owner|" one its
+        /// present owner runs; "" one nobody runs.</summary>
+        internal static string MovingRunnerKey(BuildingRegistration reg)
+        {
+            try
+            {
+                if (reg == null) return "";
+                string key = GameStateReader.AddressKey(reg);
+                if (!PartnerShop(reg)) return "self|";
+                if (MergerAbsence.SimulatesHere(key)) return "self|" + MergerAbsence.OwnerSimulatedFor(key);
+                if (MergerFlip.FlippedCount == 0 || !MergerFlip.IsFlipped(key)) return "";
+                string owner = MergerFlip.ParkedRunner(key) ?? "";
+                var away = AbsenceFor(key);
+                if (away != null) return (away.SimulatorPid ?? "") + "|" + owner;
+                return owner.Length == 0 ? "" : owner + "|";
+            }
+            catch { return ""; }
         }
 
         /// <summary>H-MERGERHIRE-1: may a recruitment campaign be booked on this partner shop from HERE? Only a

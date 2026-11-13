@@ -129,6 +129,7 @@ namespace BigAmbitionsMP
             try
             {
                 ReceiptsIn++;
+                if (seq > 0) MergerServiceLayouts.OnReceipt(seq);   // T-24 fold 2: the layout bodies that bundle carried are held
                 if (_unreceipted.Count == 0) return;
                 if (seq <= 0)
                 {
@@ -205,7 +206,7 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>R2: a new connection may publish its own leave once (MPClient.OnConnected).</summary>
-        public static void ClearLeaveLatch() { _leaveFlushed = false; try { ResetReceipts(); } catch { } }
+        public static void ClearLeaveLatch() { _leaveFlushed = false; try { ResetReceipts(); } catch { } try { MergerServiceLayouts.ResetAcked(); } catch { } }
 
         /// <summary>R2 anchor 3 (window close): Application.wantsToQuit fires on a raw window close and on
         /// Application.Quit, before OnApplicationQuit - while the world may still be loaded. Registered once from
@@ -237,6 +238,15 @@ namespace BigAmbitionsMP
                 try { json = Newtonsoft.Json.JsonConvert.SerializeObject(p); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] serialise: {ex.Message}"); return null; }
                 int bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+                // T-24 fold F2: blueprint layouts count against the cap - over it, layouts are left out (largest first,
+                // each logged) so the rest of the owner's paperwork still travels; never the whole bundle refused for them.
+                // Fold 2: a body rides until the host has receipted it; after that the bundle carries the layout's hash only.
+                while (bytes > MaxBundleBytes && MergerServiceLayouts.TrimLayouts(p, bytes - MaxBundleBytes, why))
+                {
+                    try { json = Newtonsoft.Json.JsonConvert.SerializeObject(p); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] serialise: {ex.Message}"); return null; }
+                    bytes = System.Text.Encoding.UTF8.GetByteCount(json);
+                }
                 if (bytes > MaxBundleBytes)
                 {
                     // Review r1 MAJOR-6: stamp the DAY as well. Without it the day-change branch
@@ -263,6 +273,7 @@ namespace BigAmbitionsMP
                     try
                     {   // H5: awaiting the host's receipt (bounded: a host that never answers cannot grow this)
                         _bundleSeq = seqOut;
+                        MergerServiceLayouts.NoteSent(p, seqOut);   // T-24 fold 2: the layout bodies this bundle carries await its receipt
                         _unreceipted.Enqueue(new System.Collections.Generic.KeyValuePair<int, float>(_bundleSeq, UnityEngine.Time.unscaledTime));
                         while (_unreceipted.Count > 64) _unreceipted.Dequeue();
                     }
@@ -719,14 +730,18 @@ namespace BigAmbitionsMP
                     foreach (var c in gi.interiorInstallationFirmContracts)
                     {
                         if (c == null || !mine.Contains(Key(c.addressToDoTheInstallation))) continue;
-                        l.InteriorInstallationFirmContracts.Add(new PwInstallContract
+                        var ipc = new PwInstallContract
                         {
                             FirmAddressKey = Key(c.interiorInstallationFirmAddress),
                             AddressKey = Key(c.addressToDoTheInstallation),
                             DesignName = c.designName, IsBlueprint = c.isBlueprint, IsCompatBlueprint = c.isCompatBlueprint,
                             HasDiscontinuedItems = c.hasDiscontinuedItems, DayOfInstallation = c.dayOfInstallation,
                             BusinessTypeName = c.businessTypeName,
-                        });
+                        };
+                        // T-24 part 2 / fold 2: the design name as picked, the Routed mark, the layout's hash, and its body only
+                        // while the host is not known to hold it (MergerServiceLayouts.FillHandOver).
+                        MergerServiceLayouts.FillHandOver(ipc, c);
+                        l.InteriorInstallationFirmContracts.Add(ipc);
                     }
 
                 if (gi.movingServiceContracts != null)

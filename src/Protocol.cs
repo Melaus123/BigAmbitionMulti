@@ -771,6 +771,18 @@ namespace BigAmbitionsMP
         public List<PwDeliveryLine>? Lines { get; set; }
         public int    SlotDay   { get; set; } = -1;
         public int    Hour      { get; set; } = -1;
+        /// <summary>T-24 part 2 (v28): "mergermove" / "mergerinterior" - a moving or interior installation booking on a
+        /// partner's building, routed to the game that runs it. Reuses BookingId, SlotDay (the ABSOLUTE day; Hour stays -1:
+        /// the runner draws its own, as MovingServiceContractSettings.OnSelectDay does) and AgencyKey (the moving company's /
+        /// the interior firm's address key). "mergermove": AddressKey is the ORIGIN, DestKey the destination - routed only
+        /// when one game runs both - and Transfer the "transfer business settings" tick. "mergerinterior": DesignName is a
+        /// firm preset (IsBlueprint false) or a blueprint name (IsBlueprint true), whose layout travels in Layout as mod
+        /// data, never as a file or raw JSON.</summary>
+        public string    DestKey     { get; set; } = "";
+        public string    DesignName  { get; set; } = "";
+        public bool      IsBlueprint { get; set; }
+        public bool      Transfer    { get; set; }
+        public PwLayout? Layout      { get; set; }
         public PwLogisticsPlan? Plan { get; set; }     // wave 4: "mergerplan" — the whole plan, replace-by-id on the target
         /// <summary>HQ-PARITY-5 B1, ADDITIVE (Version stays 23; an older sender leaves it null, and only the
         /// logistics "destset" op reads it).  THE WHOLE DESIRED DESTINATION LIST of one logistics plan.  The
@@ -1867,6 +1879,11 @@ namespace BigAmbitionsMP
         //      Lines, SlotDay and Hour (furniture/food bookings routed to the game that runs a merged partner's shop), and the
         //      absent-owner paperwork bundle gains the furniture/food delivery lists. 27 shipped in v0.3.3, so the change bumps;
         //      no capability gate and no old-peer branch (project rule 2026-09-18): mixed sessions refuse at Hello.
+        //      T-24 part 2 (2026-11-13, the same unreleased 28): SharedWorkEditPayload gains DestKey, DesignName, IsBlueprint,
+        //      Transfer and Layout (ops "mergermove" / "mergerinterior"), PwInstallContract gains Layout (the absent-owner
+        //      hand-over carries a blueprint install's layout, bug B), and the new DTO PwLayout carries a layout as mod data.
+        //      T-24 fold 2 (same unreleased 28): PwInstallContract gains LayoutHash (the body rides until the host receipts it)
+        //      and Routed (the receiver marks a routed or handed-over blueprint contract again, whatever its role).
         public const int Version = 28;
     }
 
@@ -4233,6 +4250,98 @@ namespace BigAmbitionsMP
         public bool   HasDiscontinuedItems { get; set; }
         public int    DayOfInstallation    { get; set; }
         public string BusinessTypeName     { get; set; } = "";
+        /// <summary>T-24 part 2 (bug B): a blueprint install's layout as mod data, so the machine that receives the
+        /// contract never looks the name up on its own disk (MergerServiceLayouts). Null for a firm preset.</summary>
+        public PwLayout? Layout { get; set; }
+        /// <summary>T-24 fold 2: the layout's content hash (MergerServiceLayouts.HashOf). Layout - the body - rides only until
+        /// the host has receipted it; the host keeps bodies by hash (MpManifest.PaperworkLayouts) and fills them back in
+        /// for a hand-over or hand-back. "" when no layout is known.</summary>
+        public string LayoutHash { get; set; } = "";
+        /// <summary>T-24 fold 2: the contract is MARKED on the sender for a reason other than "my own file" (routed from a
+        /// partner, or handed over by its owner): whoever receives it - stand-in or returning owner - marks it again
+        /// (MergerServiceLayouts.OnHandedOver). DesignName is always the design as the player picked it.</summary>
+        public bool Routed { get; set; }
+    }
+
+    /// <summary>T-24 part 2 (v28): one interior LAYOUT (BusinessLayoutSets.BusinessLayoutSet, BusinessLayoutSet.cs) as mod
+    /// data. BuildingType/BuildingSize/BuildingVersion are the blueprint's metadata (the native picker's match,
+    /// InteriorInstallationFirmHelper.GetBlueprintNames); the Set* fields are the layout set's own.</summary>
+    public class PwLayout
+    {
+        public string BuildingType       { get; set; } = "";
+        public string BuildingSize       { get; set; } = "";
+        public int    BuildingVersion    { get; set; }
+        public string SetBusinessType    { get; set; } = "";
+        public string SetBuildingSize    { get; set; } = "";
+        public int    SetBuildingVersion { get; set; }
+        public string LayoutName         { get; set; } = "";
+        public int    BuildNumber        { get; set; }
+        public List<string>         RequiredModIds  { get; set; } = new();
+        public List<PwLayoutItem>   Items           { get; set; } = new();
+        public List<PwLayoutDesign> InteriorDesigns { get; set; } = new();
+    }
+
+    /// <summary>One BusinessLayoutSets.Item (Item.cs), and FactoryItem's fields when IsFactory (FactoryItem.cs).</summary>
+    public class PwLayoutItem
+    {
+        public string? Id                  { get; set; }
+        public string? ItemName            { get; set; }
+        public float   Px { get; set; }
+        public float   Py { get; set; }
+        public float   Pz { get; set; }
+        public float   Rw { get; set; }
+        public float   Rx { get; set; }
+        public float   Ry { get; set; }
+        public float   Rz { get; set; }
+        public string? ParentId            { get; set; }
+        public string? CustomValue         { get; set; }
+        public string? WorldSpaceTextValue { get; set; }
+        public string? LinkedItemName      { get; set; }
+        public PwLayoutPurchaser?     Purchaser       { get; set; }
+        public List<PwLayoutChild>?   StackedItems    { get; set; }
+        public List<int>?             DirtSpots       { get; set; }
+        public List<PwVec3>?          CustomPositions { get; set; }
+        public List<CustomColorInfo>? CustomColors    { get; set; }
+        public List<PwCell>?          DirtCells       { get; set; }
+        public bool    IsFactory        { get; set; }
+        public string? SelectedRecipeId { get; set; }
+        public string? WorkstationType  { get; set; }
+        public int     Priority         { get; set; }
+        public bool    ProduceUpTo      { get; set; }
+        public int     ProduceUpToValue { get; set; }
+    }
+
+    public class PwLayoutPurchaser
+    {
+        public string? Name         { get; set; }
+        public bool    Enabled      { get; set; }
+        public string? ItemName     { get; set; }
+        public int     ItemQuantity { get; set; } = 1;
+    }
+
+    public class PwLayoutChild
+    {
+        public string? ChildId         { get; set; }
+        public string? ChildItemName   { get; set; }
+        public int     AttachmentIndex { get; set; }
+    }
+
+    public class PwVec3 { public float X { get; set; } public float Y { get; set; } public float Z { get; set; } }
+    public class PwCell { public int X { get; set; } public int Z { get; set; } }
+
+    /// <summary>One SerializedInteriorDesign: the surface UUID and its materials (with the "ignore" flag).</summary>
+    public class PwLayoutDesign
+    {
+        public string? UUID { get; set; }
+        public List<PwLayoutMaterial> Materials { get; set; } = new();
+    }
+
+    public class PwLayoutMaterial
+    {
+        public string? MaterialID    { get; set; }
+        public int     MaterialIndex { get; set; }
+        public int     ColorIndex    { get; set; }
+        public bool    Ignore        { get; set; }
     }
 
     public class PwMovingContract

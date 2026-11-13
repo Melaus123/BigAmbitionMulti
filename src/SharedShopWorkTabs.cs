@@ -582,8 +582,31 @@ namespace BigAmbitionsMP
                     UI.Notification.Notifications.ShowError("common_notification_select_delivery_time", "common_notification_select_delivery_time");
                 else if (p.AckCode == "noitems")
                     UI.Notification.Notifications.ShowError("dialog_furniture_delivery_select_items_notification", "dialog_furniture_delivery_select_items_notification");
+                // T-24 part 2: moving and interior bookings. A check the game's own dialog makes raises the game's own
+                // notice (MovingServiceDialog.OnMovingSettingsSet, InteriorInstallationFirmAgentDialog.OnDesignSettingsSet);
+                // a blueprint the runner cannot use shows the owner-approved line (decisions 22/25).
+                else if (p.AckCode == "movday")
+                    UI.Notification.Notifications.ShowError("dialog_moving_service_select_moving_day");
+                else if (p.AckCode == "instday")
+                    UI.Notification.Notifications.ShowError("dialog_interior_installation_firm_select_notification_select_installation_day");
+                else if (p.AckCode == "movorigin")
+                    UI.Notification.Notifications.ShowError("moving_service_notification_select_origin_address");
+                else if (p.AckCode == "movdest")
+                    UI.Notification.Notifications.ShowError("moving_service_notification_select_destination_address");
+                else if (p.AckCode == "instaddr")
+                    UI.Notification.Notifications.ShowError("common_notification_select_address");
+                else if (p.AckCode == "design")
+                    UI.Notification.Notifications.ShowError("dialog_interior_installation_firm_select_notification_select_design");
+                else if (p.AckCode == "bpbad" || p.AckCode == "bpmods")
+                {
+                    string line = p.AckCode == "bpmods" ? MergerServiceLayouts.TextBlueprintMods : MergerServiceLayouts.TextBlueprintBad;
+                    Plugin.Logger.LogWarning($"[Merger] routed interior booking for '{p.AddressKey}' was turned down ('{p.AckCode}'); shown: \"{line}\"");
+                    PassengerHud.Toast(line);
+                    return;
+                }
                 else if (p.AckCode == "offline" || p.AckCode == "norent" || p.AckCode == "store" || p.AckCode == "dest"
-                      || p.AckCode == "catalogue" || p.AckCode == "max" || p.AckCode == "noid")
+                      || p.AckCode == "catalogue" || p.AckCode == "max" || p.AckCode == "noid"
+                      || p.AckCode == "busy" || p.AckCode == "mixed")   // T-24 part 2
                 {
                     Plugin.Logger.LogWarning($"[Merger] routed booking for '{p.AddressKey}' was refused ('{p.AckCode}'). The game has no notice for this; the decision-22 toast is shown for a delivery booking.");
                     // Decision 22 (2026-11-12): owner-approved wording. Shown once: the route address was cleared above,
@@ -4591,12 +4614,14 @@ namespace BigAmbitionsMP
         /// <summary>The ops a member arms its one-shot refusal window for (SendEdit) - the routed commitments
         /// whose refusal comes back as a code (OnRoutedRefusal).</summary>
         internal static bool ArmsRoutedRefusal(string op)
-            => op == "mergercontract" || op == "mergercampaign" || op == "mergerfurniture" || op == "mergerfood";
+            => op == "mergercontract" || op == "mergercampaign" || op == "mergerfurniture" || op == "mergerfood"
+               || op == "mergermove" || op == "mergerinterior";   // T-24 part 2
 
         /// <summary>The routed commitments a STAND-IN may make on the absent owner's building it runs: the host sends
         /// them back to the sender, which applies them and tags them to the owner (StandInOwnerFor).</summary>
         internal static bool SelfRoutableOp(string op)
-            => op == "mergercontract" || op == "mergerfurniture" || op == "mergerfood";
+            => op == "mergercontract" || op == "mergerfurniture" || op == "mergerfood"
+               || op == "mergermove" || op == "mergerinterior";   // T-24 part 2: both lists ride the absence hand-over
 
         /// <summary>FurnitureDeliveryContractSettings.GenerateDeliverySlots, on THIS machine's clock.</summary>
         internal static List<(int day, int hour)> FurnitureSlots()
@@ -4646,6 +4671,146 @@ namespace BigAmbitionsMP
             var st = BuildingHelper.GetBuilding(store)?.SpecialService?.settings as FurnitureStoreSettings;
             if (st == null || st.allowedDeliveryBuildingTypes == null || st.allowedDeliveryBuildingTypes.Count == 0) return true;
             return st.allowedDeliveryBuildingTypes.Contains(reg.GetBuildingType());
+        }
+
+        /// <summary>T-24 part 2. RUNNER, MAIN THREAD: a merged co-member (or this machine, as the stand-in) booked a MOVE
+        /// ("mergermove") between two buildings that this one game runs. Re-runs the game's own booking
+        /// (MovingServiceDialog.SetMovingContract :139-150) on THIS machine's truth: both buildings rented and run here
+        /// for the same owner (moves between games are slice 2, owner decision 24 = B - never built here), the destination
+        /// of the origin's building type (MovingServiceContractSettings :162), neither address already in a move
+        /// (:166-172), the day within this machine's own Day+1..Day+7 (:77-81), and the hour drawn here (10-16, :184).
+        /// Nothing is charged now: DoMove charges on moving day, here. On a stand-in it is tagged to the absent owner.</summary>
+        private static void ApplyRoutedMove(BuildingRegistration? reg, SharedWorkEditPayload p)
+        {
+            void Refuse(string code, string why)
+            {
+                Plugin.Logger.LogWarning($"[Merger] moving booking REFUSED for '{p.AddressKey}' -> '{p.DestKey}' (booking {p.BookingId}): {why}");
+                SendRoutedRefusal(p.PlayerId, p.AddressKey, code);
+            }
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || reg == null) { Refuse("movorigin", "no registration for the origin here."); return; }
+                var dreg = GameStatePatcher.FindRegistration(p.DestKey ?? "");
+                if (dreg == null) { Refuse("movdest", "no registration for the destination here."); return; }
+                if (!reg.RentedByPlayer || !dreg.RentedByPlayer) { Refuse("norent", "a building is not rented here."); return; }
+                bool destHere = MergerFlip.TrulyMine(dreg);
+                if (!destHere) { try { destHere = MergerAbsence.SimulatesHere(p.DestKey ?? ""); } catch { } }
+                if (!destHere) { Refuse("mixed", "the destination is not run here."); return; }
+                string standIn = StandInOwnerFor(p.AddressKey, reg);
+                if (standIn != StandInOwnerFor(p.DestKey ?? "", dreg)) { Refuse("mixed", "the two buildings belong to different owners here."); return; }
+                string okey = GameStateReader.AddressKey(reg), dkey = GameStateReader.AddressKey(dreg);
+                if (okey == dkey || dreg.GetBuildingType() != reg.GetBuildingType())
+                { Refuse("movdest", $"the destination is not another building of the origin's type ({reg.GetBuildingType()})."); return; }
+                if (gi.movingServiceContracts != null)
+                    foreach (var c in gi.movingServiceContracts)
+                    {
+                        if (c == null) continue;
+                        string co = GameStateReader.AddressKey(c.originMovingAddress), cd = GameStateReader.AddressKey(c.destinationMovingAddress);
+                        if (co == okey || cd == okey || co == dkey || cd == dkey) { Refuse("busy", $"a move already names '{co}' -> '{cd}'."); return; }
+                    }
+                int today = gi.Day;
+                if (p.SlotDay < today + 1 || p.SlotDay > today + 7) { Refuse("movday", $"day {p.SlotDay} is not one of my moving days ({today + 1}-{today + 7})."); return; }
+                var coAddr = MergerAbsence.AddressOfKey(p.AgencyKey ?? "");
+                var coReg = coAddr == null ? null : BuildingHelper.GetBuildingRegistration(coAddr);
+                if (coReg == null) { Refuse("store", $"unknown moving company '{p.AgencyKey}'."); return; }
+
+                int hour = UnityEngine.Random.Range(10, 17);   // MovingServiceContractSettings.OnSelectDay
+                var mc = new Entities.MovingServiceContract
+                {
+                    movingCompanyRegistration = coReg, originMovingAddress = reg.Address, destinationMovingAddress = dreg.Address,
+                    movingDay = p.SlotDay, movingHour = hour, transferBizManSettings = p.Transfer,
+                };
+                gi.movingServiceContracts!.Add(mc);
+                global::BuildingManager.RefreshHamptonsHouseBlockerCollider(mc.originMovingAddress);
+                global::BuildingManager.RefreshHamptonsHouseBlockerCollider(mc.destinationMovingAddress);
+                if (standIn.Length > 0 && MergerAbsence.RegisterInstalledFor(standIn, "movingServiceContracts", mc))
+                    Plugin.Logger.LogInfo($"[Merger] moving booking for '{okey}' tagged to the absent owner '{standIn}' - it leaves with them.");
+                SaveGameManager.MarkChange();
+                PaperworkSync.MarkDirty();
+                Plugin.Logger.LogInfo($"[Merger] moving booking applied for '{okey}' -> '{dkey}' from '{p.PlayerId}' (booking {p.BookingId}, "
+                                    + $"day {p.SlotDay} {hour}h, transfer={p.Transfer}, company '{p.AgencyKey}')");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Merger] moving booking for '{p.AddressKey}' failed: {ex.Message}");
+                SendRoutedRefusal(p.PlayerId, p.AddressKey, "busy");
+            }
+        }
+
+        /// <summary>T-24 part 2. RUNNER, MAIN THREAD: an INTERIOR INSTALLATION booked by a co-member (or this stand-in)
+        /// ("mergerinterior"). Re-runs InteriorInstallationFirmAgentDialog.SetDesignContract (:129-142) on this machine: the
+        /// building rented here, no installation already booked for it (InteriorInstallationFirmDesignSettings
+        /// .PlayerBuildingFilter :126-139), the day within this machine's own Day+1..Day+7 (:100-103). A firm PRESET is
+        /// this machine's own (StreamingAssets) by name and must exist for the building. A BLUEPRINT's layout came as mod
+        /// data: it is validated (MergerServiceLayouts.Validate) and held for the booking, and served at install; the
+        /// contract is never a free (compat) install. Nothing is charged now: DoInstallation charges on the day, here.</summary>
+        private static void ApplyRoutedInterior(BuildingRegistration? reg, SharedWorkEditPayload p)
+        {
+            void Refuse(string code, string why)
+            {
+                Plugin.Logger.LogWarning($"[Merger] interior installation booking REFUSED for '{p.AddressKey}' (booking {p.BookingId}): {why}");
+                SendRoutedRefusal(p.PlayerId, p.AddressKey, code);
+            }
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || reg == null) { Refuse("instaddr", "no business registration here."); return; }
+                if (!reg.RentedByPlayer) { Refuse("norent", "that building is not rented here."); return; }
+                string key = GameStateReader.AddressKey(reg);
+                var firm = MergerAbsence.AddressOfKey(p.AgencyKey ?? "");
+                if (firm == null) { Refuse("store", $"unknown interior firm '{p.AgencyKey}'."); return; }
+                // T-24 fold gap 5: the firm's own accepted building types (InteriorInstallationFirmDesignSettings.PlayerBuildingFilter :128).
+                var firmSettings = global::Helpers.BuildingHelper.GetBuilding(firm)?.SpecialService?.settings as global::Buildings.InteriorInstallationFirmSettings;
+                if (firmSettings == null) { Refuse("store", $"'{p.AgencyKey}' is not an interior firm here."); return; }
+                if (firmSettings.buildingTypesThatCanInstall == null || !firmSettings.buildingTypesThatCanInstall.Contains(reg.GetBuildingType()))
+                { Refuse("instaddr", $"the firm does not install in a {reg.GetBuildingType()}."); return; }
+                if (gi.interiorInstallationFirmContracts != null)
+                    foreach (var c in gi.interiorInstallationFirmContracts)
+                        if (c != null && GameStateReader.AddressKey(c.addressToDoTheInstallation) == key)
+                        { Refuse("busy", "an installation is already booked for it."); return; }
+                int today = gi.Day;
+                if (p.SlotDay < today + 1 || p.SlotDay > today + 7) { Refuse("instday", $"day {p.SlotDay} is not one of my installation days ({today + 1}-{today + 7})."); return; }
+                string name = p.DesignName ?? "";
+                if (name.Length == 0) { Refuse("design", "no design named."); return; }
+                PwLayout? held = null;
+                if (!p.IsBlueprint)
+                {
+                    // T-24 fold F5: the picker's own business type (InteriorInstallationFirmDesignSettings.OnSelectAddress :159).
+                    string ptype = global::Buildings.BuildingTypeHelper.GetData(reg).HasTag(global::BigAmbitions.Tags.TagRef.Buildingtypetag.containsnobusiness)
+                                   ? "ba:businesstype_empty" : reg.businessTypeName;
+                    var names = InteriorInstallationFirmHelper.GetInteriorDesignsNamesForBuilding(reg.BuildingCached.BuildingType,
+                                    new global::Blueprints.BuildingSizeInfo(reg), ptype);
+                    if (names == null || Array.IndexOf(names, name) < 0) { Refuse("design", $"no firm design '{name}' for this building here."); return; }
+                }
+                else
+                {
+                    if (!MergerServiceLayouts.Validate(p.Layout, reg, checkMods: true, out string code, out string why)) { Refuse(code, why); return; }
+                    held = p.Layout;
+                }
+
+                var ic = new Entities.InteriorInstallationFirmContract
+                {
+                    interiorInstallationFirmAddress = firm, addressToDoTheInstallation = reg.Address, dayOfInstallation = p.SlotDay,
+                    designName = name, isBlueprint = p.IsBlueprint, businessTypeName = reg.businessTypeName,
+                    isCompatBlueprint = false, hasDiscontinuedItems = false,
+                };
+                gi.interiorInstallationFirmContracts!.Add(ic);
+                if (p.IsBlueprint) MergerServiceLayouts.Mark(ic, p.BookingId, name, native: false, ownerCompat: false, held);   // fold 2: the mark lives in the contract itself
+                global::BuildingManager.RefreshHamptonsHouseBlockerCollider(ic.addressToDoTheInstallation);
+                string standIn = StandInOwnerFor(p.AddressKey, reg);
+                if (standIn.Length > 0 && MergerAbsence.RegisterInstalledFor(standIn, "interiorInstallationFirmContracts", ic))
+                    Plugin.Logger.LogInfo($"[Merger] interior installation booking for '{key}' tagged to the absent owner '{standIn}' - it leaves with them.");
+                SaveGameManager.MarkChange();
+                PaperworkSync.MarkDirty();
+                Plugin.Logger.LogInfo($"[Merger] interior installation booking applied for '{key}' from '{p.PlayerId}' (booking {p.BookingId}, "
+                                    + $"day {p.SlotDay}, {(p.IsBlueprint ? "blueprint" : "preset")} '{name}', firm '{p.AgencyKey}')");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Logger.LogWarning($"[Merger] interior installation booking for '{p.AddressKey}' failed: {ex.Message}");
+                SendRoutedRefusal(p.PlayerId, p.AddressKey, "busy");
+            }
         }
 
         /// <summary>RUNNER, MAIN THREAD: a merged co-member (or this machine, as the stand-in) booked a furniture or
@@ -5225,6 +5390,8 @@ namespace BigAmbitionsMP
                 if (p.Op == "mergercampaign") { ApplyRoutedCampaignCreate(reg, p); return; }   // H-MERGERHIRE-1
                 if (p.Op == "mergerfurniture") { ApplyRoutedServiceBooking(reg, p, food: false); return; }
                 if (p.Op == "mergerfood")      { ApplyRoutedServiceBooking(reg, p, food: true); return; }
+                if (p.Op == "mergermove")      { ApplyRoutedMove(reg, p); return; }          // T-24 part 2
+                if (p.Op == "mergerinterior")  { ApplyRoutedInterior(reg, p); return; }      // T-24 part 2
                 if (p.Op == "mergerplan")     { ApplyRoutedPlanEdit(reg, p); return; }
                 // 4c part 2a: the four NON-logistics HQ families. Unlike "mergerplan" this is not a
                 // replace-by-id install - the runner applies ONE op onto its own real plan with the game's

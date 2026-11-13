@@ -1215,7 +1215,7 @@ namespace BigAmbitionsMP
             // 2 phantom slots, zero folders), which under an active fence turns Fresh into
             // Unavailable and ABORTS the join.  Null → the next EnsureManifest re-reads the
             // base honestly from disk (or mints it empty — the truthful state).
-            lock (_lock) { _activeSessionName = lineage; _activeManifest = null; _activePlaythroughId = m.PlaythroughId ?? ""; _activeHostEpoch = Math.Max(1, m.HostEpoch + 1); _midJoinSource = session; }
+            lock (_lock) { _activeSessionName = lineage; _activeManifest = null; _activePlaythroughId = m.PlaythroughId ?? ""; _activeHostEpoch = Math.Max(1, m.HostEpoch + 1); _midJoinSource = session; _layoutsLoadedFrom = session; }
             // Store v2: the loaded world's identity becomes the active playthrough folder
             // (name-only writes for this family land there). Empty pid = legacy world —
             // the first EnsureManifest mint below will stamp + activate it.
@@ -1358,7 +1358,7 @@ namespace BigAmbitionsMP
                 if (!string.IsNullOrEmpty(p.SessionName))
                     lock (_lock) { _activeSessionName = p.SessionName; }
                 Plugin.Logger.LogInfo("[MPSave] Mid-join: no host-stored save — fresh character with host settings.");
-                RestoreCargoMarksNow(null);   // 4c part 2 r2 (F6a): a fresh character in a new world starts with no cargo state
+                RestoreCargoMarksNow(null, layoutsFrom: "");   // 4c part 2 r2 (F6a): a fresh character in a new world starts with no cargo state
                 ClearClientDisconnectMarker();   // host resolved our join — pending disconnect offer consumed
                 EnsurePortraitFolderForWorld("fresh-start");   // DISK-JUNK r2: _activeSessionName was adopted from p.SessionName just above (host sends the stripped base)
                 MPClient.StartFreshFromHost(p.FallbackSettings);
@@ -1417,7 +1417,7 @@ namespace BigAmbitionsMP
             string session = p.SessionName;
             lock (_lock) { _activeSessionName = session; }
             EnsurePortraitFolderForWorld("load-data");   // DISK-JUNK r2: the session is named now; the top bar's portrait write comes at load-finish
-            RestoreCargoMarksNow(MPSaveManager.ReadManifest(session));   // 4c part 2 r2 (F6a): the cargo statics are per world - cleared here, the marks read back
+            RestoreCargoMarksNow(MPSaveManager.ReadManifest(session), layoutsFrom: session);   // 4c part 2 r2 (F6a): the cargo statics are per world - cleared here, the marks read back
             try
             {
                 byte[] raw    = UnGzipBytes(p.GetHsgGzip());
@@ -2768,6 +2768,7 @@ namespace BigAmbitionsMP
             }
 
             saved = ok;
+            if (ok) MergerServiceLayouts.SaveWith(folder);   // T-24 fold 2: this machine's held interior layouts go beside the .hsg of the slot just written
             return new MpSlot
             {
                 StableId      = MPConfig.StableId,
@@ -3664,10 +3665,15 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] the idempotence marks could not be persisted: {ex.Message}"); }
         }
 
+        /// <summary>T-24 fold 2: the session a HOST load actually read (the selected variant/checkpoint folder) - the
+        /// active session is its lineage BASE (Round-37 fork semantics), and the held interior layouts must come from
+        /// beside the .hsg that was loaded.</summary>
+        private static string _layoutsLoadedFrom = "";
+
         /// <summary>WORLD LOAD, both roles: the per-world cargo statics die with the old world and the
         /// persisted marks are read back for the new one - the manifest's copy first (the host's own), then
         /// this machine's file, additively.</summary>
-        internal static void RestoreCargoMarksNow(MpManifest? m)
+        internal static void RestoreCargoMarksNow(MpManifest? m, string? layoutsFrom = null)
         {
             try
             {
@@ -3687,6 +3693,18 @@ namespace BigAmbitionsMP
                 if (local != null) ImportTransfer.RestoreLocalState(local.ImportPending, local.ImportApplied, local.ImportClosed);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] the idempotence marks could not be read back: {ex.Message}"); }
+            // T-24 fold 2: the held interior layouts beside the .hsg actually LOADED (the selected variant/checkpoint on a
+            // host; the served session on a member; none for a fresh character). The member's path runs on the network
+            // thread, so the store is replaced on the MAIN thread, queued ahead of the load (which is queued after this).
+            try
+            {
+                string lsession, lfrom;
+                lock (_lock) { lsession = _activeSessionName; lfrom = _layoutsLoadedFrom; }
+                string src = layoutsFrom ?? (!string.IsNullOrEmpty(lfrom) && MPSaveManager.StripToBase(lfrom) == lsession ? lfrom : lsession);
+                string lfolder = string.IsNullOrEmpty(src) ? "" : Path.Combine(MPSaveManager.MpSessionFolder(src), MPSaveManager.Sanitize(MPConfig.StableId ?? ""));
+                GameStatePatcher.EnqueueOnMainThread(() => MergerServiceLayouts.RestoreFor(lfolder));
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] held interior layouts restore: {ex.Message}"); }
         }
 
         /// <summary>r3 (H1): write the HOST's in-transit cargo table NOW - called from EVERY mutation of it
@@ -3888,7 +3906,7 @@ namespace BigAmbitionsMP
                 // into the MODEL beside the merger roster. WriteManifest's temp + File.Replace
                 // carries it atomically; there is no second write to tear or lose.
                 try { PaperworkSync.FlushNow("pre-save"); } catch { }
-                m.Paperwork = MPServer.SnapshotPaperwork();
+                m.Paperwork = MPServer.SnapshotPaperwork(); m.PaperworkLayouts = MergerServiceLayouts.HostSnapshotBodies();
                 m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                 m.RivalAttention = MPRivalAttention.Snapshot(true);   // H-RIVALPARITY-1 A: per-player rival attention rides the same save moment (main thread here: host rows read now)
                 m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books store rides the same save moment
@@ -3999,7 +4017,7 @@ namespace BigAmbitionsMP
                         m.MergerWalletContributed = liveCon;
                         _keptMergerOnDisk = false;
                     }
-                    m.Paperwork = MPServer.SnapshotPaperwork();   // phase 3-A: the store rides the model, so a grants-only write cannot drop it (no flush here — this path is not guaranteed main-thread)
+                    m.Paperwork = MPServer.SnapshotPaperwork(); m.PaperworkLayouts = MergerServiceLayouts.HostSnapshotBodies();   // phase 3-A: the store rides the model, so a grants-only write cannot drop it (no flush here — this path is not guaranteed main-thread)
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                     m.RivalAttention = MPRivalAttention.Snapshot(false);   // H-RIVALPARITY-1 A: per-player rival attention rides the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): same reason - a grants-only write must not drop the books store
@@ -4090,7 +4108,7 @@ namespace BigAmbitionsMP
                 bool mine = StripAutoSuffix(sessionName) == StripAutoSuffix(_activeSessionName);
                 if (mine)
                 {   // P3-B review MAJOR-5: BOTH stamps sit under the lineage gate (a bare second statement escaped it)
-                    m.Paperwork = MPServer.SnapshotPaperwork();
+                    m.Paperwork = MPServer.SnapshotPaperwork(); m.PaperworkLayouts = MergerServiceLayouts.HostSnapshotBodies();
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                     m.RivalAttention = MPRivalAttention.Snapshot(false);   // H-RIVALPARITY-1 A: per-player rival attention rides the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books stamp sits under the SAME lineage gate
