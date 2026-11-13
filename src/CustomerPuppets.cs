@@ -1830,7 +1830,13 @@ namespace BigAmbitionsMP
                 try
                 {
                     if (!a.isActiveAndEnabled) break;
-                    arrived = !a.pathPending && a.hasPath && a.remainingDistance <= arrive + 0.05f;
+                    // T-30 (2026-11-13): arrival is DISTANCE, as the game decides it (ThirdPersonCharacter.cs:721-722).
+                    // A walk whose target is the spot the body already stands on gets no path at all (hasPath=False,
+                    // status=PathComplete), so the path test alone never passed and each such serve froze for the
+                    // whole 6 s deadline (bundle bamp-bug-20261108-004426, every 'no displacement' diag).
+                    Vector3 toGoal = pos - me.transform.position; toGoal.y = 0f;
+                    arrived = toGoal.sqrMagnitude <= arrive * arrive
+                           || (!a.pathPending && a.hasPath && a.remainingDistance <= arrive + 0.05f);
                     if (!diagDone && Time.unscaledTime >= diagAt)
                     {
                         diagDone = true;
