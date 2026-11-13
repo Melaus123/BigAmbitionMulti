@@ -4376,6 +4376,7 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (purchasing warehouseall): partnership '{id}' has an active contract here.");
                         return Refuse("warehouseall: the contract is active here");
                     }
+                    EnsureImportRows(ip, id);   // T-32
                     Address wh = null;
                     if (!string.IsNullOrEmpty(p.StationId))
                     {
@@ -4404,6 +4405,7 @@ namespace BigAmbitionsMP
                 {
                     // H6: PurchasingAgentProductCellView.ChangeTarget (decompile :234-240) -> UpdateAmount, which
                     // writes ImportProduct.amount; the rest of that body is label refresh with nothing to carry.
+                    EnsureImportRows(ip, id);   // T-32
                     string item = p.StrValue ?? "";
                     foreach (var pr in ip.products) if (pr != null && pr.itemName == item) { pr.amount = p.IntValue; return true; }
                     Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (purchasing target): item '{item}' is not on partnership '{id}' here.");
@@ -4418,6 +4420,22 @@ namespace BigAmbitionsMP
                 case "delete":    PurchasingAgentHelper.DeletePlan(id); return true;
             }
             Plugin.Logger.LogWarning($"[Merger] plan edit REFUSED (purchasing): unknown op '{op}'."); return Refuse($"unknown op '{op}'");
+        }
+
+        /// <summary>T-32 (2026-11-13): the game gives an import agreement its product rows only when its screen opens
+        /// (PurchasingAgentProductsScrollerController -> ImportPartnership.AddMissingImportProducts, decompile :400-412); an
+        /// agreement a partner created was never opened on THIS game, so its copy had no rows and every routed amount or
+        /// warehouse edit was refused ("not on this partnership"). Run the game's own row step first, as its screen would.</summary>
+        private static void EnsureImportRows(ImportPartnership ip, string id)
+        {
+            try
+            {
+                int before = ip.products?.Count ?? 0;
+                ip.AddMissingImportProducts();
+                int after = ip.products?.Count ?? 0;
+                if (after != before) Plugin.Logger.LogInfo($"[Merger] purchasing: partnership '{id}' given its {after - before} missing product row(s) (the game's own AddMissingImportProducts) before the edit.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] purchasing: AddMissingImportProducts failed on partnership '{id}': {ex.Message}"); }
         }
 
         private static bool ApplyHr(GameInstance gi, Address addr, SharedWorkEditPayload p, string op, string id)
