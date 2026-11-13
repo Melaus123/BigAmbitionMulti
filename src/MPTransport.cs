@@ -33,6 +33,11 @@ namespace BigAmbitionsMP
         /// <summary>BAN-PLAYERS-1 (A1): the joiner's Steam-VOUCHED SteamID64 (the connection's own identity, not anything
         /// the client sent) on a Steam join; "" otherwise.</summary>
         public virtual string SteamIdentity => "";
+        /// <summary>T-12: set by the host transport just before it raises PeerDisconnected - true when the PEER closed the
+        /// connection on purpose (its own leave or quit), false for a timeout, a fault, or any close the transport cannot
+        /// name as deliberate. Each transport decides from its own close codes, so the server never compares one
+        /// transport's reason names; the reason text stays the raw transport value for the logs.</summary>
+        public bool PeerClosedOnPurpose { get; internal set; }
         /// <summary>Round-276: bytes this peer is owed but has not been handed yet —
         /// the congestion signal for the join-baseline verifier and the phase-report
         /// probe (a verify window or a peer-log deadline is unmeetable while megabytes
@@ -754,6 +759,9 @@ namespace BigAmbitionsMP
             _listener.PeerDisconnectedEvent += (peer, info) =>
             {
                 if (!_links.TryRemove(peer.Id, out var link)) link = new LnlLink(peer);
+                // T-12: LiteNetLib's deliberate closes - the peer's own Disconnect (RemoteConnectionClose) or ours (DisconnectPeerCalled).
+                link.PeerClosedOnPurpose = info.Reason == DisconnectReason.RemoteConnectionClose
+                                        || info.Reason == DisconnectReason.DisconnectPeerCalled;
                 PeerDisconnected?.Invoke(link, info.Reason.ToString());
             };
             _listener.NetworkReceiveEvent += (peer, reader, channel, delivery) =>

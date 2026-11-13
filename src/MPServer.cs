@@ -2355,9 +2355,9 @@ namespace BigAmbitionsMP
             // clean close means the player deliberately quit: keep playing.
             if (leftPlayer != null && !IsInLobby)
             {
-                // reason is the transport's DisconnectReason name (ToString) — same values as pre-seam.
-                bool cleanLeave = reason == "RemoteConnectionClose"
-                               || reason == "DisconnectPeerCalled"
+                // T-12: the TRANSPORT says whether the peer closed on purpose (LiteNetLib: RemoteConnectionClose /
+                // DisconnectPeerCalled; Steam: our app close code 1000, 'App_Min'). reason stays the raw text, for the logs only.
+                bool cleanLeave = peer.PeerClosedOnPurpose
                                || reason == BanLeaveReason;   // BAN-PLAYERS-1 (A4): the host's own ban is a deliberate removal - never the paused-until-rejoin path
                 try
                 {

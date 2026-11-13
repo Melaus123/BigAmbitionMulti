@@ -663,7 +663,7 @@ namespace BigAmbitionsMP
             // Round-91 (field 20260725-165954: a relay version-refusal reached the player as a bare 'App_Min'):
             // Close() WITHOUT linger discards queued reliable data, so linger=true is what lets the tag frame
             // reach the client. The debug string is for Steam's own diagnostics - the client never sees it.
-            if (linger) _conn.Close(true, 1000, _closeText);
+            if (linger) _conn.Close(true, SteamHostTransport.DeliberateCloseCode, _closeText);
             else _conn.Close();
         }
     }
@@ -682,6 +682,12 @@ namespace BigAmbitionsMP
         // the socket under the same lock before it removes the link, so messages a leaving client delivered before its
         // close are processed (OnMessage drops any message whose link is already gone).
         private readonly object _rxLock = new();
+
+        /// <summary>T-12: the Steam close code (k_ESteamNetConnectionEnd_App_Min = 1000, logged as 'App_Min') every
+        /// deliberate close of OUR code sends - the client's leave/quit (SteamClientTransport.Disconnect) and the host's
+        /// tagged close (SteamLink.CloseNow). Seen by the host as a peer's EndReason it means the peer left on purpose;
+        /// Steam's own codes (Local_*/Remote_*/Misc_*: timeouts, problem detected) never equal it.</summary>
+        internal const int DeliberateCloseCode = 1000;
 
         public event Action<MPLink>? PeerConnected;
         public event Action<MPLink, string>? PeerDisconnected;
@@ -771,6 +777,7 @@ namespace BigAmbitionsMP
             {
                 try { link.Watch.OnClose(info.EndReason.ToString()); } catch { }   // H-STEAMNET-1
                 link.Alive = false;
+                link.PeerClosedOnPurpose = (int)info.EndReason == DeliberateCloseCode;   // T-12: the peer's own deliberate close; the raw name still goes out for the logs
                 PeerDisconnected?.Invoke(link, info.EndReason.ToString());
             }
             // Review L2: Facepunch's SocketManager closes the connection itself only when NO Interface is set -
@@ -847,7 +854,7 @@ namespace BigAmbitionsMP
             try { _watch?.OnClose("local disconnect"); } catch { }   // H-STEAMNET-1
             // D1 (review of 147e031, 2026-09-28): Close() WITHOUT linger discards queued reliable data (the host side's
             // own note at SteamLink.CloseNow) - so a client close lingers too, as SteamLink.CloseNow(true) does.
-            try { _mgr?.Close(true, 1000, "BAMP client leave"); } catch { }
+            try { _mgr?.Close(true, SteamHostTransport.DeliberateCloseCode, "BAMP client leave"); } catch { }   // T-12: the host reads this code as a clean leave
             if (_pumpThread != null && _pumpThread != Thread.CurrentThread) _pumpThread.Join(1000);
             _mgr = null;
         }
