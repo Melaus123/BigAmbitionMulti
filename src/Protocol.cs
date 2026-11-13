@@ -1884,6 +1884,12 @@ namespace BigAmbitionsMP
         //      hand-over carries a blueprint install's layout, bug B), and the new DTO PwLayout carries a layout as mod data.
         //      T-24 fold 2 (same unreleased 28): PwInstallContract gains LayoutHash (the body rides until the host receipts it)
         //      and Routed (the receiver marks a routed or handed-over blueprint contract again, whatever its role).
+        //      T-26 (2026-11-13, the same unreleased 28): PaperworkOwnerLists and CompanyListsPayload gain Warehouses (new DTO
+        //      PwWarehouseFacts: a run warehouse's slot total, products and stock), and CargoTransferPayload gains StarterPid,
+        //      NoStock and the action "report" (a partner-run source warehouse withdraws for a co-member's own plan).
+        //      T-26 fold (same unreleased 28): CargoTransferPayload gains IsExport (a partner-run source's EXPORT leg is handed
+        //      to its runner too, and paid once on the plan's game), and a "report" with RemaindersOnly set carries the ack's
+        //      leftovers to the plan's game.
         public const int Version = 28;
     }
 
@@ -4169,6 +4175,20 @@ namespace BigAmbitionsMP
         public List<string> SourceProducts { get; set; } = new();
     }
 
+    /// <summary>T-26 (v28): one warehouse's facts, measured on the machine that RUNS it and published with its plan
+    /// update, for a co-member whose OWN logistics plan draws from that warehouse.  SlotTotal is the per-slot sum the
+    /// game's capacity takes (decompile LogisticsManagerPlan.cs:151, Entities/VehicleSlot.cs:13-22: 0 for a slot with no
+    /// truck or no driver, else the truck type's destinationsThatCanDeliver) WITHOUT any manager bonus - the plan's
+    /// manager is the co-member's own.  Products is Warehouse.GetProducts() and Stock the pallet counts, measured exactly
+    /// as the plan DTO measures them for a display copy (PwLogisticsPlan.SourceProducts / Stock).</summary>
+    public class PwWarehouseFacts
+    {
+        public string AddressKey { get; set; } = "";
+        public int    SlotTotal  { get; set; }
+        public List<string>      Products { get; set; } = new();
+        public List<PwStockLine> Stock    { get; set; } = new();
+    }
+
     /// <summary>HQ-PARITY-1 P2: one row of PricingManagerPlan.cachedSuggestions (decompile
     /// Buildings.Office.Headquarters/PriceSuggestion.cs - all six of its fields).  The pricing pane's
     /// product table IS that list (PricingManagerProductsScrollerController.LoadPlan :70-79 builds one
@@ -4416,6 +4436,10 @@ namespace BigAmbitionsMP
         // .RecruitmentCampaigns, TrulyMine shops only - a machine standing in for an absent owner holds
         // none of that owner's campaigns at all, so it publishes none here.
         public List<PwRecruitmentCampaign> RecruitmentCampaigns { get; set; } = new();
+
+        // T-26 (v28, additive): the facts of every warehouse the sender RUNS (PwWarehouseFacts) - for a co-member
+        // whose own logistics plan draws from one of them.
+        public List<PwWarehouseFacts> Warehouses { get; set; } = new();
     }
 
     /// <summary>One business's own books (the BuildingRegistration half of the paperwork).</summary>
@@ -4681,6 +4705,10 @@ namespace BigAmbitionsMP
         // Additive on Version 23 (unshipped protocol 24), like every family above it.  SCREEN-LAYER ONLY
         // on the receiver - CampaignMirror holds them in memory and never puts one in a save list.
         public List<PwRecruitmentCampaign> RecruitmentCampaigns { get; set; } = new();
+
+        // T-26 (v28, additive): the facts of every warehouse the sender RUNS (PwWarehouseFacts) - for a co-member
+        // whose own logistics plan draws from one of them.
+        public List<PwWarehouseFacts> Warehouses { get; set; } = new();
     }
 
     /// <summary>MIRROR-1: ONE of the owner's TodoTasks on the wire (Entities/TodoTask.cs). The id is the
@@ -4756,7 +4784,7 @@ namespace BigAmbitionsMP
     public class CargoTransferPayload
     {
         public string PlayerId   { get; set; } = "";
-        public string Action     { get; set; } = "";      // need | offer | deliver | ack | return | closed
+        public string Action     { get; set; } = "";      // need | offer | deliver | ack | return | closed | report (T-26)
         public bool   Answer     { get; set; }            // "need" only: false = the ask, true = the reply
         public string TransferId { get; set; } = "";
         public string PlanId     { get; set; } = "";
@@ -4768,7 +4796,9 @@ namespace BigAmbitionsMP
         public int    Hour       { get; set; }
         public string Reason     { get; set; } = "";      // set on a refusal, logged - never shown
         /// <summary>r2 (F2): on a "return" leg - bring back the per-item REMAINDER only, never the whole
-        /// amount. Set whenever the destination HAS acknowledged: every unit it shelved stays shelved.</summary>
+        /// amount. Set whenever the destination HAS acknowledged: every unit it shelved stays shelved. T-26 fold: on a
+        /// "report" leg - the SECOND report, carrying the destination's per-item remainders (the ack's) to the game whose
+        /// plan it is, which raises the game's own "no available space" message.</summary>
         public bool   RemaindersOnly { get; set; }
         /// <summary>r2 (F2): a LATE acknowledgement arrived after the host had already given the whole record
         /// back, so the delivered units now exist twice. The source WITHDRAWS them again (natively, best
@@ -4776,6 +4806,17 @@ namespace BigAmbitionsMP
         /// allows. Rides the "return" action; it never travels on its own.</summary>
         public bool   WithdrawAgain  { get; set; }
         public List<CargoTransferItem> Items { get; set; } = new();
+        /// <summary>T-26 (v28): host-stamped on a need ANSWER, an offer and the "report" leg when the plan that started the
+        /// transfer is another game's than the one that RUNS the source warehouse: the withdraw is handed to the
+        /// source's runner, and this names the game whose plan it is (it raises the game's own phone report).</summary>
+        public string StarterPid { get; set; } = "";
+        /// <summary>T-26 (v28): on a handed "offer" and on the "report" leg - the shortfall the withdraw met, one row per
+        /// item (the native "no stock" rows, LogisticsManagerPlanDestination.cs:168), Amount = the missing units.</summary>
+        public List<CargoTransferItem> NoStock { get; set; } = new();
+        /// <summary>T-26 fold (v28): an EXPORT leg (a factory plan's import/export destination) whose source another game
+        /// runs - on the ask, the hand-over, the offer and the report. The source's runner withdraws and books the export on
+        /// the real warehouse; the plan's game is paid for exactly the goods offered, once per transfer id.</summary>
+        public bool IsExport { get; set; }
     }
 
     // -- H-MERGERIMPORT-1 (batch 24): the routed import line (MessageType.ImportTransfer) --

@@ -795,6 +795,8 @@ namespace BigAmbitionsMP
         private static string _rbAddr = "";
         private static double _rbAmount, _rbMoneyBefore;
         private static readonly System.Collections.Generic.Dictionary<string, string?> _dgPrev = new();
+        /// <summary>T-26 premise (`lmcap drop` / `undrop`): plan id -> (index, the destination OBJECT removed), put back as it was.</summary>
+        private static readonly System.Collections.Generic.Dictionary<string, System.Collections.Generic.KeyValuePair<int, Entities.LogisticsManagerPlanDestination>> _lmDropped = new();
 
         private static string Execute(string line)
         {
@@ -5754,10 +5756,20 @@ namespace BigAmbitionsMP
                     // skipped).  That helper takes ONE itemName and BuildingHelper's shelf-item filter
                     // (ShelfItemNames) is private, so the walk here is the same one without those two
                     // narrowings: it reports every item name the registration holds cargo of.
-                    if (arg.Length == 0) return "ERR usage: stockof <number> <ba:street_x>";
-                    var soreg = GameStatePatcher.FindRegistration(arg);
-                    if (soreg == null) return $"ERR no registration at '{arg}'";
-                    string sokey = arg; try { sokey = GameStateReader.AddressKey(soreg); } catch { }
+                    // T-26 fold (F6): `stockof <number> <ba:street_x> since <itemName> <before>` also prints that item's count
+                    // now and its difference from <before> - the scenario's equal-and-opposite check.
+                    string soarg = arg, sosince = ""; int sobefore = 0;
+                    int sosi = arg.IndexOf(" since ", StringComparison.Ordinal);
+                    if (sosi >= 0)
+                    {
+                        var sost = arg.Substring(sosi + 7).Trim().Split(' ');
+                        if (sost.Length != 2 || !int.TryParse(sost[1], out sobefore)) return "ERR usage: stockof <number> <ba:street_x> [since <itemName> <before>]";
+                        sosince = sost[0]; soarg = arg.Substring(0, sosi).Trim();
+                    }
+                    if (soarg.Length == 0) return "ERR usage: stockof <number> <ba:street_x> [since <itemName> <before>]";
+                    var soreg = GameStatePatcher.FindRegistration(soarg);
+                    if (soreg == null) return $"ERR no registration at '{soarg}'";
+                    string sokey = soarg; try { sokey = GameStateReader.AddressKey(soreg); } catch { }
                     var sotot = new System.Collections.Generic.SortedDictionary<string, int>(StringComparer.Ordinal);
                     try
                     {
@@ -5783,6 +5795,11 @@ namespace BigAmbitionsMP
                     {
                         if (sosb.Length > 0) sosb.Append(",");
                         sosb.Append($"{sokv2.Key}:{sokv2.Value}");
+                    }
+                    if (sosince.Length > 0)
+                    {
+                        int sonow; sotot.TryGetValue(sosince, out sonow);
+                        return $"OK stockof addr='{sokey}' items=[{sosb}] item='{sosince}' before={sobefore} now={sonow} diff={sonow - sobefore}";
                     }
                     return $"OK stockof addr='{sokey}' items=[{sosb}]";
                 }
@@ -5884,6 +5901,338 @@ namespace BigAmbitionsMP
                     catch (Exception ctx) { return $"ERR cargotest plan='{ctp.id}': {ctx.GetType().Name}: {ctx.Message}"; }
                     return $"OK cargotest plan='{ctp.id}' src='{ctsrc}' dest='{ctdkey}' item='{ctitem}' amount={ctamt}"
                          + $" dests={ctp.destinations.Count}";
+                }
+
+                case "whstock":
+                {
+                    // T-26 rig premise: put stock INTO a warehouse THIS machine runs, through the game's own unload into
+                    // warehouse storage - ImportPartnership.DoDeliveries (ImportPartnership.cs:277-278): a new
+                    // CargoInstance(item, amount, price), then ItemHelper.DeliverCargoToBuilding onto the iswarehousestorage
+                    // holders, which merges into matching cargo and fills free holder slots box by box (ItemHelper.cs:1091);
+                    // what does not fit stays over (left=). The import's purchase record is not raised: this stock is free.
+                    // The answer counts the item the way the delivery leg reads it (BuildingHelper.GetItemsWithStock).
+                    var wsk = arg.Split(' ');
+                    if (wsk.Length != 4) return "ERR usage: whstock <number> <ba:street_x> <itemName> <count>";
+                    int wscount;
+                    if (!int.TryParse(wsk[3], out wscount) || wscount <= 0) return $"ERR whstock: bad count '{wsk[3]}'";
+                    var wsreg = GameStatePatcher.FindRegistration(wsk[0] + " " + wsk[1]) as Entities.Warehouse;
+                    if (wsreg == null) return $"ERR no warehouse at '{wsk[0]} {wsk[1]}'";
+                    string wskey = ""; try { wskey = GameStateReader.AddressKey(wsreg); } catch { }
+                    if (CompanyPlans.RunElsewhere(wskey)) return $"ERR whstock refused - '{wskey}' is run by another machine";
+                    if (!wsreg.RentedByPlayer) return $"ERR whstock refused - '{wskey}' is not rented here (the import's own guard, ImportPartnership.cs:273)";
+                    try
+                    {
+                        var wsitem = BigAmbitions.Items.ItemsGetter.GetByName(wsk[2]);
+                        if (wsitem == null) return $"ERR no item '{wsk[2]}'";
+                        float wsprice = 0f; try { wsprice = global::ItemHelper.GetWholesalePrice(wsitem); } catch { }
+                        // the import's filter is ItemCached.HasTag(iswarehousestorage); this is the same set by name,
+                        // exactly as GetItemsWithStock builds it (BuildingHelper.cs:459-465)
+                        var wsshelf = new System.Collections.Generic.HashSet<string>(
+                            BigAmbitions.Items.ItemsGetter.GetAllItemNamesByTag(BigAmbitions.Tags.TagRef.Itemtag.iswarehousestorage), StringComparer.Ordinal);
+                        var wscargo = new BigAmbitions.Items.CargoInstance(wsitem.itemName, wscount, wsprice);
+                        global::ItemHelper.DeliverCargoToBuilding(wscargo, wsreg, x => x != null && wsshelf.Contains(x.itemName));
+                        int wsadded = wscount - wscargo.amount;
+                        var wslist = new System.Collections.Generic.List<BigAmbitions.Items.CargoInstance>();
+                        Helpers.BuildingHelper.GetItemsWithStock(wsreg, wsitem.itemName, wslist);
+                        int wsnow = 0;
+                        foreach (var wsc in wslist) if (wsc != null) wsnow += wsc.amount;
+                        Plugin.Logger.LogInfo($"[TestDrive] whstock '{wskey}': {wsitem.itemName} added={wsadded} left={wscargo.amount} now={wsnow}.");
+                        return $"OK whstock addr='{wskey}' item='{wsitem.itemName}' added={wsadded} left={wscargo.amount} now={wsnow}";
+                    }
+                    catch (Exception wsx) { return $"ERR whstock addr='{wskey}': {wsx.GetType().Name}: {wsx.Message}"; }
+                }
+
+                case "lmsource":
+                {
+                    // T-26 L1: set an OWN plan's source warehouse, the field the plan screen's warehouse dropdown writes
+                    // (LogisticsManagerPlan.targetAddress, LogisticsManagerPlan.cs:38). In memory only; the scenario
+                    // puts the old one back.
+                    var lsk = arg.Split(' ');
+                    if (lsk.Length != 3) return "ERR usage: lmsource <planId|first> <number> <ba:street_x>";
+                    var lsgi = SaveGameManager.Current;
+                    if (lsgi?.logisticsManagerPlans == null) return "ERR this machine holds no logistics manager plans";
+                    Buildings.Office.Headquarters.LogisticsManagerPlan lsp = null;
+                    foreach (var lscp in lsgi.logisticsManagerPlans)
+                    {
+                        if (lscp == null) continue;
+                        bool lsdisp; try { lsdisp = MergerAbsence.IsDisplayInstall(lscp); } catch { lsdisp = false; }
+                        if (lsdisp) continue;                    // a partner's display copy is not this machine's plan
+                        if (lsk[0] == "first" || lscp.id == lsk[0]) { lsp = lscp; break; }
+                    }
+                    if (lsp == null) return $"ERR no own logistics plan '{lsk[0]}' on this machine";
+                    var lsreg = GameStatePatcher.FindRegistration(lsk[1] + " " + lsk[2]) as Entities.Warehouse;
+                    if (lsreg == null) return $"ERR no warehouse at '{lsk[1]} {lsk[2]}'";
+                    string lswas = ""; try { lswas = GameStateReader.AddressKey(lsp.targetAddress); } catch { }
+                    lsp.targetAddress = lsreg.Address;
+                    string lsnow = ""; try { lsnow = GameStateReader.AddressKey(lsp.targetAddress); } catch { }
+                    Plugin.Logger.LogInfo($"[TestDrive] lmsource plan '{lsp.id}': '{lswas}' -> '{lsnow}'.");
+                    return $"OK lmsource plan='{lsp.id}' was='{lswas}' now='{lsnow}'";
+                }
+
+                case "lmcap":
+                {
+                    // T-26 L2.
+                    //   lmcap <number> <ba:street_x>   a warehouse THIS machine holds: its per-slot total, the native sum
+                    //                                  (LogisticsManagerPlan.cs:151) - on the runner, the real trucks
+                    //   lmcap <planId|first>           an own plan: the limit every reader gets (the MaxDestinations
+                    //                                  getter, through the hooks), the slot total it used, the bonus of
+                    //                                  this plan's manager, and whether limit == total + floor(total*skill/100)
+                    //   lmcap <planId|first> add <item> [<number> <ba:street_x>]   append one shop destination in memory,
+                    //                                  only under the plan screen's own rule (dests < limit,
+                    //                                  LogisticsManagerPlanUI.cs:235); its target = the shop's stock + 1
+                    //   lmcap <planId|first> drop <last | <number> <ba:street_x>>   free ONE destination slot through the game's own
+                    //                                  remove (LogisticsManagerDestinationUI.cs:60, destinations.RemoveAt), in
+                    //                                  memory; the removed destination object is kept here
+                    //   lmcap <planId|first> undrop    put that very object back at its index (FIXTURE HYGIENE)
+                    //   lmcap <planId|first> next      READ-ONLY: the shop `add` (no address) would pick, and the items
+                    //                                  its sale shelves are set to - the only shelves the delivery leg's
+                    //                                  first unload fills (LogisticsManagerPlanDestination.cs:176)
+                    var lck = arg.Split(' ');
+                    const string lcusage = "ERR usage: lmcap <number> <ba:street_x> | lmcap <planId|first> [next | add <itemName> [<number> <ba:street_x>] | drop <last|<number> <ba:street_x>> | undrop]";
+                    if (lck.Length == 0 || lck[0].Length == 0) return lcusage;
+                    if (lck.Length == 2)
+                    {
+                        var lcw = GameStatePatcher.FindRegistration(lck[0] + " " + lck[1]) as Entities.Warehouse;
+                        if (lcw != null)
+                        {
+                            string lcwk = ""; try { lcwk = GameStateReader.AddressKey(lcw); } catch { }
+                            int lcwt = CompanyLists.SlotTotalOf(lcw);
+                            int lcslots = lcw.vehicleSlots != null ? lcw.vehicleSlots.Count : 0;
+                            Plugin.Logger.LogInfo($"[TestDrive] lmcap warehouse '{lcwk}': slots={lcslots} total={lcwt}.");
+                            return $"OK lmcap addr='{lcwk}' total={lcwt} slots={lcslots}";
+                        }
+                    }
+                    var lcgi = SaveGameManager.Current;
+                    if (lcgi?.logisticsManagerPlans == null) return "ERR this machine holds no logistics manager plans";
+                    Buildings.Office.Headquarters.LogisticsManagerPlan lcp = null;
+                    foreach (var lccp in lcgi.logisticsManagerPlans)
+                    {
+                        if (lccp == null) continue;
+                        bool lcdisp; try { lcdisp = MergerAbsence.IsDisplayInstall(lccp); } catch { lcdisp = false; }
+                        if (lcdisp) continue;
+                        if (lck[0] == "first" || lccp.id == lck[0]) { lcp = lccp; break; }
+                    }
+                    if (lcp == null) return $"ERR no own logistics plan '{lck[0]}' on this machine";
+                    string lcsrc = ""; try { lcsrc = GameStateReader.AddressKey(lcp.targetAddress); } catch { }
+                    bool lcpartner = CompanyPlans.RunElsewhere(lcsrc);
+                    int lclimit = lcp.MaxDestinations;
+                    int lctotal = -1;
+                    if (lcpartner) { var lcf = CompanyPlans.WarehouseFactsOf(lcsrc); lctotal = lcf != null ? lcf.SlotTotal : -1; }
+                    else
+                    {
+                        Entities.Warehouse lcw2 = null;
+                        try { lcw2 = Helpers.BuildingHelper.GetBuildingRegistration(lcp.targetAddress) as Entities.Warehouse; } catch { }
+                        lctotal = lcw2 != null ? CompanyLists.SlotTotalOf(lcw2) : -1;
+                    }
+                    float lcskill = 0f;
+                    try { if (lcp.assignedEmployeeId != null) lcskill = Helpers.EmployeeHelper.GetSkillOfEmployee(lcp.assignedEmployeeId, "ba:skill_logisticsmanager"); } catch { }
+                    int lcbonus = lctotal > 0 ? UnityEngine.Mathf.FloorToInt((float)lctotal * lcskill / 100f) : 0;
+                    bool lcok = lcp.assignedEmployeeId == null ? lclimit == 0 : lclimit == (lctotal <= 0 ? 0 : lctotal + lcbonus);
+                    int lcpossible = 0;
+                    try { lcpossible = Buildings.Office.Headquarters.LogisticsManagerPlan.GetMaxPossibleDestinations(lcp.targetAddress); } catch { }
+                    int lcd = lcp.destinations != null ? lcp.destinations.Count : 0;
+                    string lchead = $"plan='{lcp.id}' src='{lcsrc}' run={(lcpartner ? "partner" : "own")} limit={lclimit} total={lctotal} bonus={lcbonus}"
+                                  + $" skill={lcskill.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)} possible={lcpossible}"
+                                  + $" formula={(lcok ? "ok" : "MISMATCH")} dests={lcd}";
+                    Plugin.Logger.LogInfo($"[TestDrive] lmcap {lchead}");
+                    if (lck.Length == 1) return "OK lmcap " + lchead;
+                    if (lck[1] == "drop" || lck[1] == "undrop")
+                    {
+                        if (lcp.destinations == null) return $"ERR plan '{lcp.id}' holds no destination list";
+                        string lcpid = lcp.id ?? "";
+                        if (lck[1] == "undrop")
+                        {
+                            if (lck.Length != 2) return lcusage;
+                            if (!_lmDropped.TryGetValue(lcpid, out var lcu) || lcu.Value == null) return $"ERR lmcap undrop: nothing dropped from plan '{lcpid}'";
+                            int lcui = System.Math.Min(System.Math.Max(lcu.Key, 0), lcp.destinations.Count);
+                            lcp.destinations.Insert(lcui, lcu.Value);
+                            _lmDropped.Remove(lcpid);
+                            string lcuk = ""; try { lcuk = GameStateReader.AddressKey(lcu.Value.deliveryTargetAddress); } catch { }
+                            Plugin.Logger.LogInfo($"[TestDrive] lmcap restored '{lcuk}' to plan '{lcpid}' at {lcui} - dests={lcp.destinations.Count}.");
+                            return $"OK lmcap restored shop='{lcuk}' index={lcui} dests={lcp.destinations.Count}";
+                        }
+                        if (_lmDropped.ContainsKey(lcpid)) return $"ERR lmcap drop: a destination of plan '{lcpid}' is dropped already - undrop it first";
+                        int lcdi = -1;
+                        if (lck.Length == 3 && lck[2] == "last") lcdi = lcd - 1;
+                        else if (lck.Length == 4)
+                        {
+                            var lcdr = GameStatePatcher.FindRegistration(lck[2] + " " + lck[3]);
+                            string lcdrk = ""; try { if (lcdr != null) lcdrk = GameStateReader.AddressKey(lcdr); } catch { }
+                            for (int lci = 0; lcdrk.Length > 0 && lci < lcd; lci++)
+                            {
+                                string lcik = ""; try { lcik = GameStateReader.AddressKey(lcp.destinations[lci]?.deliveryTargetAddress); } catch { }
+                                if (string.Equals(lcik, lcdrk, StringComparison.OrdinalIgnoreCase)) { lcdi = lci; break; }
+                            }
+                        }
+                        else return lcusage;
+                        if (lcdi < 0 || lcdi >= lcd || lcp.destinations[lcdi] == null) return $"ERR lmcap drop: no such destination on plan '{lcpid}'";
+                        var lcdd = lcp.destinations[lcdi];
+                        lcp.destinations.RemoveAt(lcdi);
+                        _lmDropped[lcpid] = new System.Collections.Generic.KeyValuePair<int, Entities.LogisticsManagerPlanDestination>(lcdi, lcdd);
+                        string lcdk = ""; try { lcdk = GameStateReader.AddressKey(lcdd.deliveryTargetAddress); } catch { }
+                        Plugin.Logger.LogInfo($"[TestDrive] lmcap dropped '{lcdk}' from plan '{lcpid}' at {lcdi} - dests {lcd} -> {lcp.destinations.Count}.");
+                        return $"OK lmcap dropped shop='{lcdk}' index={lcdi} was={lcd} dests={lcp.destinations.Count} limit={lclimit}";
+                    }
+                    bool lcnext = lck.Length == 2 && lck[1] == "next";
+                    if (!lcnext && (lck[1] != "add" || (lck.Length != 3 && lck.Length != 5))) return lcusage;
+                    if (lcp.destinations == null) return $"ERR plan '{lcp.id}' holds no destination list";
+                    if (!lcnext && lcd >= lclimit) return $"ERR lmcap add refused - dests={lcd} limit={lclimit} (the plan screen's own rule)";
+                    string lcitem = lcnext ? "" : lck[2];
+                    if (!lcnext)
+                    {
+                        bool lcknown = false;
+                        try { lcknown = BigAmbitions.Items.ItemsGetter.GetByName(lcitem) != null; } catch { }
+                        if (!lcknown) return $"ERR no item '{lcitem}'";
+                    }
+                    var lcdone = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+                    foreach (var lcod in lcp.destinations)
+                    {
+                        if (lcod == null) continue;
+                        try { lcdone.Add(GameStateReader.AddressKey(lcod.deliveryTargetAddress)); } catch { }
+                    }
+                    global::BuildingRegistration lcshop = null;
+                    if (lck.Length == 5) lcshop = GameStatePatcher.FindRegistration(lck[3] + " " + lck[4]);
+                    else if (lcgi.BuildingRegistrations != null)
+                        foreach (var lcrg in lcgi.BuildingRegistrations)
+                        {
+                            if (lcrg == null || lcrg is Entities.Warehouse) continue;
+                            bool lcmine; try { lcmine = lcrg.RentedByPlayer && MergerFlip.TrulyMine(lcrg); } catch { lcmine = false; }
+                            if (!lcmine || string.IsNullOrEmpty(lcrg.businessTypeName) || lcrg.businessTypeName == "ba:businesstype_importexport") continue;
+                            string lcrk = ""; try { lcrk = GameStateReader.AddressKey(lcrg); } catch { }
+                            if (lcrk.Length == 0 || lcdone.Contains(lcrk)) continue;
+                            lcshop = lcrg; break;
+                        }
+                    if (lcshop == null) return "ERR lmcap add: no own shop that is not already a destination of this plan";
+                    string lcsk = ""; try { lcsk = GameStateReader.AddressKey(lcshop); } catch { }
+                    if (lcdone.Contains(lcsk)) return $"ERR lmcap add: '{lcsk}' is already a destination of this plan";
+                    if (lcnext)
+                    {
+                        // A PointOfSale / ShowcaseShelf holds ONE stock cargo naming the item it is set to
+                        // (ItemHelper.GetStockInstance :108); the leg's first unload fills only those whose item matches.
+                        var lcset = new System.Collections.Generic.SortedSet<string>(StringComparer.Ordinal);
+                        try
+                        {
+                            if (lcshop.itemInstances != null)
+                                foreach (var lcii in lcshop.itemInstances.Values)
+                                {
+                                    if (lcii?.cargoInstances == null || lcii.cargoInstances.Count != 1) continue;
+                                    var lcic = lcii.ItemCached;
+                                    if (lcic == null || (lcic.type & (BigAmbitions.Items.ItemType.PointOfSale | BigAmbitions.Items.ItemType.ShowcaseShelf)) == 0) continue;
+                                    string lcin = null;
+                                    foreach (var lcic2 in lcii.cargoInstances) { lcin = lcic2?.itemName; break; }
+                                    if (!string.IsNullOrEmpty(lcin)) lcset.Add(lcin);
+                                }
+                        }
+                        catch (Exception lcx) { return $"ERR lmcap next shop='{lcsk}': {lcx.GetType().Name}: {lcx.Message}"; }
+                        Plugin.Logger.LogInfo($"[TestDrive] lmcap next shop='{lcsk}' shelves=[{string.Join(",", lcset)}].");
+                        return $"OK lmcap next shop='{lcsk}' shelves=[{string.Join(",", lcset)}] " + lchead;
+                    }
+                    int lchave = 0;
+                    try { lchave = Helpers.BuildingHelper.CountTotalResourcesInStock(lcshop.Address, lcitem); } catch { }
+                    var lcnd = new Entities.LogisticsManagerPlanDestination { deliveryTargetAddress = lcshop.Address };
+                    lcnd.stockTargets.Add(new BigAmbitions.Items.ItemAmountTarget(lcitem, lchave + 1));
+                    lcp.destinations.Add(lcnd);
+                    Plugin.Logger.LogInfo($"[TestDrive] lmcap added '{lcsk}' to plan '{lcp.id}': {lcitem} target {lchave + 1} (has {lchave}).");
+                    return $"OK lmcap added shop='{lcsk}' item='{lcitem}' have={lchave} target={lchave + 1} " + lchead;
+                }
+
+                case "lmpass":
+                {
+                    // T-26 L3: the game's hourly WAREHOUSE delivery pass, run now and in one go. Native
+                    // (LogisticsManagerHelper.DoAllWarehouseDeliveries :26-35) walks every non-factory plan's
+                    // GetPlannedDeliveries first, then ProgressDelivery (:48-50) calls DeliverDestination per pair, and
+                    // the pass ends in LogisticsManagerPlan.OnFinishedDeliveries. `lmpass <planId>` walks that plan only.
+                    var lpgi = SaveGameManager.Current;
+                    if (lpgi?.logisticsManagerPlans == null) return "ERR this machine holds no logistics manager plans";
+                    string lpwant = arg.Trim();
+                    var lppairs = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<Buildings.Office.Headquarters.LogisticsManagerPlan, Entities.LogisticsManagerPlanDestination>>();
+                    int lpplans = 0;
+                    foreach (var lpp in lpgi.logisticsManagerPlans.ToArray())
+                    {
+                        if (lpp == null || lpp.isFactory) continue;
+                        if (lpwant.Length > 0 && lpp.id != lpwant) continue;
+                        lpplans++;
+                        foreach (var lpd in lpp.GetPlannedDeliveries())
+                            lppairs.Add(new System.Collections.Generic.KeyValuePair<Buildings.Office.Headquarters.LogisticsManagerPlan, Entities.LogisticsManagerPlanDestination>(lpp, lpd));
+                    }
+                    if (lpwant.Length > 0 && lpplans == 0) return $"ERR no warehouse plan '{lpwant}' on this machine";
+                    int lpbefore = CargoTransfer.StartedCount;
+                    foreach (var lppr in lppairs)
+                    {
+                        try { lppr.Key.DeliverDestination(lppr.Value); }
+                        catch (Exception lpx) { Plugin.Logger.LogWarning($"[TestDrive] lmpass leg of plan '{lppr.Key.id}': {lpx.GetType().Name}: {lpx.Message}"); }
+                    }
+                    try { Buildings.Office.Headquarters.LogisticsManagerPlan.OnFinishedDeliveries(); }
+                    catch (Exception lpx2) { Plugin.Logger.LogWarning($"[TestDrive] lmpass finish: {lpx2.GetType().Name}: {lpx2.Message}"); }
+                    int lpstarted = CargoTransfer.StartedCount - lpbefore;
+                    Plugin.Logger.LogInfo($"[TestDrive] lmpass plans={lpplans} legs={lppairs.Count} started={lpstarted}.");
+                    return $"OK lmpass plans={lpplans} legs={lppairs.Count} started={lpstarted}";
+                }
+
+                case "lmexport":
+                {
+                    // T-26 fold (F1) LEVER-LEVEL CHECK of the export hand-over. The fixture is not known to hold a partner
+                    // FACTORY plan with stock, so this drives the export branch of CargoTransfer.TakeOver directly: an own plan
+                    // whose source another game runs is marked a factory plan for this ONE synchronous call (the branch's test
+                    // is `plan.isFactory && destination is an import/export business`, LogisticsManagerPlan.cs:85) and handed
+                    // ONE destination object - the first import/export business registration, `<item> x<amount>` - that is
+                    // never put on the plan; isFactory is restored in `finally`. The leg after that is the real one: handed to
+                    // the runner, withdrawn and booked there, paid here once.   lmexport <planId|first> <itemName> <amount>
+                    var lxk = arg.Split(' ');
+                    if (lxk.Length != 3) return "ERR usage: lmexport <planId|first> <itemName> <amount>";
+                    int lxamt;
+                    if (!int.TryParse(lxk[2], out lxamt) || lxamt < 1 || lxamt > 999) return $"ERR amount '{lxk[2]}' is not 1..999";
+                    bool lxknown = false;
+                    try { lxknown = BigAmbitions.Items.ItemsGetter.GetByName(lxk[1]) != null; } catch { }
+                    if (!lxknown) return $"ERR no item '{lxk[1]}'";
+                    var lxgi = SaveGameManager.Current;
+                    if (lxgi?.logisticsManagerPlans == null) return "ERR this machine holds no logistics manager plans";
+                    Buildings.Office.Headquarters.LogisticsManagerPlan lxp = null;
+                    foreach (var lxc in lxgi.logisticsManagerPlans)
+                    {
+                        if (lxc == null) continue;
+                        bool lxdisp; try { lxdisp = MergerAbsence.IsDisplayInstall(lxc); } catch { lxdisp = false; }
+                        if (lxdisp) continue;
+                        if (lxk[0] == "first" || lxc.id == lxk[0]) { lxp = lxc; break; }
+                    }
+                    if (lxp == null) return $"ERR no own logistics plan '{lxk[0]}' on this machine";
+                    string lxsrc = ""; try { lxsrc = GameStateReader.AddressKey(lxp.targetAddress); } catch { }
+                    if (!CompanyPlans.RunElsewhere(lxsrc)) return $"ERR lmexport: plan '{lxp.id}' draws from '{lxsrc}', which this machine runs - point it at a partner's warehouse first (lmsource)";
+                    global::BuildingRegistration lxreg = null;
+                    if (lxgi.BuildingRegistrations != null)
+                        foreach (var lxr in lxgi.BuildingRegistrations)
+                            if (lxr != null && lxr.businessTypeName == "ba:businesstype_importexport") { lxreg = lxr; break; }
+                    if (lxreg == null) return "ERR lmexport: no import/export business registration on this machine";
+                    string lxdk = ""; try { lxdk = GameStateReader.AddressKey(lxreg); } catch { }
+                    var lxd = new Entities.LogisticsManagerPlanDestination { deliveryTargetAddress = lxreg.Address };
+                    lxd.stockTargets.Add(new BigAmbitions.Items.ItemAmountTarget(lxk[1], lxamt));
+                    bool lxwas = lxp.isFactory, lxok;
+                    string lxbefore = CargoTransfer.LastStartedId;
+                    try { lxp.isFactory = true; lxok = CargoTransfer.TakeOver(lxp, lxd); }
+                    finally { lxp.isFactory = lxwas; }
+                    string lxtid = CargoTransfer.LastStartedId;
+                    if (!lxok || lxtid == lxbefore) return $"ERR lmexport: no transfer was started (ok={lxok})";
+                    Plugin.Logger.LogInfo($"[TestDrive] lmexport {lxtid}: plan '{lxp.id}' '{lxsrc}' -> '{lxdk}' {lxk[1]} x{lxamt}.");
+                    return $"OK lmexport tid='{lxtid}' plan='{lxp.id}' src='{lxsrc}' dest='{lxdk}' item='{lxk[1]}' amount={lxamt}";
+                }
+
+                case "cargoresend":
+                {
+                    // T-26 fold (F6): HOST. Sends the hand-over (the need answer the host handed a source's runner) of the
+                    // latest transfer this machine started for <plan> -> <address> once more, exactly as it went the first
+                    // time. The runner's duplicate guard is under test: it must take nothing a second time.
+                    //   cargoresend <planId> <number> <ba:street_x>
+                    if (!MPServer.IsRunning) return "ERR cargoresend is a host verb - the host holds the hand-overs";
+                    var crk = arg.Split(' ');
+                    if (crk.Length != 3) return "ERR usage: cargoresend <planId> <number> <ba:street_x>";
+                    var crreg = GameStatePatcher.FindRegistration(crk[1] + " " + crk[2]);
+                    string crdk = crk[1] + " " + crk[2];
+                    try { if (crreg != null) crdk = GameStateReader.AddressKey(crreg); } catch { }
+                    string crtid = CargoTransfer.StartedIdFor(crk[0], crdk);
+                    if (crtid.Length == 0) return $"ERR cargoresend: this machine started no transfer for plan '{crk[0]}' to '{crdk}'";
+                    string crres = MPServer.DevResendHanded(crtid);
+                    Plugin.Logger.LogInfo($"[TestDrive] cargoresend {crres}");
+                    return crres;
                 }
 
                 case "importtest":

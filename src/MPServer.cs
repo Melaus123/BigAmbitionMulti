@@ -10448,6 +10448,8 @@ namespace BigAmbitionsMP
         private sealed class HostCargoNeed
         {
             public string SourcePid = "", DestRunner = "";
+            public string StarterPid = "";   // T-26: the game whose plan asked, when the withdraw is handed to the source's runner (SourcePid)
+            public bool   IsExport;          // T-26 fold (F1): an export leg - no destination runner, sold where it stands
             public readonly Dictionary<string, int> Answered = new();
         }
 
@@ -10495,13 +10497,56 @@ namespace BigAmbitionsMP
 
                 if (p.Action == CargoTransfer.ActNeed && !p.Answer)
                 {
+                    // T-26 fold (F1): an EXPORT leg has no destination runner (the import/export business is nobody's), so the
+                    // host binds it to the SOURCE's runner and hands it the withdraw at once; the asked rows are the cap.
+                    if (p.IsExport)
+                    {
+                        string xsrc = RunnerOf(p.SourceKey ?? "");
+                        string xtype = "";
+                        try { xtype = GameStatePatcher.FindRegistration(p.DestKey ?? "")?.businessTypeName ?? ""; } catch { }
+                        string xwhy = xsrc.Length == 0 ? "nobody is running that export's source"
+                                    : xsrc == senderPid ? "the sender runs that export's source itself"
+                                    : xtype != "ba:businesstype_importexport" ? "the export's destination is not an import/export business"
+                                    : !CargoSourceInCompany(senderPid, p.SourceKey ?? "") ? "the export's source is not in the sender's company" : "";
+                        if (xwhy.Length > 0)
+                        {
+                            Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: {xwhy} ('{p.SourceKey}') - nothing is withdrawn.");
+                            SendCargoToPid(senderPid, new CargoTransferPayload
+                            {
+                                PlayerId = "host", Action = CargoTransfer.ActNeed, Answer = true, IsExport = true, TransferId = tid,
+                                PlanId = p.PlanId, SourceKey = p.SourceKey, DestKey = p.DestKey, Day = p.Day, Hour = p.Hour, Reason = xwhy,
+                            });
+                            return;
+                        }
+                        if (_cargoNeed.Count > 2000) _cargoNeed.Clear();
+                        var xn = new HostCargoNeed { SourcePid = xsrc, StarterPid = senderPid, IsExport = true };
+                        foreach (var it in p.Items ?? new List<CargoTransferItem>())
+                            if (it != null && !string.IsNullOrEmpty(it.ItemName) && it.Amount > 0)
+                                xn.Answered[it.ItemName] = (xn.Answered.TryGetValue(it.ItemName, out var had) ? had : 0) + it.Amount;
+                        var hand = new CargoTransferPayload
+                        {
+                            PlayerId = "host", Action = CargoTransfer.ActNeed, Answer = true, IsExport = true, TransferId = tid,
+                            PlanId = p.PlanId, SourceKey = p.SourceKey, DestKey = p.DestKey, SourcePid = xsrc, StarterPid = senderPid,
+                            Day = p.Day, Hour = p.Hour,
+                        };
+                        foreach (var kv in xn.Answered) hand.Items.Add(new CargoTransferItem { ItemName = kv.Key, Amount = kv.Value });
+                        _cargoNeed[tid] = xn;
+                        Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: the export source '{p.SourceKey}' is run by '{xsrc}' - the withdraw is handed to it (the plan is '{senderPid}''s).");
+                        DevNoteHanded(hand);
+                        SendCargoToPid(xsrc, hand);
+                        return;
+                    }
                     string runner = RouteTargetFor(p.DestKey ?? "");
                     // r3 (H2): SourceKey was copied unchecked, and every close leg goes to whoever runs it -
                     // so a member could name a CO-MEMBER's warehouse as the source and have that warehouse
                     // shelve goods it never sent, remainder included. The sender must run the source, by the
                     // same runner test the close leg uses.
                     string srcRunner = RunnerOf(p.SourceKey ?? "");
-                    if (runner.Length == 0 || srcRunner != senderPid || !CargoEndsAreOneCompany(senderPid, p.SourceKey ?? "", p.DestKey ?? ""))
+                    // T-26: a source run by ANOTHER game (a co-member's own plan drawing from that game's warehouse) is no
+                    // longer refused - the WITHDRAW step is handed to that runner below, so the goods still leave the real
+                    // warehouse on the machine that holds it. Nobody running the source is still a refusal.
+                    bool handed = srcRunner.Length > 0 && srcRunner != senderPid;
+                    if (runner.Length == 0 || srcRunner.Length == 0 || !CargoEndsAreOneCompany(senderPid, p.SourceKey ?? "", p.DestKey ?? ""))
                     {
                         var refusal = new CargoTransferPayload
                         {
@@ -10509,7 +10554,7 @@ namespace BigAmbitionsMP
                             PlanId = p.PlanId, SourceKey = p.SourceKey, DestKey = p.DestKey,
                             Day = p.Day, Hour = p.Hour,
                             Reason = runner.Length == 0 ? "nobody is running that destination"
-                                   : srcRunner != senderPid ? "the sender does not run that source"
+                                   : srcRunner.Length == 0 ? "nobody is running that source"
                                    : "the two ends are not in one company",
                         };
                         Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: {refusal.Reason} ('{p.DestKey}') - nothing is withdrawn.");
@@ -10518,8 +10563,10 @@ namespace BigAmbitionsMP
                     }
                     // r2 (F4): the ask BINDS this id to one source and one destination runner.
                     if (_cargoNeed.Count > 2000) _cargoNeed.Clear();
-                    _cargoNeed[tid] = new HostCargoNeed { SourcePid = senderPid, DestRunner = runner };
-                    p.PlayerId = "host"; p.SourcePid = senderPid;
+                    _cargoNeed[tid] = new HostCargoNeed { SourcePid = handed ? srcRunner : senderPid, DestRunner = runner, StarterPid = handed ? senderPid : "" };
+                    p.PlayerId = "host"; p.SourcePid = handed ? srcRunner : senderPid; p.StarterPid = "";
+                    if (handed)
+                        Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: the source '{p.SourceKey}' is run by '{srcRunner}' - the withdraw is handed to it (the plan is '{senderPid}''s).");
                     SendCargoToPid(runner, p);
                     return;
                 }
@@ -10542,7 +10589,8 @@ namespace BigAmbitionsMP
                     foreach (var it in p.Items ?? new List<CargoTransferItem>())
                         if (it != null && !string.IsNullOrEmpty(it.ItemName) && it.Amount > 0)
                             nd.Answered[it.ItemName] = (nd.Answered.TryGetValue(it.ItemName, out var had) ? had : 0) + it.Amount;
-                    p.PlayerId = "host"; p.TargetPid = to;
+                    p.PlayerId = "host"; p.TargetPid = to; p.StarterPid = nd.StarterPid;   // T-26: non-empty = 'to' withdraws for that plan's game
+                    if (nd.StarterPid.Length > 0) DevNoteHanded(p);
                     SendCargoToPid(to, p);
                     return;
                 }
@@ -10586,6 +10634,50 @@ namespace BigAmbitionsMP
                         {
                             int answered = need.Answered.TryGetValue(kv.Key, out var a) ? a : 0;
                             if (kv.Value > answered) { bad = $"'{kv.Key}' x{kv.Value} was offered but only {answered} was answered"; break; }
+                        }
+                    }
+                    // T-26: a HANDED withdraw's offer. The game whose plan it is raises the game's own phone report, so the
+                    // outcome of the withdraw goes there - fold (F4): only AFTER the amount test above, and an offer that fails
+                    // it is reported there as nothing withdrawn (the goods then go straight back below). An offer carrying
+                    // nothing ends the leg there. An EXPORT's offer ends there too (sold where it stands, paid on the plan's
+                    // game) and keeps its record, so a resent offer is answered with the same report - never a give-back of
+                    // goods the runner has already booked as exported.
+                    if (need != null && need.StarterPid.Length > 0 && senderPid == need.SourcePid)
+                    {
+                        var rep = new CargoTransferPayload
+                        {
+                            PlayerId = "host", Action = CargoTransfer.ActReport, TransferId = tid, PlanId = p.PlanId,
+                            SourceKey = p.SourceKey, DestKey = p.DestKey, SourcePid = senderPid, StarterPid = need.StarterPid,
+                            Day = p.Day, Hour = p.Hour, IsExport = need.IsExport,
+                            Reason = bad.Length > 0 ? "the offer did not match what the host answered" : (p.Reason ?? ""),
+                        };
+                        if (bad.Length == 0)
+                        {
+                            foreach (var ri in p.Items ?? new List<CargoTransferItem>())
+                                if (ri != null && ri.Amount > 0 && !string.IsNullOrEmpty(ri.ItemName))
+                                    rep.Items.Add(new CargoTransferItem { ItemName = ri.ItemName, Amount = ri.Amount, PricePerUnit = ri.PricePerUnit });
+                            foreach (var ns in p.NoStock ?? new List<CargoTransferItem>())
+                                if (ns != null && ns.Amount > 0 && !string.IsNullOrEmpty(ns.ItemName))
+                                    rep.NoStock.Add(new CargoTransferItem { ItemName = ns.ItemName, Amount = ns.Amount });
+                        }
+                        if (need.StarterPid == MPConfig.PlayerId || IsOnlinePid(need.StarterPid)) SendCargoToPid(need.StarterPid, rep);
+                        else Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: '{need.StarterPid}', whose plan it is, is not here - its report is skipped.");
+                        bool offeredAny = false;
+                        foreach (var oi in p.Items ?? new List<CargoTransferItem>())
+                            if (oi != null && oi.Amount > 0 && !string.IsNullOrEmpty(oi.ItemName)) { offeredAny = true; break; }
+                        if (!offeredAny)
+                        {
+                            _cargoNeed.Remove(tid);
+                            Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: '{senderPid}' withdrew nothing for '{need.StarterPid}'{(string.IsNullOrEmpty(p.Reason) ? "" : " (" + p.Reason + ")")} - nothing in transit.");
+                            return;
+                        }
+                        if (need.IsExport)
+                        {
+                            if (bad.Length > 0)
+                                Plugin.Logger.LogWarning($"[Cargo] transfer {tid} refused: {bad} (sender '{senderPid}') - the export is not paid on '{need.StarterPid}'.");
+                            else
+                                Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: '{senderPid}' exported for '{need.StarterPid}' - nothing in transit, paid on the plan's game.");
+                            return;
                         }
                     }
                     var e = new HostCargo
@@ -10684,6 +10776,21 @@ namespace BigAmbitionsMP
                     // acknowledgement to whoever runs the source until that machine confirms "closed".
                     e.Stage = "acked"; e.WithdrawAgain = false; e.SentCloseTo = "";
                     CargoChanged(e);                                           // r3 (H1): the shelved figures and the stage, on disk now
+                    // T-26 fold (F3): a HANDED transfer whose shop another game runs than the plan's - the leftovers go to the
+                    // game whose plan it is as a second report, and that game raises the game's own "no available space"
+                    // message (the shop's runner raises nothing: it holds no plan; the plan's own runner does it in ApplyDeliver).
+                    if (_cargoNeed.TryGetValue(tid, out var lnd) && lnd != null && lnd.StarterPid.Length > 0 && lnd.StarterPid != e.RelayedTo)
+                    {
+                        var left = new CargoTransferPayload
+                        {
+                            PlayerId = "host", Action = CargoTransfer.ActReport, RemaindersOnly = true, TransferId = tid, PlanId = e.PlanId,
+                            SourceKey = e.SourceKey, DestKey = e.DestKey, SourcePid = e.SourcePid, StarterPid = lnd.StarterPid,
+                            Day = e.Day, Hour = e.Hour,
+                        };
+                        foreach (var it in e.Items)
+                            if (it != null) left.Items.Add(new CargoTransferItem { ItemName = it.ItemName, Amount = it.Amount, PricePerUnit = it.PricePerUnit, Remainder = it.Remainder });
+                        if (lnd.StarterPid == MPConfig.PlayerId || IsOnlinePid(lnd.StarterPid)) SendCargoToPid(lnd.StarterPid, left);
+                    }
                     SendCargoCloseLeg(e, CargoTransfer.ActAck, p.Reason ?? "", true);
                     return;
                 }
@@ -10723,6 +10830,59 @@ namespace BigAmbitionsMP
             }
             catch { return false; }
         }
+
+        /// <summary>T-26 fold (F1): an export leg's one company end - the sender must pass the same gate for the company
+        /// that owns the SOURCE as a delivery's ends pass (the destination, an import/export business, is nobody's).</summary>
+        private static bool CargoSourceInCompany(string senderPid, string sourceKey)
+        {
+            try
+            {
+                var sRef = ResolveOwnerValue(SharedShopOwnerPid(sourceKey));
+                return ShopGate("CargoTransfer", sourceKey, sRef, senderPid, null, out _);
+            }
+            catch { return false; }
+        }
+
+#if BAMP_DEV
+        /// <summary>T-26 fold (F6), DEV: the last hand-overs (a need answer handed to a source's runner), kept as they were sent
+        /// so the `cargoresend` lever can send one again - the runner's duplicate guard is what that lever tests.</summary>
+        private static readonly Dictionary<string, CargoTransferPayload> _devHanded = new();
+
+        private static CargoTransferPayload DevCloneCargo(CargoTransferPayload p)
+        {
+            var c = new CargoTransferPayload
+            {
+                PlayerId = p.PlayerId, Action = p.Action, Answer = p.Answer, TransferId = p.TransferId, PlanId = p.PlanId,
+                SourceKey = p.SourceKey, DestKey = p.DestKey, SourcePid = p.SourcePid, TargetPid = p.TargetPid, Day = p.Day, Hour = p.Hour,
+                Reason = p.Reason, RemaindersOnly = p.RemaindersOnly, WithdrawAgain = p.WithdrawAgain, StarterPid = p.StarterPid, IsExport = p.IsExport,
+            };
+            foreach (var it in p.Items) if (it != null) c.Items.Add(new CargoTransferItem { ItemName = it.ItemName, Amount = it.Amount, PricePerUnit = it.PricePerUnit, Remainder = it.Remainder });
+            foreach (var it in p.NoStock) if (it != null) c.NoStock.Add(new CargoTransferItem { ItemName = it.ItemName, Amount = it.Amount });
+            return c;
+        }
+
+        private static void DevNoteHanded(CargoTransferPayload p)
+        {
+            if (p == null || string.IsNullOrEmpty(p.TransferId)) return;
+            if (_devHanded.Count >= 64 && !_devHanded.ContainsKey(p.TransferId))
+                foreach (var k in _devHanded.Keys) { _devHanded.Remove(k); break; }
+            _devHanded[p.TransferId] = DevCloneCargo(p);
+        }
+
+        /// <summary>DEV (`cargoresend`): send one kept hand-over to the source's runner again, exactly as it went.</summary>
+        internal static string DevResendHanded(string tid)
+        {
+            if (string.IsNullOrEmpty(tid) || !_devHanded.TryGetValue(tid, out var h) || h == null) return $"ERR cargoresend: no hand-over under '{tid}' on this host";
+            // A delivery hand-over carries its runner in TargetPid (the need answer re-addressed, :~10592); an export
+            // hand-over stamps SourcePid. Either names the machine the hand-over went to.
+            string to = (h.SourcePid ?? "").Length > 0 ? h.SourcePid : (h.TargetPid ?? "");
+            if (to.Length == 0 || (to != MPConfig.PlayerId && !IsOnlinePid(to))) return $"ERR cargoresend: the runner '{to}' is not here";
+            SendCargoToPid(to, DevCloneCargo(h));
+            return $"OK cargoresend tid='{tid}' to='{to}' items={h.Items.Count} export={h.IsExport}";
+        }
+#else
+        private static void DevNoteHanded(CargoTransferPayload p) { }
+#endif
 
         // -- H-MERGERIMPORT-1: the routed import line --
 

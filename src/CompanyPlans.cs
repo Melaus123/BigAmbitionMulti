@@ -3076,6 +3076,57 @@ namespace BigAmbitionsMP
         /// so a dissolved company leaves nothing behind.</summary>
         private static readonly Dictionary<string, int> _lastMax = new(StringComparer.Ordinal);
 
+        /// <summary>T-26: is this warehouse RUN BY ANOTHER GAME - a partner's building flipped onto this machine and not
+        /// simulated here (MPPatches' SetElsewhere, the rule the delivery leg gate draws).</summary>
+        public static bool RunElsewhere(string key)
+        {
+            try { return MergerFlip.FlippedCount != 0 && MergerFlip.IsFlipped(key) && !MergerAbsence.SimulatesHere(key); }
+            catch { return false; }
+        }
+
+        /// <summary>T-26: the facts the runner of one warehouse published with its plan update, by address.</summary>
+        internal static PwWarehouseFacts? WarehouseFactsOf(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return null;
+            // T-26 fold (F7): the CURRENT runner's entry first. The warehouse's true owner (MergerFlip.ParkedRunner - known on
+            // every machine; the host's RouteTargetFor tables are not) runs it whenever it is in the session, and the host
+            // retires an absent owner's lists, which leaves the stand-in's entry the only one. So a former stand-in's stale
+            // entry (its slot total may be 0) never wins over the owner's.
+            string runner = "";
+            try { runner = MergerFlip.ParkedRunner(key); } catch { }
+            if (runner.Length > 0 && _byOwner.TryGetValue(runner, out var own) && own?.Warehouses != null)
+                foreach (var f in own.Warehouses)
+                    if (f != null && Same(f.AddressKey, key)) return f;
+            foreach (var kv in _byOwner)
+                foreach (var f in kv.Value?.Warehouses ?? new List<PwWarehouseFacts>())
+                    if (f != null && Same(f.AddressKey, key)) return f;
+            return null;
+        }
+
+        /// <summary>T-26 CAPACITY.  `LogisticsManagerPlan.CalculateMaxDestinations` (decompile :145-158) and
+        /// `GetMaxPossibleDestinations` (:160-167) for a warehouse another game runs: the per-slot total is the RUNNER's
+        /// (this machine holds none of its trucks, Entities/VehicleSlot.cs:21), the manager bonus is the manager named
+        /// here - this machine's own plan's - and never the partner plan's published maximum, which carries the
+        /// partner's skill.  The decompile's arithmetic: 0 when the total is 0, else total + floor(total x skill / 100);
+        /// the possible maximum is total x 2.  False = not run elsewhere, or no facts yet: the native method runs.</summary>
+        public static bool PartnerWarehouseMax(Address address, string? employeeId, bool possible, out int max, out int total)
+        {
+            max = 0; total = 0;
+            if (MergerFlip.FlippedCount == 0 || address == null) return false;
+            string key = KeyOf(address);
+            if (key.Length == 0 || !RunElsewhere(key)) return false;
+            var f = WarehouseFactsOf(key);
+            if (f == null) return false;
+            total = f.SlotTotal < 0 ? 0 : f.SlotTotal;
+            if (possible) { max = total * 2; return true; }
+            if (total == 0) { max = 0; return true; }
+            float skill = 0f;
+            try { skill = EmployeeHelper.GetSkillOfEmployee(employeeId!, "ba:skill_logisticsmanager"); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics manager skill of '{employeeId}': {ex.Message}"); }
+            max = total + Mathf.FloorToInt((float)total * skill / 100f);
+            return true;
+        }
+
         /// <summary>PREFIX (b)'s answer: the owner's pallet count for the SOURCE WAREHOUSE OF THE PLAN THE
         /// PANE IS SHOWING and for no other address; every other address falls through to the native count.
         /// An item missing from the list is answered ZERO, because the owner's list holds every item that
@@ -3092,6 +3143,42 @@ namespace BigAmbitionsMP
                 foreach (var ln in dto.Stock ?? new List<PwStockLine>())
                     if (ln != null && string.Equals(ln.ItemName, itemName, StringComparison.Ordinal)) { count = ln.Count; break; }
             return true;
+        }
+
+        /// <summary>T-26 STOCK, MY OWN PLAN.  The pane's pallet count for an OWN plan whose source warehouse another game
+        /// runs: the runner's published count (PwWarehouseFacts.Stock) for that address and no other; an item missing
+        /// from it is zero there.  Gated like ScopedStock - the pane is showing (or drawing) that very plan.  The
+        /// runs-out estimate follows natively: GetRunsOutIn is handed this count, and its denominator is this machine's
+        /// own sales sweep, which is what the game computes for its own plans.</summary>
+        public static bool ScopedOwnPlanStock(string addressKey, string itemName, out int count)
+        {
+            count = 0;
+            var pl = PaneOwnPlan();
+            if (pl == null || !Same(KeyOf(pl.targetAddress), addressKey) || !RunElsewhere(addressKey)) return false;
+            var f = WarehouseFactsOf(addressKey);
+            if (f == null) return false;
+            if (!string.IsNullOrEmpty(itemName))
+                foreach (var ln in f.Stock ?? new List<PwStockLine>())
+                    if (ln != null && string.Equals(ln.ItemName, itemName, StringComparison.Ordinal)) { count = ln.Count; break; }
+            return true;
+        }
+
+        /// <summary>T-26: the plan the logistics pane is showing (or drawing) when it is one of THIS machine's own - the
+        /// other half of PaneDisplayPlan's test: not a tagged display copy and no partner DTO under its id.</summary>
+        public static Buildings.Office.Headquarters.LogisticsManagerPlan? PaneOwnPlan()
+        {
+            try
+            {
+                var ui = _paneUI;
+                if (ui == null || !(ui.gameObject.activeInHierarchy || CompanyLists.LoadingPlan)) return null;
+                if (_paneCurrentPlanField == null)
+                    _paneCurrentPlanField = ui.GetType().GetField("_currentPlan", BindingFlags.Instance | BindingFlags.NonPublic);
+                var pl = _paneCurrentPlanField == null
+                       ? null : _paneCurrentPlanField.GetValue(ui) as Buildings.Office.Headquarters.LogisticsManagerPlan;
+                if (pl == null || CompanyLists.IsDisplayPlan(pl) || LogisticsDtoOf(pl.id ?? "") != null) return null;
+                return pl;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Plans] logistics pane read (own plan): {ex.Message}"); return null; }
         }
 
         /// <summary>HQ-PARITY-6 P3, DIAGNOSTIC ONLY.  Why ScopedStock did NOT answer for the plan the pane is

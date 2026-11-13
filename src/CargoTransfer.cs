@@ -74,7 +74,7 @@ namespace BigAmbitionsMP
     /// </summary>
     internal static class CargoTransfer
     {
-        internal const string ActNeed = "need", ActOffer = "offer", ActDeliver = "deliver", ActAck = "ack", ActReturn = "return", ActClosed = "closed";
+        internal const string ActNeed = "need", ActOffer = "offer", ActDeliver = "deliver", ActAck = "ack", ActReturn = "return", ActClosed = "closed", ActReport = "report";
 
         private const string ExportBusinessType = "ba:businesstype_importexport";
         private const string MsgNoStock   = "ba:messagetype_phone_logistics_manager_delivery_no_stock";
@@ -91,6 +91,7 @@ namespace BigAmbitionsMP
             public bool   IsExport;
             public int    Day, Hour;
             public bool   Withdrawn;
+            public bool   Handed;                                        // T-26: the source's runner withdrew; this machine reports
             public LogisticsManagerPlan? Plan;
             public LogisticsManagerPlanDestination? Destination;
             public readonly List<CargoTransferItem> Items   = new();       // what was actually taken
@@ -103,6 +104,28 @@ namespace BigAmbitionsMP
         /// game hour starts ONE transfer (the id itself is the dedupe key - plan + destination + day +
         /// hour). Bounded: cleared whenever it grows past far more than a day's worth of legs.</summary>
         private static readonly HashSet<string> _started = new();
+
+        /// <summary>T-26: how many transfers this machine has started (the `lmpass` lever's count).</summary>
+        internal static int StartedCount;
+
+        /// <summary>T-26 fold: the id of the transfer this machine started last (the `lmexport` lever's handle).</summary>
+        internal static string LastStartedId = "";
+
+        /// <summary>T-26 fold (the `cargoresend` lever): the latest transfer this machine started for one plan and one
+        /// destination - the id is plan + destination + day + hour, so the latest game hour wins.</summary>
+        internal static string StartedIdFor(string planId, string dstKey)
+        {
+            string pre = (planId ?? "") + "|" + (dstKey ?? "") + "|", best = "";
+            long bestAt = -1;
+            foreach (var id in _started)
+            {
+                if (id == null || !id.StartsWith(pre, StringComparison.OrdinalIgnoreCase)) continue;
+                var dh = id.Substring(pre.Length).Split('|');
+                long at = dh.Length == 2 && int.TryParse(dh[0], out var d) && int.TryParse(dh[1], out var h) ? (long)d * 100 + h : 0;
+                if (at > bestAt) { bestAt = at; best = id; }
+            }
+            return best;
+        }
 
         // -- DESTINATION SIDE --
 
@@ -120,6 +143,10 @@ namespace BigAmbitionsMP
         /// <summary>Ids this machine has already refused to close once (it does not run that source), so the
         /// host's once-per-sweep re-offer does not fill the log with the same line.</summary>
         private static readonly HashSet<string> _notMineLogged = new();
+
+        /// <summary>T-26 (the source's RUNNER, withdrawing for another game's plan): ids already withdrawn for, with the
+        /// offer that was sent. A repeated hand-over re-sends that offer and takes nothing a second time.</summary>
+        private static readonly Dictionary<string, CargoTransferPayload> _handed = new();
 
         private static int DayNow()  { try { return SaveGameManager.Current?.Day  ?? 0; } catch { return 0; } }
         private static int HourNow() { try { return SaveGameManager.Current?.Hour ?? 0; } catch { return 0; } }
@@ -176,11 +203,15 @@ namespace BigAmbitionsMP
                     TransferId = tid, PlanId = planId, SourceKey = srcKey, DestKey = dstKey,
                     IsExport = isExport, Day = day, Hour = hour, Plan = plan, Destination = destination,
                 };
-                _pending[tid] = t; _started.Add(tid); Trim(_pending); Trim(_started);
+                _pending[tid] = t; _started.Add(tid); Trim(_pending); Trim(_started); StartedCount++; LastStartedId = tid;
                 Plugin.Logger.LogInfo($"[Cargo] transfer {tid} started - '{srcKey}' -> '{dstKey}' ({(isExport ? "export" : "stock")}, {(destination.stockTargets != null ? destination.stockTargets.Count : 0)} target(s)).");
 
                 // An EXPORT leg has no destination-side effect at all in the native code, so it neither
                 // asks nor waits: it runs here, whole, exactly as ProcessStockTarget's export branch does.
+                // T-26 fold (F1): an export whose source ANOTHER game runs is never sold out of this machine's copy of that
+                // warehouse - its withdraw is handed to the runner exactly like a delivery's, and this machine is paid for
+                // exactly what the runner offers (ApplyReport -> PayHandedExport).
+                if (isExport && CompanyPlans.RunElsewhere(srcKey)) { HandExport(t); return true; }
                 if (isExport) { RunExportLocally(t); return true; }
 
                 var ask = Leg(t, ActNeed);
@@ -270,46 +301,16 @@ namespace BigAmbitionsMP
             if (!_pending.TryGetValue(p.TransferId ?? "", out var t) || t == null) return;   // idempotent: already closed
             if (t.Withdrawn) return;                                                         // a duplicated answer withdraws nothing twice
             if (!string.IsNullOrEmpty(p.Reason)) { Close(t, p.Reason); return; }
+            // T-26 fold (F2): a source another game runs is never withdrawn from this machine's copy, whatever the host
+            // answered (its records may still name this machine before this machine's "simulated here" flag is set).
+            if (CompanyPlans.RunElsewhere(t.SourceKey)) { Close(t, $"the source '{t.SourceKey}' is run by another game - nothing is withdrawn from this machine's copy"); return; }
+            if (t.IsExport) { Close(t, "an export leg is never withdrawn through a delivery answer"); return; }
             if (p.Items == null || p.Items.Count == 0) { Close(t, "the destination needs nothing"); return; }
 
             var warehouse = t.Plan != null ? BuildingHelper.GetBuildingRegistration(t.Plan.targetAddress) as Warehouse : null;
             if (warehouse == null) { Close(t, "this machine no longer holds that warehouse"); return; }
 
-            var stock = new List<CargoInstance>();
-            int units = 0;
-            // r3 (H3): ONE withdraw per item, for the SUMMED amount. Two rows of one item withdrew twice,
-            // and the host's per-item cap could not see that the two together exceeded what it answered.
-            var take = new Dictionary<string, int>();
-            var takeOrder = new List<string>();
-            foreach (var it in p.Items)
-            {
-                if (it == null || it.Amount <= 0 || string.IsNullOrEmpty(it.ItemName)) continue;
-                if (!take.ContainsKey(it.ItemName)) takeOrder.Add(it.ItemName);
-                take[it.ItemName] = (take.TryGetValue(it.ItemName, out var had) ? had : 0) + it.Amount;
-            }
-            foreach (var name in takeOrder)
-            {
-                int amount = take[name];
-                try
-                {
-                    BuildingHelper.GetItemsWithStock(warehouse, name, stock);                 // :165
-                    var cargo = BuildingHelper.WithdrawFromCargo(stock, amount);              // :166
-                    if (cargo == null || cargo.amount < amount)
-                        t.NoStock.Add(new ItemAmountTarget(name, amount - (cargo != null ? cargo.amount : 0)));   // :168
-                    if (cargo != null && cargo.amount > 0)
-                    {
-                        t.Items.Add(new CargoTransferItem { ItemName = name, Amount = cargo.amount, PricePerUnit = cargo.pricePerUnit });
-                        units += cargo.amount;
-                    }
-                    // r2 (F1) NO RemoveEmptyCargo HERE. The native pass RETURNS first and removes the empties
-                    // afterwards (LogisticsManagerPlanDestination.cs:186 then :188). Deleting the emptied
-                    // instances now leaves ReturnToCargo (BuildingHelper.cs:494-516) with no instance of the
-                    // item to merge into, and the game's own editor warning at :517-519 says the leftover
-                    // "might be lost" - on the ordinary "the warehouse held no more than the need" leg that is
-                    // EVERY instance, so the whole remainder would vanish. The empties go at CLOSE instead.
-                }
-                catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] transfer {t.TransferId}: withdrawing '{name}': {ex.GetType().Name}: {ex.Message}"); }
-            }
+            int units = TakeFrom(warehouse, p.Items, t.TransferId, t.Items, t.NoStock, false);
             t.Withdrawn = true;
 
             if (t.Items.Count == 0) { Close(t, "the warehouse holds none of what was asked for"); return; }
@@ -323,6 +324,237 @@ namespace BigAmbitionsMP
             var offer = Leg(t, ActOffer);
             offer.Items.AddRange(t.Items);
             Send(offer);
+        }
+
+        /// <summary>C3's withdraw, shared by the plan's own machine (OnNeedAnswer) and - T-26 - by a source's runner
+        /// withdrawing for another game's plan (HandedWithdraw). Returns the units taken.</summary>
+        private static int TakeFrom(Warehouse warehouse, List<CargoTransferItem> asked, string tid, List<CargoTransferItem> took, List<ItemAmountTarget> noStock, bool removeEmpties)
+        {
+            var stock = new List<CargoInstance>();
+            int units = 0;
+            // r3 (H3): ONE withdraw per item, for the SUMMED amount. Two rows of one item withdrew twice,
+            // and the host's per-item cap could not see that the two together exceeded what it answered.
+            var take = new Dictionary<string, int>();
+            var takeOrder = new List<string>();
+            foreach (var it in asked)
+            {
+                if (it == null || it.Amount <= 0 || string.IsNullOrEmpty(it.ItemName)) continue;
+                if (!take.ContainsKey(it.ItemName)) takeOrder.Add(it.ItemName);
+                take[it.ItemName] = (take.TryGetValue(it.ItemName, out var had) ? had : 0) + it.Amount;
+            }
+            foreach (var name in takeOrder)
+            {
+                int amount = take[name];
+                try
+                {
+                    BuildingHelper.GetItemsWithStock(warehouse, name, stock);                 // :165
+                    var cargo = BuildingHelper.WithdrawFromCargo(stock, amount);              // :166
+                    if (cargo == null || cargo.amount < amount)
+                        noStock.Add(new ItemAmountTarget(name, amount - (cargo != null ? cargo.amount : 0)));   // :168
+                    if (cargo != null && cargo.amount > 0)
+                    {
+                        took.Add(new CargoTransferItem { ItemName = name, Amount = cargo.amount, PricePerUnit = cargo.pricePerUnit });
+                        units += cargo.amount;
+                    }
+                    // T-26 fold: an EXPORT withdraw removes its empties at once, as the native export branch does (:154) -
+                    // nothing ever comes back to merge into them.
+                    if (removeEmpties) BuildingHelper.RemoveEmptyCargo(stock);
+                    // r2 (F1) NO RemoveEmptyCargo HERE (a delivery's withdraw). The native pass RETURNS first and removes the empties
+                    // afterwards (LogisticsManagerPlanDestination.cs:186 then :188). Deleting the emptied
+                    // instances now leaves ReturnToCargo (BuildingHelper.cs:494-516) with no instance of the
+                    // item to merge into, and the game's own editor warning at :517-519 says the leftover
+                    // "might be lost" - on the ordinary "the warehouse held no more than the need" leg that is
+                    // EVERY instance, so the whole remainder would vanish. The empties go at CLOSE instead.
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] transfer {tid}: withdrawing '{name}': {ex.GetType().Name}: {ex.Message}"); }
+            }
+            return units;
+        }
+
+        // == T-26: C3 HANDED OVER - the source's RUNNER withdraws for another game's plan ==
+
+        /// <summary>MAIN THREAD, the machine that RUNS SourceKey, when the plan that asked is another game's (the host
+        /// stamps StarterPid: a co-member's own plan drawing from MY warehouse). The withdraw is C3's own (TakeFrom), on
+        /// the real warehouse here; the offer carries the native "no stock" rows so the plan's game raises the game's
+        /// own phone report. Nothing withdrawn (a refusal, nothing needed, nothing in stock) is still answered, with an
+        /// EMPTY offer, so the plan's game closes its leg. Safe to repeat: a hand-over seen before re-sends the same
+        /// offer and takes nothing; one already closed here is ignored.</summary>
+        private static void HandedWithdraw(CargoTransferPayload p)
+        {
+            string tid = p.TransferId ?? "";
+            if (_handed.TryGetValue(tid, out var sent) && sent != null)
+            {
+                Plugin.Logger.LogInfo($"[Cargo] transfer {tid} withdrawn already for '{p.StarterPid}' - the offer is sent again, nothing taken.");
+                Send(sent); return;
+            }
+            if (_closed.ContainsKey(tid))
+            { Plugin.Logger.LogInfo($"[Cargo] transfer {tid} closed already here - a repeated hand-over takes nothing."); return; }
+            var offer = new CargoTransferPayload
+            {
+                Action = ActOffer, TransferId = tid, PlanId = p.PlanId, SourceKey = p.SourceKey, DestKey = p.DestKey,
+                Day = p.Day, Hour = p.Hour, StarterPid = p.StarterPid, IsExport = p.IsExport,
+            };
+            var reg = GameStatePatcher.FindRegistration(p.SourceKey ?? "");
+            var warehouse = reg as Warehouse;
+            bool mine = false;
+            try { mine = reg != null && (MergerFlip.TrulyMine(reg) || MergerAbsence.SimulatesHere(p.SourceKey ?? "")); } catch { }
+            if (!string.IsNullOrEmpty(p.Reason)) offer.Reason = p.Reason;
+            else if (!mine || warehouse == null || !warehouse.RentedByPlayer) offer.Reason = "this machine does not run that warehouse";
+            else if (p.Items == null || p.Items.Count == 0) offer.Reason = "the destination needs nothing";
+            else
+            {
+                var noStock = new List<ItemAmountTarget>();
+                int units = TakeFrom(warehouse, p.Items, tid, offer.Items, noStock, p.IsExport);
+                foreach (var ns in noStock)
+                    if (ns != null) offer.NoStock.Add(new CargoTransferItem { ItemName = ns.itemName, Amount = ns.targetAmount });
+                if (offer.Items.Count == 0) offer.Reason = "the warehouse holds none of what was asked for";
+                else
+                {
+                    try { InstanceBehavior<GameManager>.Instance.shouldUpdateAfterDeliveries = true; } catch { }
+                    Plugin.Logger.LogInfo($"[Cargo] transfer {tid} withdrawn - {offer.Items.Count} item(s), {units} unit(s) out of '{p.SourceKey}' (handed over by '{p.StarterPid}').");
+                    if (p.IsExport) BookHandedExport(warehouse, offer, p);
+                }
+            }
+            if (offer.Items.Count == 0)
+                Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: nothing withdrawn for '{p.StarterPid}' - {offer.Reason}.");
+            // fold (F5): an EMPTY offer is not kept - nothing was taken, so a repeat has nothing to protect.
+            if (offer.Items.Count > 0) { _handed[tid] = offer; PruneHanded(); }
+            Send(offer);
+        }
+
+        /// <summary>T-26 fold (F5): bounded without wiping transfers in flight - past 2000 kept offers the oldest CLOSED
+        /// ones go first (an export closes here at once), down to 1500; only if the rest still exceed 2000 do the oldest
+        /// of those go.</summary>
+        private static void PruneHanded()
+        {
+            if (_handed.Count <= 2000) return;
+            var keys = new List<string>(_handed.Keys);
+            keys.Sort((a, b) =>
+            {
+                int ca = _closed.ContainsKey(a) ? 0 : 1, cb = _closed.ContainsKey(b) ? 0 : 1;
+                if (ca != cb) return ca.CompareTo(cb);
+                return (_handed[a] != null ? _handed[a].Day : 0).CompareTo(_handed[b] != null ? _handed[b].Day : 0);
+            });
+            int i = 0;
+            for (; i < keys.Count && _handed.Count > 1500 && _closed.ContainsKey(keys[i]); i++) _handed.Remove(keys[i]);
+            for (; i < keys.Count && _handed.Count > 2000; i++) _handed.Remove(keys[i]);
+        }
+
+        /// <summary>T-26 fold (F1), the source's RUNNER: an export's books on the REAL warehouse, as the native export writes
+        /// them (LogisticsManagerPlanDestination.cs:55-84): one negative delivery record, and - for a paid export - the
+        /// warehouse's factoryExports rows at the game's export price plus the market demand update. The MONEY is the plan's
+        /// game's (PayHandedExport). No close leg ever comes for an export, so the id is closed here at once; a repeated
+        /// hand-over re-sends the kept offer (_handed) and takes nothing.</summary>
+        private static void BookHandedExport(Warehouse warehouse, CargoTransferPayload offer, CargoTransferPayload p)
+        {
+            var moved   = new List<DeliveryItem>();
+            var exports = new Dictionary<string, FactoryExport>();
+            float profits = 0f;
+            foreach (var it in offer.Items)
+            {
+                if (it == null || it.Amount <= 0 || string.IsNullOrEmpty(it.ItemName)) continue;
+                moved.Add(new DeliveryItem(it.ItemName, -it.Amount));
+                float unit = 0f;
+                try { unit = ProductMarketHelper.GetProductExportPrice(it.ItemName); } catch { }
+                profits += unit * it.Amount;
+                if (!exports.TryGetValue(it.ItemName, out var fx)) { fx = new FactoryExport { itemName = it.ItemName }; exports[it.ItemName] = fx; }
+                fx.amount += it.Amount; fx.totalPrice += unit * it.Amount;
+            }
+            BookSourceDelivery(warehouse, moved);
+            if (profits > 0f)
+                foreach (var export in exports.Values)
+                {
+                    try
+                    {
+                        var existing = warehouse.factoryExports.Find(x => x.itemName == export.itemName);
+                        if (existing != null) { existing.totalPrice += export.totalPrice; existing.amount += export.amount; }
+                        else warehouse.factoryExports.Add(export);
+                        ProductMarketHelper.UpdateMarketDemand(export.itemName);
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] transfer {offer.TransferId}: the export record of '{export.itemName}': {ex.GetType().Name}: {ex.Message}"); }
+                }
+            MarkClosed(offer.TransferId, p.Day);
+            Plugin.Logger.LogInfo($"[Cargo] transfer {offer.TransferId}: exported out of '{p.SourceKey}' for '{p.StarterPid}' - booked here, paid on that game.");
+        }
+
+        /// <summary>MAIN THREAD, the game whose plan started a HANDED transfer (T-26): the source's runner has withdrawn
+        /// (or could not). The game's own "no stock" phone report is raised HERE, on the real plan, as before; a leg with
+        /// nothing on its way is closed here. When this machine runs the destination the row is kept for the "no
+        /// available space" half, which ApplyDeliver raises from its own remainders. Safe to repeat: only the first
+        /// report for an id finds the row unreported.</summary>
+        private static void ApplyReport(CargoTransferPayload p)
+        {
+            string tid = p.TransferId ?? "";
+            if (!_pending.TryGetValue(tid, out var t) || t == null)
+            {
+                if (p.IsExport && _closed.ContainsKey(tid))
+                    Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: a repeated export report - closed already here, nothing is paid again.");
+                return;
+            }
+            // T-26 fold (F3): the SECOND report - the destination's leftovers, forwarded by the host from the ack when another
+            // game runs the shop. The game's own "no available space" message is raised here, on the real plan.
+            if (p.RemaindersOnly)
+            {
+                if (!t.Handed) return;
+                var noShelves = new List<ItemAmountTarget>();
+                foreach (var a in p.Items ?? new List<CargoTransferItem>())
+                    if (a != null && !string.IsNullOrEmpty(a.ItemName) && a.Remainder > 0) noShelves.Add(new ItemAmountTarget(a.ItemName, a.Remainder));
+                Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: the destination's leftovers reported here - {noShelves.Count} item(s) did not fit at '{t.DestKey}'.");
+                RaiseReport(t, noShelves);
+                _pending.Remove(tid);
+                return;
+            }
+            if (t.Handed) return;
+            t.Withdrawn = true; t.Handed = true;
+            t.NoStock.Clear();
+            foreach (var ns in p.NoStock ?? new List<CargoTransferItem>())
+                if (ns != null && !string.IsNullOrEmpty(ns.ItemName) && ns.Amount > 0) t.NoStock.Add(new ItemAmountTarget(ns.ItemName, ns.Amount));
+            t.Items.Clear();
+            foreach (var it in p.Items ?? new List<CargoTransferItem>()) if (it != null && it.Amount > 0) t.Items.Add(it);
+            if (t.IsExport) { PayHandedExport(t, p); return; }
+            if (t.Items.Count == 0) { Close(t, string.IsNullOrEmpty(p.Reason) ? "the warehouse holds none of what was asked for" : p.Reason); return; }
+            Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: '{p.SourcePid}' withdrew {t.Items.Count} item(s) out of '{t.SourceKey}' for this plan - on its way to '{t.DestKey}'.");
+            RaiseReport(t, null);
+            t.NoStock.Clear();
+            // The row stays until the "no available space" half is known: ApplyDeliver raises it when this machine runs the
+            // shop, the host's leftovers report (fold F3, above) when another game does.
+        }
+
+        /// <summary>T-26 fold (F1), the plan's game: the export the source's runner withdrew is paid HERE, for exactly the
+        /// offered goods at the game's own export price (ProductMarketHelper.GetProductExportPrice, as ProcessStockTarget
+        /// :143-144), under the native transaction key and business name (:62-64), straight through ChangeMoneySafe as
+        /// RunExportLocally pays. Once per transfer id: the id is marked closed (persisted) BEFORE the money moves, and a
+        /// repeated report finds it closed and pays nothing.</summary>
+        private static void PayHandedExport(Pending t, CargoTransferPayload p)
+        {
+            string tid = t.TransferId;
+            if (_closed.ContainsKey(tid))
+            {
+                Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: a repeated export report - closed already here, nothing is paid again.");
+                _pending.Remove(tid); return;
+            }
+            MarkClosed(tid, t.Day);
+            if (t.Items.Count == 0) { Close(t, string.IsNullOrEmpty(p.Reason) ? "the warehouse holds none of the export targets" : p.Reason); return; }
+            float profits = 0f; int units = 0;
+            foreach (var it in t.Items)
+            {
+                float unit = 0f;
+                try { unit = ProductMarketHelper.GetProductExportPrice(it.ItemName); }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] transfer {tid}: the export price of '{it.ItemName}': {ex.GetType().Name}: {ex.Message}"); }
+                profits += unit * it.Amount; units += it.Amount;
+            }
+            if (profits > 0f)
+            {
+                t.NoStock.Clear();                                     // native clears both report lists on a paid export (:85-86)
+                var destReg = t.Destination != null ? BuildingHelper.GetBuildingRegistration(t.Destination.deliveryTargetAddress) : null;
+                var data = new Dictionary<string, string> { { "businessName", destReg != null ? destReg.BusinessName : "" } };
+                try { GameManager.ChangeMoneySafe(profits, new TransactionInfo("ba:transaction_exportedgoods", data)); }
+                catch (Exception mx) { Plugin.Logger.LogWarning($"[Cargo] transfer {tid}: the export income could not be paid - {mx.GetType().Name}: {mx.Message}"); }
+            }
+            try { InstanceBehavior<GameManager>.Instance.shouldUpdateAfterDeliveries = true; } catch { }
+            Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: exported {units} unit(s) that '{p.SourcePid}' withdrew out of '{t.SourceKey}' - paid {profits.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)} here, once.");
+            RaiseReport(t, null);
+            _pending.Remove(tid);
         }
 
         /// <summary>The source's own books, exactly as the native pass writes them: one negative
@@ -356,6 +588,9 @@ namespace BigAmbitionsMP
         {
             try
             {
+                // T-26 fold (F1): never on a source another game runs - this machine holds only a copy of that warehouse.
+                if (CompanyPlans.RunElsewhere(t.SourceKey))
+                { Close(t, "the export's source is run by another game - it is never exported from this machine's copy"); return; }
                 var warehouse = t.Plan != null ? BuildingHelper.GetBuildingRegistration(t.Plan.targetAddress) as Warehouse : null;
                 var destReg   = t.Destination != null ? BuildingHelper.GetBuildingRegistration(t.Destination.deliveryTargetAddress) : null;
                 if (warehouse == null || destReg == null) { Close(t, "the export leg's warehouse or destination is not on this machine"); return; }
@@ -410,6 +645,28 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[Cargo] transfer {t.TransferId}: the export leg failed - {ex.GetType().Name}: {ex.Message}");
                 _pending.Remove(t.TransferId);
             }
+        }
+
+        /// <summary>T-26 fold (F1), the plan's game: ask the host to hand an export leg's withdraw to the game that runs the
+        /// source. The ask carries the plan's own export targets, one row per item (the native withdraw is per target,
+        /// :133-135; one summed withdraw takes the same units). Nothing is withdrawn or paid here.</summary>
+        private static void HandExport(Pending t)
+        {
+            var ask = Leg(t, ActNeed);
+            ask.IsExport = true;
+            var want = new Dictionary<string, int>();
+            var order = new List<string>();
+            if (t.Destination != null && t.Destination.stockTargets != null)
+                foreach (var st in t.Destination.stockTargets)
+                {
+                    if (st == null || st.targetAmount <= 0 || string.IsNullOrEmpty(st.itemName)) continue;   // :128
+                    if (!want.ContainsKey(st.itemName)) order.Add(st.itemName);
+                    want[st.itemName] = (want.TryGetValue(st.itemName, out var had) ? had : 0) + st.targetAmount;
+                }
+            foreach (var name in order) ask.Items.Add(new CargoTransferItem { ItemName = name, Amount = want[name] });
+            if (ask.Items.Count == 0) { Close(t, "no export target asks for anything"); return; }
+            Plugin.Logger.LogInfo($"[Cargo] transfer {t.TransferId}: the export source '{t.SourceKey}' is run by another game - its withdraw is handed over, nothing is taken from this machine's copy.");
+            Send(ask);
         }
 
         // == C4 DELIVER - the DESTINATION runner places the goods ==
@@ -480,6 +737,15 @@ namespace BigAmbitionsMP
                 try { InstanceBehavior<GameManager>.Instance.shouldUpdateAfterDeliveries = true; } catch { }
 
                 Plugin.Logger.LogInfo($"[Cargo] transfer {tid} delivered {delivered} (remainder {remainder}) at '{p.DestKey}'.");
+                // T-26: a HANDED transfer of this machine's own plan - the "no available space" half of the game's own
+                // report is raised here, where the remainders are known (the source's runner holds no plan).
+                if (_pending.TryGetValue(tid, out var own) && own != null && own.Handed)
+                {
+                    var noShelves = new List<ItemAmountTarget>();
+                    foreach (var a in ack.Items) if (a != null && a.Remainder > 0) noShelves.Add(new ItemAmountTarget(a.ItemName, a.Remainder));
+                    RaiseReport(own, noShelves);
+                    _pending.Remove(tid);
+                }
             }
             catch (Exception ex)
             {
@@ -625,9 +891,9 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Cargo] transfer {tid}: the return leg failed - {ex.GetType().Name}: {ex.Message}"); }
 
             if (hint != null && !p.WithdrawAgain) RaiseReport(hint, noShelves);
-            else if (hint == null && noShelves.Count > 0)
+            else if (hint == null && noShelves.Count > 0 && !_handed.ContainsKey(tid))   // T-26: a handed leg reports on the plan's game
                 Plugin.Logger.LogInfo($"[Cargo] transfer {tid}: the undelivered-items report is skipped - this machine holds no plan for that leg.");
-            _pending.Remove(tid);
+            _pending.Remove(tid); _handed.Remove(tid);
             MarkClosed(tid, p.Day);
             SendClosed(p);
         }
@@ -752,7 +1018,7 @@ namespace BigAmbitionsMP
         /// restore and the client's load-data path); the persisted marks are read back straight after.</summary>
         internal static void ResetSession()
         {
-            _pending.Clear(); _started.Clear(); _applied.Clear(); _closed.Clear(); _notMineLogged.Clear();
+            _pending.Clear(); _started.Clear(); _applied.Clear(); _closed.Clear(); _notMineLogged.Clear(); _handed.Clear();
         }
 
         /// <summary>The GAME'S OWN phone report, nothing new: LogisticsManagerPlan.SendDeliveryReport is
@@ -805,7 +1071,12 @@ namespace BigAmbitionsMP
                 if (p == null) return;
                 switch (p.Action)
                 {
-                    case ActNeed:    if (p.Answer) OnNeedAnswer(p); else AnswerNeed(p); break;
+                    case ActNeed:
+                        if (!p.Answer) AnswerNeed(p);
+                        else if (!string.IsNullOrEmpty(p.StarterPid)) HandedWithdraw(p);   // T-26: I run the source of another game's plan
+                        else OnNeedAnswer(p);
+                        break;
+                    case ActReport:  ApplyReport(p); break;                                   // T-26: back on the plan's game
                     case ActDeliver: ApplyDeliver(p); break;
                     case ActAck:     ApplyClose(p, everythingBack: false); break;
                     // r2 (F2): a give-back AFTER an acknowledgement carries the REMAINDERS only - every unit

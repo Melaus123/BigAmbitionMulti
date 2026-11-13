@@ -6966,6 +6966,49 @@ namespace BigAmbitionsMP
             }
         }
 
+        /// <summary>T-26 CAPACITY, MY OWN PLAN ON A PARTNER'S WAREHOUSE.  `LogisticsManagerPlan.CalculateMaxDestinations`
+        /// (decompile :145-158) sums `VehicleSlot.DestinationsThatCanDeliver`, which looks the truck up in THIS machine's
+        /// VehicleInstances (Entities/VehicleSlot.cs:21) - a partner's trucks are not there, so an own plan whose
+        /// warehouse another game runs got limit 0 and no shop could be added.  Every reader goes through these two
+        /// statics: the `MaxDestinations` getter (:43) for the plan screen (LogisticsManagerPlanUI.cs:235/:252/:255/:265)
+        /// and the hourly pass (GetPlannedDeliveries :54/:63), and the plan list calls both directly
+        /// (LogisticsManagersPlanList.cs:177/:179).  The runner's slot total answers, with the bonus of the manager
+        /// named here (CompanyPlans.PartnerWarehouseMax).  A display copy's getter is answered by the prefix above and
+        /// never gets here.  Inert off a merger and for every warehouse this machine runs.</summary>
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.LogisticsManagerPlan), "CalculateMaxDestinations")]
+        public static class Patch_LogisticsCalcMax_PartnerWarehouse
+        {
+            static bool Prefix(Address address, string employeeId, ref int __result)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0 || employeeId == null) return true;   // native's own guard answers 0
+                    if (!CompanyPlans.PartnerWarehouseMax(address, employeeId, false, out var max, out _)) return true;
+                    __result = max;
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics capacity (partner warehouse): {ex.Message}"); return true; }
+            }
+        }
+
+        /// <summary>T-26: `GetMaxPossibleDestinations` (decompile :160-167, total x 2) for the same warehouses - the plan
+        /// list's over-capacity confirm (LogisticsManagersPlanList.cs:179).</summary>
+        [HarmonyPatch(typeof(Buildings.Office.Headquarters.LogisticsManagerPlan), "GetMaxPossibleDestinations")]
+        public static class Patch_LogisticsPossibleMax_PartnerWarehouse
+        {
+            static bool Prefix(Address address, ref int __result)
+            {
+                try
+                {
+                    if (MergerFlip.FlippedCount == 0) return true;
+                    if (!CompanyPlans.PartnerWarehouseMax(address, null, true, out var max, out _)) return true;
+                    __result = max;
+                    return false;
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics possible capacity (partner warehouse): {ex.Message}"); return true; }
+            }
+        }
+
         /// <summary>HQ-PARITY-2 P2 PREFIX (b) — THE STOCK.  `BuildingHelper.CountResourcesInPallets`
         /// (Helpers/BuildingHelper.cs:391-413) sums this machine's item instances for the address; a partner
         /// warehouse's replica is seeded once at world-live and refreshed only while somebody is inside it,
@@ -7000,6 +7043,9 @@ namespace BigAmbitionsMP
                     int count;
                     if (CompanyPlans.LogisticsPaneTracked && CompanyPlans.ScopedStock(key, resourceName, out count))
                     { NoteStockDuringLoadPlan(key, resourceName, count); __result = count; return false; }   // R2
+                    // T-26: my OWN plan on a warehouse another game runs - the runner's count, by address.
+                    if (CompanyPlans.LogisticsPaneTracked && CompanyPlans.ScopedOwnPlanStock(key, resourceName, out count))
+                    { __result = count; return false; }
                     // HQ-PARITY-3 A7 — THE SECOND GATE, PURCHASING.  PurchasingAgentProductModel.UpdateWarehouse
                     // (decompile :66-70) counts LOCAL pallets in the product's assigned warehouse, so a
                     // partner's purchasing rows drew this machine's stale replica.  The gate is the same shape
@@ -15160,15 +15206,22 @@ namespace BigAmbitionsMP
                 {
                     if (__instance == null || destination == null || __result == null) return;
                     var plan = __instance._currentPlan;
-                    if (plan == null || !CompanyLists.IsDisplayPlan(plan)) return;
+                    if (plan == null) return;
+                    bool display = CompanyLists.IsDisplayPlan(plan);
+                    string srcKey = "";
+                    if (!display) { try { srcKey = GameStateReader.AddressKey(plan.targetAddress); } catch { } }
+                    // T-26: my OWN plan whose source warehouse another game runs takes that runner's product list.
+                    if (!display && (srcKey.Length == 0 || !CompanyPlans.RunElsewhere(srcKey))) return;
                     var reg = BuildingHelper.GetBuildingRegistration(destination.deliveryTargetAddress);
                     if (reg == null || reg.GetBuildingType() != "ba:buildingtype_warehouse") return;   // the game's own :479 branch
                     if (plan.targetAddress == null) return;                                            // and its :481 guard
                     string id = plan.id ?? "";
-                    var dto = CompanyPlans.LogisticsDtoOf(id);
-                    if (dto == null || dto.SourceProducts == null) return;
+                    System.Collections.Generic.List<string>? source = display
+                        ? CompanyPlans.LogisticsDtoOf(id)?.SourceProducts
+                        : CompanyPlans.WarehouseFactsOf(srcKey)?.Products;
+                    if (source == null) return;
                     int added = 0;
-                    foreach (var item in dto.SourceProducts)
+                    foreach (var item in source)
                     {
                         if (string.IsNullOrEmpty(item) || __result.Contains(item)) continue;
                         __result.Add(item);

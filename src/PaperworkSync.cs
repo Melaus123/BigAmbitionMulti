@@ -54,6 +54,41 @@ namespace BigAmbitionsMP
         /// member's books and the shared-tab writes have nobody watching a screen for them.</summary>
         public static void MarkUrgent() { _dirty = true; _urgent = true; }
 
+        /// <summary>T-26: the capacity a co-member's own plan takes from one of MY warehouses is that warehouse's slot
+        /// total (PwWarehouseFacts.SlotTotal), so a truck or driver change must reach the next plan update.  The slots
+        /// are written in many places - VehicleSlot.AssignVehicle (Entities/VehicleSlot.cs:25, from Warehouse.cs:257 and
+        /// CarController.cs:617), and the driver field directly by ScheduleAutoFillerHelper.cs:116/:120,
+        /// EmployeeHelper.cs:385 and BizManTransfer.cs:203 - so instead of hooking every writer the 1 Hz tick compares the
+        /// very figure that is published and marks the update dirty when it moved.</summary>
+        private static string _slotSig = "";
+
+        private static void WatchSlots()
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null || gi.BuildingRegistrations == null) return;
+                var sb = new System.Text.StringBuilder();
+                foreach (var reg in gi.BuildingRegistrations)
+                {
+                    if (!(reg is Entities.Warehouse w)) continue;
+                    string key; try { key = GameStateReader.AddressKey(reg); } catch { continue; }
+                    if (string.IsNullOrEmpty(key) || !CompanyLists.RunsWarehouseHere(reg, key)) continue;
+                    sb.Append(key).Append('=').Append(CompanyLists.SlotTotalOf(w)).Append(';');
+                }
+                string sig = sb.ToString();
+                if (sig == _slotSig) return;
+                bool first = _slotSig.Length == 0;
+                _slotSig = sig;
+                if (!first)
+                {
+                    _dirty = true;
+                    Plugin.Logger.LogInfo($"[Paperwork] warehouse slots changed - the plan update is marked dirty ({sig}).");
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] warehouse slot watch: {ex.Message}"); }
+        }
+
         // ── Tick (1 Hz, chained off the existing canvas pre-block via MPClient.TickWorldReadyGate) ──
 
         public static void Tick()
@@ -83,6 +118,8 @@ namespace BigAmbitionsMP
                     Publish("membership");   // rising edge: the host gets a full bundle at once
                     return;
                 }
+
+                WatchSlots();   // T-26: a truck or driver slot of a warehouse I run moved -> dirty
 
                 int day = -1;
                 try { day = GameStateReader.GetGameTime().day; } catch { }
@@ -410,6 +447,7 @@ namespace BigAmbitionsMP
             n += Move(l.DeliveryContracts,     t?.DeliveryContracts,     x => A(x.BusinessAddressKey));
             n += Move(l.ImportPartnerships,    t?.ImportPartnerships,    x => A(x.HeadquartersAddressKey));
             n += Move(l.LogisticsManagerPlans, t?.LogisticsManagerPlans, x => A(x.HeadquartersAddressKey));
+            n += Move(l.Warehouses,            t?.Warehouses,            x => A(x.AddressKey));   // T-26
             n += Move(l.PricingManagerPlans,   t?.PricingManagerPlans,   x => A(x.HeadquartersAddressKey));
             n += Move(l.HrManagerPlans,        t?.HrManagerPlans,        x => A(x.HeadquartersAddressKey));
             n += Move(l.HeadhunterPlans,       t?.HeadhunterPlans,       x => A(x.HeadquartersAddressKey));
@@ -630,6 +668,17 @@ namespace BigAmbitionsMP
                             foreach (var t in kv.Value)
                                 row.Items.Add(new PwItemOrderLine { ItemName = t.itemName, Amount = t.targetAmount });
                         l.ItemsOrderedThisWeekByImporter.Add(row);
+                    }
+
+                // T-26: the facts of every warehouse this machine RUNS, for a co-member whose own plan draws from it.
+                if (gi.BuildingRegistrations != null)
+                    foreach (var reg in gi.BuildingRegistrations)
+                    {
+                        if (!(reg is Entities.Warehouse wh)) continue;
+                        string wk = Key(reg.Address);
+                        if (wk.Length == 0 || !mine.Contains(wk)) continue;
+                        var wf = CompanyLists.WarehouseFacts(wh, wk);
+                        if (wf != null) l.Warehouses.Add(wf);
                     }
 
                 if (gi.logisticsManagerPlans != null)
@@ -1645,54 +1694,43 @@ namespace BigAmbitionsMP
             }
         }
 
-        /// <summary>HQ-PARITY-2 P1, OWNER SIDE.  The two numbers a co-member cannot compute, measured here at
-        /// publish time and carried on the plan's DTO.  MaxDestinations is the plan's own getter
-        /// (LogisticsManagerPlan.cs:43 -> CalculateMaxDestinations :145-157), which needs the warehouse's
-        /// VehicleInstances - present only on this machine.  Stock is one line per PRODUCT the pane will list,
-        /// each taken from `BuildingHelper.CountResourcesInPallets` itself (HQ-PARITY-6 P4 - the very call the
-        /// pane makes, so the two cannot disagree), plus a sweep of the registration's own cargo (Helpers/
-        /// BuildingHelper.cs:391-413: every item instance tagged iswarehousestorage, every cargo instance in
-        /// it) for anything the product list does not name.  An item absent from this list is zero HERE too,
-        /// so the drawing side answers 0 for it instead
-        /// of reading its own replica.  Deliveries and sales move these figures on the ordinary dirty cadence
-        /// (30 s); a plan COMMIT publishes urgently (HQ-PARITY-1 P5), so the numbers beside an edit are at
-        /// most 2 s old.  NOT part of PlanToDto: that DTO's serialised shape is the edit dedupe, and a stock
-        /// tick must never read as somebody's edit.  HQ-PARITY-5 C2 adds a THIRD thing a co-member cannot
-        /// compute: the source building's product LIST, filled below from the same call the pane makes.</summary>
-        public static void FillLogisticsNumbers(PwLogisticsPlan pp, Buildings.Office.Headquarters.LogisticsManagerPlan pl)
+        /// <summary>T-26: the per-slot total the game's capacity takes (LogisticsManagerPlan.cs:151 -
+        /// `vehicleSlots.Sum(s => s.DestinationsThatCanDeliver)`), on THIS machine, where the trucks are.</summary>
+        internal static int SlotTotalOf(Entities.Warehouse w)
         {
-            if (pp == null || pl == null) return;
-            try { pp.MaxDestinations = pl.MaxDestinations; }
-            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics capacity for plan {pl.id}: {ex.Message}"); }
+            int n = 0;
+            if (w == null || w.vehicleSlots == null) return 0;
+            foreach (var s in w.vehicleSlots) if (s != null) n += s.DestinationsThatCanDeliver;
+            return n;
+        }
+
+        /// <summary>T-26: does THIS machine run that warehouse - mine, or simulated here for an absent owner (the test
+        /// the bundle's `mine` set and CargoTransfer.ApplyClose use).</summary>
+        internal static bool RunsWarehouseHere(global::BuildingRegistration reg, string key)
+        {
+            try { return reg != null && (MergerFlip.TrulyMine(reg) || MergerAbsence.SimulatesHere(key)); } catch { return false; }
+        }
+
+        /// <summary>T-26: one run warehouse's facts for the plan update - its slot total, and its product list and pallet
+        /// counts measured exactly as FillLogisticsNumbers measures a plan's source (AppendStockLines, shared).</summary>
+        internal static PwWarehouseFacts? WarehouseFacts(Entities.Warehouse w, string wkey)
+        {
+            if (w == null || string.IsNullOrEmpty(wkey)) return null;
+            var f = new PwWarehouseFacts { AddressKey = wkey };
+            try { f.SlotTotal = SlotTotalOf(w); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] warehouse facts '{wkey}': slots: {ex.Message}"); }
+            try { foreach (var name in w.GetProducts()) if (!string.IsNullOrEmpty(name)) f.Products.Add(name); }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] warehouse facts '{wkey}': products: {ex.Message}"); }
+            AppendStockLines(w, wkey, f.Products, f.Stock, "warehouse " + wkey);
+            return f;
+        }
+
+        /// <summary>The pallet counts of one source building (moved out of FillLogisticsNumbers unchanged, T-26, so a
+        /// plan's source and a run warehouse's facts are measured by one piece of code).</summary>
+        private static void AppendStockLines(global::BuildingRegistration reg, string wkey, List<string> products, List<PwStockLine> into, string what)
+        {
             try
             {
-                if (pl.targetAddress == null) return;
-                string wkey = SafeKey(pl.targetAddress);
-                if (wkey.Length == 0) return;
-                var reg = Helpers.BuildingHelper.GetBuildingRegistration(pl.targetAddress);
-                if (reg == null) return;
-                // HQ-PARITY-5 C2: the PRODUCT LIST of the source building, read with the call the pane's own
-                // branch makes on the owner (LogisticsManagerPlanUI.GetListOfAvailableProducts :483-485 -
-                // `GetBuildingRegistration(_currentPlan.targetAddress) is Entities.Warehouse w` then
-                // `w.GetProducts()`).  On a co-member the replica holds no pallets, so that same call answers
-                // an empty list and the destination's product picker says there is nothing to deliver.  A
-                // registration that is NOT an Entities.Warehouse is exactly what the game's own `is` test
-                // rejects, so it publishes nothing here either and the pane keeps the game's own answer
-                // (imports plus the positive targets).  FOLD b G6 (review): that is NOT the factory case -
-                // BuildingHelper.cs:154 builds `new Warehouse()` for EVERY ba:buildingtype_warehouse
-                // registration, factories included, and LogisticsManagerPlan.cs:58 casts a plan's source
-                // straight to Warehouse - so a factory plan's source IS a Warehouse and DOES publish its
-                // product list here.  What falls out of this branch is a source that is not a
-                // warehouse-type building at all.
-                if (reg is Entities.Warehouse srcWarehouse)
-                {
-                    try
-                    {
-                        foreach (var name in srcWarehouse.GetProducts())
-                            if (!string.IsNullOrEmpty(name)) pp.SourceProducts.Add(name);
-                    }
-                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics products for plan {pl.id}: {ex.Message}"); }
-                }
                 var totals = new Dictionary<string, int>(StringComparer.Ordinal);
                 if (reg.itemInstances != null)
                 foreach (var ii in reg.itemInstances.Values)
@@ -1721,14 +1759,14 @@ namespace BigAmbitionsMP
                 // being measured here.) The sweep is kept for items the product list does not name, so cargo
                 // that is present but unlisted still travels; a name is published once and once only.
                 var named = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var product in pp.SourceProducts)
+                foreach (var product in products)
                 {
                     if (string.IsNullOrEmpty(product) || !named.Add(product)) continue;
                     int have = 0;
-                    try { have = Helpers.BuildingHelper.CountResourcesInPallets(pl.targetAddress, product); }
-                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock of '{product}' for plan {pl.id}: {ex.Message}"); }
+                    try { have = Helpers.BuildingHelper.CountResourcesInPallets(reg.Address, product); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock of '{product}' for {what}: {ex.Message}"); }
                     int psw; sold.TryGetValue(product, out psw);
-                    pp.Stock.Add(new PwStockLine { AddressKey = wkey, ItemName = product, Count = have, SoldPerWeek = psw });
+                    into.Add(new PwStockLine { AddressKey = wkey, ItemName = product, Count = have, SoldPerWeek = psw });
                 }
                 // FOLD b H5 - WHAT NEITHER HALF NAMES DRAWS 0.  The two halves have different reaches: the
                 // loop above covers exactly `Warehouse.GetProducts()` (what the source warehouse is set up to
@@ -1742,8 +1780,71 @@ namespace BigAmbitionsMP
                 {
                     if (named.Contains(kv.Key)) continue;
                     int sw; sold.TryGetValue(kv.Key, out sw);
-                    pp.Stock.Add(new PwStockLine { AddressKey = wkey, ItemName = kv.Key, Count = kv.Value, SoldPerWeek = sw });
+                    into.Add(new PwStockLine { AddressKey = wkey, ItemName = kv.Key, Count = kv.Value, SoldPerWeek = sw });
                 }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock for {what}: {ex.Message}"); }
+        }
+
+        /// <summary>HQ-PARITY-2 P1, OWNER SIDE.  The two numbers a co-member cannot compute, measured here at
+        /// publish time and carried on the plan's DTO.  MaxDestinations is the plan's own getter
+        /// (LogisticsManagerPlan.cs:43 -> CalculateMaxDestinations :145-157), which needs the warehouse's
+        /// VehicleInstances - present only on this machine.  Stock is one line per PRODUCT the pane will list,
+        /// each taken from `BuildingHelper.CountResourcesInPallets` itself (HQ-PARITY-6 P4 - the very call the
+        /// pane makes, so the two cannot disagree), plus a sweep of the registration's own cargo (Helpers/
+        /// BuildingHelper.cs:391-413: every item instance tagged iswarehousestorage, every cargo instance in
+        /// it) for anything the product list does not name.  An item absent from this list is zero HERE too,
+        /// so the drawing side answers 0 for it instead
+        /// of reading its own replica.  Deliveries and sales move these figures on the ordinary dirty cadence
+        /// (30 s); a plan COMMIT publishes urgently (HQ-PARITY-1 P5), so the numbers beside an edit are at
+        /// most 2 s old.  NOT part of PlanToDto: that DTO's serialised shape is the edit dedupe, and a stock
+        /// tick must never read as somebody's edit.  HQ-PARITY-5 C2 adds a THIRD thing a co-member cannot
+        /// compute: the source building's product LIST, filled below from the same call the pane makes.</summary>
+        public static void FillLogisticsNumbers(PwLogisticsPlan pp, Buildings.Office.Headquarters.LogisticsManagerPlan pl)
+        {
+            if (pp == null || pl == null) return;
+            try { pp.MaxDestinations = pl.MaxDestinations; }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics capacity for plan {pl.id}: {ex.Message}"); }
+            try
+            {
+                if (pl.targetAddress == null) return;
+                string wkey = SafeKey(pl.targetAddress);
+                if (wkey.Length == 0) return;
+                var reg = Helpers.BuildingHelper.GetBuildingRegistration(pl.targetAddress);
+                if (reg == null) return;
+                // T-26: a source warehouse ANOTHER game runs is measured there - this machine's replica holds no live
+                // pallets.  The runner's published facts are this plan's figures (an own plan of mine drawing from a
+                // co-member's warehouse; a display copy of a partner's plan is never published from here).
+                var runnerFacts = CompanyPlans.RunElsewhere(wkey) ? CompanyPlans.WarehouseFactsOf(wkey) : null;
+                if (runnerFacts != null)
+                {
+                    pp.SourceProducts.AddRange(runnerFacts.Products ?? new List<string>());
+                    foreach (var ln in runnerFacts.Stock ?? new List<PwStockLine>()) if (ln != null) pp.Stock.Add(ln);
+                    return;
+                }
+                // HQ-PARITY-5 C2: the PRODUCT LIST of the source building, read with the call the pane's own
+                // branch makes on the owner (LogisticsManagerPlanUI.GetListOfAvailableProducts :483-485 -
+                // `GetBuildingRegistration(_currentPlan.targetAddress) is Entities.Warehouse w` then
+                // `w.GetProducts()`).  On a co-member the replica holds no pallets, so that same call answers
+                // an empty list and the destination's product picker says there is nothing to deliver.  A
+                // registration that is NOT an Entities.Warehouse is exactly what the game's own `is` test
+                // rejects, so it publishes nothing here either and the pane keeps the game's own answer
+                // (imports plus the positive targets).  FOLD b G6 (review): that is NOT the factory case -
+                // BuildingHelper.cs:154 builds `new Warehouse()` for EVERY ba:buildingtype_warehouse
+                // registration, factories included, and LogisticsManagerPlan.cs:58 casts a plan's source
+                // straight to Warehouse - so a factory plan's source IS a Warehouse and DOES publish its
+                // product list here.  What falls out of this branch is a source that is not a
+                // warehouse-type building at all.
+                if (reg is Entities.Warehouse srcWarehouse)
+                {
+                    try
+                    {
+                        foreach (var name in srcWarehouse.GetProducts())
+                            if (!string.IsNullOrEmpty(name)) pp.SourceProducts.Add(name);
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics products for plan {pl.id}: {ex.Message}"); }
+                }
+                AppendStockLines(reg, wkey, pp.SourceProducts, pp.Stock, "plan " + pl.id);
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics stock for plan {pl.id}: {ex.Message}"); }
         }
@@ -2098,6 +2199,8 @@ namespace BigAmbitionsMP
                 if (l.BusinessTasks != null) p.BusinessTasks.AddRange(l.BusinessTasks);
                 // H-MERGERCAMPAIGN-1: the owner's running campaigns travel on, untouched and unjudged.
                 if (l.RecruitmentCampaigns != null) p.RecruitmentCampaigns.AddRange(l.RecruitmentCampaigns);
+                // T-26: the facts of the warehouses this owner runs travel on, untouched.
+                if (l.Warehouses != null) p.Warehouses.AddRange(l.Warehouses);
             }
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var b in bundle?.Businesses ?? new List<BusinessPaperwork>())

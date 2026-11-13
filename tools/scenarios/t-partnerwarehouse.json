@@ -1,0 +1,478 @@
+{
+  "id": "T-PARTNERWAREHOUSE",
+  "title": "T-26, two players: the host's OWN logistics plan uses the CLIENT's warehouse - its add-shop limit is the client's per-slot total plus the host manager's skill bonus, a shop can be added, and the hourly pass delivers: the client (who runs the warehouse) withdraws, the host delivers to its shop, the client closes it out; a resend (the same pass AND the hand-over sent again) moves nothing twice; an EXPORT leg from the client's warehouse is withdrawn there and paid once on the host; ends dissolved WITHOUT a save",
+  "preconditions": "Fixture save1 (the host melaus owns a warehouse logistics plan with a manager - its destinations may already fill the limit (dests=8=limit seen in run 20261113-033632), so the run frees ONE slot through the game's own remove (`lmcap drop last`) and puts that very destination back at its index (`lmcap undrop`), asserting the count returns to its before-value; the host's world holds at least one import/export business registration (lmexport's destination - Inferred, not verified on the fixture); Client1 owns a warehouse with a truck AND a driver in at least one slot (its stock is put in by whstock); the host's first own non-warehouse business in registration order has a sale shelf set to some item). Build with the T-26 levers lmsource / lmcap (incl. next, drop, undrop) / lmpass / whstock / stockof ... since / cargoresend / lmexport. The fixture has no known partner FACTORY plan with stock, so the export hand-over is driven by the lever-level check lmexport (an own plan briefly marked a factory plan for one TakeOver call). FIXTURE HYGIENE: lmsource, lmcap add and lmcap drop change one plan in memory and are undone before the dissolve (lmexport never puts its destination on the plan); the export pays the company wallet in memory only; the run never saves, so the fixture .hsg files are untouched (the manifest is reset before every run).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Merger\\] accept .* REFUSED",
+    "upload SKIPPED",
+    "\\[Cargo\\] take-over: ",
+    "the sender does not run that source",
+    "nobody is running that source",
+    "withdrawing '",
+    "the delivery report could not be raised",
+    "logistics capacity \\(partner warehouse\\)",
+    "warehouse facts '",
+    "warehouse slot watch",
+    "\\[TestDrive\\] lmpass leg of plan",
+    "the export leg failed",
+    "never exported from this machine's copy",
+    "is never withdrawn through a delivery answer",
+    "the export income could not be paid",
+    "nothing is withdrawn from this machine's copy",
+    "the offer did not match what the host answered",
+    "the export record of '",
+    "the export price of '"
+  ],
+  "oracles_report": [
+    "\\[Cargo\\]",
+    "\\[TestDrive\\] lm",
+    "\\[Paperwork\\] warehouse slots changed",
+    "\\[TestDrive\\] cargoresend"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST PARTNERWAREHOUSE START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "mark TEST PARTNERWAREHOUSE SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [{"role": "c", "regex": "\\[Patcher\\] world settled", "within_s": 150, "since_prev_step": true}],
+      "note": "waits for the client's own settle line (searched from its step-8 mark) instead of a fixed 30 s: the load took 28-48 s across runs and a fixed wait failed twice"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "role": "h",
+      "cmd": "legs",
+      "expect_result": "^OK legs plans=\\[[^\\]]+\\]",
+      "capture": {
+        "planId": "plans=\\[([^:,\\]]+):src=",
+        "srcKey": "plans=\\[[^:,\\]]+:src=([^,\\]]+?):dests="
+      },
+      "note": "the host's first own logistics plan and its own source warehouse (put back at the end)",
+      "seq": 13
+    },
+    {
+      "role": "h",
+      "cmd": "warehouses",
+      "expect_result": "flipped=\\['[^']+'",
+      "capture": {
+        "whKey": "flipped=\\['([^']+)'"
+      },
+      "note": "the client's first warehouse as seen from the host (flipped = run by the client)",
+      "seq": 14
+    },
+    {
+      "role": "c",
+      "cmd": "lmcap ${whKey}",
+      "expect_result": "^OK lmcap addr='${whKey}' total=[1-9]\\d* ",
+      "capture": {
+        "cTotal": "total=(\\d+) "
+      },
+      "note": "the client's OWN per-slot total, native arithmetic on the machine with the trucks",
+      "seq": 15
+    },
+    {
+      "role": "h",
+      "cmd": "lmcap ${planId} drop last",
+      "expect_result": "^OK lmcap dropped shop='[^']+' index=\\d+ was=(\\d+) dests=\\d+ ",
+      "capture": {
+        "dests0": "was=(\\d+)",
+        "droppedShop": "shop='([^']+)'"
+      },
+      "note": "PREMISE: free ONE destination slot through the game's own remove (LogisticsManagerDestinationUI.cs:60); the removed destination is kept and put back in the cleanup",
+      "seq": 16
+    },
+    {
+      "role": "h",
+      "cmd": "lmcap ${planId} next",
+      "expect_result": "^OK lmcap next shop='[^']+' shelves=\\[[^\\]]+\\]",
+      "capture": {
+        "nextShop": "shop='([^']+)'",
+        "item": "shelves=\\[([^,\\]]+)"
+      },
+      "note": "the host shop `lmcap add` will pick, and an item one of its sale shelves is set to (the only shelves the delivery leg's first unload fills)",
+      "seq": 17
+    },
+    {
+      "role": "c",
+      "cmd": "whstock ${whKey} ${item} 20",
+      "expect_result": "^OK whstock addr='${whKey}' item='${item}' added=20 left=0 now=(?:[2-9]\\d|[1-9]\\d{2,})$",
+      "note": "PREMISE: the client (who runs the warehouse) stocks it through the game's own import unload - the fixture warehouse is empty",
+      "seq": 18
+    },
+    {
+      "role": "c",
+      "cmd": "stockof ${whKey} since ${item} 0",
+      "expect_result": "^OK stockof addr='${whKey}' items=\\[(?:[^\\]]*,)?${item}:(?:[2-9]\\d|[1-9]\\d{2,})(?:,|\\])",
+      "note": "PREMISE: the client's warehouse holds the chosen item; the warehouse stock BEFORE (reported)",
+      "seq": 19,
+      "capture": {
+        "whBefore": "now=(\\d+) "
+      }
+    },
+    {
+      "role": "h",
+      "cmd": "lmsource ${planId} ${whKey}",
+      "expect_result": "^OK lmsource plan='${planId}' was='${srcKey}' now='${whKey}'",
+      "note": "the host's own plan now draws from the client's warehouse",
+      "seq": 20
+    },
+    {
+      "role": "h",
+      "cmd": "lmcap ${planId}",
+      "expect_result": "^OK lmcap plan='${planId}' src='${whKey}' run=partner limit=[1-9]\\d* total=${cTotal} bonus=\\d+ skill=[\\d.]+ possible=\\d+ formula=ok ",
+      "note": "LEG 1: host limit == the client's own slot total + floor(total x HOST manager skill / 100); total asserted equal to the client's, formula asserted",
+      "seq": 21
+    },
+    {
+      "role": "h",
+      "cmd": "lmcap ${planId} add ${item}",
+      "expect_result": "^OK lmcap added shop='${nextShop}' item='${item}' ",
+      "capture": {
+        "shopKey": "shop='([^']+)'"
+      },
+      "note": "LEG 2: a shop can be added under the plan screen's own rule (dests < limit, one slot freed by the drop); target = its stock + 1",
+      "seq": 22
+    },
+    {
+      "role": "h",
+      "cmd": "stockof ${shopKey} since ${item} 0",
+      "expect_result": "^OK stockof addr='${shopKey}' .* now=\\d+ ",
+      "note": "the shop's stock of the item BEFORE",
+      "seq": 23,
+      "capture": {
+        "shopBefore": "now=(\\d+) "
+      }
+    },
+    {
+      "role": "h",
+      "cmd": "cargo",
+      "expect_result": "^OK cargo pending=0",
+      "note": "nothing in flight before",
+      "seq": 24
+    },
+    {
+      "role": "h",
+      "cmd": "lmpass ${planId}",
+      "expect_result": "^OK lmpass plans=1 legs=[1-9]\\d* started=[1-9]",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Cargo\\] transfer .* started - '${whKey}' -> '${shopKey}'",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[Cargo\\] transfer .*: the source '${whKey}' is run by '${clientPid}' - the withdraw is handed to it",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[Cargo\\] transfer .* need answered - .* at '${shopKey}'",
+          "within_s": 10
+        },
+        {
+          "role": "c",
+          "regex": "\\[Cargo\\] transfer .* withdrawn - 1 item\\(s\\), 1 unit\\(s\\) out of '${whKey}' \\(handed over by '${hostPid}'\\)",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Cargo\\] transfer .*: '${clientPid}' withdrew 1 item\\(s\\) out of '${whKey}' for this plan",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Cargo\\] transfer .* delivered 1 \\(remainder 0\\) at '${shopKey}'",
+          "within_s": 40
+        },
+        {
+          "role": "c",
+          "regex": "\\[Cargo\\] transfer .* delivered 1 \\(remainder 0\\) - nothing to return",
+          "within_s": 45
+        },
+        {
+          "role": "h",
+          "regex": "\\[Cargo\\] transfer .*: confirmed closed by '${clientPid}' - the host's record is dropped",
+          "within_s": 45
+        }
+      ],
+      "note": "LEG 3: the hourly pass - client withdraws (handed over), host delivers to its shop, client closes it out",
+      "seq": 25
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 26
+    },
+    {
+      "role": "h",
+      "cmd": "cargo",
+      "expect_result": "^OK cargo pending=0",
+      "note": "the host's record is closed",
+      "seq": 27
+    },
+    {
+      "role": "h",
+      "cmd": "stockof ${shopKey} since ${item} ${shopBefore}",
+      "expect_result": "^OK stockof addr='${shopKey}' .* diff=[1-9]\\d*$",
+      "capture": {
+        "moved": "diff=(\\d+)$",
+        "shopAfter": "now=(\\d+) "
+      },
+      "note": "LEG 4: the shop is UP by N (N captured)",
+      "seq": 28
+    },
+    {
+      "role": "c",
+      "cmd": "stockof ${whKey} since ${item} ${whBefore}",
+      "expect_result": "^OK stockof addr='${whKey}' .* diff=-${moved}$",
+      "capture": {
+        "whAfter": "now=(\\d+) "
+      },
+      "note": "LEG 4: the client's warehouse is DOWN by exactly the same N (equal and opposite)",
+      "seq": 29
+    },
+    {
+      "role": "h",
+      "cmd": "cargoresend ${planId} ${shopKey}",
+      "expect_result": "^OK cargoresend tid='[^']+' to='${clientPid}' items=[1-9]\\d* export=False$",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Cargo\\] transfer .* closed already here - a repeated hand-over takes nothing",
+          "within_s": 20
+        }
+      ],
+      "note": "LEG 5 (resend, runner side): the host sends the delivered leg's hand-over to the client again - the runner's duplicate guard takes nothing",
+      "seq": 30
+    },
+    {
+      "role": "h",
+      "cmd": "lmpass ${planId}",
+      "expect_result": "^OK lmpass plans=1 ",
+      "note": "LEG 5 (resend): the same pass again - same game hour = the same transfer id, started=0; a new hour = the shop needs nothing",
+      "seq": 31
+    },
+    {
+      "role": "h",
+      "sleep_s": 10,
+      "seq": 32
+    },
+    {
+      "role": "h",
+      "cmd": "stockof ${shopKey} since ${item} ${shopAfter}",
+      "expect_result": "^OK stockof addr='${shopKey}' .* diff=0$",
+      "note": "LEG 5: the shop holds no more than after the first pass",
+      "seq": 33
+    },
+    {
+      "role": "c",
+      "cmd": "stockof ${whKey} since ${item} ${whAfter}",
+      "expect_result": "^OK stockof addr='${whKey}' .* diff=0$",
+      "note": "LEG 5: the warehouse gave nothing a second time (neither the second pass nor the resent hand-over)",
+      "seq": 34
+    },
+    {
+      "role": "c",
+      "cmd": "stockof ${whKey} since ${item} 0",
+      "expect_result": "^OK stockof addr='${whKey}' .* now=[1-9]\\d* ",
+      "capture": {
+        "whX0": "now=(\\d+) "
+      },
+      "note": "LEG 6: the client's warehouse BEFORE the export",
+      "seq": 35
+    },
+    {
+      "role": "h",
+      "cmd": "lmexport ${planId} ${item} 1",
+      "expect_result": "^OK lmexport tid='[^']+' plan='${planId}' src='${whKey}' dest='[^']+' item='${item}' amount=1$",
+      "capture": {
+        "exDest": "dest='([^']+)'"
+      },
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Cargo\\] transfer .*: the export source '${whKey}' is run by another game - its withdraw is handed over",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[Cargo\\] transfer .*: the export source '${whKey}' is run by '${clientPid}' - the withdraw is handed to it",
+          "within_s": 10
+        },
+        {
+          "role": "c",
+          "regex": "\\[Cargo\\] transfer .* withdrawn - 1 item\\(s\\), 1 unit\\(s\\) out of '${whKey}' \\(handed over by '${hostPid}'\\)",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[Cargo\\] transfer .*: exported out of '${whKey}' for '${hostPid}' - booked here",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Cargo\\] transfer .*: exported 1 unit\\(s\\) that '${clientPid}' withdrew out of '${whKey}' - paid (?!0\\.00 )\\d+\\.\\d\\d here, once",
+          "within_s": 40
+        }
+      ],
+      "note": "LEG 6 (F1, lever-level): an export leg whose source the client runs goes to the HANDED path - the client withdraws the real goods and books the export, the host is paid for exactly that, once",
+      "seq": 36
+    },
+    {
+      "role": "c",
+      "cmd": "stockof ${whKey} since ${item} ${whX0}",
+      "expect_result": "^OK stockof addr='${whKey}' .* diff=-1$",
+      "note": "LEG 6: the client's real warehouse is down by the exported unit",
+      "seq": 37
+    },
+    {
+      "role": "h",
+      "cmd": "cargoresend ${planId} ${exDest}",
+      "expect_result": "^OK cargoresend tid='[^']+' to='${clientPid}' items=1 export=True$",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Cargo\\] transfer .* withdrawn already for '${hostPid}' - the offer is sent again, nothing taken",
+          "within_s": 20
+        },
+        {
+          "role": "h",
+          "regex": "\\[Cargo\\] transfer .*: a repeated export report - closed already here, nothing is paid again",
+          "within_s": 30
+        }
+      ],
+      "note": "LEG 6 (resend): the export hand-over sent again - nothing is withdrawn twice, nothing is paid twice",
+      "seq": 38
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 39
+    },
+    {
+      "role": "c",
+      "cmd": "stockof ${whKey} since ${item} ${whX0}",
+      "expect_result": "^OK stockof addr='${whKey}' .* diff=-1$",
+      "note": "LEG 6: still down by exactly one unit after the resend",
+      "seq": 40
+    },
+    {
+      "role": "h",
+      "cmd": "cargotest remove ${planId} ${shopKey}",
+      "expect_result": "^OK cargotest removed=1",
+      "note": "FIXTURE HYGIENE: the added shop destination is gone",
+      "seq": 41
+    },
+    {
+      "role": "h",
+      "cmd": "lmcap ${planId} undrop",
+      "expect_result": "^OK lmcap restored shop='${droppedShop}' index=\\d+ dests=${dests0}$",
+      "note": "FIXTURE HYGIENE: the dropped destination is back, and the plan holds its before-count of destinations",
+      "seq": 42
+    },
+    {
+      "role": "h",
+      "cmd": "lmsource ${planId} ${srcKey}",
+      "expect_result": "^OK lmsource plan='${planId}' was='${whKey}' now='${srcKey}'",
+      "note": "FIXTURE HYGIENE: the plan's own warehouse back",
+      "seq": 43
+    },
+    {
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved; NO save in this scenario",
+      "seq": 44
+    },
+    {
+      "role": "h",
+      "sleep_s": 5,
+      "seq": 45
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0",
+      "seq": 46
+    },
+    {
+      "role": "both",
+      "cmd": "mark TEST PARTNERWAREHOUSE END",
+      "expect_result": "OK MARK",
+      "seq": 47
+    }
+  ]
+}
