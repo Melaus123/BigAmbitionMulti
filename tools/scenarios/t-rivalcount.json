@@ -1,0 +1,210 @@
+{
+  "id": "T-RIVALCOUNT",
+  "title": "T-34 (2026-11-13): the rivals app's property count for another player comes from the host's deed ledger, not the game's deed stamp (bundle bamp-bug-20261107-223938: two of a guest's five deeds stamped to computer rivals on the host showed 1 property instead of 5); and the root: a guest's buy writes the buyer's deed stamp in the host's own game",
+  "preconditions": "Fixture save1 (host melaus, client Client1; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA== owns at least two for-rent buildings). Dev build with the stampset lever (src/DevT34.cs, T-34; `stampset <addr> read` only reads), rivalrent find/buy and rivals. Host-side check only: a client holds no deed ledger and keeps the stamp rule. NOTHING is saved (fixture reset).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "rival": "ju1yVbREcE2B5ymg6q5tyA=="
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[TestDrive\\] .*'(stampset|rivals)[^']*'.*ERR"
+  ],
+  "oracles_report": [
+    "\\[Server\\] BuyRequest",
+    "\\[Patch_GetAllRivalData\\]",
+    "\\[TestDrive\\] .* '(stampset|rivals|rivalrent)",
+    "\\[Patcher/Host\\] deed stamp"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "mark TEST RIVALCOUNT HOST SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Settle\\] world settled \\(host",
+          "within_s": 150,
+          "since_prev_step": true
+        }
+      ],
+      "note": "waits for the host's own settle line"
+    },
+    {
+      "seq": 4,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 5,
+      "note": "the join request reaches the host (t-buyowned's opening)"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "mark TEST RIVALCOUNT CLIENT SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 180,
+          "since_prev_step": true
+        }
+      ],
+      "note": "waits for the client's own settle line"
+    },
+    {
+      "seq": 8,
+      "role": "both",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 9,
+      "role": "both",
+      "cmd": "mark TEST RIVALCOUNT T1",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "rivalrent find ${rival}",
+      "expect_result": "^OK rivalrent find rival=${rival} owned=\\d+ forrent=([2-9]|\\d{2,}) ",
+      "capture": {
+        "addr1": "first=(.+?) \\[",
+        "addr2": "\\[[^;\\]]+? ; ([^;\\]]+?)(?: ;|\\])"
+      },
+      "note": "two buildings the computer rival owns: addr1 for the guest to buy, addr2 stays the rival's (no deed)"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "rivalrent buy ${addr1}",
+      "expect_result": "^OK rivalrent buy sent addr='${addr1}' .*owned=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] BuyRequest: ${addr1} \\S+ owned by ${clientPid}",
+          "within_s": 15
+        }
+      ],
+      "note": "PREMISE: the guest holds addr1's deed on the host's ledger (t-buyowned step 12's way)"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "mark TEST RIVALCOUNT T2",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Patcher/Host\\] deed stamp \\(bought\\): '${addr1}' now '${clientPid}' \\(was '${rival}'\\)",
+          "within_s": 15,
+          "since_prev_step": true
+        }
+      ],
+      "note": "ROOT FIX: the host's guest-buy handler writes the buyer's deed stamp in the host's own game (main thread), over the computer rival's"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "cmd": "stampset ${addr1} read",
+      "expect_result": "^OK stampread addr='${addr1}' stamp='${clientPid}' deed='${clientPid}'$",
+      "note": "ROOT FIX: the host's game holds the buyer's stamp, the stampset lever has written nothing (read only)"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "stampset ${addr1} read",
+      "expect_result": "^OK stampread addr='${addr1}' stamp='' deed='n/a'$",
+      "note": "the buyer's own game keeps the game's own buy stamp (empty = mine, BizManPresentation.cs:954); the host's broadcast (DeedOwnerPlayerId = the buyer) leaves it"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "rivals",
+      "expect_result": "^OK rows=\\d+ mode=lb .*id='${clientPid}';income=-?\\d+;biz=\\d+;bldg=[1-9]",
+      "note": "the rivals app on the host counts the guest's bought building"
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "stampset ${addr1} ${clientPid}",
+      "expect_result": "^OK stampset addr='${addr1}' stamp='${clientPid}' was='[^']*' deed='${clientPid}'$",
+      "note": "PREMISE: stamp and ledger AGREE on addr1 (the baseline count includes it under the old stamp rule too)"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "rivals",
+      "expect_result": "^OK rows=\\d+ mode=lb .*id='${clientPid}';income=-?\\d+;biz=\\d+;bldg=[1-9]",
+      "capture": {
+        "n0": "id='${clientPid}';income=-?\\d+;biz=\\d+;bldg=(\\d+);"
+      },
+      "note": "baseline: the rivals app's property count for the guest"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "cmd": "stampset ${addr1} ${rival}",
+      "expect_result": "^OK stampset addr='${addr1}' stamp='${rival}' was='${clientPid}' deed='${clientPid}'$",
+      "note": "the bundle's shape: the guest's deed stamped to a computer rival on the host"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "rivals",
+      "expect_result": "id='${clientPid}';income=-?\\d+;biz=\\d+;bldg=${n0};",
+      "note": "FIX: the count is unchanged - the deed ledger decides, not the stamp (before T-34: n0-1)"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "stampset ${addr2} ${clientPid}",
+      "expect_result": "^OK stampset addr='${addr2}' stamp='${clientPid}' was='[^']*' deed=''$",
+      "note": "the converse: a stamp naming the guest on a building nobody holds a deed for"
+    },
+    {
+      "seq": 21,
+      "role": "h",
+      "cmd": "rivals",
+      "expect_result": "id='${clientPid}';income=-?\\d+;biz=\\d+;bldg=${n0};",
+      "note": "FIX: still n0 - a stamp alone does not make a property (before T-34: n0+1)"
+    },
+    {
+      "seq": 22,
+      "role": "both",
+      "cmd": "mark TEST RIVALCOUNT END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

@@ -6907,6 +6907,7 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[Server] BuyRequest: {req.AddressKey} → owned by {senderPid}.");
             string addr = req.AddressKey;
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
+            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectPlayerDeed(addr, "bought"));   // T-34: the buyer's deed stamp in the host's own game (the game writes it on the buyer's machine only)
             RefreshBuildingAccess();   // housing: a guest granted housing can now enter this newly-bought building
         }
 
@@ -7140,6 +7141,7 @@ namespace BigAmbitionsMP
             BuildingRealEstateOwners.TryRemove(req.AddressKey, out _);
             string addr = req.AddressKey;
             GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostRemoveFromForSale(addr));
+            GameStatePatcher.EnqueueOnMainThread(() => GameStatePatcher.HostReflectDeedSoldToComputer(addr));   // T-34: the guest's deed stamp ends with the deed (the computer buyer's stamp, as the game's own sale)
             // D3b (fold V1c): a completed sale is a DEED END that names this address — the one positive
             // statement on the host that the seller no longer holds the house, so a Hamptons manor's
             // furniture is cleared from the host's copy here. HandleCancelSale is deliberately NOT a
@@ -7725,7 +7727,11 @@ namespace BigAmbitionsMP
                 foreach (var kv in BuildingOwners)
                     if (kv.Value == stable) { BuildingOwners[kv.Key] = pid; rekeyed++; }
                 foreach (var kv in BuildingRealEstateOwners)   // symmetric: bought real estate reserved under the absent owner's stableId must also re-key to their live pid
-                    if (kv.Value == stable) { BuildingRealEstateOwners[kv.Key] = pid; rekeyed++; }
+                    if (kv.Value == stable)
+                    {
+                        BuildingRealEstateOwners[kv.Key] = pid; rekeyed++;
+                        GameStatePatcher.HostReflectPlayerDeedQueued(kv.Key, "owner rejoined");   // T-34: the host's stamp follows the re-key
+                    }
                 if (rekeyed > 0)
                 {
                     Plugin.Logger.LogInfo($"[Server] Re-keyed {rekeyed} reserved building(s) to '{pid}'.");

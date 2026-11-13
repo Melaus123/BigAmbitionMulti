@@ -1159,6 +1159,22 @@ namespace BigAmbitionsMP
             return rd;
         }
 
+        /// <summary>T-34 (bundle bamp-bug-20261107-223938): does player <paramref name="id"/> hold this building's DEED?
+        /// HOST: the deed ledger decides (MPServer.BuildingRealEstateOwners: "host" / a live player id / an absent owner's
+        /// stable id) - the game's own stamp (buildingOwnerRivalId) on the host can name a computer rival for a building a
+        /// player bought (the bundle: 2 of the guest's 5 deeds), so the rivals app showed too few properties. A CLIENT holds
+        /// no deed ledger; its stamps are the copy the host's broadcasts write, so the stamp stays the record there.</summary>
+        private static bool HoldsDeed(BuildingRegistration reg, string stamp, string id)
+        {
+            if (!MPServer.IsRunning) return stamp == id;
+            string addr = GameStateReader.AddressKey(reg);
+            if (string.IsNullOrEmpty(addr) || !MPServer.BuildingRealEstateOwners.TryGetValue(addr, out var deed) || string.IsNullOrEmpty(deed)) return false;
+            if (deed == id) return true;
+            if (IsHostLedgerId(deed)) return IsHostLedgerId(id);
+            string stable = MPRivalAttention.StableOfPid(id);
+            return stable.Length > 0 && deed == stable;
+        }
+
         /// <summary>
         /// (Re)populate a rival/player RivalData's owned-* lists from local
         /// registrations.  The leaderboard COUNT and the detail BREAKDOWN both use
@@ -1197,7 +1213,7 @@ namespace BigAmbitionsMP
                     {
                         string bldg = reg.buildingOwnerRivalId?.ToString() ?? "";
                         string biz  = reg.businessOwnerRivalId?.ToString() ?? "";
-                        if (bldg == id && rd.ownedBuildings != null) rd.ownedBuildings.Add(reg);
+                        if (rd.ownedBuildings != null && HoldsDeed(reg, bldg, id)) rd.ownedBuildings.Add(reg);
 
                         bool isBiz;
                         if (syncedAddrs != null)
@@ -7326,6 +7342,73 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectPlayerRent: {ex.Message}"); }
         }
 
+        // T-34 (2026-11-13): the game's own buy writes the deed stamp on the BUYER's machine only (BizManPresentation.cs:954,
+        // empty = "mine"). Another player's deed is that player's ledger id in the same field - the form every client already
+        // writes from BusinessInfo.DeedOwnerPlayerId (the ownership apply, ~:6403) and BuildingSale's seller release.
+        // The host's own world never heard of a guest's buy, so its stamp kept the computer rival (bundle 20261107-223938).
+        /// <summary>T-34, HOST, MAIN THREAD: write the deed ledger's holder of this address into the host's own deed stamp
+        /// (buildingOwnerRivalId). The host's own deed ("host" / its id / its stable id, or the building natively in its real
+        /// estate) is the game's own record and is left alone; no ledger entry: nothing to write. True = the stamp changed.</summary>
+        internal static bool HostReflectPlayerDeedQueued(string addressKey, string why)
+        {
+            EnqueueOnMainThread(() => HostReflectPlayerDeed(addressKey, why));
+            return true;
+        }
+
+        /// <summary>T-34, HOST: does the deed ledger name this player stamp as the building's buyer (the same test the
+        /// scene-ready rent-vs-deed sweep and the world-health count use)?</summary>
+        internal static bool LedgerConfirmsPlayerDeed(BuildingRegistration reg, string deed)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || reg == null || string.IsNullOrEmpty(deed)) return false;
+                string addr = GameStateReader.AddressKey(reg);
+                return MPServer.BuildingRealEstateOwners.TryGetValue(addr, out var buyer)
+                       && ((buyer == deed) || (buyer == "host" && deed == MPConfig.PlayerId));
+            }
+            catch { return false; }
+        }
+
+        internal static bool HostReflectPlayerDeed(string addressKey, string why)
+        {
+            try
+            {
+                if (!MPServer.IsRunning || string.IsNullOrEmpty(addressKey)) return false;
+                if (!MPServer.BuildingRealEstateOwners.TryGetValue(addressKey, out var owner) || string.IsNullOrEmpty(owner)) return false;
+                if (IsHostLedgerId(owner) || owner == MPConfig.StableId) return false;
+                var reg = FindRegistration(addressKey);
+                if (reg == null) { Plugin.Logger.LogWarning($"[Patcher/Host] deed stamp ({why}): no reg for '{addressKey}'."); return false; }
+                bool nativeMine = false; try { nativeMine = reg.BuildingOwnedByPlayer; } catch { }
+                if (nativeMine) return false;
+                string was = reg.buildingOwnerRivalId ?? "";
+                if (was == owner) return false;
+                reg.buildingOwnerRivalId = owner;
+                RefreshForfeitPoi(reg);
+                Plugin.Logger.LogInfo($"[Patcher/Host] deed stamp ({why}): '{addressKey}' now '{owner}' (was '{(was.Length > 0 ? was : "-")}') - the deed ledger's holder.");
+                return true;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectPlayerDeed: {ex.Message}"); return false; }
+        }
+
+        /// <summary>T-34, HOST, MAIN THREAD: the computer bought a guest's building (MPServer.HandleSaleCompleted). The game's
+        /// own computer buy stamps a random rival (RealEstateHelper.cs:140); the host's copy runs the same call, so the guest's
+        /// stamp written at its buy does not outlive the deed (the host's broadcast then carries this rival to every machine).
+        /// Skipped while the ledger names a holder again (a buy landed while this was queued).</summary>
+        internal static void HostReflectDeedSoldToComputer(string addressKey)
+        {
+            try
+            {
+                if (MPServer.BuildingRealEstateOwners.TryGetValue(addressKey, out var o) && !string.IsNullOrEmpty(o)) return;
+                var reg = FindRegistration(addressKey);
+                if (reg == null) { Plugin.Logger.LogWarning($"[Patcher/Host] deed stamp (sold to computer): no reg for '{addressKey}'."); return; }
+                string was = reg.buildingOwnerRivalId ?? "";
+                reg.buildingOwnerRivalId = BigAmbitions.Rivals.RivalsHelper.GetRandomRivalForBuilding(reg.Neighborhood, reg.BuildingCached.IsHamptonsHouse());
+                RefreshForfeitPoi(reg);
+                Plugin.Logger.LogInfo($"[Patcher/Host] deed stamp (sold to computer): '{addressKey}' now '{reg.buildingOwnerRivalId}' (was '{(was.Length > 0 ? was : "-")}').");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher/Host] HostReflectDeedSoldToComputer: {ex.Message}"); }
+        }
+
         /// <summary>HOST: reverse HostReflectPlayerRent — a player vacated their
         /// building, so clear the tenant mark and put it back in the for-rent pool in
         /// the host's OWN game. The deed field (landlord) stays.  MAIN THREAD.</summary>
@@ -8090,6 +8173,19 @@ namespace BigAmbitionsMP
                     }
                     catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] deed ledger hygiene: {ex.Message}"); }
 
+                    // T-34 (2026-11-13) - DEED-STAMP RE-ASSERTION. The deed ledger comes from the manifest, the stamps from this
+                    // machine's save - which never heard of a guest's buy before T-34, nor of a deed that moved while another
+                    // machine hosted. The same write as the buy's reflect (HostReflectPlayerDeed), idempotent.
+                    try
+                    {
+                        int stamped = 0;
+                        foreach (var kv in MPServer.BuildingRealEstateOwners)
+                            if (HostReflectPlayerDeed(kv.Key, "re-assert, " + reason)) stamped++;
+                        if (stamped > 0)
+                            Plugin.Logger.LogWarning($"[Integrity] ({reason}) deed-stamps x{stamped} re-asserted from the deed ledger (T-34).");
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Integrity] deed-stamp re-assert: {ex.Message}"); }
+
                     // ROUND-156 (#1) — GHOST-TENANCY RELEASE (the reverse gap).  A member VACATES while
                     // A hosts: A's world clears the reflect and the ledger drops the entry — but B's
                     // file never hears of it.  When B later hosts, the building loads OFF-MARKET with a
@@ -8155,7 +8251,7 @@ namespace BigAmbitionsMP
                     regs++;
                     string deed = ""; try { deed = reg.buildingOwnerRivalId ?? ""; } catch { }
                     if (!string.IsNullOrEmpty(deed)) landlorded++;
-                    if (IsSessionPlayerId(deed)) playerDeeds++;
+                    if (IsSessionPlayerId(deed) && !LedgerConfirmsPlayerDeed(reg, deed)) playerDeeds++;   // T-34: a guest's deed the ledger names is a valid host stamp
                     try { if (!string.IsNullOrEmpty(reg.businessOwnerRivalId)) tenanted++; } catch { }
                 }
                 int nonSpecialRivals = -1;
@@ -8271,14 +8367,18 @@ namespace BigAmbitionsMP
                     // shop as another player's business and unassigns its staff on every load (57
                     // buildings in the field log). Without the ledger this branch WRITES NOTHING.
                     if (!MPServer.IsRunning) { unjudged++; continue; }
-                    bool legitimateDeed = false;
-                    try
+                    if (LedgerConfirmsPlayerDeed(reg, deed)) continue;
+                    // T-34: since the host stamps a guest's bought building with that guest's id, a player stamp the deed
+                    // ledger does not name is contamination ONLY when it is the rent shape (the rent ledger names this
+                    // player as the TENANT of this address). With no rent record either, the stamp may be the last record
+                    // of a real purchase whose ledger entry was lost - leave it and log, never invent a tenant.
+                    bool rentShaped = false;
+                    try { rentShaped = MPServer.BuildingOwners.TryGetValue(addr, out var tenant) && tenant == deed; } catch { }
+                    if (!rentShaped)
                     {
-                        if (MPServer.BuildingRealEstateOwners.TryGetValue(addr, out var buyer))
-                            legitimateDeed = (buyer == deed) || (buyer == "host" && deed == MPConfig.PlayerId);
+                        Plugin.Logger.LogWarning($"[Patcher] rent-vs-deed: '{addr}' deed field holds player '{deed}' with no purchase AND no rent on the ledgers - left as is (T-34).");
+                        continue;
                     }
-                    catch { }
-                    if (legitimateDeed) continue;
                     try
                     {
                         if (string.IsNullOrEmpty(reg.businessOwnerRivalId) && !MergerFlip.IsFlipped(addr)) reg.businessOwnerRivalId = deed;   // merger phase 0 (review #4): a flipped reg's empty stamp is by design

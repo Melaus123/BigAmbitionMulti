@@ -3611,6 +3611,7 @@ namespace BigAmbitionsMP
                 case "pickercheck":     return DevPickerCheck(arg);
                 case "pricesuggest":    return DevT32.DevPriceSuggest(arg);     // T-32 prices levers (DevT32.cs)
                 case "handbox":         return DevT28.Run(arg);                 // T-28 evidence lever (DevT28.cs)
+                case "stampset":        return DevT34.StampSet(arg);            // T-34 lever: set a building's deed stamp (DevT34.cs)
 
                 case "campaigns":
                 {
