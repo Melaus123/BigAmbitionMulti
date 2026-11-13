@@ -2103,6 +2103,7 @@ namespace BigAmbitionsMP
             // OTHER list (gi.CandidateEmployeeInstances), which this loop never walks - they come out here
             // and go back in the restore below, exactly as the injected employee records do.
             var removedCandidates = CompanyCandidates.StripInjected("the save");
+            CompanyCandidates.ProbeT20Leak("the save");   // PROBE P-T20-LEAK (log-only; .modding/04-probes.md)
 
             // M4 (found in the hands-on saves 2026-09-12), same choke point: an OPEN SALARY NEGOTIATION embeds the
             // WHOLE EmployeeInstance (decompile AI.Employees.SalaryNegotiation/CandidateSalaryNegotiation.cs:18)
@@ -2495,7 +2496,10 @@ namespace BigAmbitionsMP
             {
                 EmployeeInstance? le = null;
                 try { Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(s.Id, out le); } catch { }
-                if (le == null) try { if (gi.EmployeeInstances != null) foreach (var e0 in gi.EmployeeInstances) if (e0 != null && e0.id == s.Id) { le = e0; break; } } catch { }   // re-check F3: judge the listed record when the lookup entry is gone
+                EmployeeInstance? listed = null;
+                try { if (gi.EmployeeInstances != null) foreach (var e0 in gi.EmployeeInstances) if (e0 != null && e0.id == s.Id) { listed = e0; break; } } catch { }   // re-check F3: judge the listed record when the lookup entry is gone
+                if (listed == null) try { if (gi.CandidateEmployeeInstances != null) foreach (var c0 in gi.CandidateEmployeeInstances) if (c0 != null && c0.id == s.Id) { listed = c0; break; } } catch { }   // T-20: a record held only in the candidate list (the lookup table can miss it before the game's start-up rebuild)
+                if (listed != null && !HoldsRef(gi.EmployeeInstances, le) && !HoldsRef(gi.CandidateEmployeeInstances, le)) le = listed;   // T-20 (F2): a lookup entry that neither list holds (e.g. a table left from an earlier session) never outranks a listed record; no listed record = the entry is judged as before
                 bool tagged = CompanyCandidates.IsInjectedCandidate(s.Id);
                 bool isCand = false; try { isCand = le != null && le.IsCandidate; } catch { }
                 bool inCand = false, inEmp = false;
@@ -2506,7 +2510,8 @@ namespace BigAmbitionsMP
                 string copyOwner = tagged ? CompanyCandidates.OwnerOfCandidate(s.Id) : CompanyCandidates.CopyOriginOwner(s.Id);
                 string origin = CompanyCandidates.CopyOriginOf(s.Id);
                 string kind = tagged ? "copy" : isCand ? "candidate" : "hired";
-                string head = $"[StaffRoster] '{pid}' employs '{s.Id}' ('{s.Name}') at '{addr}'; this save held a leftover {kind} (tagged={tagged} copyOwner='{copyOwner}' inCandList={inCand} inEmpList={inEmp} localAddr='{localAddr}' dayHired={dayHired} origin={origin})";
+                string who = pid == SaleSource ? "the sale's staff list names" : $"'{pid}' employs";   // F4: the sale has no owner id here
+                string head = $"[StaffRoster] {who} '{s.Id}' ('{s.Name}') at '{addr}'; this save held a leftover {kind} (tagged={tagged} copyOwner='{copyOwner}' inCandList={inCand} inEmpList={inEmp} localAddr='{localAddr}' dayHired={dayHired} origin={origin})";
                 // S3 (review of 56f2a72): the lookup entry and the tag are not the whole story - gi.EmployeeInstances can hold a
                 // HIRED record with this id while the entry is a candidate / the id is tagged, and the caller's removal loop takes
                 // EVERY employee-list entry with the id. Such a record is kept unless it is a partner's display copy.
@@ -2542,16 +2547,58 @@ namespace BigAmbitionsMP
                     try { Helpers.EmployeeHelper.DiscardCandidate(le); }
                     catch (Exception dx)
                     {
-                        Plugin.Logger.LogWarning($"[StaffRoster] discard of the leftover candidate '{s.Id}' threw {dx.GetType().Name}: {dx.Message} - removed by hand.");
+                        if (_discardLogged.Add("threw|" + s.Id))   // F4: once per id (before the game's start-up the discard can throw on every call)
+                            Plugin.Logger.LogWarning($"[StaffRoster] discard of the leftover candidate '{s.Id}' threw {dx.GetType().Name}: {dx.Message} - removed by hand.");
                         try { gi.CandidateEmployeeInstances?.Remove(le); } catch { }
                         try { if (Helpers.EmployeeHelper.EmployeeInstancesDictionary.TryGetValue(s.Id, out var dd) && ReferenceEquals(dd, le)) Helpers.EmployeeHelper.EmployeeInstancesDictionary.Remove(s.Id); } catch { }
                         CompanyCandidates.CloseNegotiations(s.Id, le);   // S5 (review of 56f2a72): the hand removal also closes its negotiation, as declined
                     }
                 }
-                Plugin.Logger.LogWarning(head + " - owner's record wins, leftover discarded.");
+                if (_discardLogged.Add("won|" + s.Id))   // F4: once per id
+                    Plugin.Logger.LogWarning(head + " - owner's record wins, leftover discarded.");
                 return true;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[StaffRoster] local collision on '{s?.Id}': {ex.GetType().Name}: {ex.Message} - left alone."); return false; }
+        }
+
+        private static readonly HashSet<string> _candLeftoverLogged = new();
+        private static readonly HashSet<string> _discardLogged = new();   // F4: ResolveLocalCollision's discard warnings, once per id
+        private const string SaleSource = "the sale";   // EnsureRealStaff's pid stand-in (it has no owner id); worded as "the sale's staff list" in logs
+
+        /// <summary>T-20: before a record with this id is ADDED to gi.EmployeeInstances, the game's candidate list must not hold
+        /// one too - the game's start-up builds its id table from BOTH lists (decompile Helpers/EmployeeHelper.cs:73-80) and throws
+        /// on the duplicate key. Each candidate-list record with the id goes through ResolveLocalCollision (a tagged copy is
+        /// forgotten, an untagged leftover candidate discarded, a non-candidate record kept). True = clear, add; false = skip.
+        /// One Info line per id. MAIN THREAD.</summary>
+        private static bool ClearCandidateLeftover(GameInstance gi, string pid, StaffInfo s, string where)
+        {
+            int held = CountCandidateList(gi, s.Id);
+            if (held == 0) return true;
+            bool tagged = CompanyCandidates.IsInjectedCandidate(s.Id);
+            bool inDict = false; try { inDict = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id); } catch { }
+            bool ok = true;
+            for (int pass = 0; pass < 4 && ok && CountCandidateList(gi, s.Id) > 0; pass++)
+                ok = ResolveLocalCollision(gi, pid, s, where);
+            int left = CountCandidateList(gi, s.Id);
+            if (left > 0) ok = false;
+            if (_candLeftoverLogged.Add(s.Id))
+                Plugin.Logger.LogInfo($"[StaffRoster] T-20: '{s.Id}' ('{s.Name}') {(pid == SaleSource ? "from the sale's staff list" : $"from '{pid}'")} ({where}) was held {held}x in this save's CANDIDATE list (gi.CandidateEmployeeInstances; tagged copy={tagged}, lookup table had it={inDict}), not in its employee list - "
+                                    + (ok ? "cleared, the record is added." : $"{left} kept, the add is skipped (one id in both lists stops the game's start-up)."));
+            return ok;
+        }
+
+        private static int CountCandidateList(GameInstance gi, string id)
+        {
+            int n = 0;
+            try { if (gi?.CandidateEmployeeInstances != null) foreach (var c in gi.CandidateEmployeeInstances) if (c != null && c.id == id) n++; } catch { }
+            return n;
+        }
+
+        private static bool HoldsRef(IEnumerable<EmployeeInstance>? l, EmployeeInstance? x)
+        {
+            if (l == null || x == null) return false;
+            try { foreach (var e in l) if (ReferenceEquals(e, x)) return true; } catch { }
+            return false;
         }
 
         // Receiver main-thread apply: inject/update/remove records so gi matches the synced rosters.
@@ -2643,6 +2690,7 @@ namespace BigAmbitionsMP
                             }
                             catch { }
                         }
+                        if (!ClearCandidateLeftover(gi, v.pid, s, addr)) continue;   // T-20: never one id in both lists
                         var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
                         if (inst == null) continue;
                         inst.id = s.Id;                       // REAL id — the synced shifts match it natively
@@ -2770,9 +2818,12 @@ namespace BigAmbitionsMP
                         updated++;
                         continue;
                     }
-                    bool existsLocally = false;
-                    try { existsLocally = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id) || ListedLocally(s.Id); } catch { }   // S3: the lookup table can miss a listed record
-                    if (existsLocally) continue;   // never shadow a real local record
+                    // T-20: an id the game already knows (its lookup table: after start-up every employee AND applicant) or a record in
+                    // this save's employee list is never shadowed - a live applicant of this player is the hiring race's business
+                    // (H-HIREDUP S3, t-hiredup step 30), not the bench's. Before the game's start-up builds the table, an untagged
+                    // applicant with this id is a leftover and is cleared below, or the start-up throws on the duplicate key.
+                    if (Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id) || ListedLocally(s.Id)) continue;
+                    if (!ClearCandidateLeftover(gi, ownerPid, s, "the bench")) continue;   // the candidate list: a tagged copy is forgotten, an untagged leftover discarded, then the add; a record it must keep skips the add
                     var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
                     if (inst == null) continue;
                     inst.id = s.Id;
@@ -3149,12 +3200,12 @@ namespace BigAmbitionsMP
                 foreach (var s in staff)
                 {
                     if (s == null || string.IsNullOrEmpty(s.Id)) continue;
-                    bool exists = false;
-                    try { exists = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id); } catch { }
-                    if (!exists)
-                        foreach (var e in gi.EmployeeInstances)
-                            if (e?.id == s.Id) { exists = true; break; }
-                    if (exists) continue;
+                    // T-20: same rule as the bench add - a known id (lookup table) or a listed employee is never shadowed.
+                    bool exists = Helpers.EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(s.Id);
+                    foreach (var e in gi.EmployeeInstances)
+                        if (e?.id == s.Id) { exists = true; break; }
+                    if (exists) continue;   // a record in this save's employee list wins
+                    if (!ClearCandidateLeftover(gi, SaleSource, s, addr)) continue;   // the candidate list: a tagged copy is forgotten, an untagged leftover discarded, then the add; a record it must keep skips the add
                     var inst = Helpers.EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
                     if (inst == null) continue;
                     inst.id = s.Id;

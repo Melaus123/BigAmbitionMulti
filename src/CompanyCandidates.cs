@@ -112,6 +112,35 @@ namespace BigAmbitionsMP
             catch { return false; }
         }
 
+        /// <summary>T-20 (sibling of the staff-bench fix): gi.EmployeeInstances lists a record with this id. The lookup table can
+        /// miss it (before the game's start-up rebuild), and a copy added beside it puts one id in both lists - the game's
+        /// start-up (decompile Helpers/EmployeeHelper.cs:73-80) then throws on the duplicate key.</summary>
+        /// <summary>T-20 (t-hiredup T-HIREDUP-20261112-225309): when a copy is held back because the employee list holds its id,
+        /// the strip has already removed the id's lookup entry; point it back at the listed record, or the game's next
+        /// GetEmployeeById (decompile Helpers/EmployeeHelper.cs:474) finds nothing for a real employee.</summary>
+        private static void PointLookupAtListed(string id)
+        {
+            try
+            {
+                var l = SaveGameManager.Current?.EmployeeInstances;
+                if (l == null || string.IsNullOrEmpty(id)) return;
+                foreach (var e in l) if (e != null && e.id == id) { EmployeeHelper.EmployeeInstancesDictionary[id] = e; return; }
+            }
+            catch { }
+        }
+
+        private static bool EmployeeListHas(string id)
+        {
+            try
+            {
+                var l = SaveGameManager.Current?.EmployeeInstances;
+                if (l == null || string.IsNullOrEmpty(id)) return false;
+                foreach (var e in l) if (e != null && e.id == id) return true;
+            }
+            catch { }
+            return false;
+        }
+
         /// <summary>S2/S5 (review of 56f2a72): marks every OPEN salary negotiation on this candidate object (inst != null)
         /// or naming this id (inst == null) completed + declined - what the game's FinishPendingNegotiation(accepted:false)
         /// writes (decompile Helpers/EmployeeHelper.cs:559-567) - WITHOUT the game's DiscardCandidate, which also removes
@@ -383,6 +412,13 @@ namespace BigAmbitionsMP
                         if (_logged.Add("readd-hired|" + id))
                             Plugin.Logger.LogWarning($"{Tag} the copy of '{id}' was not put back: this save's lookup table holds a HIRED employee with that id (never overwritten).");
                     }
+                    else if (!stillListed && EmployeeListHas(id))
+                    {
+                        // T-20 (sibling): never one id in both lists.
+                        if (_logged.Add("readd-listed|" + id))
+                            Plugin.Logger.LogInfo($"{Tag} the copy of '{id}' was not put back: this save's employee list holds a record with that id (T-20).");
+                        PointLookupAtListed(id);   // the lookup entry follows the listed record, never a copy in neither list
+                    }
                     else if (!stillListed)
                     {
                         gi.CandidateEmployeeInstances.Add(have.inst);
@@ -398,7 +434,7 @@ namespace BigAmbitionsMP
                     continue;
                 }
                 bool existsLocally = false;
-                try { existsLocally = EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(id); } catch { }
+                try { existsLocally = EmployeeHelper.EmployeeInstancesDictionary.ContainsKey(id) || EmployeeListHas(id); } catch { }   // T-20: the lookup table can miss a listed record
                 if (existsLocally) continue;                       // never shadow a real local record (my own hire of this id)
                 var inst = EmployeeHelper.CreateAIEmployeeInstance("ba:skill_customerservice");
                 if (inst == null) continue;
@@ -992,6 +1028,14 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogWarning($"{Tag} the copy of '{id}' was not put back after a message purge: this save's lookup table holds a HIRED employee with that id.");
                         continue;
                     }
+                    if (EmployeeListHas(id))
+                    {
+                        // T-20 (sibling): never one id in both lists.
+                        if (_logged.Add("purge-listed|" + id))
+                            Plugin.Logger.LogInfo($"{Tag} the copy of '{id}' was not put back after a message purge: this save's employee list holds a record with that id (T-20).");
+                        PointLookupAtListed(id);
+                        continue;
+                    }
                     gi.CandidateEmployeeInstances.Add(kv.Value.inst);
                     try { EmployeeHelper.EmployeeInstancesDictionary[id] = kv.Value.inst; } catch { }
                     StampOrigin(id, "purge-repair", kv.Value.owner);   // H-HIREDUP-1 provenance
@@ -1111,6 +1155,7 @@ namespace BigAmbitionsMP
                             Plugin.Logger.LogInfo($"{Tag} restore ({context}) put back '{c.id}' which is no longer a company copy (dropped during the strip window) - untagged leftover.");
                     }
                     if (DictHoldsOtherHired(c.id, c)) continue;   // re-check F4: a hired listed employee holds this id - the copy does not come back at all
+                    if (EmployeeListHas(c.id)) { PointLookupAtListed(c.id); continue; }   // T-20 (sibling): never one id in both lists; the lookup entry follows the listed record
                     if (!there) list.Add(c);
                     try { EmployeeHelper.EmployeeInstancesDictionary[c.id] = c; } catch { }   // S3: never overwrite a hired listed employee's entry (checked above)
                 }
@@ -1129,8 +1174,65 @@ namespace BigAmbitionsMP
             catch { }
         }
 
+        // PROBE-START P-T20-LEAK (log-only, pre-approved 2026-11-12; remove when a log shows how the leftover gets in, or T-20 is closed)
+        private static readonly Dictionary<string, string> _probeT20Known = new();   // id -> "owner|how" of every partner applicant this game session knew; never cleared (Reset wipes the live tables)
+        private static readonly HashSet<string> _probeT20Logged = new();             // once per id per game session (cleared when the probe first sees a new loaded save object)
+        private static WeakReference? _probeT20Session;                               // the save object (SaveGameManager.Current) _probeT20Logged belongs to; not cleared in Reset, which the probe watches
+
+        private static void ProbeT20Remember(string why)
+        {
+            try
+            {
+                foreach (var kv in _injected) _probeT20Known[kv.Key] = (kv.Value.owner ?? "") + "|tagged-at-" + why;
+                foreach (var kv in _copyOrigin)
+                    if (!_probeT20Known.ContainsKey(kv.Key) && !string.IsNullOrEmpty(kv.Value.owner))
+                        _probeT20Known[kv.Key] = kv.Value.owner + "|origin-" + kv.Value.src + "@" + kv.Value.day + ":" + kv.Value.hour + "-at-" + why;
+                foreach (var id in _everCopied) if (!_probeT20Known.ContainsKey(id)) _probeT20Known[id] = "|ever-copied-at-" + why;
+            }
+            catch { }
+        }
+
+        /// <summary>P-T20-LEAK: at the save choke point, after the tagged copies came out - i.e. what goes to disk.</summary>
+        public static void ProbeT20Leak(string context)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi != null && !ReferenceEquals(_probeT20Session?.Target, gi)) { _probeT20Session = new WeakReference(gi); _probeT20Logged.Clear(); }   // F3: a new game session
+                var cands = gi?.CandidateEmployeeInstances;
+                if (cands == null) return;
+                ProbeT20Remember("save");
+                var inCand = new Dictionary<string, int>();
+                foreach (var c in cands)
+                {
+                    string id = c?.id ?? "";
+                    if (id.Length == 0) continue;
+                    inCand[id] = inCand.TryGetValue(id, out var k) ? k + 1 : 1;
+                    if (_injected.ContainsKey(id) || !_probeT20Known.TryGetValue(id, out var known)) continue;
+                    if (!_probeT20Logged.Add("untagged|" + id)) continue;
+                    string name = ""; try { name = c.characterData?.name ?? ""; } catch { }
+                    bool isCand = false; try { isCand = c.IsCandidate; } catch { }
+                    Plugin.Logger.LogInfo($"[PROBE T20-LEAK] {context}: UNTAGGED candidate '{id}' ('{name}') is a partner's applicant (known as owner|how='{known}', origin={CopyOriginOf(id)}, isCandidate={isCand}, copies tagged now={_injected.Count}) - written to this save as if it were its own.");
+                }
+                var inEmp = new Dictionary<string, int>();
+                if (gi.EmployeeInstances != null)
+                    foreach (var e in gi.EmployeeInstances) { string id = e?.id ?? ""; if (id.Length > 0) inEmp[id] = inEmp.TryGetValue(id, out var k) ? k + 1 : 1; }
+                foreach (var kv in inCand)
+                {
+                    inEmp.TryGetValue(kv.Key, out var ne);
+                    if (kv.Value < 2 && ne == 0) continue;
+                    if (!_probeT20Logged.Add("dup|" + kv.Key)) continue;
+                    _probeT20Known.TryGetValue(kv.Key, out var known2);
+                    Plugin.Logger.LogInfo($"[PROBE T20-LEAK] {context}: id '{kv.Key}' is listed {kv.Value}x in candidates and {ne}x in employees (tagged={_injected.ContainsKey(kv.Key)}, known as owner|how='{known2 ?? ""}', origin={CopyOriginOf(kv.Key)}) - the game's start-up throws on this id.");
+                }
+            }
+            catch (Exception ex) { if (_probeT20Logged.Add("threw")) Plugin.Logger.LogWarning($"[PROBE T20-LEAK] {context}: {ex.GetType().Name}: {ex.Message}"); }
+        }
+        // PROBE-END P-T20-LEAK
+
         public static void Reset()
         {
+            ProbeT20Remember("reset");   // PROBE P-T20-LEAK (log-only bookkeeping: Reset forgets the copies without removing them)
             _injected.Clear(); _poolByOwner.Clear(); _claims.Clear(); _pending.Clear(); _keepalive.Clear(); _everCopied.Clear();
             _offerClaims.Clear();
             _reassertOnly.Clear();
