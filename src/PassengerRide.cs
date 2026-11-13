@@ -443,14 +443,14 @@ namespace BigAmbitionsMP
                 bool canStore = cur.VehicleType != null && cur.VehicleType.spawnInPlayerObject && cur.VehicleType.maxCargoCapacity > 0;
                 if (canStore)   // pushing a flatbed/hand-truck
                 {
-                    // Parity with the owner (round-14 #1, refining round-12 #1a): the registered proxy already
-                    // opens the NATIVE vehicle menu on this same click, and the owner only deposits when its
-                    // "add items to storage" BUTTON is pressed — round-12's click-time auto-deposit beat the
-                    // menu to the choice. A LOADED truck now does nothing here (the button routes through the
-                    // MoveAndAddHandTruckItems redirect in VehicleProxyCargoGuard); an empty one keeps the
-                    // pre-round-12 take flow.
+                    // T-27 (2026-11-13): this click on ANOTHER player's car never reaches the native vehicle menu -
+                    // the cta prefix above consumes every click on a ghost we are not possessing (single decider),
+                    // so round-14's "the native menu owns the choice" no longer held and a loaded cart did nothing.
+                    // A LOADED truck therefore deposits its load here (walk to the loading spot, then the same
+                    // RequestDeposit path a held item uses: it resolves the pushed truck's stacks and sends each to
+                    // the car owner's game); an empty one keeps the take flow.
                     bool truckLoaded = cur.cargoInstances != null && cur.cargoInstances.Count > 0;
-                    if (truckLoaded)   { /* the native menu owns the choice */ }
+                    if (truckLoaded)   WalkAndDeposit(vid, owner);
                     else if (hasCargo) VehicleStoragePanel.Open(vid, owner);
                     else               PassengerHud.Toast("Nothing to take.");
                 }
