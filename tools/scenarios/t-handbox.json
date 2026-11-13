@@ -1,0 +1,42 @@
+{
+  "id": "T-HANDBOX",
+  "title": "T-28 EVIDENCE (no fix): 'the other player seems to hold a box they don't have'. The HOST holds a box through the game's own carry path, then the client's figure on the host is re-spawned through the mod's own path (RemotePlayerManager.Remove -> next packet -> SpawnRemotePlayer, which copies the host's own body); the list shows whether a box the mod did not attach (FOREIGN, not BAMP_*) sits in the re-spawned figure's hand. NO save",
+  "preconditions": "Fixture save1 (host melaus, client Client1). Dev build with src/DevT28.cs (lever `handbox`) on the HOST. Both players stand idle in the world; the client keeps sending position packets (the re-spawn waits for the next one). `handbox respawn` also despawns the client's vehicles on the host (RemotePlayerManager.Remove -> VehicleManager.DespawnAllOwnedBy). NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception"
+  ],
+  "oracles_report": [
+    "\\[T28\\] ",
+    "\\[Carry\\] '",
+    "\\[RemotePlayer\\] Removed '"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 4, "role": "both", "cmd": "mark TEST HANDBOX START", "expect_result": "OK MARK" },
+    { "seq": 5, "role": "h", "cmd": "mark TEST HANDBOX HOST SETTLE", "expect_result": "OK MARK", "expect_log": [{"role": "h", "regex": "\\[Settle\\] world settled \\(host", "within_s": 150, "since_prev_step": true}], "note": "waits for the host's own settle line (searched from its step-4 mark)" },
+    { "seq": 6, "role": "c", "cmd": "mark TEST HANDBOX CLIENT SETTLE", "expect_result": "OK MARK", "expect_log": [{"role": "c", "regex": "\\[Patcher\\] world settled", "within_s": 150, "since_prev_step": true}], "note": "waits for the client's own settle line (searched from its step-4 mark)" },
+    { "seq": 7, "role": "both", "cmd": "status", "expect_result": "settled=True" },
+    { "seq": 8, "role": "h", "sleep_s": 3, "note": "client position packets reach the host and spawn the client's figure" },
+    { "seq": 9, "role": "h", "cmd": "handbox list", "expect_result": "^OK handbox list self holding=none ", "note": "PREMISE: the host's hands start empty" },
+    { "seq": 10, "role": "h", "cmd": "handbox list ${clientPid}", "expect_result": "^OK handbox list '${clientPid}' fresh=n/a handContent=yes ", "note": "BASELINE: the client's figure as first spawned (host empty-handed) - foreign= is expected 0" },
+    { "seq": 11, "role": "h", "cmd": "handbox hold", "expect_result": "^OK handbox hold holding=ba:itemname_closedcardboardbox handActive=[1-9]", "note": "PREMISE: the host REALLY holds a box - game state (ItemInstanceInHands) AND an active object under its own HandContent" },
+    { "seq": 12, "role": "h", "sleep_s": 1 },
+    { "seq": 13, "role": "h", "cmd": "handbox respawn ${clientPid}", "expect_result": "^OK handbox respawn '${clientPid}' removed .*local hands at removal=ba:itemname_closedcardboardbox", "note": "the figure is removed while the host holds the box; the next position packet re-spawns it by copying the host's body" },
+    { "seq": 14, "role": "h", "sleep_s": 3 },
+    {"seq": 15, "role": "h", "cmd": "handbox list ${clientPid}", "expect_result": "^OK handbox list '${clientPid}' fresh=yes handContent=yes mod=0 foreign=0 .*localHolding=ba:itemname_closedcardboardbox", "note": "EVIDENCE: foreign>=1 (a FOREIGN:* item under HandContent) = a box the mod did not attach sits in the client's figure's hand; foreign=0 = the copy mechanism does not reproduce. Not asserted either way | T-28 FIX PROOF: the figure must hold nothing copied from the host (foreign=0)."},
+    { "seq": 16, "role": "h", "cmd": "handbox drop", "expect_result": "^OK handbox drop was=ba:itemname_closedcardboardbox holding=no" },
+    { "seq": 17, "role": "h", "sleep_s": 2 },
+    {"seq": 18, "role": "h", "cmd": "handbox list ${clientPid}", "expect_result": "^OK handbox list '${clientPid}' fresh=yes handContent=yes mod=0 foreign=0 .*localHolding=none", "note": "EVIDENCE (persistence): after the host drops its box, does the FOREIGN item stay in the figure's hand (the 'permanently holding a box' report) | T-28 FIX PROOF: the figure must hold nothing copied from the host (foreign=0)."},
+    { "seq": 19, "role": "both", "cmd": "mark TEST HANDBOX END", "expect_result": "OK MARK" }
+  ]
+}

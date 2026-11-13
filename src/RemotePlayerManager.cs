@@ -1868,6 +1868,26 @@ namespace BigAmbitionsMP
                     model.transform.localRotation = Quaternion.identity;
                     StripModelScripts(model);
                     VehicleManager.StripCameras(model);   // stowaway cameras hijack the cursor pick ray
+                    // T-28 (Confirmed, run T-HANDBOX-20261113-161710 steps 15/18): the clone copies whatever the LOCAL
+                    // player holds at that moment, and the held-item sync removes only its own BAMP_Held_* props, so a
+                    // copied box stayed in the other player's hand for good. The figure starts empty-handed; what the
+                    // other player really holds is added by the held-item sync from their own state.
+                    try
+                    {
+                        var copiedHand = FindDeep(model.transform, "HandContent");
+                        int dropped = 0;
+                        if (copiedHand != null)
+                            for (int i = copiedHand.childCount - 1; i >= 0; i--)
+                            {
+                                var c = copiedHand.GetChild(i);
+                                if (c == null) continue;
+                                UnityEngine.Object.Destroy(c.gameObject);
+                                dropped++;
+                            }
+                        if (dropped > 0)
+                            Plugin.Logger.LogInfo($"[RemotePlayer] '{playerId}' figure: removed {dropped} item(s) copied from my own hands.");
+                    }
+                    catch (Exception hx) { Plugin.Logger.LogWarning($"[RemotePlayer] '{playerId}' hand clear: {hx.Message}"); }
                 }
                 else
                 {

@@ -25,6 +25,7 @@ namespace BigAmbitionsMP
         private const float SettleSeconds = 3f;
         private static float _rawTrueSince = -1f;
         private static bool  _rawWasTrue;
+        private static bool  _settledLogged;
         private static readonly System.Collections.Generic.Dictionary<string, float> _nextDeferLogAt = new();
 
         internal static bool IsSettled
@@ -55,6 +56,7 @@ namespace BigAmbitionsMP
                             $"{(exMsg.Length > 0 ? $" ex='{exMsg}'" : "")} — the {SettleSeconds:0}s settle clock restarts (sweep 3a).");
                     _rawWasTrue = false;
                     _rawTrueSince = -1f;
+                    _settledLogged = false;
                     // PROBE-START: P-CARSTACK  (log-only; compare-and-assign inside the probe)
                     try { CarStackProbe.NoteSettled(false); } catch { }
                     // PROBE-END: P-CARSTACK
@@ -63,6 +65,13 @@ namespace BigAmbitionsMP
                 _rawWasTrue = true;
                 if (_rawTrueSince < 0f) _rawTrueSince = Time.unscaledTime;
                 bool settledNow = Time.unscaledTime - _rawTrueSince >= SettleSeconds;
+                // The rising edge of "settled", once per settle (on the host too - the client's '[Patcher] world settled'
+                // line is a client-only snapshot step): the one line the test scenarios wait on instead of a fixed wait.
+                if (settledNow && !_settledLogged)
+                {
+                    _settledLogged = true;
+                    Plugin.Logger.LogInfo($"[Settle] world settled ({(MPServer.IsRunning ? "host" : "client")}, regs={regs}).");
+                }
                 // PROBE-START: P-CARSTACK  (log-only; compare-and-assign inside the probe)
                 try { CarStackProbe.NoteSettled(settledNow); } catch { }
                 // PROBE-END: P-CARSTACK

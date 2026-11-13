@@ -3610,6 +3610,7 @@ namespace BigAmbitionsMP
                 case "servicelists":    return DevServiceLists(arg);
                 case "pickercheck":     return DevPickerCheck(arg);
                 case "pricesuggest":    return ProbeT32.DevPriceSuggest(arg);   // P-T32-PRICES probe lever (ProbeT32.cs)
+                case "handbox":         return DevT28.Run(arg);                 // T-28 evidence lever (DevT28.cs)
 
                 case "campaigns":
                 {
