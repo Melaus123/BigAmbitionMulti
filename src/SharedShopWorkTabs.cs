@@ -531,6 +531,7 @@ namespace BigAmbitionsMP
         {
             try
             {
+                if (p.AckCode == "mvcancel") { OnMoveCancelled(p); return; }   // T-24 slice 2 F2: a move cancelled because its origin could not be released
                 if (OnCancelAnswer(p)) return;   // T-24 slice 1B: the runner's answer to my "mergercancel"
                 if (_contractRouteAddr.Length == 0 || p.AddressKey != _contractRouteAddr
                     || Time.unscaledTime - _contractRouteAt > SellQuoteWindow)
@@ -5437,6 +5438,7 @@ namespace BigAmbitionsMP
                         case Entities.FoodDeliveryContract fo: removed = global::Buildings.BuildingTypes.Special.FoodDelivery.FoodDeliveryHelper.GetContracts().Remove(fo); break;
                         case Entities.MovingServiceContract mc:
                             removed = gi.movingServiceContracts.Remove(mc);
+                            if (removed) ContentsHandover.NoteBookingGone(mc);   // T-24 slice 2 F2 fold: the host's record of a move not yet released goes
                             global::BuildingManager.RefreshHamptonsHouseBlockerCollider(mc.originMovingAddress);
                             global::BuildingManager.RefreshHamptonsHouseBlockerCollider(mc.destinationMovingAddress);
                             break;
@@ -5532,6 +5534,48 @@ namespace BigAmbitionsMP
 
         /// <summary>Owner-approved line (decision 46 a, 2026-11-13): a cancel the runner did not carry out.</summary>
         internal const string TextCancelNotDone = "Your partner's shop couldn't cancel that booking, so it is still booked.";
+        // T-24 slice 2 F2: owner-approved (decision 57 a, 2026-11-13) - {0} origin, {1} destination, as the game formats an address.
+        internal const string TextMoveCancelled = "The moving company couldn't move {0} to {1}, so the move was cancelled.";
+
+        /// <summary>T-24 slice 2 F2, DESTINATION'S RUNNER: a move between two games whose origin could not be released twice in a
+        /// row is cancelled the way its booker's own cancel does it (ApplyRoutedCancel: the contract leaves the game's list, the
+        /// routed record goes, the booker's list is refreshed; nothing is charged - the game charges on the day), and the booker
+        /// is told over the routed-refusal channel ("mvcancel"). A booking with no routed record is this game's own: told here.</summary>
+        internal static int MoveCancelShown;   // DEV readout (movestate): how often THIS game showed TextMoveCancelled
+
+        internal static void CancelMoveNotReleased(Entities.MovingServiceContract mc, string handoverId, bool tell = true)
+        {
+            try
+            {
+                var gi = SaveGameManager.Current;
+                if (gi == null) return;
+                var r = MergerServiceLayouts.RecordOf(mc);
+                string okey = AK(mc.originMovingAddress), dkey = AK(mc.destinationMovingAddress);
+                bool removed = gi.movingServiceContracts.Remove(mc);
+                global::BuildingManager.RefreshHamptonsHouseBlockerCollider(mc.originMovingAddress);
+                global::BuildingManager.RefreshHamptonsHouseBlockerCollider(mc.destinationMovingAddress);
+                string booker = r?.Booker ?? MPConfig.PlayerId;
+                if (r != null) MergerServiceLayouts.DropRouted(new List<string> { r.BookingId }, "cancelled: its origin could not be released");
+                if (removed) { SaveGameManager.MarkChange(); PaperworkSync.MarkDirty(); }
+                Plugin.Logger.LogWarning($"[Merger] move {handoverId} '{okey}' -> '{dkey}' CANCELLED (origin not released twice; removed={removed}); nothing charged; booker '{booker}' {(tell ? "told" : "told before")}.");
+                if (r != null) RoutedChanged(booker);
+                if (tell) SendRoutedRefusal(booker, okey, "mvcancel", r?.BookingId ?? "", dkey);   // a replayed cancel: the booker was told already
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] cancel of the unreleased move {handoverId}: {ex.Message}"); }
+        }
+
+        /// <summary>BOOKER: the "mvcancel" answer - the approved line on screen, the booking out of my routed list.</summary>
+        private static void OnMoveCancelled(SharedWorkInfoPayload p)
+        {
+            string Fmt(string key) { try { var a = MergerAbsence.AddressOfKey(key); return a != null ? global::Streets.AddressHelper.ToFormattedString(a) : key; } catch { return key; } }
+            string id = p.RoutedBookings != null && p.RoutedBookings.Count > 0 ? (p.RoutedBookings[0]?.BookingId ?? "") : "";
+            if (id.Length > 0)
+                foreach (var k in new List<string>(_routedMine.Keys))
+                    if (_routedMine[k].RemoveAll(b => b != null && b.BookingId == id) > 0 && _routedMine[k].Count == 0) _routedMine.Remove(k);
+            string text = string.Format(TextMoveCancelled, Fmt(p.AddressKey ?? ""), Fmt(p.DestKey ?? ""));
+            PassengerHud.Toast(text); MoveCancelShown++;
+            Plugin.Logger.LogInfo($"[Merger] shown: \"{text}\" (booking {id}, runner '{p.PlayerId}').");
+        }
 
         /// <summary>MEMBER: my routed bookings of one kind, as their runners last listed them.</summary>
         internal static List<PwRoutedBooking> MyRoutedBookings(string kind)
@@ -5791,9 +5835,20 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(Dialogs.MovingServiceDialog), "OnCancelMovingContract")]
         public static class Patch_MovingCancel_Routed
         {
-            static bool Prefix(Dialogs.MovingServiceDialog __instance, Entities.MovingServiceContract __0, ref Entities.DialogEntry __result)
-                => !RoutedCancelClicked(__instance, __0, "OnShowMovingContractsList", ref __result);
-            static void Postfix() => RoutedJobRan();
+            static bool Prefix(Dialogs.MovingServiceDialog __instance, Entities.MovingServiceContract __0, ref Entities.DialogEntry __result, out bool __state)
+            {
+                bool listed = false; try { listed = !_cancelPassThrough && __0 != null && (SaveGameManager.Current?.movingServiceContracts?.Contains(__0) ?? false); } catch { }
+                bool routed = RoutedCancelClicked(__instance, __0, "OnShowMovingContractsList", ref __result);
+                __state = listed && !routed;   // the game's own cancel of a booking in THIS save runs (the booker runs the destination)
+                return !routed;
+            }
+            static void Postfix(Entities.MovingServiceContract __0, bool __state)
+            {
+                RoutedJobRan();
+                // N2: that cancel removed the contract (MovingServiceDialog.OnCancelMovingContract :188) - a move between two games
+                // tells the host, so a rebooking of the same pair/hour/company starts its error count at 0
+                try { if (__state && __0 != null && !(SaveGameManager.Current?.movingServiceContracts?.Contains(__0) ?? true)) ContentsHandover.NoteBookingGone(__0); } catch { }
+            }
         }
 
         [HarmonyPatch(typeof(Dialogs.InteriorInstallationFirmAgentDialog), "OnCancelInstallation")]

@@ -480,7 +480,14 @@
       "seq": 56
     },
     {
-      "seq": 57,
+      "role": "c",
+      "cmd": "blocksave 600",
+      "expect_result": "^OK saves read as blocked",
+      "note": "PREMISE SET UP (crash point 1): the origin's coordinated saves are held (dev lever, round-237 deferral) from before the drop until the kill - its save can never already hold the drop",
+      "seq": 57
+    },
+    {
+      "seq": 58,
       "role": "c",
       "cmd": "movefault drop",
       "expect_result": "OK movefault 'drop'"
@@ -490,15 +497,15 @@
       "cmd": "mergermove ${clientWh} ${hostWh} 1 transfer",
       "expect_result": "^OK mergermove routed",
       "note": "fold F1: the ORIGIN's owner (the client) books from its own building to the host-run one - routed to the destination's game (the host)",
-      "seq": 58
+      "seq": 59
     },
     {
       "role": "h",
       "sleep_s": 3,
-      "seq": 59
+      "seq": 60
     },
     {
-      "seq": 60,
+      "seq": 61,
       "role": "h",
       "cmd": "movenow",
       "expect_result": "cross=1",
@@ -512,43 +519,43 @@
       ]
     },
     {
-      "seq": 61,
+      "seq": 62,
       "role": "c",
       "cmd": "movestate",
       "expect_result": "frozen=True",
       "note": "PREMISE: the origin dropped, answered and froze before any save"
     },
     {
-      "seq": 62,
+      "seq": 63,
       "role": "c",
       "drop": true,
       "kill": true,
       "note": "crash point 1: the origin dies after dropping (no save)"
     },
     {
-      "seq": 63,
+      "seq": 64,
       "role": "c",
       "relaunch": true
     },
     {
-      "seq": 64,
+      "seq": 65,
       "role": "c",
       "cmd": "join",
       "expect_result": "^OK"
     },
     {
-      "seq": 65,
+      "seq": 66,
       "role": "h",
       "sleep_s": 5
     },
     {
-      "seq": 66,
+      "seq": 67,
       "role": "h",
       "cmd": "acceptjoin",
       "expect_result": "^OK"
     },
     {
-      "seq": 67,
+      "seq": 68,
       "role": "c",
       "cmd": "mark LEG3A REJOIN",
       "expect_result": "OK MARK",
@@ -562,7 +569,7 @@
       ]
     },
     {
-      "seq": 68,
+      "seq": 69,
       "role": "c",
       "cmd": "mark LEG3A REPLAY",
       "expect_result": "OK MARK",
@@ -580,54 +587,61 @@
       "cmd": "listsat ${clientWh}",
       "expect_result": "^OK listsat '[^']+' DeliveryContracts=0 FurnitureDeliveryContracts=0 FoodDeliveryContracts=0 importPartnerships=0 logisticsManagerPlans=0 pricingManagerPlans=0 hrManagerPlans=0 headhunterPlans=0 ",
       "note": "fold F3: the replayed drop left none of the origin's entries in its old save",
-      "seq": 69
+      "seq": 70
     },
     {
       "role": "h",
       "cmd": "listsat ${hostWh} sum ${hx} ${l3a}",
       "expect_result": "^OK listsat '[^']+' sum match=True ",
       "note": "fold F3: X's own rows = its own before + exactly one of each of Y's (no duplicate from the replayed drop)",
-      "seq": 70
+      "seq": 71
     },
     {
-      "seq": 71,
+      "seq": 72,
       "role": "c",
       "cmd": "itemsat ${clientWh}",
       "expect_result": "items=0 ",
       "note": "OUTCOME: the old save's copy given up again - nothing duplicated"
     },
     {
-      "seq": 72,
+      "seq": 73,
       "role": "h",
       "cmd": "itemsat ${hostWh}",
       "expect_result": "ids=[^ ]*${i3}",
       "note": "OUTCOME: nothing lost"
     },
     {
-      "seq": 73,
+      "seq": 74,
       "role": "both",
       "cmd": "mark LEG3B APPLYCRASH",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 74,
+      "role": "c",
+      "cmd": "blocksave 600",
+      "expect_result": "^OK saves read as blocked",
+      "note": "PREMISE SET UP (crash point 2): the destination's coordinated saves are held from before the apply until the kill - the host record cannot retire",
+      "seq": 75
+    },
+    {
+      "seq": 76,
       "role": "c",
       "cmd": "movefault apply",
       "expect_result": "OK movefault 'apply'"
     },
     {
-      "seq": 75,
+      "seq": 77,
       "role": "c",
       "cmd": "mergermove ${hostWh} ${clientWh} 1 -",
       "expect_result": "^OK mergermove routed"
     },
     {
-      "seq": 76,
+      "seq": 78,
       "role": "c",
       "sleep_s": 3
     },
     {
-      "seq": 77,
+      "seq": 79,
       "role": "c",
       "cmd": "movenow",
       "expect_result": "cross=1",
@@ -641,43 +655,43 @@
       ]
     },
     {
-      "seq": 78,
+      "seq": 80,
       "role": "h",
       "cmd": "movestate",
-      "expect_result": "charged=True stamped=True",
-      "note": "PREMISE: the charge is recorded with the cash"
+      "expect_result": "charged=True stamped=True oclosed=\\w+ osaved=\\w+ dsaved=False",
+      "note": "PREMISE: the charge is recorded with the cash AND the record is open - dsaved=False: no 'save of <destination> covers: <id> destination' line set it (ContentsHandover.OnPartySaved)"
     },
     {
-      "seq": 79,
+      "seq": 81,
       "role": "c",
       "drop": true,
       "kill": true,
       "note": "crash point 2: the destination dies after applying (no save)"
     },
     {
-      "seq": 80,
+      "seq": 82,
       "role": "c",
       "relaunch": true
     },
     {
-      "seq": 81,
+      "seq": 83,
       "role": "c",
       "cmd": "join",
       "expect_result": "^OK"
     },
     {
-      "seq": 82,
+      "seq": 84,
       "role": "h",
       "sleep_s": 5
     },
     {
-      "seq": 83,
+      "seq": 85,
       "role": "h",
       "cmd": "acceptjoin",
       "expect_result": "^OK"
     },
     {
-      "seq": 84,
+      "seq": 86,
       "role": "c",
       "cmd": "mark LEG3B REJOIN",
       "expect_result": "OK MARK",
@@ -691,7 +705,7 @@
       ]
     },
     {
-      "seq": 85,
+      "seq": 87,
       "role": "c",
       "cmd": "mark LEG3B REPLAY",
       "expect_result": "OK MARK",
@@ -705,26 +719,26 @@
       ]
     },
     {
-      "seq": 86,
+      "seq": 88,
       "role": "c",
       "cmd": "itemsat ${clientWh}",
       "expect_result": "ids=[^ ]*${i3}",
       "note": "OUTCOME: applied once, from the host's copy"
     },
     {
-      "seq": 87,
+      "seq": 89,
       "role": "h",
       "cmd": "itemsat ${hostWh}",
       "expect_result": "items=0 "
     },
     {
-      "seq": 88,
+      "seq": 90,
       "role": "both",
       "cmd": "mark LEG4 NOMONEY",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 89,
+      "seq": 91,
       "role": "c",
       "cmd": "itemsat ${clientWh}",
       "expect_result": "items=[1-9]",
@@ -733,25 +747,25 @@
       }
     },
     {
-      "seq": 90,
+      "seq": 92,
       "role": "h",
       "cmd": "movefault nomoney",
       "expect_result": "OK movefault 'nomoney'",
       "note": "the game's own refusal at the bill (ChangeMoneySafe false): no lever sets a wallet below a move's price"
     },
     {
-      "seq": 91,
+      "seq": 93,
       "role": "h",
       "cmd": "mergermove ${clientWh} ${hostWh} 1 -",
       "expect_result": "^OK mergermove routed"
     },
     {
-      "seq": 92,
+      "seq": 94,
       "role": "h",
       "sleep_s": 3
     },
     {
-      "seq": 93,
+      "seq": 95,
       "role": "h",
       "cmd": "movenow",
       "expect_result": "cross=1",
@@ -765,7 +779,7 @@
       ]
     },
     {
-      "seq": 94,
+      "seq": 96,
       "role": "c",
       "cmd": "mark LEG4 RETURNED",
       "expect_result": "OK MARK",
@@ -779,55 +793,55 @@
       ]
     },
     {
-      "seq": 95,
+      "seq": 97,
       "role": "c",
       "cmd": "itemsat ${clientWh}",
       "expect_result": "items=${n4} ",
       "note": "OUTCOME: everything returned"
     },
     {
-      "seq": 96,
+      "seq": 98,
       "role": "h",
       "cmd": "itemsat ${hostWh}",
       "expect_result": "items=0 "
     },
     {
-      "seq": 97,
+      "seq": 99,
       "role": "h",
       "cmd": "movestate",
       "expect_result": "outcome=returned charged=False",
       "note": "OUTCOME: nothing charged"
     },
     {
-      "seq": 98,
+      "seq": 100,
       "role": "both",
       "cmd": "mark LEG5 AWAY",
       "expect_result": "OK MARK"
     },
     {
-      "seq": 99,
+      "seq": 101,
       "role": "h",
       "cmd": "mergermove ${clientWh} ${hostWh} 1 -",
       "expect_result": "^OK mergermove routed"
     },
     {
-      "seq": 100,
+      "seq": 102,
       "role": "h",
       "sleep_s": 3
     },
     {
-      "seq": 101,
+      "seq": 103,
       "role": "c",
       "drop": true,
       "note": "a clean quit: the origin's owner is away; the host stands in for it"
     },
     {
-      "seq": 102,
+      "seq": 104,
       "role": "h",
       "sleep_s": 10
     },
     {
-      "seq": 103,
+      "seq": 105,
       "role": "h",
       "cmd": "movenow",
       "expect_result": "^OK movenow cross=0 standin=1",
@@ -842,13 +856,13 @@
       "note": "OUTCOME: postponed a day, nothing moved"
     },
     {
-      "seq": 104,
+      "seq": 106,
       "role": "h",
       "cmd": "itemsat ${hostWh}",
       "expect_result": "items=0 "
     },
     {
-      "seq": 105,
+      "seq": 107,
       "role": "h",
       "cmd": "mark TEST CROSSMOVE END",
       "expect_result": "OK MARK"

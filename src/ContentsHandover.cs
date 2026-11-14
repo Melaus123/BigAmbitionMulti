@@ -42,6 +42,12 @@ namespace BigAmbitionsMP
         public bool   Charged      { get; set; }
         public bool   ChargeStamped { get; set; }
         public bool   Deferred     { get; set; }            // the destination's player stood inside: the next offer re-delivers
+        // F2 (decision 57 a): consecutive release ERRORS of this move (the origin could not pack or drop). Kept in the manifest with
+        // the record (State "held" between two move hours); a successful release ends the record's held state, the 2nd error
+        // cancels the move (State "cancel" until the destination confirms).
+        public int    ErrorHolds   { get; set; }
+        public int    Attempt      { get; set; }            // the release round (one per move hour); resends carry the same one
+        public int    HeldDay      { get; set; }            // the game day the record went "held" - an unanswered hold expires
         public bool   OriginClosed { get; set; }
         public bool   OriginSaved  { get; set; }
         public bool   DestSaved    { get; set; }
@@ -128,7 +134,16 @@ namespace BigAmbitionsMP
         private static int _saveGen;
         private static float _nextSendAt;
 
-        private static readonly Dictionary<string, string> _packedHere = new(StringComparer.Ordinal);   // origin: packages this loaded world dropped
+        private static readonly Dictionary<string, string> _packedHere = new(StringComparer.Ordinal);   // origin: packages this loaded world dropped, by PackKey
+
+        /// <summary>N6: the origin's memory of a dropped package is per move AND release round ("&lt;move id&gt;#&lt;attempt&gt;"): a resend
+        /// of the same round gets the same package back (its answer was lost), a re-ask at a later move hour always packs afresh.
+        /// A late package's return ("&lt;move&gt;|late&lt;round&gt;.&lt;n&gt;") maps to the move's own entry for that round.</summary>
+        private static string PackKey(ContentsHandoverPayload p)
+        {
+            string id = p.HandoverId ?? ""; int k = id.LastIndexOf("|late", StringComparison.Ordinal);
+            return (k >= 0 ? id.Substring(0, k) : id) + "#" + p.Attempt;
+        }
         private static readonly HashSet<string> _appliedHere = new(StringComparer.Ordinal);            // destination: hand-overs this loaded world applied
         private static readonly Dictionary<string, float> _offeredAt = new(StringComparer.Ordinal);
         private static object? _world;
@@ -138,6 +153,9 @@ namespace BigAmbitionsMP
 
         internal static string DevFault = "";    // DEV lever movefault: "release" | "drop" | "apply" ("" = none)
         internal static bool DevFrozen;          // set by a fired drop/apply fault: this game answers nothing until it restarts
+        internal static int DevPackErrors;       // DEV lever movefault packerror: the next N release ROUNDS here fail to pack (F2 proof)
+        private static string _devPackErrKey = "";
+        private static readonly HashSet<string> _returnRefused = new HashSet<string>(StringComparer.Ordinal);   // N3: warned once per move + reason
 
         internal static string IdFor(string originKey, string destKey) => "mv|" + originKey + ">" + destKey;
 
@@ -295,6 +313,7 @@ namespace BigAmbitionsMP
             Action = action, HandoverId = e.HandoverId, Purpose = e.Purpose, OriginKey = e.OriginKey, DestKey = e.DestKey,
             CompanyKey = e.CompanyKey, Transfer = e.Transfer, OriginId = ResolvePid(e.OriginPid, e.OriginStable), DestId = ResolvePid(e.DestPid, e.DestStable),
             PackageJson = action == "deliver" || action == "return" ? e.PackageJson : "",   // the host's copy rides every delivery and return
+            Attempt = e.Attempt,
         };
 
         private static void SendTo(string pid, ContentsHandoverPayload p, IReadOnlyList<string>? online = null)
@@ -307,7 +326,56 @@ namespace BigAmbitionsMP
         private static void Await(MpHandoverEntry e, bool origin) { lock (_lock) _confirmGen[e.HandoverId + (origin ? "|o" : "|d")] = int.MaxValue; }
         private static void Note(MpHandoverEntry e, bool origin) { lock (_lock) _confirmGen[e.HandoverId + (origin ? "|o" : "|d")] = _saveGen; }
 
-        private static bool IsDone(MpHandoverEntry e) => e.State == "closed" && e.OriginClosed && e.OriginSaved && e.DestSaved;
+        private static bool IsDone(MpHandoverEntry e) => (e.State == "closed" && e.OriginClosed && e.OriginSaved && (e.DestSaved || e.Purpose == "late"))
+                                                        || (e.State == "cancelled" && e.DestSaved);   // F2 fold F3: the cancel is in the destination's save
+
+        /// <summary>F2 fold F2: the origin has given its contents up (a package exists or existed). "offer", "held" (postponed after a
+        /// release error), "cancel" / "cancelled" (cancelled before any release) never released anything.</summary>
+        private static bool Released(MpHandoverEntry e) => e.State != "offer" && e.State != "held" && e.State != "cancel" && e.State != "cancelled";
+
+        /// <summary>F2 fold F1 + N5: a drop that arrives when the record no longer wants it (postponed, cancelled, gone) - the
+        /// origin gave its contents up: the host keeps the package in its own record (Purpose "late", State "returning", id
+        /// "&lt;move&gt;|late&lt;attempt&gt;") and sends it home until the origin confirms the reinstall and its save covers that -
+        /// re-sent by the tick and at the origin's world-ready, like every other leg.</summary>
+        private static void SendHome(ContentsHandoverPayload p, string originPid, string why)
+        {
+            // N7: one record per DIFFERENT package - the same package answered twice (a lost answer's resend) finds its record;
+            // another package of the same round gets the next number
+            string pre = (p.HandoverId ?? "") + "|late" + p.Attempt + ".", pj = p.PackageJson ?? "";
+            MpHandoverEntry? le; string lid;
+            lock (_lock)
+            {
+                le = _list.Find(x => x.Purpose == "late" && x.HandoverId.StartsWith(pre, StringComparison.Ordinal) && x.PackageJson == pj);
+                lid = le?.HandoverId ?? pre + (_list.Count(x => x.HandoverId.StartsWith(pre, StringComparison.Ordinal)) + 1);
+            }
+            if (le == null)
+            {
+                le = new MpHandoverEntry { HandoverId = lid, Purpose = "late", State = "returning", Outcome = "returned", OriginPid = originPid,
+                                           OriginStable = MPServer.StableOf(originPid) ?? "", OriginKey = p.OriginKey ?? "", DestKey = p.DestKey ?? "",
+                                           PackageJson = p.PackageJson ?? "", Attempt = p.Attempt };
+                try { le.Day = SaveGameManager.Current?.Day ?? 0; } catch { }
+                lock (_lock) _list.Add(le);
+                MPHub.SaveLedger();
+                Plugin.Logger.LogWarning($"[Handover] {p.HandoverId}: a drop arrived late ({why}) - the host holds its package as {lid} and sends it home to '{originPid}'.");
+            }
+            if (le.State != "returning") return;   // already reinstalled: the record waits for the origin's save
+            Await(le, true); SendTo(originPid, LateReturn(le));
+        }
+
+        private static ContentsHandoverPayload LateReturn(MpHandoverEntry e) { var r = Leg(e, "return"); r.Reason = "late"; return r; }
+
+        /// <summary>DESTINATION (SharedShopWorkTabs.ApplyRoutedCancel): its booker cancelled a move between two games - the host's
+        /// record of a move not yet released goes (F2 fold F2). One already released finds no booking at delivery: the package goes home.</summary>
+        internal static void NoteBookingGone(MovingServiceContract mc)
+        {
+            try
+            {
+                string okey = Key(mc.originMovingAddress), dkey = Key(mc.destinationMovingAddress);
+                if (!IsCrossGame(okey)) return;
+                Send(new ContentsHandoverPayload { Action = "gone", HandoverId = IdOf(mc, okey, dkey), OriginKey = okey, DestKey = dkey });
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Handover] booking gone: {ex.Message}"); }
+        }
 
         /// <summary>HOST: the origin may release only while its OWN owner runs it in this session - offline, or covered by a
         /// stand-in for an absent owner, the move is postponed a day (the game's own postpone, movingDay = Day + 1).</summary>
@@ -339,6 +407,18 @@ namespace BigAmbitionsMP
                         if (e != null)
                         {
                             if (e.State == "dropped") { e.Deferred = false; SendTo(senderPid, Leg(e, "deliver")); }
+                            else if (e.State == "held")
+                            {   // F2: the next move hour after one release error - ask the origin again (same record, count kept)
+                                if (OriginRunner(e.OriginKey) != ResolvePid(e.OriginPid, e.OriginStable))
+                                { SendTo(senderPid, new ContentsHandoverPayload { Action = "hold", HandoverId = e.HandoverId, OriginKey = e.OriginKey, DestKey = e.DestKey, Reason = "origin" }); return; }
+                                e.State = "offer"; e.Attempt++; MPHub.SaveLedger(); _nextSendAt = 0f;
+                                Plugin.Logger.LogInfo($"[Handover] {e.HandoverId}: move hour again after {e.ErrorHolds} release error(s) - release asked.");
+                            }
+                            else if (e.State == "cancel") SendTo(senderPid, new ContentsHandoverPayload { Action = "cancel", HandoverId = e.HandoverId, OriginKey = e.OriginKey, DestKey = e.DestKey, Reason = "error" });
+                            else if (e.State == "cancelled")
+                            {   // F2 fold F3: the destination's game came back without the cancel in its save - cancelled again, silently
+                                var cx = new ContentsHandoverPayload { Action = "cancel", HandoverId = e.HandoverId, OriginKey = e.OriginKey, DestKey = e.DestKey, Reason = "error" }; cx.Committed = true; Await(e, false); SendTo(senderPid, cx);
+                            }
                             else if (e.State == "applied" || (e.State == "closed" && e.Outcome == "moved")) { var d = Leg(e, "deliver"); d.SkipBill = true; d.PackageJson = e.PackageJson; SendTo(senderPid, d); }
                             else if (e.Outcome == "returned") SendTo(senderPid, Leg(e, "cancel"));
                             return;   // "offer": the release is re-sent by the tick
@@ -354,7 +434,7 @@ namespace BigAmbitionsMP
                         {
                             HandoverId = p.HandoverId, Purpose = string.IsNullOrEmpty(p.Purpose) ? "move" : p.Purpose, OriginKey = p.OriginKey ?? "", DestKey = p.DestKey ?? "",
                             CompanyKey = p.CompanyKey ?? "", Transfer = p.Transfer, OriginPid = runner, OriginStable = MPServer.StableOf(runner) ?? "",
-                            DestPid = senderPid, DestStable = MPServer.StableOf(senderPid) ?? "",
+                            DestPid = senderPid, DestStable = MPServer.StableOf(senderPid) ?? "", Attempt = 1,
                         };
                         try { e.Day = SaveGameManager.Current?.Day ?? 0; } catch { }
                         lock (_lock) _list.Add(e);
@@ -364,7 +444,11 @@ namespace BigAmbitionsMP
                         return;
                     }
                 }
-                if (e == null) return;
+                if (e == null)
+                {   // F2 fold F1: a drop for a record that is gone (cancelled and retired, or expired) - the package goes home
+                    if (p.Action == "dropped" && !string.IsNullOrEmpty(p.PackageJson)) SendHome(p, senderPid, "no record");
+                    return;
+                }
                 string origin = ResolvePid(e.OriginPid, e.OriginStable), dest = ResolvePid(e.DestPid, e.DestStable);
                 bool fromOrigin = p.Action == "dropped" || p.Action == "held" || p.Action == "returned" || p.Action == "closedok";
                 if (senderPid != (fromOrigin ? origin : dest))
@@ -373,9 +457,25 @@ namespace BigAmbitionsMP
                 switch (p.Action)
                 {
                     case "held":
+                        if (!Released(e) && e.State != "offer") { Plugin.Logger.LogInfo($"[Handover] {e.HandoverId}: a late 'held' ({p.Reason}) in state {e.State} - nothing to do."); return; }
                         if (e.State != "offer")
                         {
                             Plugin.Logger.LogWarning($"[Handover] {e.HandoverId}: the origin could not apply a replayed drop ({p.Reason}) - state {e.State}; its save may still hold the copy of '{e.OriginKey}'.");
+                            return;
+                        }
+                        if (p.Reason == "error")
+                        {   // F2 (decision 57 a): a release ERROR is counted with the record; the 2nd in a row cancels the move
+                            e.ErrorHolds++;
+                            if (e.ErrorHolds >= 2)
+                            {
+                                e.State = "cancel"; MPHub.SaveLedger();
+                                Plugin.Logger.LogWarning($"[Handover] {e.HandoverId}: CANCELLED - the origin '{e.OriginKey}' could not be released {e.ErrorHolds} times in a row; nothing moved, nothing charged; the destination drops the booking and its booker is told.");
+                                SendTo(dest, new ContentsHandoverPayload { Action = "cancel", HandoverId = e.HandoverId, OriginKey = e.OriginKey, DestKey = e.DestKey, Reason = "error" });
+                                return;
+                            }
+                            e.State = "held"; try { e.HeldDay = SaveGameManager.Current?.Day ?? 0; } catch { } MPHub.SaveLedger();
+                            Plugin.Logger.LogInfo($"[Handover] {e.HandoverId}: the origin held (error {e.ErrorHolds} of 2) - nothing moved; postponed a day.");
+                            SendTo(dest, new ContentsHandoverPayload { Action = "hold", HandoverId = e.HandoverId, OriginKey = e.OriginKey, DestKey = e.DestKey, Reason = p.Reason });
                             return;
                         }
                         lock (_lock) _list.Remove(e);
@@ -384,9 +484,13 @@ namespace BigAmbitionsMP
                         SendTo(dest, new ContentsHandoverPayload { Action = "hold", HandoverId = e.HandoverId, OriginKey = e.OriginKey, DestKey = e.DestKey, Reason = p.Reason });
                         return;
                     case "dropped":
-                        if (e.State != "offer") return;   // a replayed drop's answer: the package is held already
+                        if (e.State != "offer")
+                        {   // a replayed drop's answer: the package is held already - unless nothing was ever released (F2 fold F1)
+                            if (!Released(e) && !string.IsNullOrEmpty(p.PackageJson)) SendHome(p, senderPid, $"state {e.State}");
+                            return;
+                        }
                         if (string.IsNullOrEmpty(p.PackageJson)) { Plugin.Logger.LogWarning($"[Handover] {e.HandoverId}: a first drop came with no package - not recorded."); return; }
-                        e.PackageJson = p.PackageJson; e.State = "dropped"; Await(e, true); Note(e, true);
+                        e.PackageJson = p.PackageJson; e.State = "dropped"; e.ErrorHolds = 0; Await(e, true); Note(e, true);   // F2: a release resets the error count
                         MPHub.SaveLedger();
                         if (e.Transfer)
                         {   // fold F4: the host's stored paperwork of the origin's owner loses the moved business NOW, once - an
@@ -396,6 +500,19 @@ namespace BigAmbitionsMP
                         }
                         Plugin.Logger.LogInfo($"[Handover] {e.HandoverId}: DROPPED by the origin - the host holds the package ({p.PackageJson.Length} chars); delivering.");
                         SendTo(dest, Leg(e, "deliver"));
+                        return;
+                    case "gone":
+                        if (e.State == "dropped")
+                        {   // N1: released but not delivered (possibly waiting for the player to leave) - delivered again now: the
+                            // destination finds no booking ("nocontract") and the package goes home on the return leg
+                            e.Deferred = false; _nextSendAt = 0f; MPHub.SaveLedger();
+                            Plugin.Logger.LogInfo($"[Handover] {e.HandoverId}: its booker cancelled the move after the release - delivered again so the package goes home.");
+                            return;
+                        }
+                        if (Released(e) || e.State == "cancelled") return;   // applied / returning: the move (or its return) completes
+                        lock (_lock) _list.Remove(e);
+                        MPHub.SaveLedger();
+                        Plugin.Logger.LogInfo($"[Handover] {e.HandoverId}: its booker cancelled the move (state {e.State}, {e.ErrorHolds} release error(s)) - record removed.");
                         return;
                     case "deferred":
                         if (e.State == "dropped") { e.Deferred = true; Plugin.Logger.LogInfo($"[Handover] {e.HandoverId}: the destination's player is inside - re-delivered at its next move hour."); }
@@ -417,8 +534,17 @@ namespace BigAmbitionsMP
                         if (!e.OriginClosed) SendTo(origin, Leg(e, "closed"));
                         return;
                     case "applyfail":
+                        if (e.State == "cancel")
+                        {   // F2: the destination dropped the booking - kept until ITS save covers that (fold F3): a restart before it
+                            // restores the booking, and the next offer / world-ready replay cancels it again (silently)
+                            e.State = "cancelled"; e.Outcome = "cancelled"; Await(e, false); Note(e, false);
+                            MPHub.SaveLedger();
+                            Plugin.Logger.LogInfo($"[Handover] {e.HandoverId}: the cancelled move's booking is gone on the destination ({p.Reason}) - kept until its save covers it.");
+                            return;
+                        }
+                        if (e.State == "cancelled") { Note(e, false); return; }   // a replayed cancel answered: its save now covers it
                         if (e.State != "dropped") return;
-                        e.State = "return"; e.Outcome = "returned"; Note(e, false);
+                        e.State = "return"; e.Outcome = "returned"; e.Deferred = false; Note(e, false);
                         MPHub.SaveLedger();
                         _nextSendAt = 0f;
                         Plugin.Logger.LogInfo($"[Handover] {e.HandoverId}: the destination's game did not move ({p.Reason}) - nothing charged; the package goes home.");
@@ -426,6 +552,13 @@ namespace BigAmbitionsMP
                         return;
                     case "returned":
                     case "closedok":
+                        if (p.Reason == "notrun")
+                        {   // N3: the origin's game does not run that building now (a stand-in) - re-sent at its next world-ready, not every tick
+                            if (!e.Deferred) { e.Deferred = true; MPHub.SaveLedger(); Plugin.Logger.LogWarning($"[Handover] {e.HandoverId}: the origin's game does not run '{e.OriginKey}' now - the package ({e.PackageJson.Length} chars) stays here until its next world-ready."); }
+                            return;
+                        }
+                        if (p.Reason == "unrented" || p.Reason == "unreadable")
+                            Plugin.Logger.LogWarning($"[Handover] {e.HandoverId}: the origin could not take its package back ({p.Reason}: '{e.OriginKey}' is no longer its building) - {p.Count} record(s) ({e.PackageJson.Length} chars) NOT reinstalled; the record closes.");
                         if (e.OriginClosed) return;
                         e.OriginClosed = true; e.State = "closed"; Await(e, true); Note(e, true);
                         if (IsDone(e)) lock (_lock) _list.Remove(e);
@@ -448,6 +581,7 @@ namespace BigAmbitionsMP
                 lock (_lock) list = new List<MpHandoverEntry>(_list);
                 if (list.Count == 0) return;
                 var online = MPRestSync.AllPlayers();
+                int today = 0; try { today = SaveGameManager.Current?.Day ?? 0; } catch { }
                 foreach (var e in list)
                 {
                     string origin = ResolvePid(e.OriginPid, e.OriginStable), dest = ResolvePid(e.DestPid, e.DestStable);
@@ -465,7 +599,17 @@ namespace BigAmbitionsMP
                             break;
                         case "dropped": if (!e.Deferred) SendTo(dest, Leg(e, "deliver"), online); break;
                         case "applied": if (!e.OriginClosed) SendTo(origin, Leg(e, "closed"), online); break;
-                        case "return":  { var r = Leg(e, "return"); r.PackageJson = e.PackageJson; SendTo(origin, r, online); break; }
+                        case "return":  if (!e.Deferred) { var r = Leg(e, "return"); r.PackageJson = e.PackageJson; SendTo(origin, r, online); } break;
+                        case "returning": if (!e.Deferred) SendTo(origin, LateReturn(e), online); break;   // N5: a late drop's package, until reinstalled
+                        case "cancel":  SendTo(dest, new ContentsHandoverPayload { Action = "cancel", HandoverId = e.HandoverId, OriginKey = e.OriginKey, DestKey = e.DestKey, Reason = "error" }, online); break;
+                        case "held":
+                            if (today > 0 && e.HeldDay > 0 && today > e.HeldDay + 2)
+                            {   // F2 fold F2: no move hour came back for two days - the booking is gone (the game's own cancel)
+                                lock (_lock) _list.Remove(e);
+                                MPHub.SaveLedger();
+                                Plugin.Logger.LogInfo($"[Handover] {e.HandoverId}: postponed since day {e.HeldDay} and never asked again - its booking is gone; record removed.");
+                            }
+                            break;
                     }
                 }
             }
@@ -485,9 +629,9 @@ namespace BigAmbitionsMP
                 foreach (var e in list)
                 {
                     string origin = ResolvePid(e.OriginPid, e.OriginStable), dest = ResolvePid(e.DestPid, e.DestStable);
-                    if (pid == origin && !e.OriginSaved && e.State != "offer")
+                    if (pid == origin && !e.OriginSaved && Released(e))
                     {
-                        if (e.Outcome == "returned") { var r = Leg(e, "return"); r.PackageJson = e.PackageJson; Await(e, true); SendTo(pid, r); n++; }
+                        if (e.Outcome == "returned") { var r = e.Purpose == "late" ? LateReturn(e) : Leg(e, "return"); r.PackageJson = e.PackageJson; e.Deferred = false; Await(e, true); SendTo(pid, r); n++; }
                         else
                         {
                             var rel = Leg(e, "release"); rel.Committed = true; rel.PackageJson = e.PackageJson; Await(e, true); SendTo(pid, rel); n++;
@@ -498,6 +642,7 @@ namespace BigAmbitionsMP
                     {
                         if (e.Outcome == "moved") { var d = Leg(e, "deliver"); d.SkipBill = true; d.PackageJson = e.PackageJson; Await(e, false); SendTo(pid, d); n++; }
                         else if (e.Outcome == "returned") { Await(e, false); SendTo(pid, Leg(e, "cancel")); n++; }
+                        else if (e.Outcome == "cancelled") { var cx = new ContentsHandoverPayload { Action = "cancel", HandoverId = e.HandoverId, OriginKey = e.OriginKey, DestKey = e.DestKey, Reason = "error" }; cx.Committed = true; Await(e, false); SendTo(pid, cx); n++; }
                     }
                 }
                 if (n > 0) Plugin.Logger.LogInfo($"[Handover] world-ready replay to '{pid}': {n} leg(s).");
@@ -551,7 +696,7 @@ namespace BigAmbitionsMP
             HashSet<string>? addrs = null;
             lock (_lock)
                 foreach (var e in _list)
-                    if (e.Transfer && !e.OriginSaved && e.Outcome != "returned" && e.State != "offer" && ResolvePid(e.OriginPid, e.OriginStable) == senderPid)
+                    if (e.Transfer && !e.OriginSaved && e.Outcome != "returned" && Released(e) && ResolvePid(e.OriginPid, e.OriginStable) == senderPid)
                         (addrs ??= new HashSet<string>(StringComparer.Ordinal)).Add(e.OriginKey);
             if (addrs == null) return false;
             int n = PaperworkSync.StripAddresses(p, addrs);
@@ -587,7 +732,7 @@ namespace BigAmbitionsMP
 
         private static void Reply(ContentsHandoverPayload p, string action, Action<ContentsHandoverPayload>? fill = null)
         {
-            var r = new ContentsHandoverPayload { Action = action, HandoverId = p.HandoverId, OriginKey = p.OriginKey, DestKey = p.DestKey };
+            var r = new ContentsHandoverPayload { Action = action, HandoverId = p.HandoverId, OriginKey = p.OriginKey, DestKey = p.DestKey, Attempt = p.Attempt };   // N6/N7: the round rides every answer
             fill?.Invoke(r);
             Send(r);
         }
@@ -614,14 +759,19 @@ namespace BigAmbitionsMP
                 Reply(p, "dropped");
                 return;
             }
-            if (_packedHere.TryGetValue(p.HandoverId ?? "", out var had)) { Reply(p, "dropped", r => r.PackageJson = had); return; }   // the answer was lost: same package
+            if (_packedHere.TryGetValue(PackKey(p), out var had)) { Reply(p, "dropped", r => r.PackageJson = had); return; }   // the answer was lost: same package
             string why = reg == null ? "noreg" : !MergerFlip.TrulyMine(reg) ? "notrun" : InsideAt(p.OriginKey ?? "") ? "inside" : "";
             if (why.Length > 0) { Plugin.Logger.LogInfo($"[Handover] {p.HandoverId}: release held ({why})."); Reply(p, "held", r => r.Reason = why); return; }
             // A record this game cannot pack, or a drop that fails, is answered ONCE as "held" (the design's existing path: the host
             // drops the offer, the destination's game postpones a day - the game's own postpone), never left to the host's
             // 5-second retry. A drop that failed part-way puts back what it took first (by id), so nothing is lost.
             HandoverPackage pack; string json;
-            try { pack = Pack(gi, reg!, p.OriginKey ?? "", p.Transfer); json = JsonConvert.SerializeObject(pack); }
+            try
+            {
+                string devKey = (p.HandoverId ?? "") + "#" + p.Attempt;   // T4: once per release ROUND (move hour), never per resend
+                if (DevPackErrors > 0 && devKey != _devPackErrKey) { DevPackErrors--; _devPackErrKey = devKey; throw new InvalidOperationException("DEV fault packerror"); }
+                pack = Pack(gi, reg!, p.OriginKey ?? "", p.Transfer); json = JsonConvert.SerializeObject(pack);
+            }
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[Handover] {p.HandoverId}: RELEASE FAILED - '{p.OriginKey}' could not be packed ({ex.GetType().Name}: {ex.Message}); nothing given up, held - the move is postponed a day.");
@@ -638,7 +788,7 @@ namespace BigAmbitionsMP
                 Reply(p, "held", r => r.Reason = "error");
                 return;
             }
-            _packedHere[p.HandoverId ?? ""] = json;
+            _packedHere[PackKey(p)] = json;
             try { SaveGameManager.MarkChange(); } catch { }
             try { PaperworkSync.MarkDirty(); } catch { }
             Plugin.Logger.LogInfo($"[Handover] {p.HandoverId}: RELEASED '{p.OriginKey}' - {pack.Items.Count} item(s), {pack.Vehicles.Count} vehicle(s), {pack.Slots.Count} slot(s)"
@@ -769,7 +919,7 @@ namespace BigAmbitionsMP
                 try { PaperworkSync.MarkDirty(); } catch { }
                 Plugin.Logger.LogInfo($"[Handover] {p.HandoverId}: closed at the origin - {rp} reference(s) re-pointed to '{d}', the old business closed.");
             }
-            _packedHere.Remove(p.HandoverId ?? "");
+            _packedHere.Remove(PackKey(p));
             Reply(p, "closedok");
         }
 
@@ -779,13 +929,22 @@ namespace BigAmbitionsMP
             var gi = SaveGameManager.Current!;
             var reg = GameStatePatcher.FindRegistration(p.OriginKey ?? "");
             var pk = DePkg(p.PackageJson ?? "");
-            if (reg == null || pk == null) return;
-            int n = Install(gi, reg, pk, null);
-            _packedHere.Remove(p.HandoverId ?? "");
+            bool rentedHere = false; try { rentedHere = reg != null && reg.RentedByPlayer; } catch { }
+            string why = pk == null ? "unreadable" : !rentedHere ? "unrented" : !MergerFlip.TrulyMine(reg!) ? "notrun" : "";
+            if (why.Length > 0)
+            {   // N3: never silent - answered (the host stops re-sending) and warned once, naming the move and what is not reinstalled
+                int cnt = pk == null ? 0 : pk.Items.Count + pk.Vehicles.Count + pk.Slots.Count;
+                if (_returnRefused.Add((p.HandoverId ?? "") + "|" + why))
+                    Plugin.Logger.LogWarning($"[Handover] {p.HandoverId}: a return to '{p.OriginKey}' is NOT reinstalled ({why}) - {(pk == null ? "unreadable package" : $"{pk.Items.Count} item(s), {pk.Vehicles.Count} vehicle(s), {pk.Slots.Count} slot(s)")}{(why == "notrun" ? "; the host keeps it until this game runs the building" : "")}.");
+                Reply(p, "returned", r => { r.Reason = why; r.Count = cnt; });
+                return;
+            }
+            int n = Install(gi, reg!, pk!, null);
+            _packedHere.Remove(PackKey(p));   // N6: a late package's return clears the move's entry of that round too
             try { SaveGameManager.MarkChange(); } catch { }
             try { PaperworkSync.MarkDirty(); } catch { }
             Plugin.Logger.LogInfo($"[Handover] {p.HandoverId}: RETURNED to '{p.OriginKey}' - {n} record(s) back.");
-            Reply(p, "returned");
+            Reply(p, "returned", r => r.Reason = p.Reason ?? "");   // "late": a late drop's package, not the record's return leg
         }
 
         /// <summary>Put a package's records into this save at the origin building (absent ids only). Returns the records added.
@@ -854,6 +1013,13 @@ namespace BigAmbitionsMP
         private static void DestCancel(ContentsHandoverPayload p)
         {
             var mc = ContractFor(p.OriginKey ?? "", p.DestKey ?? "");
+            if (p.Reason == "error")
+            {   // F2 (decision 57 a): the move cannot be released - cancelled through the routed-booking cancel, its booker told
+                if (mc != null) SharedShopWorkTabs.CancelMoveNotReleased(mc, p.HandoverId ?? "", tell: !p.Committed);   // a replay: the booker was told
+                else Plugin.Logger.LogInfo($"[Handover] {p.HandoverId}: the cancelled move's contract was already gone here.");
+                Reply(p, "applyfail", r => r.Reason = "cancelled");
+                return;
+            }
             if (mc != null) SaveGameManager.Current!.movingServiceContracts.Remove(mc);   // what the game's DoMove did on the failed run (:46)
             Plugin.Logger.LogInfo($"[Handover] {p.HandoverId}: the failed move's contract {(mc != null ? "removed" : "was already gone")}.");
             Reply(p, "applyfail", r => r.Reason = "cancelled");
@@ -863,7 +1029,30 @@ namespace BigAmbitionsMP
         /// game's own move runs untouched (DoMove: bill, destination resale, relocation, slots, unfit vehicles sold, transfer
         /// settings). SkipBill = the host's record says this game was already charged (a replay after a crash): the bill and
         /// a sold vehicle's payout are not booked again. Repeats: the package's ids already at the destination.</summary>
+        /// <summary>True while the destination puts a package in at the ORIGIN address and the game's own move takes it out: that
+        /// building is another game's, and these are the hand-over's own steps - never member edits. Every guest interior forward
+        /// (InteriorSync.ForwardGuestInteriorEditDelta / ForwardGuestDesignerClose - additions, removals, moves) stays silent;
+        /// afterwards this game's copy of the origin is re-synced from its runner. Address-tied: only the origin is silenced.</summary>
+        private static string _quietOriginKey = "";
+        internal static bool IsQuietOrigin(string addressKey) => _quietOriginKey.Length > 0 && addressKey == _quietOriginKey;
+
         private static void DestDeliver(ContentsHandoverPayload p)
+        {
+            try { DestDeliverCore(p); }
+            finally
+            {
+                if (_quietOriginKey.Length > 0)
+                {   // the origin's copy here no longer matches what its runner holds: forget the edit baseline (no stale diff is
+                    // ever forwarded from it) and take the runner's next snapshot whole. Staging only happens when this game does
+                    // NOT run the origin (checked at this delivery, DestDeliverCore), so the runner is always another game.
+                    string okey = _quietOriginKey; _quietOriginKey = "";
+                    try { GameStatePatcher.ForgetInteriorBaseline(okey); InteriorSync.NoteResyncOwed(okey, $"hand-over {p.HandoverId} applied here"); }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Handover] {p.HandoverId}: origin re-sync: {ex.Message}"); }
+                }
+            }
+        }
+
+        private static void DestDeliverCore(ContentsHandoverPayload p)
         {
             var gi = SaveGameManager.Current!;
             string okey = p.OriginKey ?? "", dkey = p.DestKey ?? "", id = p.HandoverId ?? "";
@@ -878,6 +1067,17 @@ namespace BigAmbitionsMP
             }
             var mc = ContractFor(okey, dkey);
             if (!p.SkipBill && mc == null) { Plugin.Logger.LogWarning($"[Handover] {id}: no move booked here for '{okey}' -> '{dkey}' - the package goes home."); Reply(p, "applyfail", r => r.Reason = "nocontract"); return; }
+            string runsHere = "";
+            try { runsHere = MergerAbsence.SimulatesHere(okey) ? "stands in for its absent owner" : MergerFlip.TrulyMine(oreg) || InteriorSync.OwnsAddressLocally(okey) ? "runs it" : ""; } catch { runsHere = "unknown"; }
+            if (runsHere.Length > 0)
+            {   // review F1: staging clears this game's copy of the origin - allowed only for a copy of ANOTHER game's building.
+                // Decided from the fact at THIS delivery (an owner may have left since the offer): the move waits, as for a
+                // player inside - postponed a day the game's way, re-delivered at the next move hour (host: "deferred").
+                if (mc != null && mc.movingDay <= gi.Day) { mc.movingDay = gi.Day + 1; try { SaveGameManager.MarkChange(); } catch { } }
+                Plugin.Logger.LogInfo($"[Handover] {id}: this game {runsHere} - '{okey}' - so the delivery waits (postponed to day {mc?.movingDay ?? gi.Day + 1}); nothing staged.");
+                Reply(p, "deferred");
+                return;
+            }
             bool rented; try { rented = oreg.RentedByPlayer && dreg.RentedByPlayer; } catch { rented = false; }
             if (InsideAt(okey) || InsideAt(dkey) || (!rented && !p.SkipBill))
             {
@@ -891,6 +1091,7 @@ namespace BigAmbitionsMP
             if (pk.Business != null) foreach (var f in pk.Business.Fields.Keys) { var fi = AccessTools.Field(oreg.GetType(), f); if (fi != null) fieldsBefore[f] = Ser(fi.GetValue(oreg), fi.FieldType); }
             var slotsBefore = oreg is Warehouse w0 ? w0.vehicleSlots : null;
             var addedRows = new List<(IList, object)>();
+            _quietOriginKey = okey;   // from here the origin address is touched by the hand-over only (reset by DestDeliver)
             int added = Install(gi, oreg, pk, replaced, addedRows);
             _skipBill = p.SkipBill; _payReached = false; _noMoney = false; _applying = true;
             try
@@ -983,15 +1184,16 @@ namespace BigAmbitionsMP
         {
             var sb = new System.Text.StringBuilder("OK movestate");
             lock (_lock) foreach (var e in _list) sb.Append($" [{e.HandoverId} state={e.State} outcome={e.Outcome} charged={e.Charged} stamped={e.ChargeStamped} oclosed={e.OriginClosed} osaved={e.OriginSaved} dsaved={e.DestSaved} pkg={e.PackageJson.Length}]");
-            sb.Append($" host={(MPServer.IsRunning ? _list.Count : -1)} packedHere={_packedHere.Count} appliedHere={_appliedHere.Count} fault='{DevFault}' frozen={DevFrozen}");
+            sb.Append($" host={(MPServer.IsRunning ? _list.Count : -1)} packedHere={_packedHere.Count} appliedHere={_appliedHere.Count} fault='{DevFault}' frozen={DevFrozen} cancelShown={SharedShopWorkTabs.MoveCancelShown}");
             return sb.ToString();
         }
 
         internal static string DevFaultSet(string arg)
         {
             string a = (arg ?? "").Trim();
-            if (a != "drop" && a != "apply" && a != "release" && a != "nomoney" && a != "off") return "ERR usage: movefault drop|apply|release|nomoney|off";
-            DevFault = a == "off" ? "" : a; if (a == "off") DevFrozen = false;
+            if (a == "packerror") { DevPackErrors = 2; return "OK movefault 'packerror' x2"; }
+            if (a != "drop" && a != "apply" && a != "release" && a != "nomoney" && a != "off") return "ERR usage: movefault drop|apply|release|nomoney|packerror|off";
+            DevFault = a == "off" ? "" : a; if (a == "off") { DevFrozen = false; DevPackErrors = 0; }
             return $"OK movefault '{DevFault}'";
         }
 

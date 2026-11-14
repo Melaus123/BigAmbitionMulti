@@ -1327,6 +1327,7 @@ namespace BigAmbitionsMP
         public static void ForwardGuestInteriorEditDelta(string addressKey, string? knownRemovedId = null)
         {
             if (string.IsNullOrEmpty(addressKey)) return;
+            if (ContentsHandover.IsQuietOrigin(addressKey)) { Plugin.Logger.LogInfo($"[Housing] edit delta for '{addressKey}' NOT forwarded - a move's hand-over is staging another game's origin here (T-24)."); return; }
             try
             {
                 // Review MAJOR-N: check the send path BEFORE building — the builder advances the
@@ -1358,6 +1359,7 @@ namespace BigAmbitionsMP
         public static void ForwardGuestDesignerClose(string addressKey)
         {
             if (string.IsNullOrEmpty(addressKey)) return;
+            if (ContentsHandover.IsQuietOrigin(addressKey)) { Plugin.Logger.LogInfo($"[Housing] designer-close delta for '{addressKey}' NOT forwarded - a move's hand-over is staging another game's origin here (T-24)."); return; }
             try
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected)

@@ -2135,7 +2135,7 @@ namespace BigAmbitionsMP
     /// <summary>T-24 part 2 slice 2 (v28): one leg of a contents hand-over (MessageType.ContentsHandover, ContentsHandover.cs).</summary>
     public class ContentsHandoverPayload
     {
-        public string Action      { get; set; } = "";   // offer|release|held|dropped|hold|deliver|deferred|applied|applyfail|closed|closedok|return|returned|cancel
+        public string Action      { get; set; } = "";   // offer|release|held|dropped|hold|deliver|deferred|applied|applyfail|closed|closedok|return|returned|cancel|gone
         public string HandoverId  { get; set; } = "";   // "mv|<origin>><destination>": one move can name an address at a time
         public string Purpose     { get; set; } = "move";   // move | sale (reserved for T-52)
         public string OriginId    { get; set; } = "";
@@ -2150,6 +2150,8 @@ namespace BigAmbitionsMP
         public bool   Charged     { get; set; }        // applied: the game's own bill was taken by this run
         public float  Money       { get; set; }        // applied: the balance right after it
         public bool   HasMoney    { get; set; }
+        public int    Attempt     { get; set; }        // release: the host's release round of this move (one per move hour)
+        public int    Count       { get; set; }        // returned: the records the origin could NOT reinstall (Reason unrented | notrun | unreadable)
         public string Reason      { get; set; } = "";   // held / hold / applyfail: inside | notrun | origin | dest | error (the origin could not pack or drop) | money | notrented | nocontract | cancelled
     }
 

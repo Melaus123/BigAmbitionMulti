@@ -1,0 +1,484 @@
+{
+  "id": "T-CROSSMOVEFAIL",
+  "title": "T-24 slice 2 F2 (decision 57 a): a cross-game move whose origin cannot be released twice in a row is cancelled - no charge, the booking gone on both games, the origin's contents intact, the approved line on the booker's game. Ends merged, NO save",
+  "preconditions": "Fixture save1 (host melaus, client Client1): host runs warehouse X (2 slotted trucks + 1 parked car, cargo) and a shop (2 staff, a contract, a host logistics plan delivering to it, prices, a logo); client runs warehouse Y and a shop of the same type. The mergestatus key order is a PREMISE the leg premises check. T-24 slice 2 deployed on BOTH machines. NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Handover\\] .*record unreadable",
+    "\\[Handover\\] host '",
+    "from '[^']*', not the (origin|destination)",
+    "\\[Handover\\] mv\\|.*: APPLIED on the destination",
+    "\\[Handover\\] mv\\|.*: MOVED on this game"
+  ],
+  "oracles_report": [
+    "\\[Handover\\]",
+    "\\[Merger\\] move .* CANCELLED"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "mark TEST CROSSMOVEFAIL HOSTLOAD",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Settle\\] world settled \\(host",
+          "within_s": 180,
+          "since_prev_step": true
+        }
+      ],
+      "note": "the host's own settle line, never a fixed load wait"
+    },
+    {
+      "seq": 5,
+      "role": "c",
+      "cmd": "mark TEST CROSSMOVEFAIL CLIENTLOAD",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 180,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "energyflag on",
+      "expect_result": "^OK",
+      "note": "the run skips game hours (movenow, day offsets)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "sleep_s": 3,
+      "note": "the merge applies (as t-mergerservice); the client settled before the merge (step 5) and a merge does not re-settle it"
+    },
+    {
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]\\d* keys=\\[",
+      "note": "PREMISE: merged, partner buildings flipped here",
+      "seq": 11
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]\\d* keys=\\[",
+      "seq": 12
+    },
+    {
+      "role": "h",
+      "cmd": "movepick wh",
+      "expect_result": "^OK movepick wh key='[^']+' score=\\d+ .* slots=[1-9]",
+      "capture": {
+        "hostWh": "key='([^']+)'"
+      },
+      "note": "the host's own warehouse with 2+ vehicle slots first (score = 1000 x min(slots,2) + 100 x slotted + all); save1's best had 1 slot",
+      "seq": 13
+    },
+    {
+      "role": "h",
+      "cmd": "moveprep ${hostWh}",
+      "expect_result": "^OK moveprep '[^']+' slots=([1-9]\\d*) made=\\d+ slotted=[1-9] parked=[1-9]\\d* cargo=[1-9]",
+      "note": "leg-1 PREMISE SET UP on the runner: 3 vehicles - 2 slotted + 1 parked, or (a 1-slot warehouse) 1 slotted + 2 parked - copies of the one parked there, cargo aboard the slotted; asserted, never assumed",
+      "seq": 14
+    },
+    {
+      "role": "c",
+      "cmd": "movepick dest ${hostWh}",
+      "expect_result": "^OK movepick dest key='[^']+' .*type=",
+      "capture": {
+        "clientWh": "key='([^']+)'"
+      },
+      "note": "the client's own warehouse building with NO vehicles first, then the most free slots",
+      "seq": 15
+    },
+    {
+      "role": "c",
+      "cmd": "moveclear ${clientWh}",
+      "expect_result": "^OK moveclear '[^']+' sold=\\d+ n=0 slots=[1-9]\\d* free=[1-9]",
+      "note": "leg-1 PREMISE SET UP on the destination's runner: Y's own vehicles sold through the game's own sale, slots freed (run 200244: both client warehouses hold vehicles). Leg 1 proves the ORIGIN's vehicles cross under the slot rule; the game's destruction of destination vehicles is not its subject",
+      "seq": 16
+    },
+    {
+      "role": "c",
+      "cmd": "warehouses",
+      "expect_result": "^OK warehouses own=\\[[^\\]]*'${clientWh}'.* flipped=\\[[^\\]]*'${hostWh}'",
+      "note": "PREMISE: Y is the client's own warehouse, X the host's flipped here",
+      "seq": 17
+    },
+    {
+      "role": "both",
+      "cmd": "mark LEG F2 RELEASE ERRORS",
+      "expect_result": "OK MARK",
+      "seq": 18
+    },
+    {
+      "role": "h",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "^OK itemsat '[^']+' items=[1-9]\\d* ",
+      "capture": {
+        "xi": "items=(\\d+) ",
+        "xid": "ids=([^,\\s]+)"
+      },
+      "note": "PREMISE: the origin's contents before",
+      "seq": 19
+    },
+    {
+      "role": "h",
+      "cmd": "vehlist ${hostWh}",
+      "expect_result": "^OK vehlist '[^']+' n=[1-9]",
+      "capture": {
+        "xv": "n=(\\d+) "
+      },
+      "seq": 20
+    },
+    {
+      "role": "h",
+      "cmd": "money",
+      "expect_result": "^OK money=",
+      "capture": {
+        "m0": "money=([-0-9.]+)"
+      },
+      "seq": 21
+    },
+    {
+      "role": "h",
+      "cmd": "movefault packerror",
+      "expect_result": "OK movefault 'packerror' x2",
+      "note": "the origin's next two release ROUNDS (one per move hour, never per 5 s resend) fail to pack",
+      "seq": 22
+    },
+    {
+      "role": "h",
+      "cmd": "mergermove ${hostWh} ${clientWh} 1 -",
+      "expect_result": "^OK mergermove routed",
+      "capture": {
+        "mid": "id ([0-9a-f]+)\\)"
+      },
+      "note": "the HOST books from its own building: the booker is not the destination's runner, so the message crosses games",
+      "seq": 23
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 24
+    },
+    {
+      "role": "h",
+      "cmd": "mycontracts",
+      "expect_result": "^OK mycontracts.*${mid}",
+      "note": "PREMISE (T2): the booking IS listed on the booker's game right after it is made",
+      "seq": 25
+    },
+    {
+      "role": "c",
+      "sleep_s": 3,
+      "seq": 26
+    },
+    {
+      "role": "c",
+      "cmd": "movenow",
+      "expect_result": "^OK movenow cross=1",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.*: the origin held \\(error 1 of 2\\)",
+          "within_s": 90,
+          "since_prev_step": true
+        }
+      ],
+      "note": "move hour 1: release error 1 - postponed a day",
+      "seq": 27
+    },
+    {
+      "role": "c",
+      "cmd": "mark F2 HOLD1",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Handover\\] mv\\|.*: postponed to day",
+          "within_s": 90,
+          "since_prev_step": true
+        }
+      ],
+      "seq": 28
+    },
+    {
+      "role": "c",
+      "cmd": "movenow",
+      "expect_result": "^OK movenow cross=1",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.*: CANCELLED - the origin '[^']+' could not be released 2 times in a row",
+          "within_s": 90,
+          "since_prev_step": true
+        }
+      ],
+      "note": "move hour 2: release error 2 - the move is cancelled",
+      "seq": 29
+    },
+    {
+      "role": "c",
+      "cmd": "mark F2 CANCELLED",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Merger\\] move mv\\|.* CANCELLED \\(origin not released twice; removed=True\\); nothing charged",
+          "within_s": 90,
+          "since_prev_step": true
+        }
+      ],
+      "seq": 30
+    },
+    {
+      "role": "h",
+      "cmd": "mark F2 TOLD",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] shown: \\\"The moving company couldn't move .+ to .+, so the move was cancelled\\.\\\" \\(booking ${mid}",
+          "within_s": 90,
+          "since_prev_step": true
+        }
+      ],
+      "note": "OUTCOME: the approved line on the booker's game",
+      "seq": 31
+    },
+    {
+      "role": "c",
+      "cmd": "movenow",
+      "expect_result": "^OK movenow cross=0 ",
+      "note": "OUTCOME: the booking is gone on the destination's game",
+      "seq": 32
+    },
+    {
+      "role": "h",
+      "cmd": "mycontracts",
+      "expect_result": "^OK mycontracts",
+      "refute_result": "${mid}",
+      "note": "OUTCOME: the booking is gone from the booker's list",
+      "seq": 33
+    },
+    {
+      "role": "h",
+      "cmd": "movestate",
+      "expect_result": "\\[mv\\|[^\\]]*${mid} state=cancelled outcome=cancelled charged=False",
+      "note": "OUTCOME (T2): the move's own record says cancelled, never charged; it stays until the destination's save covers the cancel (fold F3)",
+      "seq": 34
+    },
+    {
+      "role": "h",
+      "cmd": "movestate",
+      "expect_result": "cancelShown=1$",
+      "note": "OUTCOME: the approved line was shown once on the booker's game",
+      "seq": 35
+    },
+    {
+      "role": "c",
+      "cmd": "movestate",
+      "expect_result": "cancelShown=0$",
+      "note": "OUTCOME (T3): the destination's game (not the booker) never showed it",
+      "seq": 36
+    },
+    {
+      "role": "h",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "items=${xi} .*${xid}",
+      "note": "OUTCOME: the origin's contents intact",
+      "seq": 37
+    },
+    {
+      "role": "h",
+      "cmd": "vehlist ${hostWh}",
+      "expect_result": "n=${xv} ",
+      "seq": 38
+    },
+    {
+      "role": "h",
+      "cmd": "mark F2 NOCHARGE",
+      "expect_result": "OK MARK",
+      "note": "OUTCOME: nothing charged - no hand-over was applied",
+      "seq": 39
+    },
+    {
+      "role": "h",
+      "cmd": "movefault off",
+      "expect_result": "OK movefault ''",
+      "seq": 40
+    },
+    {
+      "role": "h",
+      "cmd": "mark N1 WAITING",
+      "expect_result": "OK MARK",
+      "seq": 41
+    },
+    {
+      "role": "c",
+      "cmd": "enterbuilding ${clientWh}",
+      "expect_result": "^OK",
+      "note": "PREMISE SET UP (N1): the destination's player is inside, so its game's move waits after the release",
+      "seq": 42
+    },
+    {
+      "role": "c",
+      "sleep_s": 3,
+      "seq": 43
+    },
+    {
+      "role": "h",
+      "cmd": "mergermove ${hostWh} ${clientWh} 1 -",
+      "expect_result": "^OK mergermove routed",
+      "capture": {
+        "mid2": "id ([0-9a-f]+)\\)"
+      },
+      "seq": 44
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 45
+    },
+    {
+      "role": "h",
+      "cmd": "mycontracts",
+      "expect_result": "^OK mycontracts.*${mid2}",
+      "note": "PREMISE: the booking is listed on the booker's game",
+      "seq": 46
+    },
+    {
+      "role": "c",
+      "cmd": "movenow",
+      "expect_result": "^OK movenow cross=1",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.*${mid2}: the destination's player is inside - re-delivered at its next move hour",
+          "within_s": 90,
+          "since_prev_step": true
+        }
+      ],
+      "note": "released and dropped; the delivery waits (player inside)",
+      "seq": 47
+    },
+    {
+      "role": "h",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "items=0 ",
+      "note": "PREMISE: the origin gave its contents up - the package is at the host",
+      "seq": 48
+    },
+    {
+      "role": "h",
+      "cmd": "cancelbooking ${mid2}",
+      "expect_result": "^OK cancelbooking sent for '${mid2}'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.*${mid2}: its booker cancelled the move after the release - delivered again",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.*${mid2}: the destination's game did not move \\(nocontract\\) - nothing charged; the package goes home",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.*${mid2}: RETURNED to '[^']+' - [1-9]\\d* record\\(s\\) back",
+          "within_s": 60
+        }
+      ],
+      "note": "N1: the booker cancels while the delivery waits",
+      "seq": 49
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 50
+    },
+    {
+      "role": "h",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "items=${xi} .*${xid}",
+      "note": "OUTCOME (N1): the origin's contents are back",
+      "seq": 51
+    },
+    {
+      "role": "h",
+      "cmd": "vehlist ${hostWh}",
+      "expect_result": "n=${xv} ",
+      "seq": 52
+    },
+    {
+      "role": "h",
+      "cmd": "movestate",
+      "expect_result": "\\[mv\\|[^\\]]*${mid2} state=(return|closed) outcome=returned charged=False",
+      "note": "OUTCOME (N1): returned, never charged",
+      "seq": 53
+    },
+    {
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK",
+      "seq": 54
+    },
+    {
+      "role": "h",
+      "cmd": "mark TEST CROSSMOVEFAIL END",
+      "expect_result": "OK MARK",
+      "seq": 55
+    }
+  ]
+}
