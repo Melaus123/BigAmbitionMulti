@@ -525,7 +525,7 @@ namespace BigAmbitionsMP
             {
                 RemotePlayerManager.RemoveAll();
                 try { TrafficSync.RefeedAnchors("host lost"); } catch { }   // H-SVC-116: the avatars just died — never leave Gley holding them
-                TimeSync.EndStartupHold();
+                TimeSync.EndClientSessionHold();   // T-25: ends a standing hold and drops this session's early-release note
                 // Shared-shop management (permission feature): the link is gone, so no shop is shared with this
                 // player any more — an open page on one rebuilds itself (ruling 5). A reconnect re-pushes the set.
                 try { GrantSync.SetSharedManage(null); } catch { }

@@ -76,6 +76,29 @@ namespace BigAmbitionsMP
             get => (System.DateTime.UtcNow - _releasedBeforeHoldAtUtc).TotalSeconds < 90.0;
             set => _releasedBeforeHoldAtUtc = value ? System.DateTime.UtcNow : System.DateTime.MinValue;
         }
+        // T-25 (host stuck on the wait screen): the note is SESSION-SCOPED. It is the CLIENT's answer to the host's
+        // release beating its own hold, so only a release that reaches a client notes it (never the client's own
+        // disconnect, which used to note one on every drop and failed join), it dies when that client session ends
+        // (EndClientSessionHold), and a HOST never consults it - the host decides its own release. A note left by a
+        // failed join made the host's next BeginStartupHold skip, so the host's release found no hold and the
+        // movement soft-hold it owed was never lifted.
+        private static System.DateTime _clientSessionEndedAtUtc = System.DateTime.MinValue;
+
+        private static void ClearEarlyReleaseNote(string why)
+        {
+            if (!_releasedBeforeHold) { _releasedBeforeHoldAtUtc = System.DateTime.MinValue; return; }
+            _releasedBeforeHold = false;
+            Plugin.Logger.LogInfo($"[TimeSync] Early-release note dropped ({why}) — it only applies to the client session that received it (T-25).");
+        }
+
+        // T-25: the ONE place every way out of a startup hold runs - released, skipped, or released before it began.
+        // Each ends unpaused and lifts the host's movement soft-hold (engaged before the hold, MPCanvasUI
+        // TickOverlayFreezeGate), so no branch can leave the soft-hold on with no hold left to end it.
+        private static void RunUnpaused(string why)
+        {
+            GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
+            MPCanvasUI.ReleaseHostSoftHold(why);   // round-205: host movement unlocks with everyone else
+        }
 
         /// <summary>True while the game is frozen waiting for all players to load.</summary>
         public static bool IsStartupHeld => _startupHold;
@@ -85,14 +108,22 @@ namespace BigAmbitionsMP
         public static void BeginStartupHold()
         {
             if (_startupHold) return;
-            if (_releasedBeforeHold)
+            if (MPServer.IsRunning)
+            {
+                // T-25: the host decides its own release - an early-release note is never the host's to act on.
+                double sinceClientEnd = (System.DateTime.UtcNow - _clientSessionEndedAtUtc).TotalSeconds;
+                if (sinceClientEnd < 90.0)
+                    Plugin.Logger.LogInfo($"[TimeSync] Host startup hold begins {sinceClientEnd:F0}s after this machine's client session ended — holding normally (T-25).");
+                ClearEarlyReleaseNote("host begins its own hold");
+            }
+            else if (_releasedBeforeHold)
             {
                 _releasedBeforeHold = false;
                 // Round-36c: skipping the hold must STILL end unpaused — the load/menu set the native
                 // pause and no release will follow to clear it (the one that arrived already ran its
                 // early path). Without this, the skip path left the pause FLAG stuck on the client.
-                GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
                 Plugin.Logger.LogInfo("[TimeSync] Startup hold SKIPPED — the release for this load already arrived (fast host / menu-reload ordering).");
+                RunUnpaused("startup hold skipped");
                 return;
             }
             _startupHold = true;
@@ -124,7 +155,25 @@ namespace BigAmbitionsMP
         }
 
         /// <summary>Release the startup hold — resumes the game at normal speed.</summary>
-        public static void EndStartupHold()
+        public static void EndStartupHold() => EndStartupHold(noteEarlyRelease: true);
+
+        /// <summary>T-25: this machine's CLIENT session ended (disconnect, failed join, leave). Releases a standing
+        /// hold like any release (we must not stay frozen after losing the host) but leaves no early-release note
+        /// behind, and drops one the session left - a later session, above all a hosted one, must not skip on it.</summary>
+        public static void EndClientSessionHold()
+        {
+            // The session is over: the world-sync gate (never unfreeze onto an unsynced world) no longer applies -
+            // there is no more host data coming, and a deferred release would be cancelled by the menu's clock
+            // reset while the freeze stayed on. Release now, once, past the gate.
+            _releaseDeferred = false;
+            _forceNextRelease = true;
+            EndStartupHold(noteEarlyRelease: false);
+            _forceNextRelease = false;
+            ClearEarlyReleaseNote("client session ended");
+            _clientSessionEndedAtUtc = System.DateTime.UtcNow;
+        }
+
+        private static void EndStartupHold(bool noteEarlyRelease)
         {
             // CLIENT world-sync gate: never unfreeze onto an unsynced world.
             if (_forceNextRelease) { _forceNextRelease = false; }
@@ -140,17 +189,22 @@ namespace BigAmbitionsMP
             }
             if (!_startupHold)
             {
-                _releasedBeforeHold = true;   // arrived before our hold began — remember it (round-18)
                 // Round-36c: the release's INTENT is "run unpaused" regardless of hold state — the game's
                 // own load pause may still be standing; clear it now, not only on the full-release path.
-                GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
-                Plugin.Logger.LogInfo("[TimeSync] Startup release received BEFORE the hold began — remembered; the pending hold will be skipped.");
+                // T-25: only a release reaching a CLIENT is remembered (round-18) - the host never skips its hold.
+                if (noteEarlyRelease && !MPServer.IsRunning)
+                {
+                    _releasedBeforeHold = true;   // arrived before our hold began — remember it (round-18)
+                    Plugin.Logger.LogInfo("[TimeSync] Startup release received BEFORE the hold began — remembered; the pending hold will be skipped.");
+                }
+                else
+                    Plugin.Logger.LogInfo($"[TimeSync] Startup release with no hold standing ({(noteEarlyRelease ? "host" : "client session ended")}) — nothing to remember.");
+                RunUnpaused("release with no hold standing");
                 return;
             }
             _startupHold = false;
             ApplyNetwork(1f);
-            GameStatePatcher.EnqueueOnMainThread(() => GameStateReader.SetNativePause(false));
-            MPCanvasUI.ReleaseHostSoftHold("startup hold released");   // round-205: host movement unlocks with everyone else
+            RunUnpaused("startup hold released");
             MPLoadProfiler.Mark("FREEZE end — game running");
             Plugin.Logger.LogInfo("[TimeSync] Startup hold released — game running.");
         }
@@ -759,7 +813,8 @@ namespace BigAmbitionsMP
             }
             // Round-36: the early-release marker is deliberately NOT cleared here anymore — the scene-ready
             // reset ran BETWEEN the early release and the hold engage (log-proven), wiping the marker the
-            // hold needed. Its 90s validity window handles staleness instead.
+            // hold needed. Its 90s validity window handles staleness instead; T-25: it also dies with the client
+            // session that noted it (EndClientSessionHold) and a host never consults it.
         }
 
         /// <summary>

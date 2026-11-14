@@ -1,0 +1,96 @@
+{
+  "id": "T-STARTUPHOLD",
+  "title": "T-25 (2026-11-13): a failed join followed at once by hosting must not leave the host on the 'Waiting for all players' screen. The client-session end of the failed join (MPClient disconnect -> TimeSync.EndClientSessionHold) must leave NO early-release note, the host's BeginStartupHold must hold normally (never SKIP), and the host's own release must end the hold AND lift the host's movement soft-hold. Host-only: the client instance is launched (the rig's minimum is 2) but stays idle in the main menu. NO save.",
+  "preconditions": "Dev build with the T-25 fix. Fixture save1 (host melaus). Nothing listens on localhost:7799. PREMISE: the bug needed the host's hold to begin within 90 s of the failed join's disconnect (the old note's validity window); step 5 asserts it with the host's '[TimeSync] Host startup hold begins Ns after this machine's client session ended' line, which TimeSync logs only when that gap is under 90 s - if the save loads slower the step FAILs as 'premise not met', not as a pass. The client's own early-release path (release before its hold, round-18/36) is not exercised here: no existing scenario covers it and no lever forces that ordering.",
+  "instances": 2,
+  "vars": {
+    "hostPid": "melaus",
+    "session": "save1",
+    "deadAddr": "localhost:7799"
+  },
+  "oracles_absent": [
+    "HarmonyException",
+    "Patching exception",
+    "\\[TimeSync\\] Startup hold SKIPPED",
+    "\\[TimeSync\\] Startup release received BEFORE the hold began",
+    "\\[TimeSync\\] Early-release note dropped \\(host begins its own hold\\)"
+  ],
+  "oracles_report": [
+    "\\[TimeSync\\]",
+    "\\[FreezeGate\\] host soft-hold",
+    "\\[Client\\] disconnect"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "mark TEST STARTUPHOLD START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "join ${deadAddr}",
+      "expect_result": "^OK Connect\\(",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TimeSync\\] Startup release with no hold standing \\(client session ended\\)",
+          "within_s": 45
+        }
+      ],
+      "note": "the failed join's disconnect ends the client session with no hold standing; before T-25 this logged 'Startup release received BEFORE the hold began' and left a 90 s note"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "mark TEST STARTUPHOLD HOST SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TimeSync\\] Host startup hold begins \\d+s after this machine's client session ended",
+          "within_s": 150,
+          "since_prev_step": true
+        },
+        {
+          "role": "h",
+          "regex": "\\[TimeSync\\] Startup hold released",
+          "within_s": 150,
+          "since_prev_step": true
+        },
+        {
+          "role": "h",
+          "regex": "\\[FreezeGate\\] host soft-hold RELEASED \\(startup hold released\\)",
+          "within_s": 150,
+          "since_prev_step": true
+        },
+        {
+          "role": "h",
+          "regex": "\\[Settle\\] world settled \\(host",
+          "within_s": 150,
+          "since_prev_step": true
+        }
+      ],
+      "note": "premise (hold began under 90 s after the failed join), then the host's own release ends the hold and lifts the movement soft-hold"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    }
+  ]
+}
