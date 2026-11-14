@@ -1,0 +1,321 @@
+{
+  "id": "T-13-DIRTAWAY",
+  "title": "T-13: the owner's cleaning staff clean the owner's shop while the owner stands OUTSIDE; the game's hourly pass changes the dirt with no event, and the owner's hourly dirt upload brings the host to the owner's value",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX; no merger). Client-owned liquor store '56 ba:street_fifthavenue' (t-mop-helper's client shop) [?] open with a cleaner on shift at the hours `clock next` crosses - if the owner's dirt does not move in the cleaning hour, step C-CLEANED says so. Dev build with T-13 (InteriorSync hourly dirt seam) and the holdcleaning / dirtseed / dirtstate / clock levers. No save step.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "clientShop": "56 ba:street_fifthavenue"
+  },
+  "oracles_absent": [
+    "HarmonyException",
+    "Patching exception",
+    "NullReferenceException",
+    "owner dirt sync rejected",
+    "\\[InteriorSync\\] owner dirt sweep \\(",
+    "\\[InteriorSync\\] hourly dirt seam:"
+  ],
+  "oracles_report": [
+    "\\[InteriorSync\\] Sent owner DIRT sync",
+    "\\[TestDrive\\] holdcleaning",
+    "\\[Settle\\] 'owner-dirt-hourly' deferred",
+    "owner dirt sync held"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "mark TEST DIRTAWAY HOST SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Settle\\] world settled \\(host",
+          "within_s": 150,
+          "since_prev_step": true
+        }
+      ],
+      "note": "waits for the host's own settle line"
+    },
+    {
+      "seq": 4,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 5,
+      "note": "the join request reaches the host (t-buildingsale's opening)"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "mark TEST DIRTAWAY CLIENT SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 180,
+          "since_prev_step": true
+        }
+      ],
+      "note": "the client's settle wait, right after the join completes (acceptjoin), before any other step"
+    },
+    {
+      "seq": 8,
+      "role": "both",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "pause off",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false,
+      "note": "a fixture can load a player inside a building"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "sleep_s": 6
+    },
+    {
+      "seq": 14,
+      "role": "both",
+      "cmd": "mark TEST DIRTAWAY START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "holdcleaning on ${clientShop}",
+      "expect_result": "^OK holdcleaning on .*held=True",
+      "note": "hold the OWNER's hourly cleaning pass before planting, so the planted dirt survives until the release"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "enterbuilding ${clientShop}",
+      "expect_result": "^OK",
+      "note": "the owner builds its dirt lattice (dirtseed needs it)"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "enterbuilding ${clientShop}",
+      "expect_result": "^OK",
+      "note": "the host builds its lattice for the client's shop too, so its dirtstate reads have cells to read"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "sleep_s": 10
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "exitbuilding",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "sleep_s": 8
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "holdcleaning status",
+      "expect_result": "^OK holdcleaning status addr='' ",
+      "note": "PREMISE: the owner is OUTSIDE (no building -> the status names no address)"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "dirtseed ${clientShop} 60 9",
+      "expect_result": "^OK dirtseed .*dirtyNow=[1-9]",
+      "note": "plant visible dirt from outside; the lever's force push carries it to the host"
+    },
+    {
+      "seq": 24,
+      "role": "c",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": "^OK dirtstate .*over5=[1-9]",
+      "note": "C-SEEDED"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "sleep_s": 10
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": "^OK dirtstate .*over5=[1-9]",
+      "note": "PREMISE: the host reads the planted dirt"
+    },
+    {
+      "seq": 27,
+      "role": "both",
+      "cmd": "mark TEST DIRTAWAY HELD HOUR",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "clock next",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] holdcleaning: skipped the hourly cleaning pass on '${clientShop}'",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ],
+      "note": "PREMISE: the host's hour roll runs the OWNER's hourly dirt pass on the client (held here, so nothing is cleaned)"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": "^OK dirtstate .*over5=[1-9]",
+      "capture": {
+        "cHeldSum": " sum=(\\d+) max="
+      },
+      "note": "C-HELD: the owner's value before the cleaning hour (customer dirt bulks may have landed in the held hour)"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "cmd": "holdcleaning off ${clientShop}",
+      "expect_result": "^OK holdcleaning off .*held=False"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "holdcleaning status",
+      "expect_result": "^OK holdcleaning status addr='' ",
+      "note": "the owner is still OUTSIDE when the cleaning hour runs"
+    },
+    {
+      "seq": 33,
+      "role": "both",
+      "cmd": "mark TEST DIRTAWAY CLEAN HOUR",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "clock next",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[InteriorSync\\] Sent owner DIRT sync \\(hourly\\) addr='${clientShop}'",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ],
+      "note": "T-13: the owner's staff clean while the owner stands outside; the hourly seam uploads the change"
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "holdcleaning status",
+      "expect_result": "^OK holdcleaning status addr='' ",
+      "note": "the upload above was made from OUTSIDE (the 2 s current-building path was not the sender)"
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": "^OK dirtstate",
+      "refute_result": " sum=${cHeldSum} max=",
+      "capture": {
+        "cPostOver5": " over5=(\\d+) ",
+        "cPostSum": " sum=(\\d+) max="
+      },
+      "note": "C-CLEANED: the cleaning hour moved the owner's dirt"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "dirtstate ${clientShop}",
+      "expect_result": "^OK dirtstate .* over5=${cPostOver5} sum=${cPostSum} max=",
+      "note": "T-13: the host reads the owner's value within one cycle (it kept the planted dirt before the fix)",
+      "abort_on_fail": false
+    },
+    {
+      "seq": 39,
+      "role": "both",
+      "cmd": "holdcleaning off",
+      "abort_on_fail": false,
+      "note": "hygiene: no hold left armed"
+    },
+    {
+      "seq": 40,
+      "role": "both",
+      "cmd": "mark TEST DIRTAWAY END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

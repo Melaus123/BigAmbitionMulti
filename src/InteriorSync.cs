@@ -99,6 +99,7 @@ namespace BigAmbitionsMP
             _lastLocalOwnerVolatileAt.Clear();
             _lastDirtHashByAddr.Clear();            // v10
             _lastLocalOwnerDirtByAddr.Clear();      // v10
+            _ownerDirtSweepDue = false;             // T-13
             _lastLocalOwnerNonCargoByAddr.Clear();  // v10
             _applyTimes.Clear();
             _loopWarnedAt.Clear();
@@ -647,6 +648,11 @@ namespace BigAmbitionsMP
                     if (SendLocalOwnerSnapshot(a, force: true, reason: "resync-answer", seedOrHeal: true))
                         ClearPendingResyncAnswer(a);
             }
+            // T-13: the game's hourly pass (cleaning staff, customer dirt bulks) changed the dirt of owned buildings
+            // nobody is standing in - upload each change once the world is settled; a placement-quiesced address
+            // keeps the sweep due, so the next tick retries it (unchanged addresses send nothing on the re-run).
+            if (_ownerDirtSweepDue && MPWorldReady.AssertSettledFor("owner-dirt-hourly"))
+                _ownerDirtSweepDue = !SweepOwnedDirt("hourly");
             if (string.IsNullOrEmpty(_localOwnerAddress)) return;
             float now = UnityEngine.Time.realtimeSinceStartup;
             if (now - _lastOwnerPollAt < PollIntervalSeconds) return;
@@ -1035,24 +1041,16 @@ namespace BigAmbitionsMP
                 // not make the next stripped tick look changed); the schedule's own trigger is oschedChanged above.
                 var keptSchedule = snap.CustomerEntries;
                 snap.CustomerEntries = new List<CustomerEntryInfo>();
-                var (ohs, ohv, ohn, ohd) = ComputeHashes(snap);
+                var (ohs, ohv, ohn, _) = ComputeHashes(snap);   // T-13: the owner's dirt band is OwnerDirtBand's own fingerprint
                 snap.CustomerEntries = keptSchedule;
                 float onow = UnityEngine.Time.realtimeSinceStartup;
                 // v10 (T7/ruling 33): dirt is its own band and no longer perturbs `full` — a
                 // dirt-only change ships as a tiny InteriorDirtSync (owner → host keeps the cache
                 // and the save current; the host forwards to inside-players only). Checked BEFORE
                 // the full gate; a force push carries DirtSpots in the full snapshot below anyway.
-                if (!_lastLocalOwnerDirtByAddr.TryGetValue(addressKey, out var pDirt) || pDirt != ohd)
-                {
-                    _lastLocalOwnerDirtByAddr[addressKey] = ohd;
-                    if (!force)
-                    {
-                        var dirtUp = BuildDirtSync(snap);
-                        MPClient.SendInteriorDirtSync(dirtUp);
-                        MopProbe.OwnerDirtSent(addressKey, dirtUp, "owner upload", true);   // [PROBE:P-CLEANLOOP] log-only: why the owner re-sent
-                        Plugin.Logger.LogInfo($"[InteriorSync] Sent owner DIRT sync ({reason}) addr='{addressKey}': {dirtUp.Spots.Count} dirty spot(s) (v10).");
-                    }
-                }
+                // T-13: one fingerprint and one send path with the hourly sweep (OwnerDirtBand reads reg.dirtSpots).
+                var dirtReg = GameStatePatcher.FindRegistration(addressKey);
+                if (dirtReg != null) OwnerDirtBand(dirtReg, addressKey, reason, send: !force);
                 if (!force)
                 {
                     bool fullChanged = !_lastLocalOwnerHashByAddr.TryGetValue(addressKey, out var prev) || prev != ohv;
@@ -2553,6 +2551,85 @@ namespace BigAmbitionsMP
             return p;
         }
 
+        // -- T-13: owner dirt changed by the game's hourly pass while the owner stands elsewhere ---------------------------
+        // BuildingCleanlinessHelper.RunHourly (decompile BuildingCleanlinessHelper.cs:22-36: ApplyDirtBulks, then
+        // SimulateCleaning for every rented open shop) writes reg.dirtSpots of EVERY owned shop with no event; the 2 s
+        // tick only polls the building the owner is inside. The owner is the authority for its shop's dirt (the host's
+        // copy is not RentedByPlayer there, so the host's own pass never cleans it), so the owner publishes each change.
+        // CLIENT ONLY: for the host's own shops the host world IS the source - visitors read it at entry and the
+        // subscriber Tick's dirt band covers players inside - so the host has no upload to make.
+        private static bool _ownerDirtSweepDue;
+
+        /// <summary>T-13: the one dirt-value term (0.1 steps) - the owner band and the snapshot band fold the same.</summary>
+        internal static int DirtTerm(float dirtiness) => ((int)System.Math.Round(dirtiness * 10f)).GetHashCode();
+
+        /// <summary>T-13: the owner's dirt band for one building, read straight from reg.dirtSpots (no snapshot):
+        /// fingerprint against the last one recorded for this address; on a change record it and, when
+        /// <paramref name="send"/>, upload the absolute dirty set (InteriorDirtSync, lattice-index keyed).
+        /// A force push passes send=false: its full snapshot carries the dirt, only the baseline moves.
+        /// No lattice = no knowledge (round-177): nothing recorded, nothing sent. Returns true on a change.</summary>
+        private static bool OwnerDirtBand(BuildingRegistration reg, string addressKey, string reason, bool send)
+        {
+            var spots = reg.dirtSpots;
+            if (spots == null || spots.Count == 0) return false;
+            int hd = 17;
+            unchecked { for (int i = 0; i < spots.Count; i++) hd = hd * 31 + DirtTerm(spots[i]?.dirtiness ?? 0f); }
+            if (_lastLocalOwnerDirtByAddr.TryGetValue(addressKey, out var prev) && prev == hd) return false;
+            _lastLocalOwnerDirtByAddr[addressKey] = hd;
+            if (!send) return true;
+            var p = new InteriorDirtSyncPayload { AddressKey = addressKey };
+            try { p.PlaythroughId = MPSaveCoordinator.ActivePlaythroughId ?? ""; } catch { }
+            for (int i = 0; i < spots.Count; i++)
+            {
+                var ds = spots[i];
+                if (ds != null && ds.dirtiness > 0f)
+                    p.Spots.Add(new DirtSpotDeltaInfo { Index = i, X = ds.x, Z = ds.z, Dirtiness = ds.dirtiness });
+            }
+            MPClient.SendInteriorDirtSync(p);
+            MopProbe.OwnerDirtSent(addressKey, p, "owner upload", true);   // [PROBE:P-CLEANLOOP] log-only: why the owner re-sent
+            Plugin.Logger.LogInfo($"[InteriorSync] Sent owner DIRT sync ({reason}) addr='{addressKey}': {p.Spots.Count} dirty spot(s) (v10).");
+            return true;
+        }
+
+        /// <summary>T-13: one pass of OwnerDirtBand over every building this machine is owner-authoritative for
+        /// (IsLocalOwnerBusiness). False while any address is mid-placement here (PlacementQuiescedAt), so the
+        /// caller keeps the sweep due and retries it.</summary>
+        private static bool SweepOwnedDirt(string reason)
+        {
+            var gi = SaveGameManager.Current;
+            if (gi?.BuildingRegistrations == null) return true;
+            bool done = true;
+            foreach (var reg in gi.BuildingRegistrations)
+            {
+                try
+                {
+                    if (reg == null || !IsLocalOwnerBusiness(reg)) continue;
+                    string addr = GameStateReader.AddressKey(reg);
+                    if (string.IsNullOrEmpty(addr)) continue;
+                    // The building the owner stands in is re-checked by the 2 s owner poll, so a placement there
+                    // must not keep the hourly sweep due (it would re-run every frame for the whole drag).
+                    if (PlacementQuiescedAt(addr, "owner-dirt-hourly")) { if (addr != _localOwnerAddress) done = false; continue; }
+                    OwnerDirtBand(reg, addr, reason, send: true);
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] owner dirt sweep ({reason}): {ex.Message}"); }
+            }
+            return done;
+        }
+
+        /// <summary>T-13: the seam - right after the game's hourly dirt pass (GameManager.cs:610 ->
+        /// BuildingCleanlinessHelper.RunHourly, public static void, no arguments). Marks the sweep due;
+        /// TickClientOwner runs it behind the settle gate.</summary>
+        [HarmonyLib.HarmonyPatch(typeof(Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanlinessHelper),
+                                 nameof(Buildings.BuildingTypes.Shared.Dirtiness.BuildingCleanlinessHelper.RunHourly))]
+        public static class Patch_BuildingCleanlinessHelper_RunHourly_OwnerDirt
+        {
+            static void Postfix()
+            {
+                try { if (MPClient.IsConnected && !MPServer.IsRunning) _ownerDirtSweepDue = true; }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[InteriorSync] hourly dirt seam: {ex.Message}"); }
+            }
+        }
+
         /// <summary>v10 (review m4): does THIS machine own the building at addressKey? Guards the
         /// host→owner full-repush request so a host cannot make a guest upload an arbitrary replica.</summary>
         internal static bool OwnsAddressLocally(string addressKey)
@@ -2740,7 +2817,7 @@ namespace BigAmbitionsMP
                 foreach (var ds in snap.DirtSpots)
                 {
                     S(ds.X); S(ds.Z);
-                    D(((int)System.Math.Round(ds.Dirtiness * 10f)).GetHashCode());   // 0.1 steps, as before
+                    D(DirtTerm(ds.Dirtiness));   // 0.1 steps, as before (T-13: the term OwnerDirtBand folds too)
                 }
                 foreach (var it in snap.ItemInstances)
                 {
