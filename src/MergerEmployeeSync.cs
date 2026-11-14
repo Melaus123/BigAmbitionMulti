@@ -153,12 +153,15 @@ namespace BigAmbitionsMP
                 bool candidate = false; try { candidate = e.IsCandidate; } catch { }
                 seenOwn.Add(e.id);
                 string prevOwn = _lastOwnAddr.TryGetValue(e.id, out var pv) ? pv : addr;
-                bool outbound = addr.Length > 0 && !candidate && MergerFlip.IsFlipped(addr);
+                // T-16: a shop this machine runs as a stand-in is NOT a partner's shop here - the hand-over made its staff this
+                // save's own records, and the host (rightly) refuses a move whose two ends are both this machine.
+                bool partnerShop = addr.Length > 0 && MergerFlip.IsFlipped(addr) && !MergerAbsence.SimulatesHere(addr);
+                bool outbound = !candidate && partnerShop;
                 _pendingAdopt.TryGetValue(e.id, out var sentAt);
                 bool inFlight = sentAt > 0f && Time.unscaledTime - sentAt < 30f;
                 if (!outbound && !inFlight) _lastOwnAddr[e.id] = addr;   // settled on the machine that runs it
 
-                if (addr.Length == 0 || !MergerFlip.IsFlipped(addr)) continue;   // my own record only migrates INTO a partner's shop
+                if (!partnerShop) continue;   // my own record only migrates INTO a partner's shop (one this machine does not run)
                 if (candidate) continue;   // negotiate first — the transfer happens once they're hired
 
                 // RIG-12 + T1(g) r2: MY OWN employee pointed at a PARTNER's shop used to take the adopt-OUT
