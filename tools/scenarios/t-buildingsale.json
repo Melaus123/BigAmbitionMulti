@@ -1,0 +1,1285 @@
+{
+  "id": "T-BUILDINGSALE",
+  "title": "T-50 (2026-11-13): players buy buildings from each other - the game's own buy box on another player's deed becomes a hub offer (Kind=building) to that owner; Accept moves the deed (host ledger + both games), the money once each way as the game's own building bought/sold transactions, the rent income to the buyer; a seller who keeps renting pays the buyer the game's own daily rent once per day; an offline owner is refused up front; a seller killed before applying finishes after rejoin; a Hamptons house is refused; fold: escrow-first legs, crash after applied legs (seller and buyer, host sells and host buys), retire only once saved; fold 2: a refund when the seller never releases (deadline lever), a lost money confirmation, the host killed after its own money leg (exact balances across relaunch), a buyer left at exactly $0",
+  "preconditions": "Fixture save1 (host melaus, client Client1; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA== owns for-rent buildings). Dev build with the T-50 levers (bldoffer, hubanswer, deedstate, xferstate, xferhold, txlines, bldrent, deedset, bldhampton, moneymark, moneydelta - BuildingSale.cs) and T-33's rivalrent buy / realbuy. The client gets +9M (spend lever) for two real buys and stays under 16,777,216 (float money holds only even numbers above it); the host pays 250,000 + 300,000 from its own money. Amounts are proven exact by the tagged transaction lines (txlines tagged=1 taggedsum=...). The scenario SAVES (save lever) into the fixture, which the rig resets. T6 needs the Hamptons DLC on the rig (asserted). Fold 2 levers: xferdrop (one confirmation lost), xferdeadline (DEV override of RefundAfterDays).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1",
+    "rival": "ju1yVbREcE2B5ymg6q5tyA=="
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[BldSale\\] (host tick|host message|leg|accept prepare|offer answer|replay to|day-change rent report|slot cash stamp)[^:]*: ",
+    "\\[Server\\] LoanOffer kind=building",
+    "\\[Buy\\] SendBuyBuildingOffer prefix:",
+    "\\[Buy\\] claim answer:",
+    "\\[TestDrive\\] .*'(bldoffer|hubanswer|deedstate|xferstate|xferhold|xferdrop|xferdeadline|spend|txlines|bldrent|deedset|bldhampton|moneymark|moneydelta)[^']*'.*ERR"
+  ],
+  "oracles_report": [
+    "\\[BldSale\\] ",
+    "\\[Hub\\] offer ",
+    "\\[Buy\\] ",
+    "\\[TestDrive\\] .* '(bldoffer|hubanswer|deedstate|xferstate|txlines)",
+    "\\[DevShown\\] "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "mark TEST BUILDINGSALE HOST SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Settle\\] world settled \\(host",
+          "within_s": 150,
+          "since_prev_step": true
+        }
+      ],
+      "note": "waits for the host's own settle line"
+    },
+    {
+      "seq": 4,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "sleep_s": 5,
+      "note": "the join request reaches the host (t-buyowned's opening)"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "mark TEST BUILDINGSALE CLIENT SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 180,
+          "since_prev_step": true
+        }
+      ],
+      "note": "waits for the client's own settle line"
+    },
+    {
+      "seq": 8,
+      "role": "both",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "spend -9000000",
+      "expect_result": "^OK spend amount=9000000\\.00 money=",
+      "note": "PREMISE: the client can pay for two real buys and stays under 16,777,216"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "cmd": "rivalrent find ${rival}",
+      "expect_result": "^OK rivalrent find rival=${rival} owned=\\d+ forrent=[1-9]",
+      "capture": {
+        "addrA": "first=(.+?) \\["
+      },
+      "note": "an unlisted building to give the client"
+    },
+    {
+      "seq": 11,
+      "role": "c",
+      "cmd": "rivalrent buy ${addrA}",
+      "expect_result": "^OK rivalrent buy sent addr='${addrA}' .*owned=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Server\\] BuyRequest: ${addrA} \\S+ owned by ${clientPid}",
+          "within_s": 15
+        }
+      ],
+      "note": "PREMISE: Client1 holds the deed of A (unlisted)"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "realbuy find 2",
+      "expect_result": "^OK realbuy find n=2 ",
+      "capture": {
+        "addrB": "a1='([^']+)'",
+        "addrC": "a2='([^']+)'"
+      }
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "realbuy ${addrB}",
+      "expect_result": "^OK realbuy addr='${addrB}' ",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patch\\] Client bought ${addrB} locally",
+          "within_s": 15
+        }
+      ],
+      "note": "PREMISE: Client1 holds B (T5)"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "realbuy ${addrC}",
+      "expect_result": "^OK realbuy addr='${addrC}' ",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patch\\] Client bought ${addrC} locally",
+          "within_s": 15
+        }
+      ],
+      "note": "PREMISE: Client1 holds C (T4)"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "cmd": "deedstate ${addrA}",
+      "expect_result": "^OK deedstate addr='${addrA}' owned=False .* deed=${clientPid}$",
+      "note": "PREMISE: the host's ledger names Client1"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "bldrent ${addrA}",
+      "expect_result": "^OK bldrent addr='${addrA}' rented=True owned=True ",
+      "note": "PREMISE (T3): Client1 also runs a tenancy in A through the game's own RentBuilding - it stays after the sale"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[MPSave\\] Stored '[^']+' \\.hsg",
+          "within_s": 90,
+          "since_prev_step": true
+        }
+      ],
+      "note": "PREMISE (fold F8): the seller's served save (the host's stored copy) holds A, B and C before any sale - T5/T7 assert the replay finds them there (inList=True)"
+    },
+    {
+      "seq": 18,
+      "role": "both",
+      "cmd": "mark TEST BUILDINGSALE T1",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 19,
+      "role": "h",
+      "cmd": "bldoffer ${addrA} 100000",
+      "expect_result": "^OK bldoffer addr='${addrA}' amount=100000\\.00 .* otherDeed=True outgoing=1$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] offer \\S+ on '${addrA}' by ${hostPid} @ 100000 SENT to the deed holder ${clientPid}",
+          "within_s": 5
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] shown: Offer sent to ${clientPid}\\. Track it in the Business app\\.",
+          "within_s": 5
+        }
+      ],
+      "note": "TEST: the game's own buy box on the guest's unlisted building sends an offer to its owner and shows the existing offer-sent line (no money moves)"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "xferstate",
+      "expect_result": "^OK xferstate .* in=\\[\\S+:${addrA}:${hostPid}:100000\\.00\\] ",
+      "note": "TEST: the owner's Business-app inbox holds the building offer"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "hubanswer last decline",
+      "expect_result": "^OK hubanswer id=\\S+ kind=building addr='${addrA}' from=${hostPid} amount=100000\\.00 accept=False$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Hub\\] offer '\\S+' kind=building addr='${addrA}' -> declined from '${clientPid}'",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[DevShown\\] toast: ${clientPid} declined your \\$100,000 offer for '[^']+' offer\\.",
+          "within_s": 10
+        }
+      ],
+      "note": "TEST: the owner declines - the buyer is SHOWN the existing decline notice (MPHub.cs:370 wording)"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "deedstate ${addrA}",
+      "expect_result": "^OK deedstate addr='${addrA}' owned=False .* deed=${clientPid}$",
+      "note": "TEST: nothing moved"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "xferstate",
+      "expect_result": "^OK xferstate sales=\\[\\] .* out=\\[\\] ",
+      "note": "TEST: no sale, no offer left waiting"
+    },
+    {
+      "seq": 24,
+      "role": "both",
+      "cmd": "mark TEST BUILDINGSALE T2",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "bldoffer ${addrA} 250000",
+      "expect_result": "^OK bldoffer addr='${addrA}' amount=250000\\.00 .* otherDeed=True outgoing=1$"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "hubanswer last accept",
+      "expect_result": "^OK hubanswer id=\\S+ kind=building addr='${addrA}' from=${hostPid} amount=250000\\.00 accept=True$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] sale \\S+ LEDGERED: '${addrA}' ${clientPid} -> ${hostPid} for 250000\\.00",
+          "within_s": 10
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] buyer charge APPLIED for sale \\S+: '${addrA}' -250000\\.00 as ba:transaction_buildingbought",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] seller release APPLIED for sale \\S+: '${addrA}' given up to ${hostPid} \\(building only, inList=True\\); \\d+ own listing\\(s\\) cancelled; tenant=True rent/day=[1-9]",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] buyer finalize APPLIED for sale \\S+: '${addrA}' from ${clientPid} \\(building only, inList=False\\)",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] seller pay APPLIED for sale \\S+: '${addrA}' \\+250000\\.00 as ba:transaction_buildingsold",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] sale \\S+ '${addrA}': paid CONFIRMED by seller ${clientPid}",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[DevShown\\] toast: ${clientPid} accepted your \\$250,000 offer for '",
+          "within_s": 20
+        }
+      ],
+      "note": "TEST (HOST buys): escrow first - the buyer's own charge, then the seller gives the building up (still renting it, now at market rent, its own listing cancelled in its leg), the deed moves, the buyer takes it, the seller is paid from escrow; the buyer is shown 'accepted' only after its charge"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "xferstate",
+      "expect_result": "^OK xferstate sales=\\[\\S+:${addrA}:${clientPid}->${hostPid}:250000\\.00:charged=True:released=True:deed=True:applied=True:paid=True:buyerSaved=False:sellerSaved=False:stayed=True:retired=False:cancelled=False:refunded=False:stamped=True/True/False\\]",
+      "note": "TEST: every leg confirmed; not retired before both saves cover it"
+    },
+    {
+      "seq": 28,
+      "role": "h",
+      "cmd": "deedstate ${addrA}",
+      "expect_result": "^OK deedstate addr='${addrA}' owned=True record=True .* listed=False .* deed=${hostPid}$",
+      "note": "TEST: the buyer's game and the host ledger name the buyer"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "deedstate ${addrA}",
+      "expect_result": "^OK deedstate addr='${addrA}' owned=False record=False .* stamp=${hostPid} rented=True rentPerDay=[1-9]",
+      "note": "TEST: the seller's game no longer owns it, names the buyer, and pays market rent"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "txlines ${addrA} ba:transaction_buildingbought",
+      "expect_result": "^OK txlines addr='${addrA}' type=ba:transaction_buildingbought tagged=1 taggedsum=-250000\\.00 ",
+      "note": "TEST: the buyer paid exactly once, as the game's own 'building bought' line"
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "cmd": "txlines ${addrA} ba:transaction_buildingsold",
+      "expect_result": "^OK txlines addr='${addrA}' type=ba:transaction_buildingsold tagged=1 taggedsum=250000\\.00 ",
+      "note": "TEST: the seller was paid exactly once, as the game's own 'building sold' line"
+    },
+    {
+      "seq": 32,
+      "role": "both",
+      "cmd": "mark TEST BUILDINGSALE T3",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "clock 23:57",
+      "expect_result": "^OK clock "
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "clock next",
+      "expect_result": "^OK clock .* on day \\d+",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] rent rent\\|${addrA}\\|\\d+\\|${clientPid}: this game paid \\S+ for '${addrA}'",
+          "within_s": 60
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] rent rent\\|${addrA}\\|\\d+\\|${clientPid}: \\+\\S+ from ${clientPid} for '${addrA}'",
+          "within_s": 60
+        }
+      ],
+      "note": "the day turns: the seller's game charges its own rent and reports it; the host records the id (RentGoesToDeedHolder: a tenant of another player's building) and the buyer's game books it"
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "txlines ${addrA} ba:transaction_rent",
+      "expect_result": "^OK txlines addr='${addrA}' type=ba:transaction_rent tagged=0 taggedsum=0\\.00 native=1 ",
+      "capture": {
+        "rent": "nativesum=-(\\d+\\.\\d\\d)"
+      },
+      "note": "TEST: the seller paid the game's own daily rent once"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "cmd": "txlines ${addrA} ba:transaction_rentrevenue",
+      "expect_result": "^OK txlines addr='${addrA}' type=ba:transaction_rentrevenue tagged=1 taggedsum=${rent} native=1 ",
+      "note": "TEST: the buyer got that rent once (tagged) plus the building's own tenant rent (native)"
+    },
+    {
+      "seq": 37,
+      "role": "h",
+      "cmd": "clock 23:57",
+      "expect_result": "^OK clock "
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "clock next",
+      "expect_result": "^OK clock .* on day \\d+",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] rent rent\\|${addrA}\\|\\d+\\|${clientPid}: booked by the deed holder ${hostPid}",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 39,
+      "role": "c",
+      "cmd": "txlines ${addrA} ba:transaction_rent",
+      "expect_result": "^OK txlines addr='${addrA}' type=ba:transaction_rent tagged=0 taggedsum=0\\.00 native=2 ",
+      "capture": {
+        "rent2": "nativesum=-(\\d+\\.\\d\\d)"
+      },
+      "note": "TEST: one rent per day"
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "txlines ${addrA} ba:transaction_rentrevenue",
+      "expect_result": "^OK txlines addr='${addrA}' type=ba:transaction_rentrevenue tagged=2 taggedsum=${rent2} ",
+      "note": "TEST: the buyer got each day's rent exactly once"
+    },
+    {
+      "seq": 41,
+      "role": "h",
+      "cmd": "txlines ${addrA} ba:transaction_buildingbought",
+      "expect_result": "tagged=1 taggedsum=-250000\\.00 ",
+      "note": "TEST: the re-sends never charged twice"
+    },
+    {
+      "seq": 42,
+      "role": "c",
+      "cmd": "txlines ${addrA} ba:transaction_buildingsold",
+      "expect_result": "tagged=1 taggedsum=250000\\.00 ",
+      "note": "TEST: the re-sends never paid twice"
+    },
+    {
+      "seq": 43,
+      "role": "h",
+      "cmd": "xferstate",
+      "expect_result": "rentIds=[1-9]",
+      "note": "TEST: the host keeps the paid rent ids (fold F6)"
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK",
+      "note": "a save after the rent legs; the sale may already have retired at an earlier save (the day turn's autosave) - step 45 asserts retired only with both parties' saves covering every leg (fold F3)"
+    },
+    {
+      "seq": 45,
+      "role": "h",
+      "cmd": "xferstate",
+      "expect_result": "\\S+:${addrA}:${clientPid}->${hostPid}:250000\\.00:charged=True:released=True:deed=True:applied=True:paid=True:buyerSaved=True:sellerSaved=True:stayed=True:retired=True",
+      "note": "TEST: retired, kept only as the record the seller's rent follows"
+    },
+    {
+      "seq": 46,
+      "role": "both",
+      "cmd": "mark TEST BUILDINGSALE T5",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 47,
+      "role": "c",
+      "cmd": "moneymark t5",
+      "expect_result": "^OK moneymark name=t5 "
+    },
+    {
+      "seq": 48,
+      "role": "c",
+      "cmd": "xferhold release",
+      "expect_result": "^OK xferhold hold=release$",
+      "note": "the seller's game will neither apply nor confirm the release - the crash window between legs"
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "cmd": "bldoffer ${addrB} 300000",
+      "expect_result": "^OK bldoffer addr='${addrB}' amount=300000\\.00 .* otherDeed=True outgoing=1$"
+    },
+    {
+      "seq": 50,
+      "role": "c",
+      "cmd": "hubanswer last accept",
+      "expect_result": "^OK hubanswer id=\\S+ kind=building addr='${addrB}' .* accept=True$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] buyer charge APPLIED for sale \\S+: '${addrB}' -300000\\.00",
+          "within_s": 20
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] DEV hold: release for sale \\S+ \\('${addrB}'\\) NOT applied",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 51,
+      "role": "h",
+      "cmd": "xferstate",
+      "expect_result": "\\S+:${addrB}:${clientPid}->${hostPid}:300000\\.00:charged=True:released=False:deed=False:applied=False:paid=False",
+      "note": "PREMISE: the buyer's money is in escrow, the seller's leg is open, nothing else moved"
+    },
+    {
+      "seq": 52,
+      "role": "c",
+      "drop": true,
+      "note": "the seller is killed before applying the release"
+    },
+    {
+      "seq": 53,
+      "role": "h",
+      "cmd": "mark TEST BUILDINGSALE T4",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 54,
+      "role": "h",
+      "cmd": "bldoffer ${addrC} 50000",
+      "expect_result": "^OK bldoffer addr='${addrC}' amount=50000\\.00 .* otherDeed=True outgoing=0$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] offer on '${addrC}' by ${hostPid} @ 50000 REFUSED - the owner \\S+ is offline",
+          "within_s": 5
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] shown: \\S+ is offline, so they can't get your offer right now\\.",
+          "within_s": 5
+        }
+      ],
+      "note": "TEST: an offer to an offline owner is refused up front and the approved line is SHOWN; no offer, no money"
+    },
+    {
+      "seq": 55,
+      "role": "c",
+      "relaunch": true
+    },
+    {
+      "seq": 56,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 57,
+      "role": "h",
+      "sleep_s": 5,
+      "note": "the join request reaches the host"
+    },
+    {
+      "seq": 58,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 59,
+      "role": "c",
+      "cmd": "mark TEST BUILDINGSALE T5 REJOIN SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 240,
+          "since_prev_step": true
+        }
+      ],
+      "note": "waits for the client's own settle line"
+    },
+    {
+      "seq": 60,
+      "role": "c",
+      "cmd": "mark TEST BUILDINGSALE T5 REPLAY",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] seller release APPLIED for sale \\S+: '${addrB}' given up to ${hostPid} \\(building only, inList=True\\)",
+          "within_s": 60,
+          "since_prev_step": true
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] seller pay APPLIED for sale \\S+: '${addrB}' \\+300000\\.00",
+          "within_s": 60,
+          "since_prev_step": true
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] buyer finalize APPLIED for sale \\S+: '${addrB}' from ${clientPid}",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ],
+      "note": "TEST: the rejoined seller finishes the sale - the release finds B in its loaded (served) save (inList=True), then it is paid"
+    },
+    {
+      "seq": 61,
+      "role": "c",
+      "cmd": "moneydelta t5",
+      "expect_result": "^OK moneydelta name=t5 delta=300000\\.00 ",
+      "note": "TEST: the seller was paid exactly once across the crash"
+    },
+    {
+      "seq": 62,
+      "role": "h",
+      "cmd": "xferstate",
+      "expect_result": "\\S+:${addrB}:${clientPid}->${hostPid}:300000\\.00:charged=True:released=True:deed=True:applied=True:paid=True",
+      "note": "TEST: every leg confirmed"
+    },
+    {
+      "seq": 63,
+      "role": "c",
+      "cmd": "deedstate ${addrB}",
+      "expect_result": "^OK deedstate addr='${addrB}' owned=False record=False ",
+      "note": "TEST: the seller's game gave the building up"
+    },
+    {
+      "seq": 64,
+      "role": "both",
+      "cmd": "mark TEST BUILDINGSALE T7T8",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 65,
+      "role": "c",
+      "cmd": "moneymark t78",
+      "expect_result": "^OK moneymark name=t78 "
+    },
+    {
+      "seq": 66,
+      "role": "h",
+      "cmd": "bldoffer ${addrC} 120000",
+      "expect_result": "^OK bldoffer addr='${addrC}' amount=120000\\.00 .* otherDeed=True outgoing=1$"
+    },
+    {
+      "seq": 67,
+      "role": "c",
+      "cmd": "hubanswer last accept",
+      "expect_result": "^OK hubanswer id=\\S+ kind=building addr='${addrC}' .* accept=True$",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] seller pay APPLIED for sale \\S+: '${addrC}' \\+120000\\.00",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] sale \\S+ '${addrC}': paid CONFIRMED by seller ${clientPid}",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] sale \\S+ '${addrC}': finalized CONFIRMED by buyer ${hostPid}",
+          "within_s": 30
+        }
+      ],
+      "note": "T7 (seller side): the guest sells C, every leg applied and confirmed"
+    },
+    {
+      "seq": 68,
+      "role": "c",
+      "cmd": "bldoffer ${addrA} 200000",
+      "expect_result": "^OK bldoffer addr='${addrA}' amount=200000\\.00 .* held=True otherDeed=True ",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] claim \\S+ for '${addrA}': offer \\S+ @ 200000 sent to ${hostPid}; nothing was charged\\.",
+          "within_s": 15
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] shown: Offer sent to ${hostPid}\\. Track it in the Business app\\.",
+          "within_s": 15
+        }
+      ],
+      "note": "T8 (HOST sells): the guest - still renting A - offers on the host's building A (its earlier sale is retired, so a new one may start)"
+    },
+    {
+      "seq": 69,
+      "role": "h",
+      "cmd": "hubanswer last accept",
+      "expect_result": "^OK hubanswer id=\\S+ kind=building addr='${addrA}' from=${clientPid} amount=200000\\.00 accept=True$",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] buyer charge APPLIED for sale \\S+: '${addrA}' -200000\\.00",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] seller release APPLIED for sale \\S+: '${addrA}' given up to ${clientPid} \\(building only, inList=True\\)",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] buyer finalize APPLIED for sale \\S+: '${addrA}' from ${hostPid} \\(building only, inList=False\\)",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] seller pay APPLIED for sale \\S+: '${addrA}' \\+200000\\.00",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] sale \\S+ '${addrA}': finalized CONFIRMED by buyer ${clientPid}",
+          "within_s": 30
+        }
+      ],
+      "note": "T8: the host sells A back; every leg applied and confirmed"
+    },
+    {
+      "seq": 70,
+      "role": "c",
+      "cmd": "moneydelta t78",
+      "expect_result": "^OK moneydelta name=t78 delta=-80000\\.00 ",
+      "note": "PREMISE: +120,000 for C, -200,000 for A, once each"
+    },
+    {
+      "seq": 71,
+      "role": "c",
+      "drop": true,
+      "note": "the guest is killed AFTER its legs were applied and confirmed, before any save (its served save still holds C and lacks A)",
+      "kill": true
+    },
+    {
+      "seq": 72,
+      "role": "c",
+      "relaunch": true
+    },
+    {
+      "seq": 73,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 74,
+      "role": "h",
+      "sleep_s": 5,
+      "note": "the join request reaches the host"
+    },
+    {
+      "seq": 75,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 76,
+      "role": "c",
+      "cmd": "mark TEST BUILDINGSALE T7T8 REJOIN SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 240,
+          "since_prev_step": true
+        }
+      ],
+      "note": "waits for the client's own settle line"
+    },
+    {
+      "seq": 77,
+      "role": "c",
+      "cmd": "mark TEST BUILDINGSALE T7T8 REPLAY",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] seller release APPLIED for sale \\S+: '${addrC}' given up to ${hostPid} \\(building only, inList=True\\)",
+          "within_s": 60,
+          "since_prev_step": true
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] buyer finalize APPLIED for sale \\S+: '${addrA}' from ${hostPid} \\(building only, inList=False\\)",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ],
+      "note": "TEST (fold F1): the replay re-applies the BUILDING changes the rolled-back save lacks"
+    },
+    {
+      "seq": 78,
+      "role": "c",
+      "cmd": "moneydelta t78",
+      "expect_result": "^OK moneydelta name=t78 delta=-80000\\.00 ",
+      "note": "TEST (fold F1): the money is NOT moved again - the ledger had recorded it"
+    },
+    {
+      "seq": 79,
+      "role": "c",
+      "cmd": "deedstate ${addrC}",
+      "expect_result": "^OK deedstate addr='${addrC}' owned=False record=False ",
+      "note": "TEST: C given up again"
+    },
+    {
+      "seq": 80,
+      "role": "c",
+      "cmd": "deedstate ${addrA}",
+      "expect_result": "^OK deedstate addr='${addrA}' owned=True record=True ",
+      "note": "TEST: A owned again"
+    },
+    {
+      "seq": 81,
+      "role": "h",
+      "cmd": "mark TEST BUILDINGSALE T6",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 82,
+      "role": "h",
+      "cmd": "bldhampton",
+      "expect_result": "^OK bldhampton addr='[^']+' dlc=True$",
+      "capture": {
+        "house": "addr='([^']+)'"
+      },
+      "note": "PREMISE ASSERTED: the rig owns the Hamptons DLC and has a free house - absent, this step FAILS on its premise (never a vacuous pass)"
+    },
+    {
+      "seq": 83,
+      "role": "h",
+      "cmd": "deedset ${house} ${clientPid}",
+      "expect_result": "^OK deedset addr='${house}' deed=${clientPid}$",
+      "note": "PREMISE: Client1 holds the house's deed (DEV ledger write; cleared below)"
+    },
+    {
+      "seq": 84,
+      "role": "h",
+      "cmd": "bldoffer ${house} 100000",
+      "expect_result": "^OK bldoffer addr='${house}' amount=100000\\.00 .* otherDeed=True outgoing=0$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] buy of '${house}' by ${hostPid} @ 100000 REFUSED - the deed is held by ${clientPid} and Hamptons houses are not sold between players",
+          "within_s": 5
+        }
+      ],
+      "note": "TEST: a Hamptons house is refused with T-33's text ('Another player already owns this building.'), no offer"
+    },
+    {
+      "seq": 85,
+      "role": "h",
+      "cmd": "deedset ${house} clear",
+      "expect_result": "^OK deedset addr='${house}' deed=$"
+    },
+    {
+      "seq": 86,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] save of '[^']+' covers: .*RETIRED",
+          "within_s": 90,
+          "since_prev_step": true
+        }
+      ],
+      "note": "the T7/T8 sales retire once the rejoined guest's save covers its replayed legs (fold F3): T9's sale of A may only start after that (otherwise the accept is held, decision 52 a)"
+    },
+    {
+      "seq": 87,
+      "role": "both",
+      "cmd": "mark TEST BUILDINGSALE T9",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 88,
+      "role": "h",
+      "cmd": "moneymark t9",
+      "expect_result": "^OK moneymark name=t9 "
+    },
+    {
+      "seq": 89,
+      "role": "c",
+      "cmd": "xferhold release",
+      "expect_result": "^OK xferhold hold=release$"
+    },
+    {
+      "seq": 90,
+      "role": "h",
+      "cmd": "bldoffer ${addrA} 50000",
+      "expect_result": "^OK bldoffer addr='${addrA}' amount=50000\\.00 .* otherDeed=True outgoing=1$",
+      "note": "T9: the HOST offers on the guest's building A (the guest bought it back in T8)"
+    },
+    {
+      "seq": 91,
+      "role": "c",
+      "cmd": "hubanswer last accept",
+      "expect_result": "^OK hubanswer id=\\S+ kind=building addr='${addrA}' .* accept=True$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] buyer charge APPLIED for sale \\S+: '${addrA}' -50000\\.00",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] DEV hold: release for sale \\S+ \\('${addrA}'\\) NOT applied",
+          "within_s": 30
+        }
+      ],
+      "note": "the escrow is taken; the seller holds its release"
+    },
+    {
+      "seq": 92,
+      "role": "c",
+      "drop": true,
+      "note": "the seller goes away without releasing"
+    },
+    {
+      "seq": 93,
+      "role": "h",
+      "cmd": "xferdeadline 0",
+      "expect_result": "^OK xferdeadline days=0 constant=3$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] sale \\S+ '${addrA}': CANCELLED - the seller has not released within 0 game day\\(s\\) of the charge",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] buyer refund APPLIED for sale \\S+: '${addrA}' \\+50000\\.00",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] shown: \\S.* didn't complete the sale of .+, so your money has been returned\\.",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] sale \\S+ '${addrA}': refunded CONFIRMED by buyer ${hostPid} \\(.*stamped=True/False/True\\) - RETIRED",
+          "within_s": 30
+        }
+      ],
+      "note": "TEST (fold 2 c): the deadline (DEV override 0 days) passes with the seller away - cancelled, the escrow returned once, retired at once (the refund rode the slot write)"
+    },
+    {
+      "seq": 94,
+      "role": "h",
+      "cmd": "moneydelta t9",
+      "expect_result": "^OK moneydelta name=t9 delta=0\\.00 ",
+      "note": "TEST: charged once, refunded once"
+    },
+    {
+      "seq": 95,
+      "role": "h",
+      "cmd": "xferdeadline off",
+      "expect_result": "^OK xferdeadline days=off constant=3$"
+    },
+    {
+      "seq": 96,
+      "role": "c",
+      "relaunch": true
+    },
+    {
+      "seq": 97,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 98,
+      "role": "h",
+      "sleep_s": 5,
+      "note": "the join request reaches the host"
+    },
+    {
+      "seq": 99,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 100,
+      "role": "c",
+      "cmd": "mark TEST BUILDINGSALE T9 REJOIN SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 240,
+          "since_prev_step": true
+        }
+      ],
+      "note": "waits for the client's own settle line"
+    },
+    {
+      "seq": 101,
+      "role": "c",
+      "cmd": "deedstate ${addrA}",
+      "expect_result": "^OK deedstate addr='${addrA}' owned=True record=True ",
+      "note": "TEST: the deed stayed with the seller"
+    },
+    {
+      "seq": 102,
+      "role": "both",
+      "cmd": "mark TEST BUILDINGSALE T10",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 103,
+      "role": "c",
+      "cmd": "moneymark t10",
+      "expect_result": "^OK moneymark name=t10 "
+    },
+    {
+      "seq": 104,
+      "role": "c",
+      "cmd": "xferdrop paid",
+      "expect_result": "^OK xferdrop drop=paid$"
+    },
+    {
+      "seq": 105,
+      "role": "h",
+      "cmd": "bldoffer ${addrA} 60000",
+      "expect_result": "^OK bldoffer addr='${addrA}' amount=60000\\.00 .* otherDeed=True outgoing=1$",
+      "note": "TEST (fold 2 c): the cancelled sale no longer blocks the address"
+    },
+    {
+      "seq": 106,
+      "role": "c",
+      "cmd": "hubanswer last accept",
+      "expect_result": "^OK hubanswer id=\\S+ kind=building addr='${addrA}' .* accept=True$",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] seller pay APPLIED for sale \\S+: '${addrA}' \\+60000\\.00",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] DEV drop: the 'paid' confirmation for sale \\S+ \\('${addrA}'\\) was applied but NOT sent",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] pay for sale \\S+: already booked by this game - confirmed, no money moved\\.",
+          "within_s": 45
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] sale \\S+ '${addrA}': paid CONFIRMED by seller ${clientPid}",
+          "within_s": 45
+        }
+      ],
+      "note": "TEST (F8): the seller's pay applied, its confirmation lost; the host re-sends and the seller confirms without paying twice"
+    },
+    {
+      "seq": 107,
+      "role": "c",
+      "cmd": "moneydelta t10",
+      "expect_result": "^OK moneydelta name=t10 delta=60000\\.00 ",
+      "note": "TEST: paid exactly once"
+    },
+    {
+      "seq": 108,
+      "role": "both",
+      "cmd": "mark TEST BUILDINGSALE T11",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 109,
+      "role": "c",
+      "cmd": "deedstate ${addrC}",
+      "expect_result": "^OK deedstate addr='${addrC}' .* money=[0-9.]+ ",
+      "capture": {
+        "cm": "money=([0-9.]+) "
+      }
+    },
+    {
+      "seq": 110,
+      "role": "c",
+      "cmd": "spend ${cm}",
+      "expect_result": "^OK spend .*money=0\\.00",
+      "note": "PREMISE: the guest's money set to exactly 0"
+    },
+    {
+      "seq": 111,
+      "role": "c",
+      "cmd": "spend -120000",
+      "expect_result": "^OK spend .*money=120000\\.00",
+      "note": "PREMISE: exactly the offer"
+    },
+    {
+      "seq": 112,
+      "role": "h",
+      "cmd": "save",
+      "expect_result": "^OK",
+      "note": "the live session is the scenario's own ${session} again (earlier legs moved it to -disconnect/-auto copies), so the relaunch's hostload below loads the session the pay leg is stamped into, as a host continuing after a crash does"
+    },
+    {
+      "seq": 113,
+      "role": "h",
+      "cmd": "moneymark t11",
+      "expect_result": "^OK moneymark name=t11 "
+    },
+    {
+      "seq": 114,
+      "role": "c",
+      "cmd": "bldoffer ${addrC} 120000",
+      "expect_result": "^OK bldoffer addr='${addrC}' amount=120000\\.00 .* held=True otherDeed=True ",
+      "note": "T11: the guest offers its whole balance on the host's building C"
+    },
+    {
+      "seq": 115,
+      "role": "h",
+      "cmd": "hubanswer last accept",
+      "expect_result": "^OK hubanswer id=\\S+ kind=building addr='${addrC}' from=${clientPid} amount=120000\\.00 accept=True$",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] buyer charge APPLIED for sale \\S+: '${addrC}' -120000\\.00",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] buyer finalize APPLIED for sale \\S+: '${addrC}' from ${hostPid}",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] seller pay APPLIED for sale \\S+: '${addrC}' \\+120000\\.00",
+          "within_s": 30
+        },
+        {
+          "role": "h",
+          "regex": "\\[BldSale\\] sale \\S+ '${addrC}': paid CONFIRMED by seller ${hostPid} \\(.*stamped=True/True/False\\)",
+          "within_s": 30
+        }
+      ],
+      "note": "every leg applied; the host's own pay leg is recorded in the same manifest write as its slot figure"
+    },
+    {
+      "seq": 116,
+      "role": "c",
+      "cmd": "deedstate ${addrC}",
+      "expect_result": "^OK deedstate addr='${addrC}' owned=True record=True .* money=0\\.00 ",
+      "note": "PREMISE: the buyer is at exactly $0"
+    },
+    {
+      "seq": 117,
+      "role": "h",
+      "cmd": "moneydelta t11",
+      "expect_result": "^OK moneydelta name=t11 delta=120000\\.00 "
+    },
+    {
+      "seq": 118,
+      "role": "h",
+      "drop": true,
+      "note": "the HOST is killed after its own money leg, before any save (its save predates the sale)",
+      "kill": true
+    },
+    {
+      "seq": 119,
+      "role": "c",
+      "drop": true
+    },
+    {
+      "seq": 120,
+      "role": "h",
+      "relaunch": true
+    },
+    {
+      "seq": 121,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 122,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 123,
+      "role": "h",
+      "cmd": "mark TEST BUILDINGSALE T11 HOST SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Settle\\] world settled \\(host",
+          "within_s": 240,
+          "since_prev_step": true
+        }
+      ],
+      "note": "waits for the host's own settle line"
+    },
+    {
+      "seq": 124,
+      "role": "h",
+      "cmd": "moneydelta t11",
+      "expect_result": "^OK moneydelta name=t11 delta=120000\\.00 ",
+      "note": "TEST (fold 2 F2): the host's pay is NOT re-run - the slot it is restored from carried it with the ledger mark"
+    },
+    {
+      "seq": 125,
+      "role": "c",
+      "relaunch": true
+    },
+    {
+      "seq": 126,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 127,
+      "role": "h",
+      "sleep_s": 5,
+      "note": "the join request reaches the host"
+    },
+    {
+      "seq": 128,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 129,
+      "role": "c",
+      "cmd": "mark TEST BUILDINGSALE T11 REJOIN SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 240,
+          "since_prev_step": true
+        }
+      ],
+      "note": "waits for the client's own settle line"
+    },
+    {
+      "seq": 130,
+      "role": "c",
+      "cmd": "deedstate ${addrC}",
+      "expect_result": "^OK deedstate addr='${addrC}' owned=True record=True .* money=0\\.00 ",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[BldSale\\] (buyer finalize APPLIED for sale \\S+: '${addrC}' from ${hostPid}|finalize for sale \\S+: '${addrC}' is already in this game's real estate)",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ],
+      "note": "TEST (fold 2 a): the guest's recorded $0 is restored (not its older save's money); the building leg is replayed - applied, or confirmed as already held when the guest's own quit save (step 119 is a clean close) already had it"
+    },
+    {
+      "seq": 131,
+      "role": "h",
+      "cmd": "moneydelta t11",
+      "expect_result": "^OK moneydelta name=t11 delta=120000\\.00 ",
+      "note": "TEST: still exactly once after the replay"
+    }
+  ]
+}

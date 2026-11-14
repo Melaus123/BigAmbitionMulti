@@ -360,7 +360,7 @@ namespace BigAmbitionsMP
                     if ((double)SaveGameManager.Current.Money < amount) return true;
                     // T-33 (F5): likewise the game's DLC check (:892) and minimum price (:912-916) - a buy failing them
                     // stops in the game with its own notice, so it must not reserve the deed for a round trip.
-                    if (WouldRefuseOffer(__instance, amount)) return true;
+                    if (WouldRefuseOffer(__instance, amount, MPBuildingSale.IsOtherPlayersDeed(reg))) return true;   // T-50: on another player's deed the OWNER decides the price
                     string key = GameStateReader.AddressKey(reg);
 
                     if (MPClient.IsConnected)
@@ -385,8 +385,8 @@ namespace BigAmbitionsMP
                     string claimId = $"host-{++_claimSeq}";
                     if (!MPServer.TryClaimDeed(key, pid, claimId, out var holder, out bool fresh))
                     {
-                        MPServer.BuyOfPlayerOwnedBuilding(key, pid, holder, amount, null);
-                        ShowOwnedRefusal();
+                        string outcome = MPServer.BuyOfPlayerOwnedBuilding(key, pid, holder, amount, null, out string ownerName);   // T-50: an offer to the owner
+                        MPBuildingSale.ShowBuyOutcome(outcome, ownerName);
                         return false;
                     }
                     if (fresh) _hostState = __state = "host|" + claimId + "|" + key;
@@ -469,6 +469,12 @@ namespace BigAmbitionsMP
             {
                 try
                 {
+                    if (a.OfferSent || a.HolderOffline)
+                    {   // T-50: the deed holder is a player - the host sent them an offer (or refused: offline); nothing to re-run
+                        if (_pending != null && _pending.Id == a.ClaimId) _pending = null;
+                        MPBuildingSale.GuestOnOfferAnswer(a);
+                        return;
+                    }
                     var p = _pending;
                     if (p == null || a.ClaimId != p.Id)
                     {
@@ -539,13 +545,14 @@ namespace BigAmbitionsMP
 
             /// <summary>T-33 (F5): true iff the game's own buy would refuse this offer on its DLC check (:892) or its
             /// minimum price (:912-916, same formula). Unreadable = false (the claim goes ahead as before).</summary>
-            private static bool WouldRefuseOffer(BizManPresentation pres, double amount)
+            private static bool WouldRefuseOffer(BizManPresentation pres, double amount, bool skipPrice = false)
             {
                 try
                 {
                     var biz = ReadMember(pres, "bizManBusiness") as BizManBusiness;
                     if (biz == null || biz.building == null || biz.buildingRegistration == null) return false;
                     if (!biz.building.requiredDLC.DlcIsOwned()) return true;
+                    if (skipPrice) return false;
                     var addr = biz.building.Address;
                     BuildingForSale? sale = null;
                     var list = SaveGameManager.Current.buildingsForSale;
@@ -9396,7 +9403,7 @@ namespace BigAmbitionsMP
                     if (MPHub.OfferBusiness(owner, amount, addr, biz))
                     {
                         Plugin.Logger.LogInfo($"[Offers] purchase offer sent: '{biz}' at {addr} to '{owner}' for ${amount:N0}.");
-                        try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Info, $"Offer sent to {owner} — no money moves unless they accept. Track it in the Business app."); } catch { }
+                        try { UI.Notification.Notifications.Show(UI.Notification.NotificationType.Info, $"Offer sent to {owner}. Track it in the Business app."); } catch { }
                         try { ___offerAmountInputField.text = ""; } catch { }
                     }
                     return false;

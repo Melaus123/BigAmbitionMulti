@@ -905,7 +905,7 @@ namespace BigAmbitionsMP
                     BNameCell(row, tab, 0, o.From, _bizOnline.Contains(o.From) ? "" : "Offline");
                     BCell(row, tab, 1, BizKind(o.Kind), Color.white, true);
                     BCell(row, tab, 2, $"${o.Principal:N0}", Color.white, true);
-                    BCell(row, tab, 3, o.Kind == "gift" ? "" : o.Kind == "business"
+                    BCell(row, tab, 3, o.Kind == "gift" ? "" : o.Kind == MPBuildingSale.Kind ? MPBuildingSale.OfferLine(o.BusinessName) : o.Kind == "business"
                         ? $"{o.BusinessName}: the business, its furniture and staff"
                         : $"{MPHub.OfferTotalPct(o):F0}% for {MPHub.OfferTermDays(o)} days: you pay ${o.DailyInterest:N0} + ${o.DailyPayment:N0} a day", B_MUTED, false, true);
                     BRowButtons(row, ("Accept", 0, (byte)0, o.Id, GrantKind.Vehicle), ("Decline", 2, (byte)1, o.Id, GrantKind.Vehicle));
@@ -920,7 +920,7 @@ namespace BigAmbitionsMP
                     BNameCell(row, tab, 0, o.To, _bizOnline.Contains(o.To) ? "" : "Offline");
                     BCell(row, tab, 1, BizKind(o.Kind), Color.white, true);
                     BCell(row, tab, 2, $"${o.Principal:N0}", Color.white, true);
-                    BCell(row, tab, 3, o.Kind == "gift" ? "" : o.Kind == "business"
+                    BCell(row, tab, 3, o.Kind == "gift" ? "" : o.Kind == MPBuildingSale.Kind ? MPBuildingSale.OfferLine(o.BusinessName) : o.Kind == "business"
                         ? $"{o.BusinessName}: the business, its furniture and staff"
                         : $"{MPHub.OfferTotalPct(o):F0}% for {MPHub.OfferTermDays(o)} days: they pay ${o.DailyInterest:N0} + ${o.DailyPayment:N0} a day", B_MUTED, false, true);
                     BCell(row, tab, 4, "Waiting", B_MUTED, false);
@@ -1053,7 +1053,7 @@ namespace BigAmbitionsMP
             if (_bizToolCompany != null) _bizToolCompany.SetActive(tab == 4 && MergerSync.IAmMember);
         }
 
-        private static string BizKind(string kind) => kind == "gift" ? "Gift" : kind == "business" ? "Business sale" : "Loan";
+        private static string BizKind(string kind) => kind == "gift" ? "Gift" : kind == "business" ? "Business sale" : kind == MPBuildingSale.Kind ? "Building sale" : "Loan";
 
         // ══ row builders ══
 

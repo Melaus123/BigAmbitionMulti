@@ -493,6 +493,8 @@ def validate_scenario(sc):
         if s.get("role") in ROLES and s["role"] not in active:
             raise ValueError("step %d: role '%s' needs instances=%d"
                              % (i, s["role"], ROLES.index(s["role"]) + 1))
+        if s.get("kill") and not s.get("drop"):
+            raise ValueError("step %d: kill is a kind of drop (\"drop\": true, \"kill\": true)" % i)
         if s.get("drop") and s.get("relaunch"):
             raise ValueError("step %d: drop and relaunch are separate steps" % i)
         if (s.get("drop") or s.get("relaunch")) and (s.get("cmd") or s.get("sleep_s")):
@@ -516,7 +518,7 @@ def step_label(s):
     if s.get("cmd"):
         return s["cmd"]
     if s.get("drop"):
-        return "(drop %s)" % ROLE_NAME.get(s.get("role"), s.get("role"))
+        return "(%s %s)" % ("kill" if s.get("kill") else "drop", ROLE_NAME.get(s.get("role"), s.get("role")))
     if s.get("relaunch"):
         return "(relaunch %s)" % ROLE_NAME.get(s.get("role"), s.get("role"))
     return "(wait %ss)" % s.get("sleep_s")
@@ -760,7 +762,9 @@ class Run:
 
     def drop_role(self, step):
         """D1: WM_CLOSE exactly ONE role, wait for its process to be GONE (never a fixed sleep), then
-        snapshot that role's log because the relaunch truncates it. Never kills by image name."""
+        snapshot that role's log because the relaunch truncates it. Never kills by image name.
+        "kill": true = a CRASH instead of a quit: taskkill /F by PID at once, so no quit path runs (no
+        disconnect save, no clean leave) - for legs whose premise is 'killed before any save'."""
         seq, role, label = step["seq"], step["role"], step_label(step)
         exp, note = "process gone", step.get("note", "")
         if role in self.down:
@@ -770,9 +774,14 @@ class Run:
             return self.cmdless_row(seq, role, label, exp, "FAIL",
                                     "no %s process is running to drop" % ROLE_NAME[role])
         pid, t0, killed = mine[0][0], now(), False
-        say("drop %s: WM_CLOSE pid=%d%s" % (ROLE_NAME[role], pid, (" - " + note) if note else ""))
-        for hwnd in windows_of_pid(pid):
-            _u32.PostMessageW(hwnd, 0x0010, 0, 0)      # WM_CLOSE == CloseMainWindow, the real quit path
+        if step.get("kill"):
+            killed = True
+            say("drop %s: HARD KILL pid=%d (taskkill /F by PID, no quit path)%s" % (ROLE_NAME[role], pid, (" - " + note) if note else ""))
+            run(["taskkill", "/PID", str(pid), "/F"])
+        else:
+            say("drop %s: WM_CLOSE pid=%d%s" % (ROLE_NAME[role], pid, (" - " + note) if note else ""))
+            for hwnd in windows_of_pid(pid):
+                _u32.PostMessageW(hwnd, 0x0010, 0, 0)      # WM_CLOSE == CloseMainWindow, the real quit path
         while now() - t0 < DROP_GONE_S:
             if not [p for p in game_processes() if p[0] == pid]:
                 break

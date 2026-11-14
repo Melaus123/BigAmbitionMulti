@@ -33,6 +33,7 @@ namespace BigAmbitionsMP
         public bool   IsHost        { get; set; }
         public int    Day           { get; set; }          // for display in the load list
         public float  Money         { get; set; }          // last-known cash (live-streamed) — reapplied on reconnect
+        public bool   MoneyKnown    { get; set; }          // T-50 fold 2 (a): Money is a recorded figure ($0 included); false = an older manifest's possible $0 placeholder
     }
 
     /// <summary>Manifest for one MP save session — the MP-only state the per-player
@@ -133,6 +134,11 @@ namespace BigAmbitionsMP
         /// the slot, REPLACED from the loaded slot on every load, reset on a new world, never carried
         /// over in memory. Empty/absent on manifests written before the field existed.</summary>
         public List<MpTransferEntry> Transfers { get; set; } = new();
+        /// <summary>T-50: the host's player-to-player BUILDING SALES (replayed to each party at world-ready while the deed
+        /// ledger names the buyer) and the rent days held for an absent deed holder. Empty on older manifests.</summary>
+        public List<MpBuildingSaleEntry> BuildingSales { get; set; } = new();
+        public List<MpRentForwardEntry> RentForwards { get; set; } = new();
+        public List<MpRentForwardEntry> RentDone { get; set; } = new();   // T-50 fold F6: recorded rent ids, kept >= 7 game days
         /// <summary>Merger phase 4c part 2 (D20-7): CARGO in transit between two members as of this save
         /// moment. The goods have left the source's warehouse natively and no destination has shelved them
         /// yet, so NOBODY's .hsg holds them - the host's table is the only copy, which is why it rides the

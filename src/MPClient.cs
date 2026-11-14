@@ -1297,6 +1297,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.BuildingSale:   // T-50: a building-sale leg / held rent / rent receipt from the host
+                {
+                    var bsp = env.GetPayload<BuildingSalePayload>();
+                    if (bsp != null) GameStatePatcher.EnqueueOnMainThread(() => MPBuildingSale.OnMessage(bsp));
+                    break;
+                }
+
                 case MessageType.BizTransferFinalize:   // round-196: I bought it — claim locally
                 {
                     var bt = env.GetPayload<BizTransferPayload>();
@@ -2661,7 +2668,7 @@ namespace BigAmbitionsMP
 
         /// <summary>Ships this player's saved .hsg (gzipped) up to the host so the
         /// host holds the canonical copy (Phase 4 — centralized persistence).</summary>
-        public static void SendSaveData(string sessionName, MpSlot slot, byte[] hsgGzip, int rawLength, string metaJson = "")
+        public static void SendSaveData(string sessionName, MpSlot slot, byte[] hsgGzip, int rawLength, string metaJson = "", int saveRound = 0)
         {
             if (!IsConnected) return;
             var p = new SaveDataPayload
@@ -2672,6 +2679,7 @@ namespace BigAmbitionsMP
                 RawLength     = rawLength,
                 MetaJson      = metaJson,   // round-275: the sidecar that lets the host DATE this save
                 PlaythroughId = MPSaveManager.ActivePlaythrough,   // round-222: identity travels
+                SaveRound     = saveRound,   // T-50 fold 2 (d): the host's save round this upload answers
             };
             var env = MessageEnvelope.Create(MessageType.SaveData, MPConfig.PlayerId, p);
             env.Attachment = hsgGzip;   // v9: raw gzip rides the attachment frame, no base64

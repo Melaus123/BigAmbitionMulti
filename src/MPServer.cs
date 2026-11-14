@@ -440,8 +440,9 @@ namespace BigAmbitionsMP
                     else                                              BuildingRealEstateOwners[kv.Key] = ownerStable; // reserved (absent owner)
                 }
                 RestoreForfeitsFromManifest(m);   // BAN-PLAYERS-1 build B (B1): the forfeit record follows the ledgers it changed
+                MPBuildingSale.Restore(m);   // T-50: the sale records follow the deed ledger they changed
                 foreach (var slot in m.Slots)
-                    if (slot.Money != 0f) CashByStableId[slot.StableId] = slot.Money;
+                    if (slot.MoneyKnown || slot.Money != 0f) CashByStableId[slot.StableId] = slot.Money;   // T-50 fold 2 (a): a recorded $0 is a value, not "none"
 
                 Plugin.Logger.LogInfo($"[Server] Restored {BuildingOwners.Count} owned building(s) from manifest ({m.Slots?.Count ?? 0} save slot(s)).");
                 // [Ledger] shrink probe (round-184, field bamp-bug-20260729-150703): a load that
@@ -1450,7 +1451,7 @@ namespace BigAmbitionsMP
                 // Round-224: zero cash with no live stream = UNKNOWN, not broke — the
                 // overlay must stand down so the .hsg's own wallet survives (rig: a
                 // placeholder $0 slot zeroed a returning client's wallet).
-                bool moneyKnown = cash != 0f || GetKnownCash(pid) >= 0f;
+                bool moneyKnown = cash != 0f || GetKnownCash(pid) >= 0f || MPSaveCoordinator.SlotMoneyKnown(servedFrom, stable);   // T-50 fold 2 (a): a recorded $0 is known
                 if (!moneyKnown) Plugin.Logger.LogInfo($"[Server] cash unknown for '{pid}' — serving no-overlay; their save's own wallet stands.");
                 var payload = new LoadDataPayload
                 {
@@ -3224,6 +3225,11 @@ namespace BigAmbitionsMP
                             break;
                         }
                     }
+                    if (lo.State == "offer" && lo.Kind == MPBuildingSale.Kind)
+                    {   // T-50: a building offer is made by the HOST from the buyer's held buy (MPBuildingSale.HostOfferFromBuy) - never by a client
+                        Plugin.Logger.LogWarning($"[Server] LoanOffer kind=building from '{senderPid}' - building offers are host-made; dropped.");
+                        break;
+                    }
                     GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostRouteOffer(lo));
                     break;
                 }
@@ -3241,6 +3247,19 @@ namespace BigAmbitionsMP
                     var lr = env.GetPayload<LoanRepayPayload>();
                     if (lr == null || !SenderIs(lr.From, senderPid, env.Type)) break;
                     GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostHandleRepay(lr));
+                    break;
+                }
+
+                case MessageType.BuildingSale:     // T-50: a building-sale confirmation or a rent report
+                {
+                    var bsp = env.GetPayload<BuildingSalePayload>();
+                    if (bsp == null) break;
+                    // T-50 fold F1: a money leg's confirmation carries the balance right after it - record it as this
+                    // player's live figure HERE, in arrival order with CashSync (a later CashSync is newer), so the figure a
+                    // rejoin restores and the ledger's mark (main thread, next) agree: money moved = recorded.
+                    if (bsp.HasMoney && (bsp.Action == "charged" || bsp.Action == "paid" || bsp.Action == "rentok" || bsp.Action == "refunded") && IsSaneMoney(bsp.Money, 10_000_000_000f))
+                        RecordCash(senderPid, bsp.Money);
+                    GameStatePatcher.EnqueueOnMainThread(() => MPBuildingSale.HostOnMessage(bsp, senderPid));
                     break;
                 }
 
@@ -3932,7 +3951,7 @@ namespace BigAmbitionsMP
                 }
                 string stable = StableOfPid(playerId);
                 JoinerIdentity(link, out var steam, out var ip);
-                var e = MPConfig.AddBan(playerId, steam, stable, ip, GameDayNow());
+                var e = MPConfig.AddBan(playerId, steam, stable, ip, GameDayNow()); MPBuildingSale.OnBanned();   // T-50 fold 2 (c): a banned seller's unreleased sale is cancelled at the next tick
                 if (e == null) return $"ERR nothing identifies '{playerId}' - not banned";
                 bool ipKept = MPConfig.IsRecordableIp(ip);
                 Plugin.Logger.LogInfo($"[Server] BANNED '{playerId}' (saved ban {e.Key}: stable id {(stable.Length > 0 ? "yes" : "no")}, Steam id {(steam.Length > 0 ? "yes" : "no")}, address {(ipKept ? "recorded" : "not recorded")} {MPConfig.AddressTag(ip)}) - lasts until unbanned.");
@@ -4001,7 +4020,7 @@ namespace BigAmbitionsMP
                 var (peer, hello) = parked[0];
                 JoinerIdentity(peer, out var steam, out var ip);
                 string stable = hello.StableId ?? "";
-                var e = MPConfig.AddBan(hello.PlayerId, steam, stable, ip, GameDayNow());
+                var e = MPConfig.AddBan(hello.PlayerId, steam, stable, ip, GameDayNow()); MPBuildingSale.OnBanned();   // T-50 fold 2 (c): a banned seller's unreleased sale is cancelled at the next tick
                 foreach (var (pp, _) in parked) { try { pp.Disconnect(System.Text.Encoding.UTF8.GetBytes("BAMP:banned")); } catch { } }
                 if (e == null) return $"ERR nothing identifies '{hello.PlayerId}' - not banned (the waiting request was refused)";
                 bool ipKept = MPConfig.IsRecordableIp(ip);
@@ -4040,7 +4059,7 @@ namespace BigAmbitionsMP
                 _vouchedSteamByStable.TryGetValue(stable, out var steam);
                 if (string.IsNullOrEmpty(steam) && stable.StartsWith("steam-", StringComparison.Ordinal) && ulong.TryParse(stable.Substring(6), out _))
                     steam = stable.Substring(6);   // C1 (F2b): a Steam player's stable id IS 'steam-<SteamID64>'
-                var e = MPConfig.AddBan(pid, steam ?? "", stable, "", GameDayNow());
+                var e = MPConfig.AddBan(pid, steam ?? "", stable, "", GameDayNow()); MPBuildingSale.OnBanned();   // T-50 fold 2 (c): a banned seller's unreleased sale is cancelled at the next tick
                 if (e == null) return $"ERR nothing identifies '{who}' - not banned";
                 Plugin.Logger.LogInfo($"[Server] BANNED offline player '{pid}' (saved ban {e.Key}: stable id yes, Steam id {(string.IsNullOrEmpty(steam) ? "no" : "yes")}) - lasts until unbanned.");
                 int refused = 0;
@@ -4093,6 +4112,7 @@ namespace BigAmbitionsMP
                 int n;
                 lock (_forfeitLock) { n = _forfeits.Count; _forfeits.Clear(); _forfeitRefusalLogged.Clear(); _forfeitReplayStopLogged.Clear(); }
                 if (n > 0) Plugin.Logger.LogInfo($"[Forfeit] record cleared ({n} entr(ies); {why}).");
+                MPBuildingSale.Reset();   // T-50: the building-sale records belong to the same world as the forfeit record
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Forfeit] reset: {ex.Message}"); }
         }
@@ -6181,6 +6201,7 @@ namespace BigAmbitionsMP
                 // list (applied after it on the same main-thread queue; ApplyBuildingsForSale clears and rebuilds) restores
                 // the host's fresh unowned listing.
                 SendForfeitsTo(pid, "world-ready re-send");
+                MPBuildingSale.HostReplayTo(pid);   // T-50: every building-sale leg and held rent naming this player (its own data decides 'already done?')
                 // v9: a daily for-sale flip that landed in this joiner's load-window drop
                 // list has no other re-cover until the NEXT in-game day — ship the live list.
                 var fsList = BusinessSync.CurrentForSaleList();
@@ -6991,7 +7012,7 @@ namespace BigAmbitionsMP
                 answer.Granted = true;
                 Plugin.Logger.LogInfo($"[Buy] claim {claimId} for '{c.AddressKey}' by {senderPid} @ {c.Amount:F0} GRANTED - the deed ledger names {senderPid}; the guest runs the game's own buy once.");
             }
-            else BuyOfPlayerOwnedBuilding(c.AddressKey, senderPid, holder, c.Amount, answer);
+            else BuyOfPlayerOwnedBuilding(c.AddressKey, senderPid, holder, c.Amount, answer, out _);
             Send(peer, MessageEnvelope.Create(MessageType.BuyClaimAnswer, "host", answer));
         }
 
@@ -6999,11 +7020,11 @@ namespace BigAmbitionsMP
         /// declines): the ONE place that decides what a buy of a building whose deed ANOTHER player holds does. Today it
         /// refuses. Called for a guest's claim (answer is filled here, the guest shows the approved text) and, with
         /// answer == null, for the host's own buy (MPPatches.Patch_SendBuyBuildingOffer shows the text).</summary>
-        internal static void BuyOfPlayerOwnedBuilding(string addr, string buyerPid, string holder, double amount, BuyClaimPayload? answer)
-        {
-            Plugin.Logger.LogWarning($"[Buy] buy of '{addr}' by {buyerPid} @ {amount:F0} REFUSED - the deed is held by {holder} (no money moved).");
-            if (answer != null) { answer.Granted = false; answer.OwnedByPlayer = true; }
-        }
+        // T-50 (owner decisions 28-34, 36, 38): the seam now SENDS AN OFFER to the deed holder (a hub offer Kind="building"),
+        // refuses up front when that owner is offline, and keeps the refusal only for a Hamptons house. Returns
+        // "offer" | "offline" | "refused"; ownerName = who the buyer's screen names.
+        internal static string BuyOfPlayerOwnedBuilding(string addr, string buyerPid, string holder, double amount, BuyClaimPayload? answer, out string ownerName)
+            => MPBuildingSale.HostOfferFromBuy(addr, buyerPid, holder, amount, answer, out ownerName);
 
         /// <summary>T-33: the DEED gate for listing, cancelling and completing a building SALE - true iff senderPid holds the
         /// deed (BuildingRealEstateOwners). A tenant (BuildingOwners) is not the owner here: only SenderOwns, the gate for
@@ -7748,7 +7769,7 @@ namespace BigAmbitionsMP
                 {
                     SessionName = adopt, RawLength = data.Value.raw, Money = cash,
                     MetaJson = MPSaveCoordinator.ReadMemberMetaJson(servedFrom, stable),   // round-275b: keep their copy datable
-                    MoneyKnown = cash != 0f || GetKnownCash(pid) >= 0f,   // round-224: 0-and-unstreamed = unknown
+                    MoneyKnown = cash != 0f || GetKnownCash(pid) >= 0f || MPSaveCoordinator.SlotMoneyKnown(servedFrom, stable),   // round-224: 0-and-unstreamed = unknown; T-50 fold 2 (a): a recorded $0 is known
                     // Handoff slice 4: identity/day/epoch for the joiner's log-only diagnostics.
                     WorldDay = m?.WorldDay ?? 0, PlaythroughId = !string.IsNullOrEmpty(m?.PlaythroughId) ? m.PlaythroughId : MPSaveCoordinator.ActivePlaythroughId, HostEpoch = m?.HostEpoch ?? 0,
                     LoadGen = MintLoadGen(pid),   // round-284 load ticket
@@ -8849,6 +8870,9 @@ namespace BigAmbitionsMP
             if (!dissolves && membershipSent) BroadcastWalletGroup(g0);
             return true;
         }
+
+        internal static string StableOf(string pid) => StableOfPid(pid ?? "");   // T-50
+        internal static string PidOf(string stable) => PidOfStable(stable ?? "");   // T-50
 
         private static string StableOfPid(string pid)
             => pid == MPConfig.PlayerId ? MPConfig.StableId

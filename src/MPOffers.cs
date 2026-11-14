@@ -114,6 +114,7 @@ namespace BigAmbitionsMP
         /// <summary>HOST tick (main thread, cheap): re-send unacked Finalizes.</summary>
         public static void HostTick()
         {
+            MPBuildingSale.HostTick();   // T-50: building-sale legs and held rent (own 5 s cadence)
             if (!MPServer.IsRunning || _pendingFinalize.Count == 0) return;
             try
             {

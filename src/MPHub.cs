@@ -1,3 +1,4 @@
+using Streets;
 using System;
 using System.Collections.Generic;
 using Helpers;
@@ -139,6 +140,32 @@ namespace BigAmbitionsMP
             return true;
         }
 
+        /// <summary>T-50, HOST MAIN THREAD: the building offer the host made from a buyer's held buy of another player's
+        /// deed (MPBuildingSale.HostOfferFromBuy). A newer offer from the same buyer for the same building replaces the
+        /// older one everywhere (no revoke notice).</summary>
+        internal static void HostCreateBuildingOffer(string id, string from, string to, float amount, string addressKey)
+        {
+            string name = addressKey;
+            try { var reg = GameStatePatcher.FindRegistration(addressKey); if (reg != null) name = reg.Address.ToFormattedString(); } catch { }
+            foreach (var k in new List<string>(_hostOffers.Keys))
+            {
+                var o = _hostOffers[k];
+                if (o.Kind == MPBuildingSale.Kind && o.From == from && o.AddressKey == addressKey) _hostOffers.Remove(k);
+            }
+            var p = new LoanOfferPayload { Id = id, From = from, To = to, Principal = amount, Kind = MPBuildingSale.Kind, AddressKey = addressKey, BusinessName = name };
+            if (from == MPConfig.PlayerId) NoteOutgoingBuildingOffer(p);
+            HostRouteOffer(p);
+        }
+
+        /// <summary>T-50: MY building offer (made by the host from my held buy) joins my outgoing list, replacing an older
+        /// one for the same building.</summary>
+        internal static void NoteOutgoingBuildingOffer(LoanOfferPayload p)
+        {
+            OutgoingOffers.RemoveAll(o => o.Kind == MPBuildingSale.Kind && o.AddressKey == p.AddressKey);
+            OutgoingOffers.Add(p);
+            Version++;
+        }
+
         /// <summary>Cancel one of MY pending offers (the outgoing list's X).</summary>
         public static void CancelOffer(string id)
         {
@@ -184,6 +211,7 @@ namespace BigAmbitionsMP
             IncomingOffers.Remove(offer);
             Version++;
             var a = new LoanAnswerPayload { Id = id, From = MPConfig.PlayerId, Accept = accept };
+            if (accept && offer.Kind == MPBuildingSale.Kind) MPBuildingSale.SellerPrepareAccept(offer, a);   // T-50: occupancy/rent price only - the host decides first; the listing is cancelled in the seller's leg (fold F4)
             if (MPServer.IsRunning) HostHandleAnswer(a);
             else MPClient.SendHub(MessageType.LoanAnswer, a);
         }
@@ -232,7 +260,7 @@ namespace BigAmbitionsMP
                 // The proposer deserves an explicit answer (user 2026-07-20) — before
                 // this, acceptance was only inferable from the money-movement toast.
                 string verdict = p.State == "accepted" ? "accepted" : "declined";
-                string what = p.Kind == "gift" ? "gift" : p.Kind == "business" ? $"offer for '{p.BusinessName}'" : "loan offer";
+                string what = p.Kind == "gift" ? "gift" : (p.Kind == "business" || p.Kind == MPBuildingSale.Kind) ? $"offer for '{p.BusinessName}'" : "loan offer";
                 // HUBSALE-1: the verdict is logged on the PROPOSER's machine too - a buyer's bundle used to show nothing.
                 Plugin.Logger.LogInfo($"[Hub] offer '{p.Id}' kind={p.Kind} addr='{p.AddressKey}' -> {p.State} from '{p.To}' (${p.Principal:N0}).");
                 GameStatePatcher.EnqueueOnMainThread(() => PassengerHud.Toast($"{p.To} {verdict} your ${p.Principal:N0} {what}.", 4f));
@@ -248,6 +276,8 @@ namespace BigAmbitionsMP
             }
             // No chat notice — the pulsing Business badge is the signal
             // (user call, 2026-06-10).
+            // T-50: a newer building offer from the same buyer for the same building replaces the older one.
+            if (p.Kind == MPBuildingSale.Kind) IncomingOffers.RemoveAll(o => o.Kind == MPBuildingSale.Kind && o.From == p.From && o.AddressKey == p.AddressKey);
             IncomingOffers.Add(p);
             Version++;
         }
@@ -288,6 +318,27 @@ namespace BigAmbitionsMP
             else MPServer.SendHubTo(p.To, MessageType.LoanOffer, p);
         }
 
+        /// <summary>T-50 fold (HOST, main thread): the outcome of a building sale's escrow leg. Charged = the buyer hears
+        /// "accepted" (the existing lines). Not = the buyer's own game could not pay (it showed the game's own
+        /// insufficient-money notice): nothing moved and the offer is pending again, with the enforcement lines below.</summary>
+        internal static void HostBuildingOfferOutcome(LoanOfferPayload offer, bool charged)
+        {
+            string what = $"offer for '{offer.BusinessName}'";
+            if (charged)
+            {
+                var result = new LoanOfferPayload { Id = offer.Id, From = offer.From, To = offer.To, Kind = offer.Kind, Principal = offer.Principal, AddressKey = offer.AddressKey, BusinessName = offer.BusinessName, State = "accepted" };
+                if (offer.From == MPConfig.PlayerId) ReceiveOffer(result);
+                else MPServer.SendHubTo(offer.From, MessageType.LoanOffer, result);
+                NotifyParty(offer.From, $"{offer.To} accepted your ${offer.Principal:N0} {what}.");
+                return;
+            }
+            _hostOffers[offer.Id] = offer;
+            NotifyParty(offer.To, $"{offer.From}'s ${offer.Principal:N0} {what} offer can't be accepted right now — they can't cover it. It stays pending.");
+            NotifyParty(offer.From, $"{offer.To} tried to accept your ${offer.Principal:N0} {what} but your balance can't cover it.");
+            if (offer.To == MPConfig.PlayerId) ReceiveOffer(offer);
+            else MPServer.SendHubTo(offer.To, MessageType.LoanOffer, offer);
+        }
+
         public static void HostHandleAnswer(LoanAnswerPayload a)
         {
             if (a == null || !_hostOffers.TryGetValue(a.Id, out var offer)) return;
@@ -297,7 +348,7 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogWarning($"[Hub] answer for offer '{a.Id}' from '{a.From}' but it was made to '{offer.To}' — dropped.");
                 return;
             }
-            string what = offer.Kind == "gift" ? "gift" : offer.Kind == "business" ? $"offer for '{offer.BusinessName}'" : "loan";
+            string what = offer.Kind == "gift" ? "gift" : (offer.Kind == "business" || offer.Kind == MPBuildingSale.Kind) ? $"offer for '{offer.BusinessName}'" : "loan";
 
             // Round-196: a business sale needs the seller to STILL own the shop per the
             // session ledger at accept time (live read at commitment — ownership may have
@@ -341,6 +392,45 @@ namespace BigAmbitionsMP
                 }
             }
 
+            // T-50 (owner decisions 28-34): a building sale needs BOTH players online at accept (the early-repayment rule
+            // above) - otherwise it stays pending - and the deed ledger must still name the seller (else it lapses, like a
+            // business sale; Occupancy -1 = the seller's own game has no record of the building).
+            if (a.Accept && offer.Kind == MPBuildingSale.Kind)
+            {
+                var present = MPRestSync.AllPlayers();
+                if (!present.Contains(offer.From) || !present.Contains(offer.To))
+                {
+                    string away = present.Contains(offer.From) ? offer.To : offer.From;
+                    Plugin.Logger.LogWarning($"[BldSale] accept of offer '{a.Id}' for '{offer.AddressKey}' held - {away} is offline (both players must be online); the offer stays pending.");
+                    // owner decision 50 (2026-11-13): the accepting player is told, as the other offer notices are
+                    string awayName = away;
+                    try { string n = GrantSync.NameOf(MPServer.StableOf(away) ?? ""); if (!string.IsNullOrEmpty(n)) awayName = n; } catch { }
+                    string heldText = MPBuildingSale.AcceptHeldOfflineText(awayName);
+                    NotifyParty(offer.To, heldText);
+                    Plugin.Logger.LogInfo($"[BldSale] shown to {offer.To}: {heldText}");
+                    if (offer.To == MPConfig.PlayerId) ReceiveOffer(offer);
+                    else MPServer.SendHubTo(offer.To, MessageType.LoanOffer, offer);
+                    return;
+                }
+                if (MPBuildingSale.HasOpenSale(offer.AddressKey ?? ""))
+                {   // fold F3: an earlier sale of this building is not retired yet (every leg confirmed AND saved) - no approved line fits, so log only and keep the offer pending
+                    Plugin.Logger.LogWarning($"[BldSale] accept of offer '{a.Id}' for '{offer.AddressKey}' held - an earlier sale of this building is still open (retired only when every leg is confirmed and saved); the offer stays pending.");
+                    if (offer.To == MPConfig.PlayerId) ReceiveOffer(offer);
+                    else MPServer.SendHubTo(offer.To, MessageType.LoanOffer, offer);
+                    return;
+                }
+                if (a.Occupancy < 0f || !MPBuildingSale.HostSellerHoldsDeed(offer.AddressKey ?? "", offer.To))
+                {
+                    Plugin.Logger.LogWarning($"[BldSale] building offer '{a.Id}' for '{offer.AddressKey}' lapsed - the deed ledger or the seller's own record no longer names the seller '{offer.To}'.");
+                    NotifyParty(offer.To, $"the sale of '{offer.BusinessName}' can't complete — the session ledger no longer lists you as its owner.");
+                    _hostOffers.Remove(a.Id);
+                    var lapse = new LoanOfferPayload { Id = offer.Id, From = offer.From, To = offer.To, Kind = offer.Kind, Principal = offer.Principal, AddressKey = offer.AddressKey, BusinessName = offer.BusinessName, State = "declined" };
+                    if (offer.From == MPConfig.PlayerId) ReceiveOffer(lapse);
+                    else MPServer.SendHubTo(offer.From, MessageType.LoanOffer, lapse);
+                    return;
+                }
+            }
+
             // ENFORCEMENT: an offer can't be accepted while the offerer can't
             // cover it (their wallet may have dropped since offering).  The
             // offer stays pending — it re-enables when funds recover.
@@ -361,6 +451,12 @@ namespace BigAmbitionsMP
                 }
             }
             _hostOffers.Remove(a.Id);
+            if (a.Accept && offer.Kind == MPBuildingSale.Kind)
+            {   // T-50 fold (ROOT): escrow first - the buyer's own game takes the money in the sale's first leg; the buyer hears
+                // "accepted" only then (HostBuildingOfferOutcome), and an offer its game cannot pay goes back to pending.
+                MPBuildingSale.HostBegin(offer, a.Occupancy, a.PricePerSqm);
+                return;
+            }
             // Tell the offerer the outcome (clears their outgoing list).
             var result = new LoanOfferPayload { Id = offer.Id, From = offer.From, To = offer.To, Kind = offer.Kind, Principal = offer.Principal, AddressKey = offer.AddressKey, BusinessName = offer.BusinessName, State = a.Accept ? "accepted" : "declined" };
             if (offer.From == MPConfig.PlayerId) ReceiveOffer(result);

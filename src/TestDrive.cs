@@ -985,6 +985,22 @@ namespace BigAmbitionsMP
                     return $"OK realbuy addr='{t33key}' amount={ramt.ToString("F2", t33inv)} moneyBefore={rmoney.ToString("F2", t33inv)} moneyNow={((double)t33gi.Money).ToString("F2", t33inv)} owned={rown} held={MPPatches.Patch_SendBuyBuildingOffer.HasPendingClaim} deed={rdeed}";
                 }
 
+                // T-50 DEV levers (t-buildingsale): the game's buy box on another player's building, the Business app's
+                // answer buttons, deed/transaction readouts, the seller's crash window, and the T3/T6 premises.
+                case "bldoffer":   return MPBuildingSale.DevBldOffer(arg);
+                case "hubanswer":  return MPBuildingSale.DevHubAnswer(arg);
+                case "deedstate":  return MPBuildingSale.DevDeedState(arg);
+                case "xferstate":  return MPBuildingSale.DevXferState();
+                case "xferhold":   { string h = arg.Trim(); MPBuildingSale.DevHold = h == "off" || h.Length == 0 ? "" : h == "on" ? "release" : h; return $"OK xferhold hold={(MPBuildingSale.DevHold.Length > 0 ? MPBuildingSale.DevHold : "off")}"; }
+                case "xferdrop":   { string h = arg.Trim(); MPBuildingSale.DevDropOnce = h == "off" || h.Length == 0 ? "" : h; return $"OK xferdrop drop={(MPBuildingSale.DevDropOnce.Length > 0 ? MPBuildingSale.DevDropOnce : "off")}"; }
+                case "xferdeadline": { string h = arg.Trim(); if (h == "off" || h.Length == 0) MPBuildingSale.DevRefundAfterDays = -1; else if (int.TryParse(h, out var dd) && dd >= 0) MPBuildingSale.DevRefundAfterDays = dd; else return "ERR usage: xferdeadline <days|off>"; return $"OK xferdeadline days={(MPBuildingSale.DevRefundAfterDays >= 0 ? MPBuildingSale.DevRefundAfterDays.ToString() : "off")} constant={MPBuildingSale.RefundAfterDays}"; }
+                case "moneymark":  return MPBuildingSale.DevMoneyMark(arg);
+                case "moneydelta": return MPBuildingSale.DevMoneyDelta(arg);
+                case "txlines":    return MPBuildingSale.DevTxLines(arg);
+                case "bldrent":    return MPBuildingSale.DevBldRent(arg);
+                case "deedset":    return MPBuildingSale.DevDeedSet(arg);
+                case "bldhampton": return MPBuildingSale.DevFindHampton();
+
                 case "deedgate":
                 {
                     // T-33 DEV lever (t-buyowned T4): the DEED gate on ListForSale / CancelSale / SaleCompleted.

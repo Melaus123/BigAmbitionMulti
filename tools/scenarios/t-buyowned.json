@@ -1,6 +1,6 @@
 {
   "id": "T-BUYOWNED",
-  "title": "T-33 (2026-11-13): every building buy is decided by the host BEFORE any money moves - BizManPresentation.SendBuyBuildingOffer is held by a prefix; a guest sends a BuyClaim and the host answers from one locked check-and-record against the deed ledger; the host's own buy runs the same check. A building whose deed another player holds is refused ('Another player already owns this building.'), money and ledger unchanged; a race for one unowned building yields exactly one owner; list/cancel/sale-done for a building need the DEED (a tenant is dropped); an unowned building still buys normally, charged once",
+  "title": "T-33 (2026-11-13): every building buy is decided by the host BEFORE any money moves - BizManPresentation.SendBuyBuildingOffer is held by a prefix; a guest sends a BuyClaim and the host answers from one locked check-and-record against the deed ledger; the host's own buy runs the same check. A buy of a building whose deed another player holds becomes a hub offer to that owner (T-50), money and ledger unchanged; a race for one unowned building yields exactly one owner; list/cancel/sale-done for a building need the DEED (a tenant is dropped); an unowned building still buys normally, charged once",
   "preconditions": "Fixture save1 (host melaus, client Client1; Murray Hill special rival ju1yVbREcE2B5ymg6q5tyA== owns for-rent buildings). Dev build with the realbuy + deedgate levers (TestDrive.cs, T-33) and rivalrent buy (client, no money). T3 races for the cheapest listed building and the race loser buys the second cheapest in T5 (realbuy unless lever), at the game's own minimum offer. Step 9 gives each player 20M (spend lever) for T1's minimum offer (a rival building's minimum can exceed 17M); step 18 takes 14M back so T3/T5's exact charge checks run under the float limit (16,777,216); step 35 refunds the guest for T2 (the lever answers ERR ... (premise - nothing pressed) otherwise). T2/T4 use the building the host bought. NOTHING is saved (fixture reset).",
   "instances": 2,
   "vars": {
@@ -58,8 +58,8 @@
     {
       "seq": 14, "role": "h", "cmd": "realbuy ${addr1}",
       "expect_result": "^OK realbuy addr='${addr1}' amount=\\d+\\.00 .* owned=False held=False deed=${clientPid}$",
-      "expect_log": [ { "role": "h", "regex": "\\[Buy\\] buy of '${addr1}' by ${hostPid} @ \\S+ REFUSED - the deed is held by ${clientPid}", "within_s": 5 } ],
-      "note": "TEST: the host presses the game's real buy for the guest's building - refused in the prefix before any money moves (the game's own minimum offer: a lower offer stops at the game's price check before the deed check, T-33 fold F5)"
+      "expect_log": [ { "role": "h", "regex": "\\[BldSale\\] offer \\S+ on '${addr1}' by ${hostPid} @ \\S+ SENT to the deed holder ${clientPid}", "within_s": 5 } ],
+      "note": "TEST: the host presses the game's real buy for the guest's building - since T-50 it becomes an offer to the deed holder, decided in the prefix before any money moves (the game's own minimum offer: a lower offer stops at the game's price check before the deed check, T-33 fold F5)"
     },
     { "seq": 15, "role": "h", "cmd": "realbuy last", "expect_result": "^OK realbuy last addr='${addr1}' .* owned=False once=False unchanged=True ", "note": "TEST: the host's money is unchanged" },
     { "seq": 16, "role": "h", "cmd": "bldgstate ${addr1}", "expect_result": "^OK bldg .* owned=False .* deed=${clientPid} ", "note": "TEST: the ledger still names Client1" },
@@ -80,8 +80,8 @@
     },
     {
       "seq": 22, "role": "h", "sleep_s": 8,
-      "expect_log": [ { "role": "h", "regex": "\\[Buy\\] buy of '${race}' by \\S+ @ \\d+ REFUSED - the deed is held by \\S+", "within_s": 15 } ],
-      "note": "exactly one of the two is refused (the oracle below checks there is exactly one owner)"
+      "expect_log": [ { "role": "h", "regex": "\\[BldSale\\] offer \\S+ on '${race}' by \\S+ @ \\d+ SENT to the deed holder \\S+", "within_s": 15 } ],
+      "note": "exactly one of the two loses - since T-50 the loser's buy becomes an offer to the winner, no money moved (the oracle below checks there is exactly one owner)"
     },
     {
       "seq": 23, "role": "h", "cmd": "bldgstate ${race}",
@@ -126,10 +126,10 @@
       "seq": 38, "role": "c", "cmd": "realbuy ${hostb}",
       "expect_result": "^OK realbuy addr='${hostb}' amount=\\d+\\.00 .* owned=False held=True ",
       "expect_log": [
-        { "role": "h", "regex": "\\[Buy\\] buy of '${hostb}' by ${clientPid} @ \\S+ REFUSED - the deed is held by ${hostPid}", "within_s": 15 },
-        { "role": "c", "regex": "\\[Buy\\] claim \\S+ for '${hostb}' REFUSED by the host - another player holds the deed", "within_s": 15 }
+        { "role": "h", "regex": "\\[BldSale\\] offer \\S+ on '${hostb}' by ${clientPid} @ \\S+ SENT to the deed holder ${hostPid}", "within_s": 15 },
+        { "role": "c", "regex": "\\[BldSale\\] claim \\S+ for '${hostb}': offer \\S+ @ \\S+ sent to ${hostPid}; nothing was charged\\.", "within_s": 15 }
       ],
-      "note": "TEST: the guest's buy is held (claim sent, nothing charged) and the host refuses it (the game's own minimum offer, funded by step 35)"
+      "note": "TEST: the guest's buy is held (claim sent, nothing charged) and the host turns it into an offer to the deed holder (T-50) (the game's own minimum offer, funded by step 35)"
     },
     { "seq": 39, "role": "c", "cmd": "realbuy last", "expect_result": "^OK realbuy last addr='${hostb}' .* owned=False once=False unchanged=True held=False$", "note": "TEST: the guest's money is unchanged and no claim is left waiting" },
     { "seq": 40, "role": "h", "cmd": "bldgstate ${hostb}", "expect_result": "^OK bldg .* owned=True .* deed=${hostPid} ", "note": "TEST: the ledger still names the host" },

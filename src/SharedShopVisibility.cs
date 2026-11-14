@@ -778,7 +778,7 @@ namespace BigAmbitionsMP
                         }
                     }
                     SetButtonsCalling(__instance.transform, "TerminateContract", interactable: termOk);
-                    SetButtonsCalling(__instance.transform, "SendBuyBuildingOffer", interactable: !other);
+                    SetButtonsCalling(__instance.transform, "SendBuyBuildingOffer", interactable: !other || MPBuildingSale.IsOtherPlayersDeed(reg));   // T-50: another player's DEED takes an offer
                     if (other && __instance.showEmployeesButton != null) __instance.showEmployeesButton.SetActive(false);
                     if (other && !SharedShopSchedule.IsSharedShop(reg, AddrOf(reg))) ShopValuation.Request(AddrOf(reg));   // H-BIZ-1 (review #5): a SHARED shop shows the "mine" view (tenancy raised for OnEnable) — nothing to fill
                     // (the buy-offer box is re-shown by the "make an offer" button later; its Send button is greyed
@@ -807,7 +807,12 @@ namespace BigAmbitionsMP
         {
             static bool Prefix(BizManPresentation __instance)
             {
-                try { return !BlockOnOtherPlayersShop(_fPresBiz?.GetValue(__instance) as BizManBusiness, "buy-building offer"); }
+                try
+                {
+                    var bz = _fPresBiz?.GetValue(__instance) as BizManBusiness;
+                    if (MPBuildingSale.IsOtherPlayersDeed(bz?.buildingRegistration)) return true;   // T-50: the deed case becomes an offer to its owner
+                    return !BlockOnOtherPlayersShop(bz, "buy-building offer");
+                }
                 catch { return true; }
             }
         }

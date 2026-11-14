@@ -142,7 +142,8 @@ namespace BigAmbitionsMP
 
             try
             {
-                var payload = new SaveNowPayload { SessionName = session, Reason = reason, PlaythroughId = ActivePlaythroughId };
+                int saveRound = MPBuildingSale.OnSaveNow();   // T-50 fold: a save round begins - the uploads answering it cover the sale legs confirmed before it
+                var payload = new SaveNowPayload { SessionName = session, Reason = reason, PlaythroughId = ActivePlaythroughId, Round = saveRound };
                 MPServer.BroadcastAny(MessageEnvelope.Create(MessageType.SaveNow, "host", payload));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] SaveNow broadcast: {ex.Message}"); }
@@ -170,7 +171,7 @@ namespace BigAmbitionsMP
                     // keep their own honest dates).
                     SetSessionMetadata(session, slot.Day, saved);   // owners + roster (+ day/time if saved)
                     DiagPhase("host lambda: SetSessionMetadata done → MergeSlot");
-                    if (saved) MergeSlot(session, slot);      // host's own slot
+                    if (saved) { MPBuildingSale.OnPartySaved(slot.StableId); MergeSlot(session, slot); }      // host's own slot
                     else Plugin.Logger.LogError($"[MPSave] host save '{session}' FAILED — own slot NOT advertised (round-237); the load-time lineage rescue fills it honestly. Members' uploads still land.");
                     // Carry forward anyone who isn't here to save themselves (a member who just left, or
                     // was offline) so a save never silently drops them → a load that would otherwise
@@ -214,7 +215,7 @@ namespace BigAmbitionsMP
             {
                 var slot = PerformLocalSave(dc, out bool saved);
                 SetSessionMetadata(dc, slot.Day, saved);
-                if (saved) MergeSlot(dc, slot);
+                if (saved) { MPBuildingSale.OnPartySaved(slot.StableId); MergeSlot(dc, slot); }
                 else Plugin.Logger.LogError($"[MPSave] quit checkpoint '{dc}' save FAILED — own slot NOT advertised (round-237); members still carried forward below.");
                 // Same carry-forward as every other save path (review 2026-07-20) — but
                 // INCLUDING connected members (review-2 fix 2026-07-23): unlike every
@@ -294,7 +295,8 @@ namespace BigAmbitionsMP
             Plugin.Logger.LogInfo($"[MPSave] HostSaveSync session='{session}' reason={reason} (inline).");
             try
             {
-                var payload = new SaveNowPayload { SessionName = session, Reason = reason, PlaythroughId = ActivePlaythroughId };
+                int saveRound = MPBuildingSale.OnSaveNow();   // T-50 fold: a save round begins - the uploads answering it cover the sale legs confirmed before it
+                var payload = new SaveNowPayload { SessionName = session, Reason = reason, PlaythroughId = ActivePlaythroughId, Round = saveRound };
                 MPServer.BroadcastAny(MessageEnvelope.Create(MessageType.SaveNow, "host", payload));
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[MPSave] HostSaveSync broadcast: {ex.Message}"); }
@@ -306,7 +308,7 @@ namespace BigAmbitionsMP
             {
                 var slot = PerformLocalSave(session, out bool saved);
                 SetSessionMetadata(session, slot.Day, saved);
-                if (saved) MergeSlot(session, slot);
+                if (saved) { MPBuildingSale.OnPartySaved(slot.StableId); MergeSlot(session, slot); }
                 else Plugin.Logger.LogError($"[MPSave] menu save '{session}' FAILED — own slot NOT advertised (round-237); members' uploads and carry-forward still run.");
                 // Field 2026-07-19 (the unintended character reset): this MANUAL path —
                 // which is exactly where a save-as under a new name lands — never carried
@@ -433,12 +435,13 @@ namespace BigAmbitionsMP
             string canonical = StripAutoSuffix(session);
             lock (_lock) { _activeSessionName = canonical; }
 
-            GameStatePatcher.EnqueueOnMainThread(() => ClientSaveBody(session));
+            int saveRound = payload.Round;   // T-50 fold 2 (d): the round this save answers rides to its upload
+            GameStatePatcher.EnqueueOnMainThread(() => ClientSaveBody(session, saveRound));
         }
 
         /// <summary>The client save execution — split out so a placement-deferred save can
         /// re-enter from TickDeferredSave (task-28 fix 2).  Main thread only.</summary>
-        private static void ClientSaveBody(string session)
+        private static void ClientSaveBody(string session, int saveRound = 0)
         {
                 try
                 {
@@ -491,7 +494,7 @@ namespace BigAmbitionsMP
                     }
                     string dir = MPSaveManager.MpCharacterFolder(session, MPConfig.StableId);
                     lock (_pending)
-                        _pending.Add(new PendingUpload { Session = session, Slot = slot, Folder = dir });
+                        _pending.Add(new PendingUpload { Session = session, Slot = slot, Folder = dir, Round = saveRound });
                     Plugin.Logger.LogInfo($"[MPSave] Queued .hsg upload for session '{session}'.");
                 }
                 catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] Client save: {ex}"); }
@@ -605,6 +608,7 @@ namespace BigAmbitionsMP
             public MpSlot Slot = new();
             public string Folder = "";
             public int    WaitedFrames;
+            public int    Round;          // T-50 fold 2 (d): the SaveNow round this upload answers
         }
 
         private static readonly List<PendingUpload> _pending = new();
@@ -1025,7 +1029,7 @@ namespace BigAmbitionsMP
                         string metaJson = "";
                         try { string mp = fileT + ".meta"; if (File.Exists(mp)) metaJson = File.ReadAllText(mp); } catch { }
                         if (MPClient.IsConnected)
-                            MPClient.SendSaveData(upT.Session, upT.Slot, GzipBytes(raw), raw.Length, metaJson);
+                            MPClient.SendSaveData(upT.Session, upT.Slot, GzipBytes(raw), raw.Length, metaJson, upT.Round);
                         Plugin.Logger.LogInfo($"[MPSave] Uploaded '{upT.Slot.SaveName}.hsg' ({raw.Length}B) for session '{upT.Session}' (off-thread, wave-2).");
                         Remove(upT);
                     }
@@ -1105,6 +1109,7 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogError($"[MPSave] HostHandleSaveData write: {ex}"); return; }
 
+            MPBuildingSale.OnPartySaved(data.Slot.StableId, data.SaveRound);   // T-50 fold: this member's stored save covers its sale legs recorded before ITS round (before the merge writes the manifest)
             MergeSlot(data.SessionName, data.Slot);
             // Handoff slice 1: this member's fresh .hsg just landed — mirror it (+
             // current manifest) to every OTHER client. Already on the network
@@ -1856,6 +1861,8 @@ namespace BigAmbitionsMP
         private static float _pendingCashApply;
         private static bool  _hasPendingCash;   // explicit sentinel — a legitimate $0 / negative (overdraft) is a real authoritative balance, not "nothing pending"
         private static int   _cashApplyDwell;
+        /// <summary>T-50 fold: a restored balance is waiting to be written over this game's money - a money leg waits for it.</summary>
+        internal static bool CashOverlayPending => _hasPendingCash;
 
         public static void QueueCashApply(float money)
         {
@@ -2779,6 +2786,7 @@ namespace BigAmbitionsMP
                 IsHost        = MPServer.IsRunning,
                 Day           = day,
                 Money         = LocalWalletOr0(),   // round-224: kill the $0 placeholder at birth
+                MoneyKnown    = LocalWalletKnown(), // T-50 fold 2 (a)
             };
         }
 
@@ -3391,6 +3399,7 @@ namespace BigAmbitionsMP
                     StableId = MPConfig.StableId, DisplayName = MPConfig.PlayerId, CharacterId = MPConfig.StableId,
                     SaveName = Path.GetFileNameWithoutExtension(file), Day = marker.Day, IsHost = false,
                     Money = LocalWalletOr0(),   // round-224
+                    MoneyKnown = LocalWalletKnown(),   // T-50 fold 2 (a)
                 };
                 // Round-275: include the sidecar — the host's day validator reads the day
                 // through the save scanner, which is blind without the .meta (the restore
@@ -3910,7 +3919,7 @@ namespace BigAmbitionsMP
                 m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                 m.RivalAttention = MPRivalAttention.Snapshot(true);   // H-RIVALPARITY-1 A: per-player rival attention rides the same save moment (main thread here: host rows read now)
                 m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books store rides the same save moment
-                m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: an in-transit employee is held by NOBODY's .hsg - the host's table is the only copy
+                m.Transfers = MPServer.SnapshotTransfers(); m.BuildingSales = MPBuildingSale.SnapshotSales(); m.RentForwards = MPBuildingSale.SnapshotRents(); m.RentDone = MPBuildingSale.SnapshotRentDone();   // T-50   // phase 4b (people) P2: an in-transit employee is held by NOBODY's .hsg - the host's table is the only copy
                 m.CargoTransfers = MPServer.SnapshotCargoTransfers();   // phase 4c part 2: in-transit GOODS are held by nobody's .hsg either
                 m.CargoClosed  = CargoTransfer.SnapshotClosed();        // r2 (F3): the ack/return ids this machine has applied
                 m.CargoApplied = CargoTransfer.SnapshotApplied();       // r2 (F6c): and the deliveries it has already shelved
@@ -4021,7 +4030,7 @@ namespace BigAmbitionsMP
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                     m.RivalAttention = MPRivalAttention.Snapshot(false);   // H-RIVALPARITY-1 A: per-player rival attention rides the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): same reason - a grants-only write must not drop the books store
-                    m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: same reason - a grants-only write must not drop an in-transit employee
+                    m.Transfers = MPServer.SnapshotTransfers(); m.BuildingSales = MPBuildingSale.SnapshotSales(); m.RentForwards = MPBuildingSale.SnapshotRents(); m.RentDone = MPBuildingSale.SnapshotRentDone();   // T-50   // phase 4b (people) P2: same reason - a grants-only write must not drop an in-transit employee
                     m.CargoTransfers = MPServer.SnapshotCargoTransfers();   // phase 4c part 2: same reason - nor in-transit goods
                     m.CargoClosed  = CargoTransfer.SnapshotClosed();        // r2 (F3): same reason - a grants-only write must not drop the marks
                     m.CargoApplied = CargoTransfer.SnapshotApplied();       // r2 (F6c)
@@ -4112,7 +4121,7 @@ namespace BigAmbitionsMP
                     m.Absence   = MPServer.SnapshotAbsence();     // phase 3-B: the absence marks ride the same save moment
                     m.RivalAttention = MPRivalAttention.Snapshot(false);   // H-RIVALPARITY-1 A: per-player rival attention rides the same save moment
                     m.CompanyBooks = MPServer.SnapshotCompanyBooks();   // phase 4a (G1): the books stamp sits under the SAME lineage gate
-                    m.Transfers = MPServer.SnapshotTransfers();   // phase 4b (people) P2: the in-transit stamp sits under the SAME lineage gate
+                    m.Transfers = MPServer.SnapshotTransfers(); m.BuildingSales = MPBuildingSale.SnapshotSales(); m.RentForwards = MPBuildingSale.SnapshotRents(); m.RentDone = MPBuildingSale.SnapshotRentDone();   // T-50   // phase 4b (people) P2: the in-transit stamp sits under the SAME lineage gate
                     m.CargoTransfers = MPServer.SnapshotCargoTransfers();   // phase 4c part 2: the cargo stamp sits under the SAME lineage gate
                     m.CargoClosed  = CargoTransfer.SnapshotClosed();        // r2 (F3/F6c): the idempotence marks sit under it too
                     m.CargoApplied = CargoTransfer.SnapshotApplied();
@@ -4136,6 +4145,47 @@ namespace BigAmbitionsMP
             return 0f;
         }
 
+        private static bool LocalWalletKnown()
+        {
+            try { return SaveGameManager.Current != null; } catch { return false; }
+        }
+
+        /// <summary>T-50 fold F1 / fold 2 (F2): stamp ONE player's slot with the live figure the host just recorded for them
+        /// (a building sale's money leg), so the ledger write that follows (MPHub.SaveLedger) carries the money and its
+        /// ledger mark together - a host restart restores both or neither. True = the store this player's money is restored
+        /// from carries the figure in that write: their slot was stamped, or they are merged (the company wallet the
+        /// manifest write carries). False = no such store (no slot yet): their money comes back from their own save.</summary>
+        internal static bool StampSlotCash(string stableId)
+        {
+            if (string.IsNullOrEmpty(stableId)) return false;
+            try
+            {
+                bool merged = TryMergedShare(stableId, out _);
+                lock (_lock)
+                {
+                    if (string.IsNullOrEmpty(_activeSessionName)) return false;
+                    var m = EnsureManifest(_activeSessionName);
+                    var s = m.Slots.Find(x => x.StableId == stableId);
+                    if (s != null && (MPServer.CashByStableId.ContainsKey(stableId) || merged)) { s.Money = SavedCashFor(stableId, m); s.MoneyKnown = true; return true; }
+                    return merged;
+                }
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[BldSale] slot cash stamp '{stableId}': {ex.Message}"); return false; }
+        }
+
+        /// <summary>T-50 fold 2 (a): does this session's manifest hold a RECORDED figure for that member (a genuine $0
+        /// included)? The serve paths ask it so a recorded $0 is overlaid, not mistaken for "no value".</summary>
+        internal static bool SlotMoneyKnown(string session, string stableId)
+        {
+            try
+            {
+                var m = MPSaveManager.ReadManifest(session);
+                var s = m?.Slots?.Find(x => x.StableId == stableId);
+                return s != null && s.MoneyKnown;
+            }
+            catch { return false; }
+        }
+
         private static void RefreshSlotCash(MpManifest m)
         {
             try
@@ -4147,7 +4197,7 @@ namespace BigAmbitionsMP
                     // wallet mirror, i.e. the full company balance sitting in one member's slot. TryMergedShare is
                     // the "I know this member's share" contract (X1); nothing here creates slots.
                     if (MPServer.CashByStableId.ContainsKey(s.StableId) || TryMergedShare(s.StableId, out _))
-                        s.Money = SavedCashFor(s.StableId, m);   // W2: the SHARE while merged, the live figure otherwise
+                    { s.Money = SavedCashFor(s.StableId, m); s.MoneyKnown = true; }   // W2: the SHARE while merged, the live figure otherwise
             }
             catch { }
         }

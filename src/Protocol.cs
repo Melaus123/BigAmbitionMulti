@@ -224,6 +224,7 @@ namespace BigAmbitionsMP
         WorldSettings         = 221,     // SAVED-SETTINGS-1 (user-approved 2026-09-29, decisions 18/20/21; protocol 27): the saved world's FLEXIBLE settings the host changed in the load lobby. Host -> client {Rev, Settings} when the client reports its world loaded (the Settled/Running applying-edge), after the host's own world-ready apply (broadcast), and on ask; the client applies through the game's own SaveGameManager.ApplyNewDifficulty (skipped when already equal). Client -> host with Settings = null = 'my applied rev differs from the heartbeat's WorldRev - re-send'.
         PropertyForfeit       = 222,     // BAN-PLAYERS-1 build B (owner-approved 2026-10-01; protocol 27, unreleased - additive): Host -> clients. The host REMOVED a banned player's property: per banned owner (stable id) the addresses it rented and bought, the ones whose contents go, and the game day. A machine that is not that owner clears its copy (for-rent flags, name, type, furniture/stock/storage; a building its own player holds is never touched); the banned player's OWN machine - only if it is ever unbanned and rejoins (the host replays the record at its world-ready) - ends those leases through the game's own lease-end steps WITHOUT any payout and gives up the bought buildings. Host -> client only.
         BuyClaim              = 223,     // T-33 (2026-11-13; protocol 28, unreleased - additive): Guest -> Host, BEFORE any money moves. The game's BizManPresentation.SendBuyBuildingOffer (decompile :889) is held by a prefix and the guest asks 'may I buy AddressKey at Amount' (ClaimId pairs the answer). The host decides in ONE locked check-and-record against the deed ledger (MPServer.TryClaimDeed) and answers with BuyClaimAnswer. The same type with Release=true is the guest's 'drop my granted claim': its one native re-run did not complete the buy, or the answer came after it stopped waiting.
+        BuildingSale          = 225,     // T-50 (2026-11-13; protocol 28, unreleased - additive): a PLAYER-TO-PLAYER BUILDING SALE's legs and its rent forwarding, one type told apart by Action. Escrow first (fold): host -> buyer "charge" / buyer -> host "charged" (or "chargefail": cannot pay, nothing moved); host -> seller "release" / "released"; host -> buyer "finalize" / "finalized"; host -> seller "pay" / "paid". Each leg is sent only while the host's ledger has not recorded it (every 5 s); a money leg's answer carries the balance after it; a building leg is replayed at the party's world-ready until its save covers it and follows the game's own list. Payer -> host "rentpaid" / host -> payer "rentnoted"; host -> deed holder "rent" / holder -> host "rentok" (the id rides the native transaction's data). The offer itself is a LoanOffer Kind="building" the HOST makes from a held buy (MPBuildingSale.HostOfferFromBuy).
         BuyClaimAnswer        = 224,     // T-33: Host -> that guest. Granted=true = the deed ledger now names the guest; it re-runs the game's own buy ONCE (native charge/deed/notifications exactly once) and its BuyRequest (17) then confirms. Granted=false + OwnedByPlayer = another player holds the deed; the guest shows the approved refusal. No money ever moves without Granted=true.
     }
 
@@ -1892,6 +1893,13 @@ namespace BigAmbitionsMP
         //      so per the freeze rule a wire-visible change bumps: a v26 client would drop 221 as "Unknown message type" and
         //      keep its own economy settings while everyone else runs the host's. No capability gate and no old-peer branch
         //      (project rule 2026-09-18): mixed sessions refuse at Hello.
+        // v28 (2026-11-13, T-50 fold of the independent review, additive - v28 unreleased): BuildingSale legs are now escrow-first
+        // (charge/charged/chargefail -> release/released -> finalize/finalized + pay/paid); BuildingSalePayload gains
+        // Committed, Tenant, Money, HasMoney; MpManifest gains RentDone; MpBuildingSaleEntry's two done marks became per-leg
+        // states + per-party saved marks (+ SellerStayed, Retired); MpRentForwardEntry gains Saved.
+        // v28 (2026-11-13, T-50, additive): MessageType.BuildingSale (225, BuildingSalePayload); LoanOffer Kind="building"
+        // (host-made from a held buy of another player's deed); LoanAnswerPayload Occupancy/PricePerSqm; BuyClaimPayload
+        // OfferSent/OfferId/Holder/HolderOffline; MpManifest BuildingSales/RentForwards.
         // v28 (2026-11-12, T-24 part 1, owner decision 11): partner booking routing - SharedWorkEditPayload gains BookingId,
         //      Lines, SlotDay and Hour (furniture/food bookings routed to the game that runs a merged partner's shop), and the
         //      absent-owner paperwork bundle gains the furniture/food delivery lists. 27 shipped in v0.3.3, so the change bumps;
@@ -2106,6 +2114,34 @@ namespace BigAmbitionsMP
         public bool Granted { get; set; }
         /// <summary>Answer only: the refusal is 'another player holds the deed'.</summary>
         public bool OwnedByPlayer { get; set; }
+        // T-50 (v28, additive): answer only - the deed holder is a player, so the host made a hub OFFER (OfferId) to
+        // Holder instead of refusing; or HolderOffline = that owner is not in the session (Holder = their name), refused.
+        public bool   OfferSent     { get; set; }
+        public string OfferId       { get; set; } = "";
+        public string Holder        { get; set; } = "";
+        public bool   HolderOffline { get; set; }
+    }
+
+    /// <summary>T-50 (v28): one leg of a player-to-player building sale or one forwarded day of rent (MessageType.BuildingSale).</summary>
+    public class BuildingSalePayload
+    {
+        public string Action      { get; set; } = "";   // charge|charged|chargefail|release|released|releasefail|finalize|finalized|pay|paid|refund|refunded|rentpaid|rentnoted|rent|rentok
+        public string SaleId      { get; set; } = "";
+        public string AddressKey  { get; set; } = "";
+        public string Name        { get; set; } = "";   // the address as the game formats it
+        public string BuyerId     { get; set; } = "";   // rent: the deed holder
+        public string SellerId    { get; set; } = "";   // rent: the paying tenant
+        public float  Amount      { get; set; }
+        public float  Occupancy   { get; set; }
+        public float  PricePerSqm { get; set; }
+        public int    Day         { get; set; }
+        public string RentId      { get; set; } = "";
+        public bool   Committed   { get; set; }        // charge: the seller already gave the building up (the host's own charge re-run after a restart)
+        public bool   Tenant      { get; set; }        // released: the seller still rents the building (decision 37's rent rule)
+        public float  Money       { get; set; }        // charged|paid|rentok: the party's balance right after the leg (the host's live figure)
+        public bool   HasMoney    { get; set; }
+        public int    Deadline    { get; set; }        // release (fold 2): the game day the host cancels from (0 = none); a first release applies only before Deadline - 1
+        public string SellerName  { get; set; } = "";   // refund (decision 53): the seller's display name for the buyer's notice
     }
 
     /// <summary>Periodic market price broadcast.</summary>
@@ -3088,6 +3124,10 @@ namespace BigAmbitionsMP
         public string Id     { get; set; } = "";
         public string From   { get; set; } = "";   // the borrower answering
         public bool   Accept { get; set; }
+        // T-50 (v28, additive): Kind="building" accept only - the seller's own RealEstate occupancy and rent per m2 the
+        // buyer's record carries; Occupancy -1 = the seller's game has no record of the building (the sale lapses).
+        public float  Occupancy   { get; set; }
+        public float  PricePerSqm { get; set; }
     }
 
     public class LoanEntry
@@ -3770,6 +3810,8 @@ namespace BigAmbitionsMP
         /// client told to save under a name it has never seen files it correctly — the
         /// order and the identity travel together (decision F: no guessing).</summary>
         public string PlaythroughId { get; set; } = "";
+        /// <summary>T-50 fold 2 (d): the host's save round this order starts; the upload answering it carries it back.</summary>
+        public int    Round         { get; set; }
     }
 
     /// <summary>One chat line.  Clients send it to the host; the host relays it to
@@ -3822,6 +3864,8 @@ namespace BigAmbitionsMP
         /// date a .hsg without it — host-stored copies lacked one, so day validation read
         /// -1/0 and the disconnect-save restore never committed on a real world.</summary>
         public string MetaJson       { get; set; } = "";
+        /// <summary>T-50 fold 2 (d): the SaveNow round this upload answers (0 = none: it proves no building-sale leg saved).</summary>
+        public int    SaveRound      { get; set; }
         /// <summary>v9: gzip(.hsg) as raw bytes, carried by the envelope's attachment frame
         /// (no base64). Set at the dispatch seam from env.Attachment; never in the JSON.</summary>
         [Newtonsoft.Json.JsonIgnore]
