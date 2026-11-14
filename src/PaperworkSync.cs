@@ -2242,11 +2242,26 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] baseline re-seed for '{planId}': {ex.Message}"); }
         }
 
+        /// <summary>T-53 (review F1): the live display copy behind a STALE copy object (null when `plan` is not stale).
+        /// A caller that knows the ONE field the player changed copies it onto this object and routes this object.</summary>
+        public static Buildings.Office.Headquarters.LogisticsManagerPlan? LiveCopyOf(Buildings.Office.Headquarters.LogisticsManagerPlan plan)
+        { try { return plan == null ? null : MergerAbsence.LiveDisplayCopyOf(plan) as Buildings.Office.Headquarters.LogisticsManagerPlan; } catch { return null; } }
+        private static readonly HashSet<string> _loggedStaleRoute = new(StringComparer.Ordinal);   // T-53
+
         public static void RoutePlanEdit(Buildings.Office.Headquarters.LogisticsManagerPlan plan, string why)
         {
             try
             {
                 if (plan == null || !IsDisplayPlan(plan)) return;
+                // T-53 (review F1): a STALE copy's fields are the owner's OLD plan; diffed against the fresh baseline they
+                // would revert the owner's newer edits.  Never route one - a caller that knows the changed field carries
+                // it onto LiveCopyOf(plan) and routes that.
+                if (LiveCopyOf(plan) != null)
+                {
+                    if (_loggedStaleRoute.Add(plan.id ?? ""))
+                        Plugin.Logger.LogInfo($"[Merger] plan {plan.id}: {why} on a replaced copy is not routed - its other fields are the owner's old plan.");
+                    return;
+                }
                 var dto = PlanToDto(plan);
                 if (string.IsNullOrEmpty(dto.HeadquartersAddressKey)) return;
                 // WAVE 4 r2 (review MAJOR-4), NARROWED BY FOLD c2 (re-review MAJOR-2): an empty target has

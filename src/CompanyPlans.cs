@@ -4224,6 +4224,21 @@ namespace BigAmbitionsMP
                     if (key.Length == 0) { pl.UnAssignAddress(); return true; }
                     var a = AddrOf(key);
                     if (a == null) return Refuse($"warehouse: '{key}' is not a building known here");
+                    // T-53 (review F2): the game's own dropdown rule (LogisticsManagerPlanUI.cs:185-199) - a WAREHOUSE
+                    // business in a warehouse building, run here or by a member of this company.
+                    var wreg = GameStatePatcher.FindRegistration(key);
+                    string wbt = ""; try { wbt = wreg?.GetBuildingType() ?? ""; } catch { }
+                    if (wreg == null || wreg.businessTypeName != "ba:businesstype_warehouse" || wbt != "ba:buildingtype_warehouse")
+                        return Refuse($"warehouse: '{key}' is not a warehouse business");
+                    bool wMember = false;
+                    try
+                    {
+                        wMember = (wreg.RentedByPlayer && MergerFlip.TrulyMine(wreg))
+                               || (CompanyLists.TryOwnerOfAddress(key, out var wOwner) && !string.IsNullOrEmpty(wOwner)
+                                   && (wOwner == MPConfig.PlayerId || MergerSync.MergedRuntime(wOwner, MPConfig.PlayerId)));
+                    }
+                    catch { }
+                    if (!wMember) return Refuse($"warehouse: '{key}' is not run by a member of this company");
                     pl.targetAddress = a;
                     return true;
                 }

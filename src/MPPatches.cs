@@ -6765,6 +6765,26 @@ namespace BigAmbitionsMP
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics plan-warehouse gate: {ex.Message}"); return true; }
             }
+
+            /// <summary>T-53: THE WAREHOUSE PICK'S COMMIT POINT.  OnChangedWarehouse (decompile LogisticsManagerPlanUI.cs:210-225)
+            /// writes targetAddress, re-runs LoadPlan (a load commits nothing since HQ-PARITY-3 A1) and ends at
+            /// SaveGameManager.MarkChange - and the MarkChange seam never routed it (rig runs T-LOGWAREHOUSE-20261113-184514
+            /// and -185758: an accepted pick on a partner's copy, no route, nothing applied on the owner).  This is the
+            /// same route UpdateSelectedBusiness's Postfix takes; RoutePlanEdit is a no-op off a display copy and on a
+            /// shape already sent, so a second fire through MarkChange sends nothing.
+            /// T-53 (review F1): only a pick the Prefix let through (__runOriginal), and on a REPLACED copy only the
+            /// field the player changed is carried onto the live copy, which is what is routed.</summary>
+            static void Postfix(bool __runOriginal, Buildings.Office.Headquarters.LogisticsManagerPlan ____currentPlan)
+            {
+                try
+                {
+                    if (!__runOriginal || MergerFlip.FlippedCount == 0 || ____currentPlan == null) return;
+                    var live = CompanyLists.LiveCopyOf(____currentPlan);
+                    if (live != null) live.targetAddress = ____currentPlan.targetAddress;
+                    CompanyLists.RoutePlanEdit(live ?? ____currentPlan, "warehouse changed");
+                }
+                catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] plan-warehouse route: {ex.Message}"); }
+            }
         }
 
         /// <summary>WAVE 4 (V2c) — ONE OF THE TWO ROUTE SEAMS for an in-place mutation of a tagged
@@ -7235,12 +7255,17 @@ namespace BigAmbitionsMP
         [HarmonyPatch(typeof(UI.Smartphone.Apps.BizMan.LogisticsManagers.LogisticsManagersPlanList), "ChangeLogisticsManager")]
         public static class Patch_LogisticsManagerChange_MergerRoute
         {
-            static void Postfix(Buildings.Office.Headquarters.LogisticsManagerPlan plan)
+            static void Postfix(bool __runOriginal, Buildings.Office.Headquarters.LogisticsManagerPlan plan)
             {
                 try
                 {
                     if (MergerFlip.FlippedCount == 0) return;   // inert without a merger
-                    if (CompanyLists.IsDisplayPlan(plan)) CompanyLists.RoutePlanEdit(plan, "logistics manager changed");
+                    if (CompanyLists.IsDisplayPlan(plan))
+                    {   // T-53 (review F1): on a REPLACED copy only the manager is carried onto the live copy and routed
+                        var live = __runOriginal ? CompanyLists.LiveCopyOf(plan) : null;
+                        if (live != null) live.assignedEmployeeId = plan.assignedEmployeeId;
+                        CompanyLists.RoutePlanEdit(live ?? plan, "logistics manager changed");
+                    }
                     else if (CompanyLists.OwnPlanChanged(plan)) CompanyPlans.OwnEditCommitted("logistics manager changed");
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] logistics manager route: {ex.Message}"); }

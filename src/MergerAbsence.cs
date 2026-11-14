@@ -1163,7 +1163,48 @@ namespace BigAmbitionsMP
             foreach (var e in _installed)
                 if (ReferenceEquals(e.Item, item))
                     return e.Owner != null && e.Owner.StartsWith("display:", StringComparison.Ordinal);
-            return false;
+            return IsStaleDisplayCopy(item);   // T-53
+        }
+
+        /// <summary>T-53 - A COPY IS IDENTIFIED BY ITS PLAN ID, NOT BY ITS OBJECT.  Every bundle re-installs a
+        /// partner's display copies as FRESH objects and RemoveInstalled drops the old ones from _installed, but a
+        /// screen can still hold an old one (the plan pane defers its redraw while a dropdown is open), and the
+        /// reference scan above then called it "not a copy" - the warehouse gate took it for one of my own plans
+        /// and refused a legal pick (rig run T-LOGWAREHOUSE-20261113-184514).  A STALE COPY is an object of the
+        /// same type, with the same non-empty 'id', as a LIVE "display:" install, that is NOT itself an element
+        /// of that install's game list: an element of the list is a real plan (mine, or a stand-in's tagged
+        /// one, which the reference scan already answered), so no list element's answer can change here.  Kinds
+        /// without an 'id' field (delivery contracts) are not recognised this way.</summary>
+        private static bool IsStaleDisplayCopy(object item) => LiveDisplayCopyOf(item) != null;
+
+        /// <summary>T-53 (review F1): the LIVE display install a stale copy stands for (same type, same id, tagged
+        /// "display:"), or null when `item` is not a stale copy.  An edit made on a stale object must be carried
+        /// onto THIS object field by field and routed from here - the stale object's other fields are the owner's
+        /// OLD plan, and routing them would revert the owner's newer edits.</summary>
+        internal static object? LiveDisplayCopyOf(object item)
+        {
+            if (item == null || _installed.Count == 0) return null;
+            foreach (var e in _installed) if (ReferenceEquals(e.Item, item)) return null;   // installed itself: not stale
+            try
+            {
+                var t = item.GetType();
+                string? id = null;
+                foreach (var e in _installed)
+                {
+                    if (e.Item == null || e.Item.GetType() != t
+                        || e.Owner == null || !e.Owner.StartsWith("display:", StringComparison.Ordinal)) continue;
+                    if (id == null)
+                    {
+                        id = FieldOf(item, "id")?.GetValue(item) as string ?? "";
+                        if (id.Length == 0) return null;
+                    }
+                    if (!string.Equals(FieldOf(e.Item, "id")?.GetValue(e.Item) as string, id, StringComparison.Ordinal)) continue;
+                    var list = ListByName(SaveGameManager.Current, e.List);
+                    return list != null && !list.Contains(item) ? e.Item : null;
+                }
+            }
+            catch { }
+            return null;
         }
 
         /// <summary>WAVE 4 r2 (review MAJOR-3): whose absence is this machine standing in for at `addressKey`?

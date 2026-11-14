@@ -1,0 +1,411 @@
+{
+  "id": "T-LOGWAREHOUSE",
+  "title": "T-53 evidence, two players merged: the member has the HOST's logistics plan copy open on the game's own plan pane with the warehouse dropdown open; a fresh bundle of the host's plans arrives (the old copy is replaced); the member then picks ITS OWN warehouse through the dropdown's own option select. Decides whether the pick is refused because the pane still holds the replaced object (no longer a known display copy -> own-plan test -> planSet elsewhere -> refused at the MPPatches 'logistics plan warehouse' line). Control: the same pick with no bundle in between must be accepted. Ends dissolved, NO save",
+  "preconditions": "Fixture save1 (host melaus, client Client1). Dev build with DevT53.cs (`logpane` lever) deployed on the CLIENT. FIXTURE: the host's headquarters holds at least one logistics plan (not a factory plan) - its first row in `plans <host> rows logistics` is the one used; the client truly owns at least one warehouse that no other plan already targets (asserted: `warehouses` own=[...] and the pane's dropdown offers it). The screen is the game's own: `logpane open` runs BizMan.Open(<plan HQ>, LogisticsManagers) and the pane's own LoadPlan with the display copy; `logpane dropdown` is the dropdown's own middle-box click; `logpane pick` is the dropdown's own SelectOption, whose listener is the pane's OnChangedWarehouse (the gated method). The fresh copy is forced by `paperwork push` on the host (one publish, no plan edit). Leg B runs BEFORE the control leg A, because an accepted pick routes a warehouse change that would make the same option already-selected on a later leg. NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "logistics plan-warehouse gate: ",
+    "\\[Merger\\] accept .* REFUSED"
+  ],
+  "oracles_report": [
+    "\\[Merger\\] logistics plan warehouse",
+    "\\[Merger\\] plan REFUSED cross-owner",
+    "\\[Plans\\] redraw for",
+    "\\[Plans\\] refreshed the open logistics pane",
+    "\\[CompanyLists\\] installed",
+    "\\[Merger\\] plan edit applied for"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST T53 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "mark TEST T53 HOST SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Settle\\] world settled \\(host",
+          "within_s": 150,
+          "since_prev_step": true
+        },
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 240,
+          "since_prev_step": true
+        }
+      ],
+      "note": "both worlds settled (host's own line, client's snapshot apply) before the merge"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "offers",
+      "expect_result": "pending=\\[${clientPid}<-${hostPid}\\]"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]"
+    },
+    {
+      "seq": 12,
+      "role": "c",
+      "cmd": "mark TEST T53 CLIENT SETTLE",
+      "expect_result": "OK MARK",
+      "note": "the client settled before the merge (step 5); step 13 re-checks it is still settled after the merge"
+    },
+    {
+      "seq": 13,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 14,
+      "role": "c",
+      "cmd": "mark TEST T53 COPIES",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CompanyLists\\] installed \\d+ contracts, [1-9]\\d* logistics plans, \\d+ hr plans of '${hostPid}' \\(display copies",
+          "within_s": 120,
+          "since_prev_step": true
+        }
+      ],
+      "note": "PREMISE: the host's logistics plans are installed on the client as display copies"
+    },
+    {
+      "seq": 15,
+      "role": "c",
+      "cmd": "logpane wh",
+      "expect_result": "^OK logpane wh pick='[^']+' occupant=[^ ]+ kind=own ",
+      "capture": {
+        "ownWh": "pick='([^']+)'",
+        "ownPlan": "occupant=([^ ]+) "
+      },
+      "note": "PREMISE: the client TRULY owns a warehouse BUSINESS (the game's dropdown filter, LogisticsManagerPlanUI.cs:192-199 - '6 ba:street_twentyfifthstreet' is a factory and never qualifies). Run 183420: the game drops a warehouse that ANOTHER plan already takes as its source (:177-184), and save1's client warehouse is the source of the client's OWN logistics plan - asserted here (kind=own); the address is captured, never hard-coded"
+    },
+    {
+      "seq": 17,
+      "role": "c",
+      "cmd": "hqlog ${ownPlan} warehouse -",
+      "expect_result": "^OK hqlog ${ownPlan} warehouse applied \\(own plan",
+      "note": "frees that warehouse through the existing own-plan lever (CompanyPlans.ApplyLogistics warehouse op -> the game's LogisticsManagerPlan.UnAssignAddress), as a player unassigns it on their own plan first; NOT saved"
+    },
+    {
+      "seq": 18,
+      "role": "c",
+      "cmd": "logpane wh",
+      "expect_result": "^OK logpane wh pick='${ownWh}' occupant=- kind=none ",
+      "note": "PREMISE: the client's own warehouse is now no plan's source, so the game's own filter offers it (asserted again in step 21's offered=[...])"
+    },
+    {
+      "seq": 16,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "rows=\\[logistics:[^:]+:",
+      "capture": {
+        "planId": "rows=\\[logistics:([^:]+):",
+        "destsBefore": "rows=\\[logistics:[^:]+:[^:]*?dests=([1-9]\\d*)"
+      },
+      "note": "PREMISE: a logistics plan of the host, as the client holds it T-53: and its destination count (at least 1 - leg B's host edit removes one)"
+    },
+    {
+      "seq": 20,
+      "role": "both",
+      "cmd": "mark T53 LEGB REFRESH",
+      "expect_result": "OK MARK",
+      "note": "LEG B - the player's sequence: open, dropdown open, fresh copies arrive, pick"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "cmd": "logpane open ${planId}",
+      "expect_result": "^OK logpane open ${planId} hq='[^']+' offered=\\[[^\\]]*'${ownWh}'[^\\]]*\\] pane=True plan=${planId} held=True known=True display=True liveCopy=False planSet=elsewhere ",
+      "capture": {
+        "planHq": "hq='([^']+)'"
+      },
+      "note": "PREMISES: the game's own pane shows the display copy (known, IsDisplayPlan) on an active screen; the dropdown offers the client's own warehouse; and planSet=elsewhere = what the own-plan branch would see for this object if it stopped being a known copy"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "plans ${hostPid} hqs",
+      "expect_result": "hqs=\\[[^\\]]*${planHq}",
+      "note": "PREMISE: the plan's office is the host's headquarters (run on the host)"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "logpane dropdown",
+      "expect_result": "^OK logpane dropdown pane=True plan=${planId} held=True known=True display=True .*edit='a dropdown is open'",
+      "note": "PREMISE: the warehouse dropdown is open (CompanyPlans.EditWindowOpen reads the game's Dropdown.currentDropdown)"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CompanyLists\\] installed \\d+ contracts, [1-9]\\d* logistics plans, \\d+ hr plans of '${hostPid}' \\(display copies; \\d+ item\\(s\\) in, [1-9]\\d* replaced",
+          "within_s": 30
+        },
+        {
+          "role": "c",
+          "regex": "\\[Plans\\] redraw for '${hostPid}' DEFERRED - a dropdown is open",
+          "within_s": 30
+        }
+      ],
+      "note": "the host publishes; fresh copies of its plans arrive on the client and the old ones are lifted ('N replaced'). T-53: the screen's redraw is DEFERRED on this refresh (the dropdown is open) - logged here, before step 25's mark"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "logpane state",
+      "expect_result": "^OK logpane state pane=True plan=${planId} held=True known=False display=True liveCopy=True planSet=elsewhere .*edit='a dropdown is open'",
+      "abort_on_fail": false,
+      "note": "CLAIM 1 (T-53 fix): the pane still holds the SAME object it was opened with (held=True), that object is no longer in the plan list (known=False) and a fresh copy with the same id is (liveCopy=True) - and the replaced object is STILL recognised as the host's copy by its plan id (display=True, MergerAbsence.IsStaleDisplayCopy)"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "cmd": "hqlog ${planId} destremove 0",
+      "expect_result": "^OK hqlog ${planId} destremove applied \\(own plan",
+      "note": "T-53 F1: the HOST edits its plan AFTER the client's copy was replaced and BEFORE the client's pick (the client's pane still holds the old object, which still has this destination)"
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CompanyLists\\] installed \\d+ contracts, [1-9]\\d* logistics plans, \\d+ hr plans of '${hostPid}' \\(display copies; \\d+ item\\(s\\) in, [1-9]\\d* replaced",
+          "within_s": 30,
+          "since_prev_step": true
+        }
+      ],
+      "note": "the host's edited plan reaches the client as fresh copies (the dropdown is still open, so the pane keeps the old object)"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "logistics:${planId}:[^:]*?dests=\\d+",
+      "refute_result": "logistics:${planId}:[^:]*?dests=${destsBefore} ",
+      "capture": {
+        "destsMid": "logistics:${planId}:[^:]*?dests=(\\d+)"
+      },
+      "note": "PREMISE: the client holds the host's edit (one destination fewer than step 16)"
+    },
+    {
+      "seq": 29,
+      "role": "c",
+      "cmd": "logpane pick ${ownWh}",
+      "expect_result": "^OK logpane pick wh='${ownWh}' idx=\\d+ plan=${planId} pre\\[pane=True plan=${planId} held=True known=False display=True .*\\] outcome=accepted target='[^']*'->'${ownWh}'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied for '${planHq}' from '${clientPid}' \\((?:[^)]*, )?plan ${planId}[,;]",
+          "within_s": 30
+        }
+      ],
+      "abort_on_fail": false,
+      "note": "CLAIM 2 (T-53 fix): the own-warehouse pick on the replaced object takes the display-copy branch (RoutedEndFits), the game's own handler writes it, and the edit is ROUTED: the host applies it to its real plan ('plan edit applied for' the plan's headquarters from the client)",
+      "refute_result": "outcome=refused"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "sleep_s": 3,
+      "note": "the deferred redraw lands once the dropdown has closed"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CompanyLists\\] installed \\d+ contracts, [1-9]\\d* logistics plans, \\d+ hr plans of '${hostPid}' \\(display copies; \\d+ item\\(s\\) in, [1-9]\\d* replaced",
+          "within_s": 30
+        }
+      ],
+      "note": "the host publishes the plan it just applied the routed edit to"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "logpane wh",
+      "expect_result": "^OK logpane wh .*all=\\[[^\\]]*'${ownWh}'=${planId}:display",
+      "note": "CLAIM 3: the HOST's plan now takes the client's own warehouse as its source - read off the fresh copy the host's bundle just installed (the copy is built from the host's real plan)"
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "plans ${hostPid} rows logistics",
+      "expect_result": "logistics:${planId}:[^:]*?dests=${destsMid} ",
+      "note": "CLAIM 4 (T-53 F1): the host's own edit SURVIVES the client's pick on the replaced copy - only the warehouse travelled, never the old copy's destinations"
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "hqlog ${planId} warehouse -",
+      "expect_result": "^OK hqlog ${planId} warehouse routed to '${hostPid}'",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied for '${planHq}' from '${clientPid}' \\((?:[^)]*, )?plan ${planId}[,;]",
+          "within_s": 30
+        }
+      ],
+      "note": "RESET for leg A: the host's plan lets go of the client's warehouse again through the existing routed lever, so the dropdown offers it and selecting it fires the handler"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[CompanyLists\\] installed \\d+ contracts, [1-9]\\d* logistics plans, \\d+ hr plans of '${hostPid}' \\(display copies; \\d+ item\\(s\\) in, [1-9]\\d* replaced",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "logpane wh",
+      "expect_result": "^OK logpane wh pick='${ownWh}' occupant=- kind=none ",
+      "note": "PREMISE for leg A: the client's warehouse is no plan's source again"
+    },
+    {
+      "seq": 50,
+      "role": "both",
+      "cmd": "mark T53 LEGA CONTROL",
+      "expect_result": "OK MARK",
+      "note": "LEG A - the same open, dropdown and pick with NO bundle in between"
+    },
+    {
+      "seq": 51,
+      "role": "c",
+      "cmd": "logpane open ${planId}",
+      "expect_result": "^OK logpane open ${planId} hq='${planHq}' offered=\\[[^\\]]*'${ownWh}'[^\\]]*\\] pane=True plan=${planId} held=True known=True display=True liveCopy=False planSet=elsewhere ",
+      "note": "PREMISE: the pane is re-opened on the CURRENT copy"
+    },
+    {
+      "seq": 52,
+      "role": "c",
+      "cmd": "logpane dropdown",
+      "expect_result": "edit='a dropdown is open'"
+    },
+    {
+      "seq": 53,
+      "role": "c",
+      "cmd": "logpane pick ${ownWh}",
+      "expect_result": "^OK logpane pick wh='${ownWh}' idx=\\d+ plan=${planId} pre\\[pane=True plan=${planId} held=True known=True display=True .*\\] outcome=accepted target='[^']*'->'${ownWh}'",
+      "refute_result": "outcome=refused",
+      "note": "CONTROL: on a known display copy the same pick passes RoutedEndFits and the game's own handler writes the warehouse. pre[known=True] proves no bundle replaced the copy between open and pick; if it reads False, a periodic host publish landed in between and the leg must be re-run. T-53: the pick is ROUTED and the host applies it to its real plan",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Merger\\] plan edit applied for '${planHq}' from '${clientPid}' \\((?:[^)]*, )?plan ${planId}[,;]",
+          "within_s": 30
+        }
+      ]
+    },
+    {
+      "seq": 54,
+      "role": "c",
+      "sleep_s": 3,
+      "note": "the host's apply and its publish settle before teardown"
+    },
+    {
+      "seq": 60,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved; NO save"
+    },
+    {
+      "seq": 61,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 62,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False.*flipped=0"
+    },
+    {
+      "seq": 63,
+      "role": "both",
+      "cmd": "mark TEST T53 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
