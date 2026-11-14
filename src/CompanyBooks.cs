@@ -90,7 +90,7 @@ namespace BigAmbitionsMP
         private static int   _inertLoggedDay = -1;
         // T-21: the save OBJECT this overlay's rows and folded totals were last put into (weak: an old save must not be kept
         // alive by it). The overlay belongs to that object only - tracking built for another save is DISCARDED at the session
-        // boundary, never lifted out of or re-applied to the save now loaded (rig run T-BAN-20261113-191227, probe P-T21-BOOKS).
+        // boundary, never lifted out of or re-applied to the save now loaded (rig run T-BAN-20261113-191227).
         private static WeakReference? _builtFor;
         private static bool  _loadDeferLogged;   // T-21: the "apply waits for the load" line, once per load
         private static int   _lastPublishedDay = -1;
@@ -889,9 +889,6 @@ namespace BigAmbitionsMP
 
                 _pending = false;
                 Plugin.Logger.LogInfo($"[Books] overlaid {rows} rows over {_overlaid.Count} days (profit +{added:F2}) ({why}).");
-                // PROBE-START: P-T21-BOOKS  (log-only; rows/days applied and the save object this overlay is now built for)
-                ProbeT21Books.Applied(rows, _overlaid.Count, gi, gi.Day);
-                // PROBE-END: P-T21-BOOKS
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] apply ({why}): {ex.Message}"); }
         }
@@ -958,9 +955,6 @@ namespace BigAmbitionsMP
                 int days = _overlaid.Count;
                 _overlaid.Clear(); _rowOwner.Clear(); _labelOwner.Clear(); _nativeKept.Clear(); _builtFor = null;
                 Plugin.Logger.LogWarning($"[Books] overlay built for a different save discarded at {where} ({days} day(s)): nothing lifted from or re-applied to the save now loaded.");
-                // PROBE-START: P-T21-BOOKS  (log-only; records the T-21 discard as the overlay's last clear)
-                ProbeT21Books.Cleared("T-21 discard: a different save is loaded", true);
-                // PROBE-END: P-T21-BOOKS
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] foreign-overlay check ({where}): {ex.Message}"); }
         }
@@ -1006,9 +1000,6 @@ namespace BigAmbitionsMP
             RemoveAll();
             _partner.Clear(); _pending = false; _nativeKept.Clear();
             if (had) Plugin.Logger.LogInfo($"[Books] cleared ({why}).");
-            // PROBE-START: P-T21-BOOKS  (log-only; remembers that "Books cleared" ran, and why)
-            ProbeT21Books.Cleared(why, had);
-            // PROBE-END: P-T21-BOOKS
         }
 
         /// <summary>SCENE BOUNDARY ONLY (MergerFlip.Reset, after 'Game scene loaded').  M2 (review r2):
@@ -1019,9 +1010,6 @@ namespace BigAmbitionsMP
         /// disconnect) is Tick's job, and that one unfolds first.</summary>
         public static void Reset()
         {
-            // PROBE-START: P-T21-BOOKS  (log-only; the scene-boundary summary, BEFORE tracking is cleared)
-            ProbeT21Books.SceneReset(_overlaid.Count, _partner.Count, _suspend, _pending);
-            // PROBE-END: P-T21-BOOKS
             _overlaid.Clear(); _rowOwner.Clear(); _labelOwner.Clear(); _partner.Clear(); _nativeKept.Clear();
             _suspend = 0; _pending = false; _wasMember = false; _memberSig = ""; _edgeHeldSig = ""; _edgeRetryAt = 0f;
             _lastPublishedDay = -1; _inertLoggedDay = -1; _veilBuildLoggedDay = -1; _lastRefusal.Clear();
@@ -1036,9 +1024,6 @@ namespace BigAmbitionsMP
         public static void SuspendPush()
         {
             DiscardIfForeign("veil lift");   // T-21: a veil during another save's load must not lift this overlay out of it
-            // PROBE-START: P-T21-BOOKS  (log-only; times this lift - did it lift, and how many overlaid days)
-            long probeT = ProbeT21Books.Now(); int probeDays = _overlaid.Count; bool probeLift = _suspend == 0 && probeDays > 0;
-            // PROBE-END: P-T21-BOOKS
             try
             {
                 if (_suspend++ > 0) return;
@@ -1047,16 +1032,10 @@ namespace BigAmbitionsMP
                 _pending = true;
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] suspend: {ex.Message}"); }
-            // PROBE-START: P-T21-BOOKS
-            finally { ProbeT21Books.Done(probeT, lift: true, did: probeLift, days: probeDays); }
-            // PROBE-END: P-T21-BOOKS
         }
 
         public static void SuspendPop()
         {
-            // PROBE-START: P-T21-BOOKS  (log-only; times this re-apply - did Apply run inside it)
-            long probeT = ProbeT21Books.Now(); int probeApplies = ProbeT21Books.Applies;
-            // PROBE-END: P-T21-BOOKS
             try
             {
                 if (--_suspend > 0) return;
@@ -1064,9 +1043,6 @@ namespace BigAmbitionsMP
                 if (_pending && MergerSync.IAmMember && MergerFlip.VeilDepth == 0) Apply("veil/save released");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Books] resume: {ex.Message}"); }
-            // PROBE-START: P-T21-BOOKS
-            finally { ProbeT21Books.Done(probeT, lift: false, did: ProbeT21Books.Applies != probeApplies, days: _overlaid.Count); }
-            // PROBE-END: P-T21-BOOKS
         }
 
         // ══ M0 — THE MEMBERSHIP EDGE (review r2, rig run T-P4-BOOKS/1) ═══════════════════
@@ -1083,9 +1059,6 @@ namespace BigAmbitionsMP
         /// is.  The display surfaces keep their own ApplyPending; this is what makes them unnecessary.</summary>
         public static void Tick()
         {
-            // PROBE-START: P-T21-BOOKS  (log-only; the world-settled summary, once per load)
-            ProbeT21Books.Tick();
-            // PROBE-END: P-T21-BOOKS
             try
             {
                 if (!MergerSync.IAmMember)
@@ -1881,101 +1854,4 @@ namespace BigAmbitionsMP
         }
     }
 
-    // PROBE-START: P-T21-BOOKS  (log-only; T-21 merged-join freeze - registry .modding/04-probes.md)
-    /// <summary>LOG-ONLY probe P-T21-BOOKS.  Counts and times CompanyBooks.SuspendPush / SuspendPop - the overlay
-    /// lift and re-apply that the merger veil drives (MergerFlip.Push/Pop) - and records which save object the
-    /// overlay was last built for, so a load can show whether it lifted/re-applied an overlay carried over from a
-    /// previous session.  One summary line per load phase (the scene boundary, then the world settling) and one
-    /// throttled line for a single call over 50 ms.  Changes nothing; every entry point swallows its own errors.</summary>
-    internal static class ProbeT21Books
-    {
-        private const double SlowMs = 50.0;
-        private const float SlowGapSeconds = 5f;
-        internal static int Applies;                    // CompanyBooks.Apply completions (process lifetime)
-        private static int _load;                       // scene boundaries seen (CompanyBooks.Reset)
-        private static bool _settledLogged;
-        private static int _pushCalls, _lifts, _popCalls, _reapplies, _foreignLifts, _slowCalls;
-        private static double _liftMs, _reapplyMs, _maxMs; private static string _maxKind = "-";
-        private static long _rows; private static int _lastRows = -1, _lastDays = -1;
-        private static int _builtFor, _builtForDay = -1, _builtForLoad = -1;   // save object the overlay was last built for (identity hash; 0 = none)
-        private static int _firstNow = -1, _firstBuiltFor, _firstBuiltForLoad = -1, _firstDays;   // the first lift of this phase
-        private static bool _clearedSinceReset; private static string _lastClear = "never"; private static float _lastClearAt = -1f;
-        private static int _slowSuppressed; private static float _lastSlowAt = -100f;
-
-        internal static long Now() => System.Diagnostics.Stopwatch.GetTimestamp();
-        private static int SaveId(object gi) => gi == null ? 0 : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(gi);
-        private static float T() { try { return UnityEngine.Time.realtimeSinceStartup; } catch { return 0f; } }
-
-        internal static void Done(long t0, bool lift, bool did, int days)
-        {
-            try
-            {
-                double ms = (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
-                if (lift) _pushCalls++; else _popCalls++;
-                if (!did) return;
-                int now = SaveId(SaveGameManager.Current);
-                if (lift)
-                {
-                    _lifts++; _liftMs += ms;
-                    if (_builtFor != 0 && _builtFor != now) _foreignLifts++;
-                    if (_firstNow == -1) { _firstNow = now; _firstBuiltFor = _builtFor; _firstBuiltForLoad = _builtForLoad; _firstDays = days; }
-                }
-                else { _reapplies++; _reapplyMs += ms; }
-                if (ms > _maxMs) { _maxMs = ms; _maxKind = lift ? "lift" : "reapply"; }
-                if (ms <= SlowMs) return;
-                _slowCalls++;
-                float t = T();
-                if (t - _lastSlowAt < SlowGapSeconds) { _slowSuppressed++; return; }
-                _lastSlowAt = t;
-                Plugin.Logger.LogInfo($"[PROBE T21-BOOKS] slow {(lift ? "lift" : "reapply")} {ms:F1}ms load={_load} veil={MergerFlip.VeilDepth} days={days} lastRows={_lastRows} save={now} builtFor={_builtFor} builtForLoad={_builtForLoad} suppressedSinceLast={_slowSuppressed}");
-                _slowSuppressed = 0;
-            }
-            catch { }
-        }
-
-        internal static void Applied(int rows, int days, object gi, int day)
-        {
-            try { Applies++; _rows += rows; _lastRows = rows; _lastDays = days; _builtFor = SaveId(gi); _builtForDay = day; _builtForLoad = _load; }
-            catch { }
-        }
-
-        internal static void Cleared(string why, bool had)
-        {
-            try { if (!had) return; _clearedSinceReset = true; _lastClear = why ?? "?"; _lastClearAt = T(); _builtFor = 0; }
-            catch { }
-        }
-
-        internal static void SceneReset(int overlaidDays, int partners, int suspend, bool pending)
-        {
-            try
-            {
-                int now = SaveId(SaveGameManager.Current);
-                string clearAge = _lastClearAt < 0f ? "-" : $"{T() - _lastClearAt:F1}s ago";
-                Emit("scene-load", $"atReset: overlaidDays={overlaidDays} partners={partners} suspend={suspend} pending={pending} builtFor={_builtFor}(load {_builtForLoad}, day {_builtForDay}) nowLoaded={now} sameSave={(_builtFor != 0 && _builtFor == now)} clearedSincePrevReset={_clearedSinceReset} lastClear='{_lastClear}' {clearAge}");
-                _load++; _settledLogged = false; _clearedSinceReset = false;
-            }
-            catch { }
-        }
-
-        internal static void Tick()
-        {
-            try
-            {
-                if (_settledLogged || !MPWorldReady.IsSettled) return;
-                _settledLogged = true;
-                Emit("settled", $"builtFor={_builtFor}(load {_builtForLoad}) nowLoaded={SaveId(SaveGameManager.Current)} clearedSinceReset={_clearedSinceReset}");
-            }
-            catch { }
-        }
-
-        private static void Emit(string phase, string tail)
-        {
-            string carried = _firstNow == -1 ? "n/a" : ((_firstBuiltFor != 0 && _firstBuiltFor != _firstNow) ? "YES" : "no");
-            Plugin.Logger.LogInfo($"[PROBE T21-BOOKS] summary phase={phase} load={_load} push={_pushCalls} lifts={_lifts} liftMs={_liftMs:F0} pop={_popCalls} reapplies={_reapplies} reapplyMs={_reapplyMs:F0} totalMs={_liftMs + _reapplyMs:F0} maxMs={_maxMs:F1}({_maxKind}) slow50={_slowCalls} rowsApplied={_rows} lastRows={_lastRows} lastDays={_lastDays} foreignLifts={_foreignLifts} firstLift: save={_firstNow} builtFor={_firstBuiltFor}(load {_firstBuiltForLoad}) days={_firstDays} carried={carried} | {tail}");
-            _pushCalls = _lifts = _popCalls = _reapplies = _foreignLifts = _slowCalls = 0;
-            _liftMs = _reapplyMs = _maxMs = 0; _maxKind = "-"; _rows = 0;
-            _firstNow = -1; _firstBuiltFor = 0; _firstBuiltForLoad = -1; _firstDays = 0;
-        }
-    }
-    // PROBE-END: P-T21-BOOKS
 }
