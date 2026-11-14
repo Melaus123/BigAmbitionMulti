@@ -25,7 +25,12 @@
     "\\[BanUI\\] (open ban|open list|rebuild|click|tick|notice): ",
     "\\[Client\\] banned: (city exit|HideOverlays):",
     "\\[Forfeit\\] own property get-out check:",
-    "\\[Hub\\] (TickHubWindow|rebuild|ban button|banned button):"
+    "\\[Hub\\] (TickHubWindow|rebuild|ban button|banned button):",
+    "\\[PROBE T21-BOOKS\\] summary phase=\\S+ .*foreignLifts=[1-9]",
+    "\\[PROBE T21-BOOKS\\] summary .*carried=YES"
+  ],
+  "oracles_present": [
+    {"role": "c", "regex": "\\[PROBE T21-BOOKS\\] summary phase=scene-load "}
   ],
   "oracles_report": [
     "\\[Server\\] (BANNED|UNBANNED|Hello from BANNED)",
@@ -44,7 +49,10 @@
     "while the join request waited",
     "\\[BanUI\\]",
     "\\[Client\\] banned",
-    "\\[Forfeit\\] REMOVED"
+    "\\[Forfeit\\] REMOVED",
+    "\\[PROBE T21-BOOKS\\] (summary|slow)",
+    "\\[Books\\] overlay built for a different save discarded",
+    "\\[Books\\] .* deferred: a load is in progress"
   ],
   "steps": [
     {
