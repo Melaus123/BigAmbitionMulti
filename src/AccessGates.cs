@@ -474,8 +474,8 @@ namespace BigAmbitionsMP
         internal static bool InteriorOffered(BuildingRegistration reg) => MovingOriginOffered(reg);
 
         /// <summary>T-24 part 2: may this building be the destination of a move from that origin? Two of mine stay native;
-        /// otherwise both must be routable and run by the same game for the same owner (MovingRunnerKey). With no origin
-        /// picked, only my own buildings.</summary>
+        /// otherwise both must be routable and run by some game (MovingRunnerKey; slice 2: the same game or two different
+        /// ones). With no origin picked, only my own buildings.</summary>
         internal static bool MovingDestinationOffered(BuildingRegistration? origin, BuildingRegistration dest)
         {
             try
@@ -487,7 +487,12 @@ namespace BigAmbitionsMP
                 if (!op && !dp) return true;
                 if ((op && !ServiceRoutable(origin)) || (dp && !ServiceRoutable(dest))) return false;
                 string ro = MovingRunnerKey(origin), rd = MovingRunnerKey(dest);
-                return ro.Length > 0 && ro == rd;
+                // T-24 slice 2 (owner decision 24 B, 2026-11-13): a move between buildings DIFFERENT games run is offered
+                // too - the destination's runner runs the game's own move and the origin hands its contents over
+                // (ContentsHandover). Only a building nobody runs is left out.
+                // Fold F7: the same game for both, or - between two games - each building run by its OWN owner ("self|" /
+                // "owner|"), the routing's test (MPServer, mergermove): a stand-in's building would be offered, then refused.
+                return ro.Length > 0 && rd.Length > 0 && (ro == rd || (ro.EndsWith("|", StringComparison.Ordinal) && rd.EndsWith("|", StringComparison.Ordinal)));
             }
             catch { return false; }
         }

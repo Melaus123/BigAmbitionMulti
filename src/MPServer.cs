@@ -441,6 +441,7 @@ namespace BigAmbitionsMP
                 }
                 RestoreForfeitsFromManifest(m);   // BAN-PLAYERS-1 build B (B1): the forfeit record follows the ledgers it changed
                 MPBuildingSale.Restore(m);   // T-50: the sale records follow the deed ledger they changed
+                ContentsHandover.Restore(m);   // T-24 slice 2: the open hand-overs (the host's copy of each package)
                 foreach (var slot in m.Slots)
                     if (slot.MoneyKnown || slot.Money != 0f) CashByStableId[slot.StableId] = slot.Money;   // T-50 fold 2 (a): a recorded $0 is a value, not "none"
 
@@ -618,6 +619,7 @@ namespace BigAmbitionsMP
                 bool hadBodies = false;   // T-54 fold F2: a layout body the store takes out changes the text, so it is re-serialised
                 try { var ic = p.Lists?.InteriorInstallationFirmContracts; if (ic != null) foreach (var c in ic) if (c?.Layout != null) { hadBodies = true; break; } } catch { }
                 MergerServiceLayouts.HostTakeBodies(p, senderPid);   // T-24 fold 2: layout bodies go to the store by hash; the bundle keeps the hash
+                if (ContentsHandover.HostFilterPaperwork(p, senderPid)) hadBodies = true;   // T-24 slice 2: a moved business's rows stay out until the origin's save covers it (re-serialised)
                 string json;
                 string? stored = null;   // the stored form of exactly `json`; null = not packed yet
                 if (!hadBodies && !string.IsNullOrEmpty(arrivedJson)) { json = arrivedJson!; stored = arrivedStored; }
@@ -3247,6 +3249,16 @@ namespace BigAmbitionsMP
                     var lr = env.GetPayload<LoanRepayPayload>();
                     if (lr == null || !SenderIs(lr.From, senderPid, env.Type)) break;
                     GameStatePatcher.EnqueueOnMainThread(() => MPHub.HostHandleRepay(lr));
+                    break;
+                }
+
+                case MessageType.ContentsHandover:     // T-24 slice 2: a hand-over leg from a party
+                {
+                    var chp = env.GetPayload<ContentsHandoverPayload>();
+                    if (chp == null) break;
+                    // the bill's balance is recorded HERE, in arrival order with CashSync (the T-50 rule, fold F1)
+                    if (chp.HasMoney && chp.Action == "applied" && chp.Charged && IsSaneMoney(chp.Money, 10_000_000_000f)) RecordCash(senderPid, chp.Money);
+                    GameStatePatcher.EnqueueOnMainThread(() => ContentsHandover.HostOnMessage(chp, senderPid));
                     break;
                 }
 
@@ -6201,6 +6213,7 @@ namespace BigAmbitionsMP
                 // list (applied after it on the same main-thread queue; ApplyBuildingsForSale clears and rebuilds) restores
                 // the host's fresh unowned listing.
                 SendForfeitsTo(pid, "world-ready re-send");
+                ContentsHandover.HostReplayTo(pid);   // T-24 slice 2: the hand-over legs this player's save may predate
                 MPBuildingSale.HostReplayTo(pid);   // T-50: every building-sale leg and held rent naming this player (its own data decides 'already done?')
                 // v9: a daily for-sale flip that landed in this joiner's load-window drop
                 // list has no other re-cover until the NEXT in-game day — ship the live list.
@@ -9103,6 +9116,30 @@ namespace BigAmbitionsMP
         /// <summary>Resolve a shop's owner pid from the rental ledger; "" when unowned. This is the
         /// AUTHORISATION answer (whose grant/membership a sender must hold, and the identity every
         /// ask/answer pair checks) — never the delivery answer; RouteTargetFor below is that.</summary>
+        internal static string OwnerPidOf(string addressKey) => SharedShopOwnerPid(addressKey ?? "");   // T-24 slice 2
+
+        /// <summary>T-24 slice 2 fold F4: take these addresses out of ONE owner's stored paperwork (at a hand-over's drop, once)
+        /// and fan the result out as every store does. Returns the parts taken out.</summary>
+        internal static int StripStoredPaperwork(string stable, HashSet<string> addrs)
+        {
+            if (string.IsNullOrEmpty(stable) || addrs == null || addrs.Count == 0) return 0;
+            try
+            {
+                PaperworkEntry? e;
+                lock (_paperwork) _paperwork.TryGetValue(stable, out e);
+                if (e == null) return 0;
+                var b = Newtonsoft.Json.JsonConvert.DeserializeObject<BusinessPaperworkPayload>(e.Text);
+                if (b == null) return 0;
+                int n = PaperworkSync.StripAddresses(b, addrs);
+                if (n == 0) return 0;
+                string stored = PaperworkSync.StoreEntryText(Newtonsoft.Json.JsonConvert.SerializeObject(b));
+                lock (_paperwork) _paperwork[stable] = new PaperworkEntry { StableId = stable, Day = e.Day, ReceivedDay = e.ReceivedDay, Stored = stored };
+                FanOutCompanyLists(stable, "hand-over drop");
+                return n;
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] hand-over strip for '{stable}': {ex.Message}"); return 0; }
+        }
+
         private static string SharedShopOwnerPid(string addressKey)
         {
             if (!BuildingOwners.TryGetValue(addressKey, out var owner) || string.IsNullOrEmpty(owner)) return "";
@@ -11735,7 +11772,10 @@ namespace BigAmbitionsMP
                     string wrunner = RouteTargetFor(p.AddressKey, ownerPid);
                     // Batch 15 (review MEDIUM-3): the HOST itself answers a routed op it refuses at the route (the
                     // campaign 'away' refusal) - it is not the runner, and that answer must still reach the member.
-                    if (senderPid != wrunner && !(senderPid == MPConfig.PlayerId && p.Tab == "mergerack"))
+                    // T-24 slice 2: a cross-game move's answer comes from the runner of the DESTINATION it names (the booking is
+                    // held there but keyed on the origin) - forwarded only when the sender really runs that destination
+                    bool destAck = senderPid != wrunner && p.Tab == "mergerack" && !string.IsNullOrEmpty(p.DestKey) && RouteTargetFor(p.DestKey) == senderPid;   // fold D: asked only off the runner
+                    if (senderPid != wrunner && !(senderPid == MPConfig.PlayerId && p.Tab == "mergerack") && !destAck)
                     { Plugin.Logger.LogWarning($"[SharedShop] work snapshot for '{p.AddressKey}' from '{senderPid}', which is not the machine running it ('{(wrunner.Length > 0 ? wrunner : "nobody")}'; ledger owner '{ownerPid}') — dropped."); return; }
                     if (string.IsNullOrEmpty(p.ToPid)) return;
                     if (!ShopGateFor("SharedWorkInfo snapshot", p.AddressKey, ownerPid, p.ToPid, GrantBusiness, out _)) return;   // wave 2: UNION; ABSENT-OWNER-GATES-1 (was silent)
@@ -11782,8 +11822,34 @@ namespace BigAmbitionsMP
                     return;
                 }
                 string ownerPid = SharedShopOwnerPid(p.AddressKey);
-                if (ownerPid.Length == 0 || ownerPid == senderPid) return;
-                if (!ShopGateFor("SharedWorkEdit", p.AddressKey, ownerPid, senderPid, GrantBusiness, out bool weMember)) return;   // ABSENT-OWNER-GATES-1 (UNION: grant or membership)
+                // T-24 slice 2 fold F1: a move from the SENDER's OWN building to a partner's travels under the origin's address.
+                // The destination's game runs it (design A), so the membership gate and the route are the destination's -
+                // and no move booking is dropped here without the refusal answer.
+                // a cancel of a move names its destination too (T-24 slice 2): it is routed exactly as the booking was
+                bool isMove = p.Op == "mergermove" || (p.Op == "mergercancel" && !string.IsNullOrEmpty(p.DestKey));
+                bool moveFromOwn = isMove && ownerPid.Length > 0 && ownerPid == senderPid;
+                string originOwner = ownerPid;
+                if (moveFromOwn)
+                {
+                    string dOwner = string.IsNullOrEmpty(p.DestKey) ? "" : SharedShopOwnerPid(p.DestKey!);
+                    if (dOwner.Length == 0 || dOwner == senderPid)
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] mergermove from '{senderPid}''s own '{p.AddressKey}' REFUSED: the destination '{p.DestKey}' is not a partner's building here.");
+                        SharedShopWorkTabs.SendRoutedRefusalFor(senderPid, p, "movdest");
+                        return;
+                    }
+                    ownerPid = dOwner;
+                }
+                if (ownerPid.Length == 0 || ownerPid == senderPid)
+                {
+                    if (isMove)
+                    {
+                        Plugin.Logger.LogWarning($"[Merger] {p.Op} for '{p.AddressKey}' REFUSED: no owner of it is known here.");
+                        SharedShopWorkTabs.SendRoutedRefusalFor(senderPid, p, "offline");
+                    }
+                    return;
+                }
+                if (!ShopGateFor("SharedWorkEdit", moveFromOwn ? p.DestKey! : p.AddressKey, ownerPid, senderPid, GrantBusiness, out bool weMember)) return;   // ABSENT-OWNER-GATES-1 (UNION: grant or membership)
                 // MERGER PHASE 2 WAVE 4 (V2): the three PARITY routes ride this envelope as new Ops (rule 5 -
                 // one new MessageType in the whole wave, and it went to the display copies). They are gated on
                 // MEMBERSHIP ONLY, never on a bare Business grant: a permission helper gets today's behaviour
@@ -11833,7 +11899,7 @@ namespace BigAmbitionsMP
                     if (string.IsNullOrEmpty(p.BookingId))
                     {
                         Plugin.Logger.LogWarning($"[Merger] {p.Op} REFUSED for '{p.AddressKey}': the leg carried no booking id.");
-                        SharedShopWorkTabs.SendRoutedRefusalTo(senderPid, p.AddressKey, "noid");
+                        SharedShopWorkTabs.SendRoutedRefusalFor(senderPid, p, "noid");
                         return;
                     }
                     string bkey = p.Op + "|" + p.BookingId + "|" + senderPid;
@@ -11870,25 +11936,33 @@ namespace BigAmbitionsMP
                                  || p.Op == "mergercancel";                             // T-24 slice 1B: the building its booking was routed by
                 if (!skipAddrGate && !SharedWorkAddressAllowed(p.AddressKey, weMember))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
-                string wtarget = RouteTargetFor(p.AddressKey, ownerPid);   // W3-0
+                string wtarget = RouteTargetFor(p.AddressKey, originOwner);   // W3-0 (T-24 fold F1: the ORIGIN's owner - the sender itself for a move from its own building)
                 if (wtarget.Length == 0)
                 {
                     if (w4) Plugin.Logger.LogWarning($"[Merger] {p.Op} REFUSED for '{p.AddressKey}': nobody is running that building (RouteTargetFor).");
                     // The sender is waiting on an answer for a routed commitment: tell it, so its pending
                     // request clears. The game has no notice for this, so the sender only logs it.
-                    if (SharedShopWorkTabs.ArmsRoutedRefusal(p.Op)) SharedShopWorkTabs.SendRoutedRefusalTo(senderPid, p.AddressKey, "offline");
+                    if (SharedShopWorkTabs.ArmsRoutedRefusal(p.Op)) SharedShopWorkTabs.SendRoutedRefusalFor(senderPid, p, "offline");
                     return;
                 }
                 // T-24 part 2: a move is routed only when ONE game runs both buildings (owner decision 24 = B: moves between
                 // buildings run by different games are slice 2). The member's picker offers nothing else; decided again here.
-                if (p.Op == "mergermove")
+                if (isMove)
                 {
                     string dtarget = string.IsNullOrEmpty(p.DestKey) ? "" : RouteTargetFor(p.DestKey);
+                    // T-24 slice 2 (owner decision 24 B, design A): two buildings run by DIFFERENT games, each by its own
+                    // owner - the DESTINATION's game books the move and runs the game's own move; the origin's contents
+                    // cross at the move hour (ContentsHandover). A building a stand-in runs keeps the refusal below.
+                    if (dtarget != wtarget && dtarget.Length > 0 && wtarget == originOwner && dtarget == SharedShopOwnerPid(p.DestKey!))
+                    {
+                        Plugin.Logger.LogInfo($"[Merger] mergermove '{p.AddressKey}' -> '{p.DestKey}' runs on two games ('{wtarget}', '{dtarget}'): routed to the destination's.");
+                        wtarget = dtarget;
+                    }
                     if (dtarget != wtarget)
                     {
                         Plugin.Logger.LogWarning($"[Merger] mergermove not routed for '{p.AddressKey}' -> '{p.DestKey}': the origin runs on '{wtarget}', "
                                                + $"the destination on '{(dtarget.Length == 0 ? "nobody" : dtarget)}'.");
-                        SharedShopWorkTabs.SendRoutedRefusalTo(senderPid, p.AddressKey, "mixed");
+                        SharedShopWorkTabs.SendRoutedRefusalFor(senderPid, p, "mixed");
                         return;
                     }
                 }
@@ -11900,7 +11974,7 @@ namespace BigAmbitionsMP
                 if (p.Op == "mergercampaign" && wtarget != ownerPid)
                 {
                     Plugin.Logger.LogWarning($"[Merger] campaign booking REFUSED for '{p.AddressKey}': '{wtarget}' only stands in for the absent owner '{ownerPid}'.");
-                    SharedShopWorkTabs.SendRoutedRefusalTo(senderPid, p.AddressKey, "away");
+                    SharedShopWorkTabs.SendRoutedRefusalFor(senderPid, p, "away");
                     return;
                 }
                 if (wtarget == senderPid)
@@ -11914,6 +11988,11 @@ namespace BigAmbitionsMP
                         Plugin.Logger.LogInfo($"[Merger] {p.Op} for '{p.AddressKey}' applied on its sender '{senderPid}', the stand-in that runs it.");
                         if (senderPid == MPConfig.PlayerId) SharedShopWorkTabs.OwnerApplyEdit(p);
                         else SendToPid(senderPid, MessageEnvelope.Create(MessageType.SharedWorkEdit, "host", p));
+                    }
+                    else if (SharedShopWorkTabs.ArmsRoutedRefusal(p.Op))
+                    {   // T-24 slice 2: e.g. a cancel by the runner of its own routed move - answered, never silent
+                        Plugin.Logger.LogWarning($"[Merger] {p.Op} for '{p.AddressKey}' from '{senderPid}', which runs it itself - not routed; answered.");
+                        SharedShopWorkTabs.SendRoutedRefusalFor(senderPid, p, "mixed");
                     }
                     return;
                 }

@@ -1297,6 +1297,13 @@ namespace BigAmbitionsMP
                     break;
                 }
 
+                case MessageType.ContentsHandover:   // T-24 slice 2: a hand-over leg from the host
+                {
+                    var chp = env.GetPayload<ContentsHandoverPayload>();
+                    if (chp != null) GameStatePatcher.EnqueueOnMainThread(() => ContentsHandover.OnMessage(chp));
+                    break;
+                }
+
                 case MessageType.BuildingSale:   // T-50: a building-sale leg / held rent / rent receipt from the host
                 {
                     var bsp = env.GetPayload<BuildingSalePayload>();

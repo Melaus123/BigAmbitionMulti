@@ -494,11 +494,12 @@ namespace BigAmbitionsMP
 
         /// <summary>RUNNER → the ONE member that asked: a routed COMMITMENT was refused, by CODE. The member
         /// maps the code to the game's own notification locally (r2 minor f) - no text is ever on the wire.</summary>
-        private static void SendRoutedRefusal(string toPid, string addr, string code, string bookingId = "")
+        private static void SendRoutedRefusal(string toPid, string addr, string code, string bookingId = "", string destKey = "")
         {
             if (string.IsNullOrEmpty(toPid) || string.IsNullOrEmpty(code)) return;
             var reply = new SharedWorkInfoPayload
-            { PlayerId = MPConfig.PlayerId, Action = "snapshot", Tab = "mergerack", AddressKey = addr, ToPid = toPid, AckCode = code };
+            { PlayerId = MPConfig.PlayerId, Action = "snapshot", Tab = "mergerack", AddressKey = addr, ToPid = toPid, AckCode = code,
+              DestKey = destKey ?? "" };   // T-24 slice 2: a cross-game move's answer comes from the DESTINATION's runner (the host checks it)
             // T-24 slice 1B: a "mergercancel" answer names its booking (the member may have more than one pending).
             if (!string.IsNullOrEmpty(bookingId)) reply.RoutedBookings = new List<PwRoutedBooking> { new PwRoutedBooking { BookingId = bookingId } };
             // A stand-in's own booking is applied on the stand-in itself: the refusal is for this machine.
@@ -510,6 +511,11 @@ namespace BigAmbitionsMP
         /// <summary>H-MERGERHIRE-1: the HOST's own refusal of a routed commitment it could not deliver (a campaign
         /// booking whose owner turned out to be away). Same wire shape, same code table.</summary>
         internal static void SendRoutedRefusalTo(string toPid, string addr, string code) => SendRoutedRefusal(toPid, addr, code);
+
+        /// <summary>T-24 slice 2 fold B: the HOST's refusal of a routed edit - a "mergercancel" names its booking (the booker's
+        /// cancel answer matches by it, OnCancelAnswer) and a move its destination (the host forwards that runner's answers).</summary>
+        internal static void SendRoutedRefusalFor(string toPid, SharedWorkEditPayload p, string code)
+            => SendRoutedRefusal(toPid, p.AddressKey ?? "", code, p.Op == "mergercancel" ? (p.BookingId ?? "") : "", p.DestKey ?? "");
 
         /// <summary>MEMBER (r2 minor f): a routed contract creation was refused on the runner for a reason the
         /// game itself has a notification for. The dialog's own null return is silent, so the member saw
@@ -4816,7 +4822,7 @@ namespace BigAmbitionsMP
             void Refuse(string code, string why)
             {
                 Plugin.Logger.LogWarning($"[Merger] moving booking REFUSED for '{p.AddressKey}' -> '{p.DestKey}' (booking {p.BookingId}): {why}");
-                SendRoutedRefusal(p.PlayerId, p.AddressKey, code);
+                SendRoutedRefusal(p.PlayerId, p.AddressKey, code, "", p.DestKey ?? "");   // T-24 slice 2: answered by the destination's runner
             }
             try
             {
@@ -4866,7 +4872,7 @@ namespace BigAmbitionsMP
             catch (Exception ex)
             {
                 Plugin.Logger.LogWarning($"[Merger] moving booking for '{p.AddressKey}' failed: {ex.Message}");
-                SendRoutedRefusal(p.PlayerId, p.AddressKey, "busy");
+                SendRoutedRefusal(p.PlayerId, p.AddressKey, "busy", "", p.DestKey ?? "");
             }
         }
 
@@ -5447,7 +5453,7 @@ namespace BigAmbitionsMP
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] cancel of routed booking {p.BookingId}: {ex.Message}"); }
             RoutedChanged(p.PlayerId);
-            SendRoutedRefusal(p.PlayerId, p.AddressKey, code, p.BookingId);
+            SendRoutedRefusal(p.PlayerId, p.AddressKey, code, p.BookingId, p.DestKey ?? "");   // T-24 slice 2: a cross-game move's cancel is answered by the destination's runner
         }
 
         // ── MEMBER side ──
@@ -5655,7 +5661,9 @@ namespace BigAmbitionsMP
                 foreach (var b in kv.Value) if (b != null && b.BookingId == id) { runner = kv.Key; bk = b; }
             if (bk == null) { Plugin.Logger.LogWarning($"[Merger] cancel of routed booking {id}: not in my lists."); return ""; }
             _pendingCancel[id] = new PendingCancel { Id = id, Runner = runner, Addr = bk.AddressKey ?? "", Agency = bk.AgencyKey ?? "", Kind = bk.Kind ?? "", DialogType = dialogType, Copy = copy };
-            SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = bk.AddressKey ?? "", Op = "mergercancel", BookingId = id });
+            // T-24 slice 2: a move names its destination - a move between two games is held, and cancelled, by the destination's runner
+            SendEdit(new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = bk.AddressKey ?? "", Op = "mergercancel", BookingId = id,
+                                                 DestKey = bk.Kind == KindMove ? (bk.DestKey ?? "") : "" });
             Plugin.Logger.LogInfo($"[Merger] cancel of my routed booking {id} sent to the runner of '{bk.AddressKey}' ('{runner}') - it stays listed until the runner answers.");
             return bk.AddressKey ?? "";
         }
@@ -6314,6 +6322,23 @@ namespace BigAmbitionsMP
                     return;
                 }
                 var reg = GameStatePatcher.FindRegistration(p.AddressKey);
+                // T-24 slice 2: a move between buildings run by TWO games is booked - and cancelled - on the DESTINATION's
+                // game (design A), but it travels keyed on the ORIGIN, which this game does not run. It is accepted here on
+                // the facts that make it one: the destination it names is truly mine, and the origin is a merged partner's
+                // building another game runs (ContentsHandover.IsCrossGame) - the host routes such a pair only to the
+                // destination's runner (MPServer: "routed to the destination's"). The booker's grant/membership was checked
+                // above and by the host. ApplyRoutedMove / ApplyRoutedCancel then run their own checks; nothing else of the
+                // run-here gate below is loosened.
+                if ((p.Op == "mergermove" || p.Op == "mergercancel") && reg != null && !string.IsNullOrEmpty(p.DestKey))
+                {
+                    var dregX = GameStatePatcher.FindRegistration(p.DestKey!);
+                    bool destMine = false; try { destMine = dregX != null && MergerFlip.TrulyMine(dregX); } catch { }
+                    if (destMine && ContentsHandover.IsCrossGame(p.AddressKey))
+                    {
+                        if (p.Op == "mergermove") ApplyRoutedMove(reg, p); else ApplyRoutedCancel(p);
+                        return;
+                    }
+                }
                 // W3-0: mine, or a business I am simulating for an absent partner (still flipped here, but its
                 // lifted copy is the live state, and my owner-style pushes carry the edit onward).
                 bool commitsHere = reg != null && MergerFlip.TrulyMine(reg);
@@ -6323,6 +6348,9 @@ namespace BigAmbitionsMP
                     // W3-0 r1 (F4): the resolver sent this here, so silence is the one thing we must not do.
                     if (_logged.Add("edit-notmine|" + p.AddressKey))
                         Plugin.Logger.LogWarning($"{Tag} work edit '{p.Op}' on '{p.AddressKey}' from '{p.PlayerId}' refused — not run here (not mine and not simulated here).");
+                    // T-24 slice 2 fold A: a routed COMMITMENT is answered, never dropped in silence (the existing codes and lines)
+                    if (ArmsRoutedRefusal(p.Op))
+                        SendRoutedRefusal(p.PlayerId, p.AddressKey, "mixed", p.Op == "mergercancel" ? (p.BookingId ?? "") : "", p.DestKey ?? "");
                     return;
                 }
                 // ── MERGER PHASE 2 WAVE 4 (V2): the three PARITY routes. Each is a COMMITMENT on this

@@ -620,6 +620,9 @@ namespace BigAmbitionsMP
             b.Lists      ??= new PaperworkOwnerLists();
         }
 
+        /// <summary>T-24 slice 2: every part of `addrs` leaves this bundle (ContentsHandover.HostFilterPaperwork).</summary>
+        internal static int StripAddresses(BusinessPaperworkPayload b, HashSet<string> addrs) => Surgery(b, null, addrs);
+
         /// <summary>Every part of `addrs` leaves `from` and (when `to` is given) joins it. Returns the
         /// number of parts that moved - 0 means this bundle held nothing of those addresses.</summary>
         private static int Surgery(BusinessPaperworkPayload from, BusinessPaperworkPayload? to, HashSet<string> addrs)

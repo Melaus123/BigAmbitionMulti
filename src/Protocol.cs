@@ -225,6 +225,7 @@ namespace BigAmbitionsMP
         PropertyForfeit       = 222,     // BAN-PLAYERS-1 build B (owner-approved 2026-10-01; protocol 27, unreleased - additive): Host -> clients. The host REMOVED a banned player's property: per banned owner (stable id) the addresses it rented and bought, the ones whose contents go, and the game day. A machine that is not that owner clears its copy (for-rent flags, name, type, furniture/stock/storage; a building its own player holds is never touched); the banned player's OWN machine - only if it is ever unbanned and rejoins (the host replays the record at its world-ready) - ends those leases through the game's own lease-end steps WITHOUT any payout and gives up the bought buildings. Host -> client only.
         BuyClaim              = 223,     // T-33 (2026-11-13; protocol 28, unreleased - additive): Guest -> Host, BEFORE any money moves. The game's BizManPresentation.SendBuyBuildingOffer (decompile :889) is held by a prefix and the guest asks 'may I buy AddressKey at Amount' (ClaimId pairs the answer). The host decides in ONE locked check-and-record against the deed ledger (MPServer.TryClaimDeed) and answers with BuyClaimAnswer. The same type with Release=true is the guest's 'drop my granted claim': its one native re-run did not complete the buy, or the answer came after it stopped waiting.
         BuildingSale          = 225,     // T-50 (2026-11-13; protocol 28, unreleased - additive): a PLAYER-TO-PLAYER BUILDING SALE's legs and its rent forwarding, one type told apart by Action. Escrow first (fold): host -> buyer "charge" / buyer -> host "charged" (or "chargefail": cannot pay, nothing moved); host -> seller "release" / "released"; host -> buyer "finalize" / "finalized"; host -> seller "pay" / "paid". Each leg is sent only while the host's ledger has not recorded it (every 5 s); a money leg's answer carries the balance after it; a building leg is replayed at the party's world-ready until its save covers it and follows the game's own list. Payer -> host "rentpaid" / host -> payer "rentnoted"; host -> deed holder "rent" / holder -> host "rentok" (the id rides the native transaction's data). The offer itself is a LoanOffer Kind="building" the HOST makes from a held buy (MPBuildingSale.HostOfferFromBuy).
+        ContentsHandover      = 226,     // T-24 part 2 slice 2 (2026-11-13; protocol 28, unreleased - additive): ONE host-held hand-over of a building's CONTENTS between two players' games (purpose move; T-52 may reuse it as sale). Destination -> host "offer" (the game's move hour); host -> origin "release" / origin -> host "dropped" (the package: every item with cargo, every vehicle the origin's game had parked there with its slot and driver, and - transfer settings - a Business section packed from the origin's OWN save) or "held"; host -> destination "deliver" (or "hold": the origin is offline or stood in for - postponed a day) / destination -> host "applied" (the game's own move ran, its bill charged once - Charged + Money) or "applyfail" (too little money / not rented: nothing charged) or "deferred"; host -> origin "closed" / "closedok" or "return" / "returned"; host -> destination "cancel". The host keeps its copy in the manifest until closed and both saves cover it; a party's world-ready replays its legs (the destination's WITHOUT the bill).
         BuyClaimAnswer        = 224,     // T-33: Host -> that guest. Granted=true = the deed ledger now names the guest; it re-runs the game's own buy ONCE (native charge/deed/notifications exactly once) and its BuyRequest (17) then confirms. Granted=false + OwnedByPlayer = another player holds the deed; the guest shows the approved refusal. No money ever moves without Granted=true.
     }
 
@@ -576,6 +577,9 @@ namespace BigAmbitionsMP
         // the bookings that member routed there, as the runner holds them; the member's own manage-contracts lists show them. A whole-list
         // replace per (runner, building): an empty list clears it. NULL on every other tab.
         public List<PwRoutedBooking>? RoutedBookings { get; set; }
+        // T-24 slice 2 (v28, additive): Tab "mergerack" for a move between two games - the DESTINATION whose runner answers
+        // (the booking is held there, keyed on the origin); the host forwards it when the sender runs that destination.
+        public string DestKey { get; set; } = "";
     }
 
     /// <summary>H-BIZ-1: on-demand estimate of another PLAYER's shop, computed by its owner with the game's own closure
@@ -1896,6 +1900,9 @@ namespace BigAmbitionsMP
         //      so per the freeze rule a wire-visible change bumps: a v26 client would drop 221 as "Unknown message type" and
         //      keep its own economy settings while everyone else runs the host's. No capability gate and no old-peer branch
         //      (project rule 2026-09-18): mixed sessions refuse at Hello.
+        // v28 (2026-11-13, T-24 part 2 slice 2, additive): MessageType.ContentsHandover (226, ContentsHandoverPayload) - moves between
+        //      buildings run by different games of one merged company; ContentsHandover.cs. SharedWorkInfoPayload gains DestKey
+        //      (a cross-game move's "mergerack" from the destination's runner); SharedWorkEditPayload.DestKey also rides "mergercancel".
         // v28 (2026-11-13, T-50 fold of the independent review, additive - v28 unreleased): BuildingSale legs are now escrow-first
         // (charge/charged/chargefail -> release/released -> finalize/finalized + pay/paid); BuildingSalePayload gains
         // Committed, Tenant, Money, HasMoney; MpManifest gains RentDone; MpBuildingSaleEntry's two done marks became per-leg
@@ -2123,6 +2130,27 @@ namespace BigAmbitionsMP
         public string OfferId       { get; set; } = "";
         public string Holder        { get; set; } = "";
         public bool   HolderOffline { get; set; }
+    }
+
+    /// <summary>T-24 part 2 slice 2 (v28): one leg of a contents hand-over (MessageType.ContentsHandover, ContentsHandover.cs).</summary>
+    public class ContentsHandoverPayload
+    {
+        public string Action      { get; set; } = "";   // offer|release|held|dropped|hold|deliver|deferred|applied|applyfail|closed|closedok|return|returned|cancel
+        public string HandoverId  { get; set; } = "";   // "mv|<origin>><destination>": one move can name an address at a time
+        public string Purpose     { get; set; } = "move";   // move | sale (reserved for T-52)
+        public string OriginId    { get; set; } = "";
+        public string DestId      { get; set; } = "";
+        public string OriginKey   { get; set; } = "";
+        public string DestKey     { get; set; } = "";
+        public string CompanyKey  { get; set; } = "";   // the moving company's address
+        public bool   Transfer    { get; set; }        // transfer settings (MovingServiceContract.transferBizManSettings)
+        public string PackageJson { get; set; } = "";   // dropped / deliver / return / a replayed release: HandoverPackage
+        public bool   Committed   { get; set; }        // release: a replay - the host holds the package; drop its ids again
+        public bool   SkipBill    { get; set; }        // deliver: the host's record says this game was charged - never again
+        public bool   Charged     { get; set; }        // applied: the game's own bill was taken by this run
+        public float  Money       { get; set; }        // applied: the balance right after it
+        public bool   HasMoney    { get; set; }
+        public string Reason      { get; set; } = "";   // held / hold / applyfail: inside | notrun | origin | dest | error (the origin could not pack or drop) | money | notrented | nocontract | cancelled
     }
 
     /// <summary>T-50 (v28): one leg of a player-to-player building sale or one forwarded day of rent (MessageType.BuildingSale).</summary>

@@ -1,0 +1,857 @@
+{
+  "id": "T-CROSSMOVE",
+  "title": "T-24 part 2 slice 2: the moving service between buildings run by DIFFERENT players' games of one merged company - contents (items, cargo, every vehicle), transfer settings (the whole business), both crash points, too little money, origin away. Ends with the client away, NO save",
+  "preconditions": "Fixture save1 (host melaus, client Client1): host runs warehouse X (2 slotted trucks + 1 parked car, cargo) and a shop (2 staff, a contract, a host logistics plan delivering to it, prices, a logo); client runs warehouse Y and a shop of the same type. The mergestatus key order is a PREMISE the leg premises check. T-24 slice 2 deployed on BOTH machines. NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Handover\\] .*record unreadable",
+    "\\[Handover\\] host '",
+    "from '[^']*', not the (origin|destination)"
+  ],
+  "oracles_report": [
+    "\\[Handover\\]",
+    "mergermove .* runs on two games"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "mark TEST CROSSMOVE HOSTLOAD",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Settle\\] world settled \\(host",
+          "within_s": 180,
+          "since_prev_step": true
+        }
+      ],
+      "note": "the host's own settle line, never a fixed load wait"
+    },
+    {
+      "seq": 5,
+      "role": "c",
+      "cmd": "mark TEST CROSSMOVE CLIENTLOAD",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 180,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "energyflag on",
+      "expect_result": "^OK",
+      "note": "the run skips game hours (movenow, day offsets)"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 10,
+      "role": "h",
+      "sleep_s": 3,
+      "note": "the merge applies (as t-mergerservice); the client settled before the merge (step 5) and a merge does not re-settle it"
+    },
+    {
+      "role": "c",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]\\d* keys=\\[",
+      "note": "PREMISE: merged, partner buildings flipped here",
+      "seq": 11
+    },
+    {
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]\\d* keys=\\[",
+      "seq": 12
+    },
+    {
+      "role": "h",
+      "cmd": "movepick wh",
+      "expect_result": "^OK movepick wh key='[^']+' score=\\d+ .* slots=[1-9]",
+      "capture": {
+        "hostWh": "key='([^']+)'"
+      },
+      "note": "the host's own warehouse with 2+ vehicle slots first (score = 1000 x min(slots,2) + 100 x slotted + all); save1's best had 1 slot",
+      "seq": 13
+    },
+    {
+      "role": "h",
+      "cmd": "moveprep ${hostWh}",
+      "expect_result": "^OK moveprep '[^']+' slots=([1-9]\\d*) made=\\d+ slotted=[1-9] parked=[1-9]\\d* cargo=[1-9]",
+      "note": "leg-1 PREMISE SET UP on the runner: 3 vehicles - 2 slotted + 1 parked, or (a 1-slot warehouse) 1 slotted + 2 parked - copies of the one parked there, cargo aboard the slotted; asserted, never assumed",
+      "seq": 14
+    },
+    {
+      "role": "h",
+      "cmd": "movepick shop",
+      "expect_result": "^OK movepick shop key='[^']+' score=[2-9]\\d{3} ",
+      "capture": {
+        "hostShop": "key='([^']+)'"
+      },
+      "note": "a SHOP of the host's (prices, not a headquarters or warehouse) with 2+ real staff (score = 1000 x staff + 100 x contracts + 10 x plan targets + logo); run 200244 picked a 48-staff HQ office",
+      "seq": 15
+    },
+    {
+      "role": "h",
+      "cmd": "moveprep shop ${hostShop}",
+      "expect_result": "^OK moveprep shop '[^']+' staff=[2-9]\\d* contracts=[1-9]\\d* planTargets=[1-9]\\d* prices=[1-9]\\d* logo=True ",
+      "note": "leg-2 PREMISE SET UP on the runner: a delivery contract and a host plan delivery to the shop are made when missing (copies of this save's own); staff/prices/logo asserted",
+      "seq": 16
+    },
+    {
+      "role": "c",
+      "cmd": "movepick dest ${hostWh}",
+      "expect_result": "^OK movepick dest key='[^']+' .*type=",
+      "capture": {
+        "clientWh": "key='([^']+)'"
+      },
+      "note": "the client's own warehouse building with NO vehicles first, then the most free slots",
+      "seq": 17
+    },
+    {
+      "role": "c",
+      "cmd": "moveclear ${clientWh}",
+      "expect_result": "^OK moveclear '[^']+' sold=\\d+ n=0 slots=[1-9]\\d* free=[1-9]",
+      "note": "leg-1 PREMISE SET UP on the destination's runner: Y's own vehicles sold through the game's own sale, slots freed (run 200244: both client warehouses hold vehicles). Leg 1 proves the ORIGIN's vehicles cross under the slot rule; the game's destruction of destination vehicles is not its subject",
+      "seq": 18
+    },
+    {
+      "role": "c",
+      "cmd": "movepick dest ${hostShop}",
+      "expect_result": "^OK movepick dest key='[^']+' ",
+      "capture": {
+        "clientShop": "key='([^']+)'"
+      },
+      "note": "the client's own building of the shop's building type, an empty one first",
+      "seq": 19
+    },
+    {
+      "role": "c",
+      "cmd": "warehouses",
+      "expect_result": "^OK warehouses own=\\[[^\\]]*'${clientWh}'.* flipped=\\[[^\\]]*'${hostWh}'",
+      "note": "PREMISE: Y is the client's own warehouse, X the host's flipped here",
+      "seq": 20
+    },
+    {
+      "seq": 21,
+      "role": "both",
+      "cmd": "mark LEG1 CONTENTS",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "bizat ${hostWh}",
+      "expect_result": "^OK bizat '[^']+' name=",
+      "note": "report: X's business as the host holds it (any business type: the game moves contents by BUILDING type, MovingServiceHelper.cs:409; step 13 proved X is a warehouse building with vehicle slots)"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "bizat ${clientWh}",
+      "expect_result": "^OK bizat ",
+      "note": "report: Y as the client holds it (movepick prefers an EMPTY warehouse building; step 17 proved it is a warehouse)"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "vehlist ${hostWh}",
+      "expect_result": "^OK vehlist '[^']+' n=[3-9] slotted=[1-9] .*\\[(?=[^\\]]*slot=[0-9])(?=[^\\]]*slot=-1)(?=[^\\]]*cargo=[1-9])",
+      "capture": {
+        "xs": "slotted=(\\d+) "
+      },
+      "note": "PREMISE: 3+ vehicles at X on its runner, slotted and parked ones, cargo aboard"
+    },
+    {
+      "role": "c",
+      "cmd": "vehlist ${clientWh}",
+      "expect_result": "^OK vehlist '[^']+' n=0 slotted=0 slots=[1-9]\\d* free=",
+      "capture": {
+        "yf": "free=(\\d+) "
+      },
+      "note": "PREMISE: Y holds no vehicle of its own (nothing for the game to destroy) and has slots; its free slots decide the outcome",
+      "seq": 25
+    },
+    {
+      "role": "c",
+      "cmd": "movecalc min ${xs} ${yf}",
+      "expect_result": "^OK movecalc value=\\d+$",
+      "capture": {
+        "ye": "value=(\\d+)"
+      },
+      "note": "the game's own rule: each slotted origin vehicle takes a free destination slot while one is left (MovingServiceHelper :577-603); the parked ones are placed on the floor or sold",
+      "seq": 26
+    },
+    {
+      "seq": 27,
+      "role": "h",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "^OK itemsat '[^']+' items=[1-9]\\d* ",
+      "capture": {
+        "i1": "ids=([^,\\s]+)"
+      },
+      "note": "PREMISE: X holds items (their ids are checked at Y)"
+    },
+    {
+      "role": "h",
+      "cmd": "mergermove ${hostWh} ${clientWh} 1 -",
+      "expect_result": "^OK mergermove routed",
+      "note": "fold F1: the origin's owner (the host) books from its own building - routed to the destination's game (the client)",
+      "seq": 28
+    },
+    {
+      "role": "c",
+      "sleep_s": 3,
+      "seq": 29
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "movenow",
+      "expect_result": "^OK movenow cross=1",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Handover\\] mv\\|.* MOVED on this game",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ],
+      "note": "the move hour now: offer -> release -> dropped -> deliver -> the game's own move"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "cmd": "movestate",
+      "expect_result": "outcome=moved charged=True stamped=True",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.*: CLOSED by the origin \\(closedok\\)",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ],
+      "note": "OUTCOME: one charge, recorded with the cash"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "cmd": "itemsat ${clientWh}",
+      "expect_result": "ids=[^ ]*${i1}",
+      "note": "OUTCOME: Y holds X's item ids"
+    },
+    {
+      "role": "c",
+      "cmd": "vehlist ${clientWh}",
+      "expect_result": "^OK vehlist '[^']+' n=\\d+ slotted=${ye} ",
+      "note": "OUTCOME: exactly the slotted count the game's rule gives; a vehicle that did not fit was sold by the game (log)",
+      "seq": 33
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "items=0 ",
+      "note": "OUTCOME: X empty on the origin's game"
+    },
+    {
+      "seq": 35,
+      "role": "h",
+      "cmd": "vehlist ${hostWh}",
+      "expect_result": "n=0 slotted=0 "
+    },
+    {
+      "seq": 36,
+      "role": "c",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "items=0 ",
+      "note": "OUTCOME: X empty on the destination's game"
+    },
+    {
+      "seq": 37,
+      "role": "both",
+      "cmd": "mark LEG2 TRANSFER",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "cmd": "staffat ${hostShop}",
+      "expect_result": "real=[1-9]\\d* ",
+      "note": "PREMISE: real staff at the shop (count carried to the outcome)",
+      "capture": {
+        "s2": "real=(\\d+) "
+      }
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "listsat ${hostShop}",
+      "expect_result": "' DeliveryContracts=[1-9]\\d* .*planTargets=[1-9]",
+      "note": "PREMISE: a contract or a logistics plan delivering to it (counts carried to the outcome)",
+      "capture": {
+        "c2": "' DeliveryContracts=(\\d+) ",
+        "p2": "planTargets=(\\d+)"
+      }
+    },
+    {
+      "seq": 40,
+      "role": "h",
+      "cmd": "bizat ${hostShop}",
+      "expect_result": "logo=True prices=[1-9]",
+      "capture": {
+        "bizName": "name='([^']+)'"
+      },
+      "note": "PREMISE: prices and a logo"
+    },
+    {
+      "seq": 41,
+      "role": "c",
+      "cmd": "mergermove ${hostShop} ${clientShop} 1 transfer",
+      "expect_result": "^OK mergermove routed"
+    },
+    {
+      "seq": 42,
+      "role": "c",
+      "sleep_s": 3
+    },
+    {
+      "seq": 43,
+      "role": "c",
+      "cmd": "movenow",
+      "expect_result": "cross=1",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Handover\\] mv\\|.* MOVED on this game",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 44,
+      "role": "h",
+      "cmd": "mark LEG2 CLOSE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.*: closed at the origin - [1-9]\\d* reference\\(s\\) re-pointed",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 45,
+      "role": "c",
+      "cmd": "staffat ${clientShop}",
+      "expect_result": "real=${s2} standin=0 duty=\\d+ indict=${s2} ",
+      "note": "OUTCOME: real staff only on the destination's game, found by the game's own id lookup (fold F2: shifts/vehicles work without a reload)"
+    },
+    {
+      "seq": 46,
+      "role": "h",
+      "cmd": "staffat ${hostShop}",
+      "expect_result": "real=0 standin=0"
+    },
+    {
+      "seq": 47,
+      "role": "h",
+      "cmd": "staffat ${clientShop}",
+      "expect_result": "real=0 ",
+      "note": "OUTCOME: no real copy on the origin's game - payroll once"
+    },
+    {
+      "seq": 48,
+      "role": "c",
+      "cmd": "listsat ${clientShop}",
+      "expect_result": "' DeliveryContracts=${c2} ",
+      "note": "OUTCOME: the contract lives where the business runs now"
+    },
+    {
+      "seq": 49,
+      "role": "h",
+      "cmd": "listsat ${hostShop}",
+      "expect_result": "' DeliveryContracts=0 .*planTargets=0"
+    },
+    {
+      "seq": 50,
+      "role": "h",
+      "cmd": "listsat ${clientShop}",
+      "expect_result": "planTargets=${p2}$",
+      "note": "OUTCOME: the host's plan targets moved with the address (re-pointed on the host)"
+    },
+    {
+      "seq": 51,
+      "role": "c",
+      "cmd": "bizat ${clientShop}",
+      "expect_result": "name='${bizName}' .*logo=True prices=[1-9]"
+    },
+    {
+      "seq": 52,
+      "role": "h",
+      "cmd": "bizat ${hostShop}",
+      "expect_result": "name='' ",
+      "note": "OUTCOME: the old business closed as the game closes it"
+    },
+    {
+      "seq": 53,
+      "role": "both",
+      "cmd": "mark LEG3A DROPCRASH",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 54,
+      "role": "c",
+      "cmd": "itemsat ${clientWh}",
+      "expect_result": "items=[1-9]",
+      "capture": {
+        "i3": "ids=([^,\\s]+)"
+      }
+    },
+    {
+      "role": "c",
+      "cmd": "listsat ${clientWh}",
+      "expect_result": "^OK listsat '[^']+' ",
+      "capture": {
+        "l3a": "^OK listsat '[^']+' (.*) planTargets="
+      },
+      "note": "fold F3 premise: the origin's own list counts before the move",
+      "seq": 55
+    },
+    {
+      "role": "h",
+      "cmd": "listsat ${hostWh}",
+      "expect_result": "^OK listsat '[^']+' ",
+      "capture": {
+        "hx": "^OK listsat '[^']+' (.*) planTargets="
+      },
+      "note": "fold F3: the destination's own rows before the move (X keeps its business; the game adds Y's)",
+      "seq": 56
+    },
+    {
+      "seq": 57,
+      "role": "c",
+      "cmd": "movefault drop",
+      "expect_result": "OK movefault 'drop'"
+    },
+    {
+      "role": "c",
+      "cmd": "mergermove ${clientWh} ${hostWh} 1 transfer",
+      "expect_result": "^OK mergermove routed",
+      "note": "fold F1: the ORIGIN's owner (the client) books from its own building to the host-run one - routed to the destination's game (the host)",
+      "seq": 58
+    },
+    {
+      "role": "h",
+      "sleep_s": 3,
+      "seq": 59
+    },
+    {
+      "seq": 60,
+      "role": "h",
+      "cmd": "movenow",
+      "expect_result": "cross=1",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.* MOVED on this game",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 61,
+      "role": "c",
+      "cmd": "movestate",
+      "expect_result": "frozen=True",
+      "note": "PREMISE: the origin dropped, answered and froze before any save"
+    },
+    {
+      "seq": 62,
+      "role": "c",
+      "drop": true,
+      "kill": true,
+      "note": "crash point 1: the origin dies after dropping (no save)"
+    },
+    {
+      "seq": 63,
+      "role": "c",
+      "relaunch": true
+    },
+    {
+      "seq": 64,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 65,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 66,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 67,
+      "role": "c",
+      "cmd": "mark LEG3A REJOIN",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 180,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 68,
+      "role": "c",
+      "cmd": "mark LEG3A REPLAY",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Handover\\] mv\\|.*: replayed drop at",
+          "within_s": 90,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "role": "c",
+      "cmd": "listsat ${clientWh}",
+      "expect_result": "^OK listsat '[^']+' DeliveryContracts=0 FurnitureDeliveryContracts=0 FoodDeliveryContracts=0 importPartnerships=0 logisticsManagerPlans=0 pricingManagerPlans=0 hrManagerPlans=0 headhunterPlans=0 ",
+      "note": "fold F3: the replayed drop left none of the origin's entries in its old save",
+      "seq": 69
+    },
+    {
+      "role": "h",
+      "cmd": "listsat ${hostWh} sum ${hx} ${l3a}",
+      "expect_result": "^OK listsat '[^']+' sum match=True ",
+      "note": "fold F3: X's own rows = its own before + exactly one of each of Y's (no duplicate from the replayed drop)",
+      "seq": 70
+    },
+    {
+      "seq": 71,
+      "role": "c",
+      "cmd": "itemsat ${clientWh}",
+      "expect_result": "items=0 ",
+      "note": "OUTCOME: the old save's copy given up again - nothing duplicated"
+    },
+    {
+      "seq": 72,
+      "role": "h",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "ids=[^ ]*${i3}",
+      "note": "OUTCOME: nothing lost"
+    },
+    {
+      "seq": 73,
+      "role": "both",
+      "cmd": "mark LEG3B APPLYCRASH",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 74,
+      "role": "c",
+      "cmd": "movefault apply",
+      "expect_result": "OK movefault 'apply'"
+    },
+    {
+      "seq": 75,
+      "role": "c",
+      "cmd": "mergermove ${hostWh} ${clientWh} 1 -",
+      "expect_result": "^OK mergermove routed"
+    },
+    {
+      "seq": 76,
+      "role": "c",
+      "sleep_s": 3
+    },
+    {
+      "seq": 77,
+      "role": "c",
+      "cmd": "movenow",
+      "expect_result": "cross=1",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "DEV fault apply: .* applied and answered",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 78,
+      "role": "h",
+      "cmd": "movestate",
+      "expect_result": "charged=True stamped=True",
+      "note": "PREMISE: the charge is recorded with the cash"
+    },
+    {
+      "seq": 79,
+      "role": "c",
+      "drop": true,
+      "kill": true,
+      "note": "crash point 2: the destination dies after applying (no save)"
+    },
+    {
+      "seq": 80,
+      "role": "c",
+      "relaunch": true
+    },
+    {
+      "seq": 81,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 82,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 83,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 84,
+      "role": "c",
+      "cmd": "mark LEG3B REJOIN",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 180,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 85,
+      "role": "c",
+      "cmd": "mark LEG3B REPLAY",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Handover\\] replay: the move's bill was taken on the first run - not booked again",
+          "within_s": 90,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 86,
+      "role": "c",
+      "cmd": "itemsat ${clientWh}",
+      "expect_result": "ids=[^ ]*${i3}",
+      "note": "OUTCOME: applied once, from the host's copy"
+    },
+    {
+      "seq": 87,
+      "role": "h",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "items=0 "
+    },
+    {
+      "seq": 88,
+      "role": "both",
+      "cmd": "mark LEG4 NOMONEY",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 89,
+      "role": "c",
+      "cmd": "itemsat ${clientWh}",
+      "expect_result": "items=[1-9]",
+      "capture": {
+        "n4": "items=(\\d+)"
+      }
+    },
+    {
+      "seq": 90,
+      "role": "h",
+      "cmd": "movefault nomoney",
+      "expect_result": "OK movefault 'nomoney'",
+      "note": "the game's own refusal at the bill (ChangeMoneySafe false): no lever sets a wallet below a move's price"
+    },
+    {
+      "seq": 91,
+      "role": "h",
+      "cmd": "mergermove ${clientWh} ${hostWh} 1 -",
+      "expect_result": "^OK mergermove routed"
+    },
+    {
+      "seq": 92,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 93,
+      "role": "h",
+      "cmd": "movenow",
+      "expect_result": "cross=1",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.*: the game's own move did not happen \\(too little money",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 94,
+      "role": "c",
+      "cmd": "mark LEG4 RETURNED",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Handover\\] mv\\|.*: RETURNED to",
+          "within_s": 60,
+          "since_prev_step": true
+        }
+      ]
+    },
+    {
+      "seq": 95,
+      "role": "c",
+      "cmd": "itemsat ${clientWh}",
+      "expect_result": "items=${n4} ",
+      "note": "OUTCOME: everything returned"
+    },
+    {
+      "seq": 96,
+      "role": "h",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "items=0 "
+    },
+    {
+      "seq": 97,
+      "role": "h",
+      "cmd": "movestate",
+      "expect_result": "outcome=returned charged=False",
+      "note": "OUTCOME: nothing charged"
+    },
+    {
+      "seq": 98,
+      "role": "both",
+      "cmd": "mark LEG5 AWAY",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 99,
+      "role": "h",
+      "cmd": "mergermove ${clientWh} ${hostWh} 1 -",
+      "expect_result": "^OK mergermove routed"
+    },
+    {
+      "seq": 100,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 101,
+      "role": "c",
+      "drop": true,
+      "note": "a clean quit: the origin's owner is away; the host stands in for it"
+    },
+    {
+      "seq": 102,
+      "role": "h",
+      "sleep_s": 10
+    },
+    {
+      "seq": 103,
+      "role": "h",
+      "cmd": "movenow",
+      "expect_result": "^OK movenow cross=0 standin=1",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Handover\\] mv\\|.*(is stood in for its absent owner - postponed|postponed)",
+          "within_s": 240,
+          "since_prev_step": true
+        }
+      ],
+      "note": "OUTCOME: postponed a day, nothing moved"
+    },
+    {
+      "seq": 104,
+      "role": "h",
+      "cmd": "itemsat ${hostWh}",
+      "expect_result": "items=0 "
+    },
+    {
+      "seq": 105,
+      "role": "h",
+      "cmd": "mark TEST CROSSMOVE END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

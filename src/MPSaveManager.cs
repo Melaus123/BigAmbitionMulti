@@ -137,6 +137,7 @@ namespace BigAmbitionsMP
         /// <summary>T-50: the host's player-to-player BUILDING SALES (replayed to each party at world-ready while the deed
         /// ledger names the buyer) and the rent days held for an absent deed holder. Empty on older manifests.</summary>
         public List<MpBuildingSaleEntry> BuildingSales { get; set; } = new();
+        public List<MpHandoverEntry> Handovers { get; set; } = new();   // T-24 slice 2: open contents hand-overs (ContentsHandover)
         public List<MpRentForwardEntry> RentForwards { get; set; } = new();
         public List<MpRentForwardEntry> RentDone { get; set; } = new();   // T-50 fold F6: recorded rent ids, kept >= 7 game days
         /// <summary>Merger phase 4c part 2 (D20-7): CARGO in transit between two members as of this save

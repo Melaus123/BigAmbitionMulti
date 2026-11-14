@@ -3618,6 +3618,20 @@ namespace BigAmbitionsMP
                 case "mergerfurniture": return DevServiceBooking(arg, food: false);
                 case "mergerfood":      return DevServiceBooking(arg, food: true);
                 case "mergermove":      return DevMergerMove(arg);       // T-24 part 2
+                // T-24 slice 2 levers (ContentsHandover.cs): the hand-over records, a building's contents, vehicles, business,
+                // staff and lists as THIS game holds them, the move hour now, and the crash points.
+                case "movestate":       return ContentsHandover.DevState();
+                case "movenow":         return ContentsHandover.DevMoveNow();
+                case "movepick":        return ContentsHandover.DevPick(arg);           // T-24 slice 2 fold: the rig picks its buildings by type
+                case "movecalc":        return ContentsHandover.DevCalc(arg);           // T-24 slice 2 fold: expected count from a game rule
+                case "moveprep":        return ContentsHandover.DevPrepArg(arg);        // T-24 slice 2 fold: leg-1 / leg-2 (shop) premises set up on the runner
+                case "moveclear":       return ContentsHandover.DevClear(DevT24Key(arg));  // T-24 slice 2 fold: the destination warehouse emptied of its own vehicles
+                case "movefault":       return ContentsHandover.DevFaultSet(arg);
+                case "itemsat":         return ContentsHandover.DevItemsAt(DevT24Key(arg));
+                case "vehlist":         return ContentsHandover.DevVehList(DevT24Key(arg));
+                case "bizat":           return ContentsHandover.DevBizAt(DevT24Key(arg));
+                case "staffat":         return ContentsHandover.DevStaffAt(DevT24Key(arg));
+                case "listsat":         return ContentsHandover.DevListsArg(arg);
                 case "mergerinterior":  return DevMergerInterior(arg);   // T-24 part 2
                 case "mergerrename":    return SharedShopWorkTabs.DevRename(arg);   // T-24 slice 1B
                 case "mycontracts":     return SharedShopWorkTabs.DevMyContracts();         // T-24 slice 1B (decision 26)
@@ -9221,6 +9235,14 @@ namespace BigAmbitionsMP
                 return $"OK servicelists day={(global::TimeHelper.CurrentDay)} hour={(global::TimeHelper.CurrentHour)} furniture={nf} [{sbF}] food={nd} [{sbD}] spot={spot} moving={nm} [{sbM}] interior={ni} [{sbI}]";
             }
             catch (Exception ex) { return $"ERR servicelists: {ex.Message}"; }
+        }
+
+        /// <summary>T-24 slice 2: a lever's building argument ("num street" or an address key) as this game's address key.</summary>
+        private static string DevT24Key(string arg)
+        {
+            string a = (arg ?? "").Trim();
+            var reg = GameStatePatcher.FindRegistration(a);
+            return reg == null ? a : GameStateReader.AddressKey(reg);
         }
 
         /// <summary>T-24 part 2 TEST LEVER `mergermove &lt;num&gt; &lt;street&gt; &lt;num&gt; &lt;street&gt; &lt;dayOffset&gt; [transfer|-] [bookingId]`:
