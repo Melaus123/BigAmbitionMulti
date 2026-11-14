@@ -1,0 +1,116 @@
+{
+  "id": "T-LOGOLEAVE",
+  "title": "T-8: a client leaves to the menu while the game's logo maker is mid-render - the routine ends cleanly ('logo maker stopped') instead of faulting on the cleared save or the destroyed GlobalReferences",
+  "preconditions": "Fixture save1 (host melaus/Prabaha, client Client1/REX). Dev build with DevT8 (logoregen lever) and the T-8 logo-routine prefix deployed. The client's renders go to a scratch folder under the game's temporary cache; the save is not written. Ends with both instances dropped.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patch class Patch_LogoRoutine_WorldGone",
+    "logo maker city-gone check failed"
+  ],
+  "oracles_present": [
+    {
+      "role": "c",
+      "regex": "\\[Patcher\\] logo maker stopped: the city is gone \\((no save|no GlobalReferences)\\)"
+    }
+  ],
+  "oracles_report": [
+    "\\[TestDrive\\] logoregen",
+    "\\[Patcher\\] logo maker stopped",
+    "BusinessLogoGenerator not found",
+    "Patched Patch_LogoRoutine_WorldGone"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "cmd": "mark TEST LOGOLEAVE HOST SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Settle\\] world settled \\(host",
+          "within_s": 300,
+          "since_prev_step": true
+        }
+      ],
+      "note": "the host's own settle line, searched from the hostload step"
+    },
+    {
+      "seq": 5,
+      "role": "c",
+      "cmd": "mark TEST LOGOLEAVE CLIENT SETTLE",
+      "expect_result": "OK MARK",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] world settled",
+          "within_s": 300,
+          "since_prev_step": true
+        }
+      ],
+      "note": "the client's settle line, searched from its join step"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "logoregen 120",
+      "expect_result": "^OK logoregen n=120 .*generating=True queued=\\d+",
+      "note": "DevT8 lever: 120 renders handed to the game's own logo maker; each takes several frames, so the chain is still running at the next step"
+    },
+    {
+      "seq": 7,
+      "role": "c",
+      "cmd": "leavegame menu",
+      "expect_result": "^OK leavegame menu",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Patcher\\] logo maker stopped: the city is gone",
+          "within_s": 120
+        }
+      ],
+      "note": "sent at once: the game loads the menu before it unloads the city, so the in-flight routine steps after the save is cleared / GlobalReferences is destroyed"
+    },
+    {
+      "seq": 8,
+      "role": "c",
+      "sleep_s": 20,
+      "note": "the city unload completes; any late fault lands in the log before teardown"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "drop": true
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "drop": true
+    }
+  ]
+}

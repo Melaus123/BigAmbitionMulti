@@ -6767,6 +6767,7 @@ namespace BigAmbitionsMP
 
                 case "horn":      return DevT31.Horn(arg);        // T-31 lever: the game's own horn on the car I drive (DevT31.cs)
                 case "hornstate": return DevT31.HornState(arg);   // T-31 lever: own cars + remote copies' horn state (DevT31.cs)
+                case "logoregen": return DevT8.LogoRegen(arg);    // T-8 lever: queue logo renders so one is in flight at a leave (DevT8.cs)
 
                 case "board":
                 {

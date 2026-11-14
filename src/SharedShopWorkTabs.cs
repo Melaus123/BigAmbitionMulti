@@ -3753,6 +3753,16 @@ namespace BigAmbitionsMP
                 _stWarehouseLogoQueue.Clear();
                 return;
             }
+            // T-8 (2026-11-13): the warehouse generator draws SYNCHRONOUSLY with the GlobalReferences font
+            // (BusinessLogoGenerator.cs:232); while the city is going away (no save / no GlobalReferences) it would
+            // fault, and the world these requests belong to is ending - drop them, as the absent-generator case does.
+            if (GameStatePatcher.LogoWorldGone(out string goneWhy))
+            {
+                if (_logged.Add("st-logogone"))
+                    Plugin.Logger.LogWarning($"{Tag} the city is going away ({goneWhy}) — {_stWarehouseLogoQueue.Count} warehouse sign(s) keep their previous art.");
+                _stWarehouseLogoQueue.Clear();
+                return;
+            }
             try { if (_fLogoBusy?.GetValue(gen) is bool busy && busy) return; }   // the rig is mid-render; try again next tick
             catch { }
             var reg = _stWarehouseLogoQueue[0];

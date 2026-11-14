@@ -6932,6 +6932,10 @@ namespace BigAmbitionsMP
         public static void DrainPendingLogoRefreshes()
         {
             if (_pendingLogoRefreshes.Count == 0) return;
+            // T-8 (2026-11-13): no refresh while the world is going away - UpdateSign can start the game's logo
+            // routine on a city that is being unloaded. Entries are KEPT: each is only an address and a time, and
+            // it fires in the next live world as a repaint from that world's own registration and sign.
+            if (!GameStateReader.HasLiveWorld()) return;
             float now = UnityEngine.Time.realtimeSinceStartup;
             for (int i = _pendingLogoRefreshes.Count - 1; i >= 0; i--)
             {
@@ -6968,6 +6972,104 @@ namespace BigAmbitionsMP
                     }
                 }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Patcher] DrainPendingLogoRefreshes: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>T-8 (2026-11-13): true when the state the game's logo maker needs is gone - no save loaded
+        /// (MainMenuController clears SaveGameManager.Current as the menu loads) or no GlobalReferences
+        /// (SceneLoader.RemoveDuplicatedSingletons destroys it before the city is unloaded). The game loads the menu
+        /// BEFORE it unloads the city, so the city's logo routine keeps stepping through both. GlobalReferences is
+        /// read through the same getter the routine uses (InstanceBehavior&lt;T&gt;.Instance, HGExtensions): a
+        /// destroyed or missing instance makes it return null, it does not throw. Deliberately NOT
+        /// GameManager.isCitySceneBeingUnloaded: that flag stays true when an exit aborts and would then stop every
+        /// logo for the rest of the session. Main thread.</summary>
+        internal static bool LogoWorldGone(out string why)
+        {
+            if (SaveGameManager.Current == null) { why = "no save"; return true; }
+            if (InstanceBehavior<GlobalReferences>.Instance == null) { why = "no GlobalReferences"; return true; }
+            why = "";
+            return false;
+        }
+
+        /// <summary>T-8 (2026-11-13): keeps the game's business-logo coroutine (BusinessLogoGenerator.GenerateBusinessLogo,
+        /// compiler-generated &lt;GenerateBusinessLogo&gt;d__18) from faulting when the city is gone, touching only the
+        /// steps that would use the gone state. MoveNext dispatches on &lt;&gt;1__state (IL_000f: switch to IL_0036,
+        /// IL_0158, IL_01cc, IL_0201, IL_021a, IL_024f, IL_0268, IL_02ee):
+        /// state 0 = the first step, SetUpSettings -> GlobalReferences.GetFontByName (IL_0063; BusinessLogoGenerator.cs:130,218);
+        /// state 7 = the queue-chain step (Queue.Count IL_02fb, StartCoroutine IL_0339; cs:175-183).
+        /// States 1-6 only draw, wait on the GPU and write the image files (CompleteCapture; StoreGeneratedTexture,
+        /// LogoHelper.cs:314-325, needs neither the save nor GlobalReferences) - but the step that completes the wide
+        /// image (resumed from state 5 or 6) also invokes the callback (IL_02ce-IL_02d9, cs:173), which reads the save
+        /// through LogoHelper. So: states 0 and 7 end the routine; states 1-6 run to the file write with the
+        /// iterator's onCreate field cleared, which the routine's own null check (IL_02d4 brtrue) then skips - the logo
+        /// a player just changed still lands on disk. When the routine is ended, the generator's busy flag and queue
+        /// are reset (the routine has no finally block): a stuck flag would park every later logo forever if an exit
+        /// aborts and the generator lives on; the queued requests belong to the world that is going away. One log
+        /// line per exit.</summary>
+        [HarmonyLib.HarmonyPatch]
+        internal static class Patch_LogoRoutine_WorldGone
+        {
+            private static System.Reflection.FieldInfo? _fOwner, _fState, _fOnCreate;
+            private static bool _stopLogged;
+            private static bool _faultLogged;
+            private static int _callbacksDropped;
+
+            /// <summary>Null (the class then fails loudly at patch time) unless the iterator still has the three
+            /// fields the state gate reads - a reshaped routine must not be gated by guesswork.</summary>
+            static System.Reflection.MethodBase? TargetMethod()
+            {
+                var gen = HarmonyLib.AccessTools.Method(typeof(BusinessLogoGenerator), "GenerateBusinessLogo");
+                var moveNext = gen == null ? null : HarmonyLib.AccessTools.EnumeratorMoveNext(gen);
+                var it = moveNext?.DeclaringType;
+                if (it == null) return null;
+                _fOwner = HarmonyLib.AccessTools.Field(it, "<>4__this");
+                _fState = HarmonyLib.AccessTools.Field(it, "<>1__state");
+                _fOnCreate = HarmonyLib.AccessTools.Field(it, "onCreate");
+                return _fOwner != null && _fState != null && _fOnCreate != null ? moveNext : null;
+            }
+
+            static bool Prefix(object __instance, ref bool __result)
+            {
+                try
+                {
+                    if (!LogoWorldGone(out string why)) { _stopLogged = false; return true; }
+                    int state = (int)_fState!.GetValue(__instance);
+                    if (state != 0 && state != 7)
+                    {
+                        // A drawing step: let it write its files; only the callback would read the gone save.
+                        if (_fOnCreate!.GetValue(__instance) != null)
+                        {
+                            _fOnCreate!.SetValue(__instance, null);
+                            _callbacksDropped++;
+                        }
+                        return true;
+                    }
+                    int dropped = 0;
+                    var gen = _fOwner?.GetValue(__instance) as BusinessLogoGenerator;
+                    if (gen != null)
+                    {
+                        dropped = gen.LogoGenerationQueue.Count;
+                        gen.LogoGenerationQueue.Clear();
+                        gen._logoIsGenerating = false;
+                    }
+                    __result = false;
+                    if (!_stopLogged)
+                    {
+                        _stopLogged = true;
+                        Plugin.Logger.LogInfo($"[Patcher] logo maker stopped: the city is gone ({why}); {dropped} queued logo(s) dropped, {_callbacksDropped} finished logo(s) written without their callback.");
+                        _callbacksDropped = 0;
+                    }
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    if (!_faultLogged)
+                    {
+                        _faultLogged = true;
+                        Plugin.Logger.LogWarning($"[Patcher] logo maker city-gone check failed - the game's logo step runs unchecked: {ex.GetType().Name}: {ex.Message}");
+                    }
+                    return true;
+                }
             }
         }
 
