@@ -6764,6 +6764,9 @@ namespace BigAmbitionsMP
                     return $"OK drive vid={dvid} owner={da[0]} type={dtype} queued";
                 }
 
+                case "horn":      return DevT31.Horn(arg);        // T-31 lever: the game's own horn on the car I drive (DevT31.cs)
+                case "hornstate": return DevT31.HornState(arg);   // T-31 lever: own cars + remote copies' horn state (DevT31.cs)
+
                 case "board":
                 {
                     // H-OWNERRIDE-HOSTDRIVER-1 rig lever (DEV, WRITES the local player's position). `board <vehicleId>`: ask

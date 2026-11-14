@@ -1513,6 +1513,9 @@ namespace BigAmbitionsMP
         public float  Qw { get; set; }
         public float  Fuel { get; set; }
         public float  Damage { get; set; }   // 0..1 — the borrower's accrued damage, applied to the owner's real car
+        // T-31 (v28, additive): the borrower's car horn is sounding (the native horn source playing, or it sounded since the
+        // last send). The owner applies it on its real car (native horn input). Absent (older peer) = false = no horn.
+        public bool   Horn { get; set; }
         public bool   Released { get; set; }
         // Round-232: on Released, the borrower's native parking verdict for where they left the car
         // (Helpers.ParkingState as int; -1 = absent/old sender). Without it the owner's copy keeps the
@@ -2489,6 +2492,10 @@ namespace BigAmbitionsMP
         /// it. Receivers spawn the normal player-vehicle ghost but never depict the owner inside it, never count it as
         /// in-use, label it "<owner>'s driver", and attach the GhostTaxi ride hook. Always Driving (volatile pose).</summary>
         public bool Service { get; set; }
+        /// <summary>T-31 (v28, additive): this car's horn is sounding on the owner's machine (the native horn source
+        /// playing, or it sounded since the last send) while the car is in use. Receivers play the copy's captured horn
+        /// while set and stop it when clear or when no packet arrives for over 1 s. Absent (older peer) = false = no horn.</summary>
+        public bool Horn { get; set; }
     }
 
     /// <summary>

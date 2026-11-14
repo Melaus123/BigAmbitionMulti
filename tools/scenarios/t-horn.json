@@ -1,0 +1,115 @@
+{
+  "id": "T-HORN",
+  "title": "T-31 (player report 2026-11-13): other players hear a player's car horn. The horn rides the vehicle streams as a flag (VehicleEntry.Horn / VehicleDrivePayload.Horn) decided from the native horn source actually playing; a remote copy plays a horn source captured from the native horn before the strip; the owner plays a borrower's horn through its real car's native horn input. LEG 1: the host drives its own car and holds the GAME'S horn ('horn 2') - the client's copy starts, then stops on the off flag. LEG 2: the host leaves the car while the horn is held - the copy stops. LEG 3 (merger grant): the client drives the host's car and honks - the host plays it on its REAL car (captured horn source) and its fleet packet carries Horn=true, then both stop. Ends dissolved; NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1; both own cars). Dev build with the T-31 levers: horn <seconds> (holds input.Horn on the car this player drives via a CarController.Update postfix - the native sound path), hornstate (pick=<first own live car> own=[vid:ctl:src:playing:mod] copies=[vid:src:playing:clip]); plus the H-OWNERRIDE levers board/drive/ride/exitride and merge propose/accept/leave (a merger makes every partner car drivable).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "\\[Horn\\] (capture|owned apply) ",
+    "\\[TestDrive\\] .*'(horn|hornstate)[^']*'.*ERR"
+  ],
+  "oracles_report": [
+    "\\[Horn\\] ",
+    "\\[Drive\\] ",
+    "\\[TestDrive\\] horn"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "mark TEST HORN HOST SETTLE", "expect_result": "OK MARK",
+      "expect_log": [ { "role": "h", "regex": "\\[Settle\\] world settled \\(host", "within_s": 150, "since_prev_step": true } ],
+      "note": "waits for the host's own settle line" },
+    { "seq": 4, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 5, "role": "h", "sleep_s": 5, "note": "the join request reaches the host (t-buildingsale's opening)" },
+    { "seq": 6, "role": "h", "cmd": "acceptjoin", "expect_result": "^OK" },
+    { "seq": 7, "role": "c", "cmd": "mark TEST HORN CLIENT SETTLE", "expect_result": "OK MARK",
+      "expect_log": [ { "role": "c", "regex": "\\[Patcher\\] world settled", "within_s": 180, "since_prev_step": true } ],
+      "note": "waits for the client's own settle line" },
+    { "seq": 8, "role": "both", "cmd": "mark TEST HORN START", "expect_result": "OK MARK" },
+
+    { "seq": 9, "role": "h", "cmd": "hornstate", "expect_result": "^OK hornstate pick=(?!-)\\S+ ",
+      "capture": { "hvid": "^OK hornstate pick=(\\S+) " },
+      "note": "LEG 1 PREMISE: the host has a live car of its own" },
+    { "seq": 10, "role": "h", "cmd": "board ${hvid}", "expect_result": "^OK board vid=${hvid} own=True",
+      "note": "the host takes the wheel of its own car (native DriveVehicle)" },
+    { "seq": 11, "role": "h", "sleep_s": 12, "note": "walk to the driver door + native EnterVehicle" },
+    { "seq": 12, "role": "h", "cmd": "hornstate", "expect_result": "own=\\[[^\\]]*${hvid}:ctl=True:src=True:playing=False",
+      "note": "PREMISE: the host drives it and the car has a native horn source, silent" },
+    { "seq": 13, "role": "c", "cmd": "hornstate", "expect_result": "copies=\\[[^\\]]*${hvid}:src=True:playing=False:clip=\\S",
+      "note": "PREMISE: the client's copy of the host's car carries a captured horn clip and is silent - the legs cannot pass vacuously" },
+    { "seq": 14, "role": "h", "cmd": "horn 2", "expect_result": "^OK horn vid=${hvid} seconds=2\\.0 nativeHorn=True",
+      "expect_log": [
+        { "role": "h", "regex": "\\[Horn\\] send '${hvid}' on role=owner", "within_s": 2 },
+        { "role": "c", "regex": "\\[Horn\\] start '${hvid}' copy \\(owner '${hostPid}'\\)", "within_s": 2 }
+      ],
+      "note": "LEG 1: the game's own horn on the host's car -> the flag goes out -> the client's copy starts" },
+    { "seq": 15, "role": "c", "cmd": "hornstate", "expect_result": "copies=\\[[^\\]]*${hvid}:src=True:playing=True",
+      "note": "the copy's horn source is actually playing on the client" },
+    { "seq": 16, "role": "c", "cmd": "mark TEST HORN LEG1 RELEASE", "expect_result": "OK MARK",
+      "expect_log": [
+        { "role": "h", "regex": "\\[TestDrive\\] horn released on '${hvid}'", "within_s": 4 },
+        { "role": "h", "regex": "\\[Horn\\] send '${hvid}' off role=owner", "within_s": 5 },
+        { "role": "c", "regex": "\\[Horn\\] stop '${hvid}' copy \\(packet\\)", "within_s": 5 }
+      ],
+      "note": "the release travels as the off flag (reason 'packet', not the 1 s stall fallback)" },
+    { "seq": 17, "role": "c", "cmd": "hornstate", "expect_result": "copies=\\[[^\\]]*${hvid}:src=True:playing=False" },
+
+    { "seq": 18, "role": "h", "cmd": "horn 8", "expect_result": "^OK horn vid=${hvid} seconds=8\\.0",
+      "expect_log": [ { "role": "c", "regex": "\\[Horn\\] start '${hvid}' copy", "within_s": 2 } ],
+      "note": "LEG 2: horn held again" },
+    { "seq": 19, "role": "h", "cmd": "exitride", "expect_result": "^OK exitride driver vid=${hvid}",
+      "expect_log": [
+        { "role": "h", "regex": "\\[Horn\\] send '${hvid}' off role=owner", "within_s": 6 },
+        { "role": "c", "regex": "\\[Horn\\] stop '${hvid}' copy \\(packet\\)", "within_s": 6 }
+      ],
+      "note": "LEG 2: the host leaves the car while the horn is still held (the lever runs ~7 s more) -> the copy stops" },
+    { "seq": 20, "role": "c", "cmd": "hornstate", "expect_result": "copies=\\[[^\\]]*${hvid}:src=True:playing=False" },
+    { "seq": 21, "role": "h", "cmd": "mark TEST HORN LEG2 LEVER END", "expect_result": "OK MARK",
+      "expect_log": [ { "role": "h", "regex": "\\[TestDrive\\] horn released on '${hvid}'", "within_s": 10 } ],
+      "note": "the lever's key release lands before leg 3" },
+
+    { "seq": 22, "role": "h", "cmd": "merge propose ${clientPid}", "expect_result": "OK merge propose sent",
+      "note": "LEG 3: the merger grants the client the host's cars" },
+    { "seq": 23, "role": "h", "sleep_s": 1 },
+    { "seq": 24, "role": "c", "cmd": "merge accept", "expect_result": "OK merge accept sent" },
+    { "seq": 25, "role": "h", "sleep_s": 3 },
+    { "seq": 26, "role": "h", "cmd": "mergestatus", "expect_result": "member=True" },
+    { "seq": 27, "role": "h", "sleep_s": 25, "note": "ghosts respawn drivable on both machines after the membership edge (t-ownerride)" },
+    { "seq": 28, "role": "c", "cmd": "drive ${hostPid} ${hvid}", "expect_result": "^OK drive vid=${hvid} owner=${hostPid} ",
+      "note": "PREMISE: the client holds a drivable proxy of the host's car" },
+    { "seq": 29, "role": "c", "sleep_s": 12, "note": "walk to the driver door + native EnterVehicle; the drive stream starts" },
+    { "seq": 30, "role": "c", "cmd": "ride", "expect_result": "^OK ride local='' seat=-1 driving='${hvid}' ",
+      "note": "PREMISE: the client IS driving the host's car" },
+    { "seq": 31, "role": "h", "cmd": "hornstate", "expect_result": "own=\\[[^\\]]*${hvid}:ctl=False:src=True:playing=\\w+:mod=False",
+      "note": "PREMISE: the host's real car is silent (no captured borrower horn playing on it)" },
+    { "seq": 32, "role": "c", "cmd": "horn 2", "expect_result": "^OK horn vid=BAMP_${hvid} seconds=2\\.0 nativeHorn=True",
+      "expect_log": [
+        { "role": "c", "regex": "\\[Horn\\] send '${hvid}' on role=borrower", "within_s": 2 },
+        { "role": "h", "regex": "\\[Horn\\] start '${hvid}' own car \\(driver '${clientPid}'\\)", "within_s": 2 },
+        { "role": "h", "regex": "\\[Horn\\] send '${hvid}' on role=owner", "within_s": 3 }
+      ],
+      "note": "LEG 3: the borrower honks -> the owner plays it on its real car, and the owner's fleet packet then carries Horn=true (what a third player receives)" },
+    { "seq": 33, "role": "h", "cmd": "hornstate", "expect_result": "own=\\[[^\\]]*${hvid}:ctl=False:src=True:playing=\\w+:mod=True",
+      "note": "the host HEARS it: the captured horn source on its own real car is actually playing (the native horn is disabled on a car its owner does not drive)" },
+    { "seq": 34, "role": "c", "cmd": "mark TEST HORN LEG3 RELEASE", "expect_result": "OK MARK",
+      "expect_log": [
+        { "role": "c", "regex": "\\[Horn\\] send '${hvid}' off role=borrower", "within_s": 4 },
+        { "role": "h", "regex": "\\[Horn\\] stop '${hvid}' own car \\(packet\\)", "within_s": 5 },
+        { "role": "h", "regex": "\\[Horn\\] send '${hvid}' off role=owner", "within_s": 6 }
+      ] },
+    { "seq": 35, "role": "h", "cmd": "hornstate", "expect_result": "own=\\[[^\\]]*${hvid}:ctl=False:src=True:playing=\\w+:mod=False" },
+    { "seq": 36, "role": "c", "cmd": "exitride", "expect_result": "^OK exitride driver vid=BAMP_${hvid}" },
+    { "seq": 37, "role": "c", "sleep_s": 5 },
+    { "seq": 38, "role": "c", "cmd": "merge leave", "expect_result": "OK merge leave sent", "note": "FIXTURE HYGIENE: end dissolved" },
+    { "seq": 39, "role": "h", "sleep_s": 5 },
+    { "seq": 40, "role": "h", "cmd": "mergestatus", "expect_result": "member=False" },
+    { "seq": 41, "role": "both", "cmd": "mark TEST HORN END", "expect_result": "OK MARK" }
+  ]
+}

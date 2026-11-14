@@ -689,6 +689,7 @@ namespace BigAmbitionsMP
                         CargoNested = cargoNested,   // CARTBAG-1 (additive)
                         CarriedItems = carried,
                         Bldg  = bldg,
+                        Horn  = VehicleHorns.SenderHorn(vc, inst.id, vc.controlledByPlayer || _ownedFollowing.ContainsKey(inst.id), "owner"),   // T-31: in use = I drive it or a borrower does
                     });
                 }
 
@@ -830,7 +831,7 @@ namespace BigAmbitionsMP
             }
             List<VehicleEntry>? driven = null;
             foreach (var e in full.Vehicles)
-                if (e != null && e.Driving) (driven ??= new List<VehicleEntry>()).Add(e);
+                if (e != null && (e.Driving || e.Horn)) (driven ??= new List<VehicleEntry>()).Add(e);   // T-31: a sounding horn streams at the driven rate
             if (driven == null) return;   // everything parked and unchanged — silence until the heartbeat
             DispatchFleet(new VehicleFleetPayload { OwnerId = full.OwnerId, T = full.T, Partial = true, Vehicles = driven });
         }
@@ -851,7 +852,7 @@ namespace BigAmbitionsMP
             foreach (var e in p.Vehicles)
             {
                 if (e == null) continue;
-                if (e.Driving) { sb.Append(e.VehicleId).Append("|D;"); continue; }
+                if (e.Driving || e.Horn) { sb.Append(e.VehicleId).Append("|D;"); continue; }   // T-31: a sounding horn is volatile - the fast stream carries the flag
                 sb.Append(e.VehicleId).Append('|').Append(e.TypeName).Append('|').Append(e.ColorName).Append('|').Append(e.Bldg)
                   .Append('|').Append(e.Dormant).Append('|').Append(e.Cargo).Append('|').Append(e.CarriedItems)
                   // Review MIN-5: round-to-nearest METRE, not a truncated half-metre — a parked car
@@ -972,6 +973,7 @@ namespace BigAmbitionsMP
                     rv.TargetRot = rot;
                     rv.TargetAt  = Time.unscaledTime;
                     rv.SenderT   = p.T;
+                    { bool hornMine = rv.Go != null && PossessedByLocal(rv.Go); VehicleHorns.ApplyCopy(e.VehicleId, e.Horn && !hornMine, hornMine ? "local driver" : "packet"); }   // T-31: my own drive plays the native horn
                     rv.OwnerUsing = e.Driving && !e.Service;   // in-use arbitration (see the run-9 note above); a service car is never "in use" by its owner
 
                     // Keep a drivable (granted) proxy fueled from the owner's car so it isn't stuck at 0%.
@@ -1437,6 +1439,7 @@ namespace BigAmbitionsMP
                 }
             }
             catch { }
+            VehicleHorns.CaptureOnCopy(go, vc, e.VehicleId, ownerId, e.TypeName);   // T-31: before the strip, while the NWH horn is still on the copy
             int killed;
             if (drivable)
             {
@@ -2346,6 +2349,7 @@ namespace BigAmbitionsMP
                         X = pose.position.x, Y = pose.position.y, Z = pose.position.z,
                         Qx = pose.rotation.x, Qy = pose.rotation.y, Qz = pose.rotation.z, Qw = pose.rotation.w,
                         Fuel = fuel, Damage = dmg, Released = false, T = Time.unscaledTime,
+                        Horn = VehicleHorns.SenderHornOf(pose, realVid),   // T-31
                         Bldg = MPRegisterSync.CurrentShopAddress ?? "" });   // truthful-follow tag (door-hold removed round-74): visibility masks + dormant releases key on it
                 }
                 else if (!string.IsNullOrEmpty(_drivingRealVid))
@@ -2361,6 +2365,7 @@ namespace BigAmbitionsMP
                         if (pt != null) parkState = (int)pt.parkingState;
                     }
                     catch { }
+                    VehicleHorns.ClearLatchOf(GhostTransform(_drivingRealVid));   // T-31: a honk in the last send window must not ride the next borrow
                     SendDrive(new VehicleDrivePayload { VehicleId = _drivingRealVid, OwnerId = _drivingOwner, DriverId = MPConfig.PlayerId, Released = true, ParkState = parkState, T = Time.unscaledTime });
                     Plugin.Logger.LogInfo($"[Drive] exited borrowed '{_drivingRealVid}' — sent release (parkState={parkState}).");
                     _drivingRealVid = ""; _drivingOwner = "";
@@ -2497,6 +2502,7 @@ namespace BigAmbitionsMP
                 f.Pos = new Vector3(p.X, p.Y, p.Z); f.Rot = new Quaternion(p.Qx, p.Qy, p.Qz, p.Qw);
                 f.Bldg = p.Bldg ?? "";
                 f.Until = Time.unscaledTime + DriveSyncTimeout;
+                VehicleHorns.ApplyOwned(ownedGo, p.VehicleId, p.DriverId, p.Horn);   // T-31: the borrower's horn on my real car
                 // (Round-74d dynamic ride offset REVERTED same day: the per-type offset was already
                 // placing the pusher correctly — the "posture" gap is the push POSE animation, not
                 // the standing spot — and the computed offset made placement worse.)
@@ -2546,6 +2552,7 @@ namespace BigAmbitionsMP
         {
             if (!_ownedFollowing.TryGetValue(vid, out var f)) return;
             _ownedFollowing.Remove(vid);
+            VehicleHorns.ReleaseOwned(vid, "drive ended");   // T-31: release or borrow timeout silences my car
             // Bug #1: restore the borrower's walk model + release the ride pin now they've stopped driving my car.
             if (!string.IsNullOrEmpty(f.Driver))
                 try { RemotePlayerManager.SetRide(f.Driver, null, Vector3.zero); RemotePlayerManager.SetDriving(f.Driver, false); } catch { }
