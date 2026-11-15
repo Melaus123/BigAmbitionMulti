@@ -1011,7 +1011,7 @@ namespace BigAmbitionsMP
         /// recompute, the rig lever - so the postfix WRITES ON EVERY CALL: it either arms (a bench copy, no
         /// bulk run in progress, a real price) or CLEARS. The flag therefore cannot outlive the call that set
         /// it, and the consume adds a frame test on top of that.</summary>
-        private static (string id, string owner, string skill, float cost, int frame) _benchTrainArm;
+        private static (string id, string owner, string skill, float cost, int frame) _benchTrainArm = ("", "", "", 0f, 0);   // T-69: never null - the confirm wrapper reads id.Length on the first dialog of a launch
 
         /// <summary>Public so the rig lever can drop an arm it raised itself (it prices an employee without
         /// ever opening the dialog).</summary>
