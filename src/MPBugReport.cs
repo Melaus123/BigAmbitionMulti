@@ -152,6 +152,11 @@ namespace BigAmbitionsMP
         /// Prabaha report had NO way to tell a menu-kill loop from a real gameplay crash.</summary>
         public static string PendingCrashHint { get; private set; } = "";
 
+        /// <summary>T-67: this launch began after the previous session ended without closing cleanly.
+        /// Unlike PendingCrashDetected it is never cleared, so EVERY report filed from this launch - a
+        /// hand-filed one included - carries the crashed session's own ring log and crash files.</summary>
+        public static bool LaunchFollowedUncleanExit { get; private set; }
+
         public static void MarkSessionStarted()
         {
             try
@@ -168,6 +173,7 @@ namespace BigAmbitionsMP
                         old.IndexOf("\"State\": \"open\"", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
                         PendingCrashDetected = true;
+                        LaunchFollowedUncleanExit = true;
                         _pendingCrashSummary = old;
                         PendingCrashHint = BuildCrashHint(old);
                         Plugin.Logger.LogWarning($"[BugReport] Previous session did not close cleanly; crash report popup will be shown.{(PendingCrashHint.Length > 0 ? " " + PendingCrashHint : "")}");
@@ -389,11 +395,14 @@ namespace BigAmbitionsMP
                 CopyPlayerLogs(dir);
                 WriteSaveStore(dir);   // bug-report v2 (task #40) + H-REPORTLOSS-1: newest save per connected player + full store listing
                 CopyIfExists(ring, Path.Combine(dir, "bamp-ring.log"), MaxCopiedLogBytes);
-                // P-MIDNIGHT: a crash report also carries the crashed session's own ring, kept on disk every ~10 s
-                if (includeCrashArtifacts) CopyIfExists(StallWatch.PrevPath(), Path.Combine(dir, "bamp-ring-prev.log"), MaxCopiedLogBytes);
-                // Task #5: the actual crash evidence lives OUTSIDE Player.log — but only CRASH reports
-                // carry it (a stale Crash_* folder on an unrelated manual report is misleading noise).
-                if (includeCrashArtifacts) CollectUnityCrashArtifacts(dir);
+                // P-MIDNIGHT: a crash report also carries the crashed session's own ring, kept on disk every ~10 s;
+                // T-67: so does any report filed from the launch that followed an unclean exit (players often
+                // dismiss the crash popup and report by hand later)
+                bool crashEvidence = includeCrashArtifacts || LaunchFollowedUncleanExit;
+                if (crashEvidence) CopyIfExists(StallWatch.PrevPath(), Path.Combine(dir, "bamp-ring-prev.log"), MaxCopiedLogBytes);
+                // Task #5: the actual crash evidence lives OUTSIDE Player.log — only reports tied to a crash
+                // carry it (a stale Crash_* folder on a report from a cleanly started launch is misleading noise).
+                if (crashEvidence) CollectUnityCrashArtifacts(dir);
                 CopyUserAttachments(dir, attachments);
                 WriteRedactedConfig(Path.Combine(dir, "config-redacted.json"));
                 WriteSubmitNotes(Path.Combine(dir, "README-submit.txt"));

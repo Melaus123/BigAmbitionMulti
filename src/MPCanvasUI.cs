@@ -6694,7 +6694,7 @@ namespace BigAmbitionsMP
                 var result = MPBugReport.Create(prefix + _crashReportMessage, openFolder: false,
                     attachments: _crashReportAttachments, discordTagIds: SelectedDiscordForumTagIds(),
                     onUploadComplete: (ok, folder) => GameStatePatcher.EnqueueOnMainThread(() => OnReportUploadDone(ok, folder)),
-                    includeCrashArtifacts: _crashReportIsCrash);   // Unity crash folder rides CRASH reports only
+                    includeCrashArtifacts: _crashReportIsCrash);   // crash files + the crashed session's ring: CRASH reports, and (T-67, inside Create) any report from a launch that followed an unclean exit
                 _crashReportDir = result.DirectoryPath;
                 if (_crashReportIsCrash) MPBugReport.AcknowledgePendingCrash();
                 if (!result.DiscordUploadQueued)   // nothing to upload — report saved locally, done

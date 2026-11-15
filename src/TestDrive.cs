@@ -2774,7 +2774,9 @@ namespace BigAmbitionsMP
                     // zip still gets built before the upload is tried.
                     string why = arg.Length > 0 ? arg : "testdrive report";
                     var rep = MPBugReport.Create("testdrive: " + why, openFolder: false);
-                    return $"OK report dir={rep.DirectoryPath} uploadQueued={rep.DiscordUploadQueued}";
+                    bool ringPrev = false;
+                    try { ringPrev = System.IO.File.Exists(System.IO.Path.Combine(rep.DirectoryPath ?? "", "bamp-ring-prev.log")); } catch { }
+                    return $"OK report dir={rep.DirectoryPath} uploadQueued={rep.DiscordUploadQueued} afterUnclean={MPBugReport.LaunchFollowedUncleanExit} ringprev={ringPrev}";
                 }
 
                 case "bugbudget":
