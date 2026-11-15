@@ -16,7 +16,7 @@ namespace BigAmbitionsMP
     /// fee (ChangeMoneySafe, :165), CreateVehicle (:223) and SpawnVehicle, whose EnterVehicle one frame later MOUNTS the player (:188-196).
     /// `vehmove &lt;vid&gt; [seconds]` reads THIS machine's object for that vehicle (the own instance, else the mod's copy through
     /// VehicleManager.GhostTransform): rigidbodies kinematic / FreezeAll-constrained over total (the game's SetFreeze uses constraints,
-    /// VehicleController.cs:526-536; the mod's copy uses isKinematic, VehicleManager.cs:1473-1483), NWH controllers enabled over total,
+    /// VehicleController.cs:526-536; the mod's copy uses isKinematic, VehicleManager.cs SpawnRemoteVehicle freeze loop), NWH controllers enabled over total,
     /// the throttle the NWH input handler holds, controlledByPlayer. With seconds it starts a timed sample (start position now, end
     /// position taken by the ticker at t0+seconds); a later `vehmove &lt;vid&gt;` reports the distance.
     /// `throttle &lt;0..1&gt; [seconds]` feeds the layer a key press feeds: the key is read by InputSystemVehicleInputProvider.Throttle(),
@@ -279,6 +279,37 @@ namespace BigAmbitionsMP
             try { PassengerRide.RouteGhostClick(vid, "rig"); }
             catch (Exception ex) { return $"ERR ghostclick: {ex.Message}"; }
             return $"OK ghostclick vid={vid} reason={reason} routed";
+        }
+
+        /// <summary>`useown &lt;vid&gt;` (T-70): the LOCAL player's own vehicle's native Interact() - the direct-enter route a
+        /// scooter and a hand truck take on the interact key (decompile ScooterController.cs:168-177, HandTruck.cs:101-127),
+        /// which never passes DriveVehicle. Teleports beside it first, like 'board'. Reports whether I ended up in a vehicle.</summary>
+        internal static string UseOwn(string arg)
+        {
+            if (!MPServer.IsRunning && !MPClient.IsConnected) return "ERR no session";
+            string vid = (arg ?? "").Trim();
+            if (vid.Length == 0 || vid.Contains(" ")) return "ERR usage: useown <vehicleId>";
+            VehicleController? own = null;
+            try
+            {
+                var list = Helpers.VehicleHelper.AllPlayerVehicles;
+                if (list != null)
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var vc = list[i];
+                        if (vc != null && vc.vehicleInstance != null && vc.vehicleInstance.id == vid) { own = vc; break; }
+                    }
+            }
+            catch { }
+            if (own == null) return $"ERR useown: '{vid}' is not my vehicle here";
+            string terr = TestDrive.TeleportBeside(own.transform);
+            if (terr.Length > 0) return "ERR useown: " + terr;
+            bool handled;
+            try { handled = own.Interact(); }
+            catch (Exception ex) { return $"ERR useown: Interact threw {ex.Message}"; }
+            bool inVehicle = false;
+            try { inVehicle = Helpers.VehicleHelper.IsInsideVehicle(); } catch { }
+            return $"OK useown vid={vid} handled={handled} inVehicle={inVehicle} drivenRemotely={VehicleManager.IsDrivenRemotely(vid)}";
         }
     }
 

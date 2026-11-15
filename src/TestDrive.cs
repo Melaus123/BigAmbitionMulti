@@ -6806,6 +6806,7 @@ namespace BigAmbitionsMP
                 case "vehmove":     return DevT70.VehMove(arg);       // T-70 readout: kinematic/frozen/NWH state of a vehicle here + timed move sample (DevT70.cs)
                 case "throttle":    return DevT70.Throttle(arg);      // T-70 lever: hold throttle on the vehicle I ride via a DEV NWH input provider (DevT70.cs)
                 case "ghostclick":  return DevT70.GhostClick(arg);    // T-70 lever: the mod's ghost-click entry on another player's vehicle (DevT70.cs)
+                case "useown":      return DevT70.UseOwn(arg);        // T-70 lever: my own vehicle's native Interact (the direct-enter route of scooters / hand trucks)
 
                 case "board":
                 {
@@ -8042,7 +8043,7 @@ namespace BigAmbitionsMP
 
         /// <summary>'drive'/'board' (H-OWNERRIDE-HOSTDRIVER-1): put the LOCAL player 3 m to the side of a car with the
         /// game's own teleport, exactly as 'tp' does (a temporary GameObject carries the target). "" on success.</summary>
-        private static string TeleportBeside(UnityEngine.Transform car)
+        internal static string TeleportBeside(UnityEngine.Transform car)
         {
             UnityEngine.GameObject? probe = null;
             try

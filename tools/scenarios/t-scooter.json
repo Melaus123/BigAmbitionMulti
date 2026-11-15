@@ -1,6 +1,6 @@
 {
   "id": "T-SCOOTER",
-  "title": "T-70 (bundle 20261114-110317, mod 0.3.3: 'if you rent scooter your friend can't use it'). REPRODUCE + MEASURE, no fix: the host rents an e-scooter the game's way, the merged friend gets on it, throttles 5 s, and vehmove records kinematic/frozen counts and the distance moved on both machines (suspect A: the copy's rigidbodies are frozen kinematic). The owner then clicks his scooter while the friend rides (suspect B: board request on a 0-seat scooter) and the toast he is shown is logged. Reverse: the owner rides, the friend's click meets the designed 'owner-using' refusal. Ends dissolved; NO save.",
+  "title": "T-70 (bundle 20261114-110317, mod 0.3.3: 'if you rent scooter your friend can't use it'). TEST of the fix (rig run T-SCOOTER-20261115-021236 measured the copy at kinematic 2/2 and 0.00 m under full throttle): the host rents an e-scooter the game's way and parks it (its kinematic count is captured); the merged friend's copy is frozen while parked, gets on, the copy's main body is non-kinematic and full throttle for 5 s moves it at least 1 m; the friend gets off, the copy is frozen again (N/N) and the host's own scooter reads the same kinematic count as before the borrow. Kept: the owner's click while the friend rides (toast reported) and the reverse 'owner-using' refusal. Ends dissolved; NO save.",
   "preconditions": "Fixture save1 (host melaus, Client1), the host outdoors near a loaded scooter rental point with money for the fee. Dev build with the T-70 levers (DevT70.cs): rentscooter, vehmove <vid> [seconds], throttle <0..1> [seconds], ghostclick <vid>, and the DEV toast log line '[TestDrive] toast: '...''; plus drive/board/ride/exitride (H-OWNERRIDE).",
   "instances": 2,
   "vars": {
@@ -12,7 +12,10 @@
     "NullReferenceException",
     "HarmonyException",
     "\\[Drive\\] owner-ride guard: ",
-    "\\[Drive\\] TickDriveSync: "
+    "\\[Drive\\] TickDriveSync: ",
+    "\\[Drive\\] borrowed copy '[^']*' was still dynamic after the drive ended",
+    "\\[Drive\\] borrowed copy '[^']*': driver on, but no copy record",
+    "\\[Drive\\] borrowed copy (lift|re-freeze|release freeze): "
   ],
   "oracles_report": [
     "\\[Drive\\] ",
@@ -140,79 +143,97 @@
     },
     {
       "seq": 19,
-      "role": "c",
+      "role": "h",
       "cmd": "vehmove ${svid}",
-      "expect_result": "^OK vehmove vid=${svid} which=copy",
-      "note": "PREMISE: the client holds a copy of the host's scooter. REPORT: its kinematic/frozen/NWH counts while parked"
+      "expect_result": "^OK vehmove vid=${svid} which=own name=\\S+ kinematic=\\d+/\\d+ ",
+      "capture": {
+        "hostKin": "kinematic=(\\d+/\\d+) "
+      },
+      "note": "BASELINE: the owner's own scooter PARKED, before any borrow - its kinematic count is captured as hostKin; after the borrow it must read the same"
     },
     {
       "seq": 20,
+      "role": "c",
+      "cmd": "vehmove ${svid}",
+      "expect_result": "^OK vehmove vid=${svid} which=copy name=\\S+ kinematic=(\\d+)/\\1 ",
+      "note": "PREMISE + TEST: the client holds a copy of the host's scooter, every rigidbody frozen while parked (the spawn freeze)"
+    },
+    {
+      "seq": 21,
       "role": "c",
       "cmd": "drive ${hostPid} ${svid}",
       "expect_result": "^OK drive vid=${svid} owner=${hostPid} ",
       "note": "the friend gets on the host's scooter (explicit vid: the passenger-seat filter is skipped)"
     },
     {
-      "seq": 21,
+      "seq": 22,
       "role": "c",
       "sleep_s": 12,
       "note": "walk to the scooter + native EnterVehicle; the drive stream starts"
     },
     {
-      "seq": 22,
+      "seq": 23,
       "role": "c",
       "cmd": "ride",
       "expect_result": "^OK ride local='' seat=-1 driving='${svid}' ",
       "note": "PREMISE: the client IS driving the host's scooter"
     },
     {
-      "seq": 23,
+      "seq": 24,
       "role": "c",
       "cmd": "vehmove ${svid}",
-      "expect_result": "^OK vehmove vid=${svid} ",
-      "note": "REPORT (suspect A): kinematic/frozen counts, NWH enabled, throttleIn on the friend's ride - not asserted"
+      "expect_result": "^OK vehmove vid=${svid} which=copy .*nwhRbKinematic=False .*ctl=True",
+      "note": "TEST: the friend drives the copy - its main (NWH) rigidbody is non-kinematic"
     },
     {
-      "seq": 24,
+      "seq": 25,
       "role": "h",
       "cmd": "vehmove ${svid} 8",
       "expect_result": "sample=started",
       "note": "REPORT: does the owner's own scooter follow the friend's ride (sampled on the host)"
     },
     {
-      "seq": 25,
+      "seq": 26,
       "role": "c",
       "cmd": "throttle 1 5",
       "expect_result": "^OK throttle vid=(BAMP_)?${svid} ",
       "note": "the friend holds full throttle 5 s through the NWH input-provider layer a key press feeds"
     },
     {
-      "seq": 26,
-      "role": "c",
-      "cmd": "vehmove ${svid} 5",
-      "expect_result": "sample=started"
-    },
-    {
       "seq": 27,
       "role": "c",
-      "sleep_s": 8
+      "cmd": "vehmove ${svid} 5",
+      "expect_result": "sample=started",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[TestDrive\\] vehmove: '${svid}' moved [1-9][0-9]*\\.[0-9]+ m",
+          "within_s": 12
+        }
+      ],
+      "note": "TEST: the friend's copy moves at least 1.00 m in the 5 s sample under full throttle (the run before the fix: 0.00 m)"
     },
     {
       "seq": 28,
       "role": "c",
-      "cmd": "vehmove ${svid}",
-      "expect_result": "sample=done",
-      "note": "REPORT (suspect A): dist = how far the friend's ride moved under 5 s of throttle - not asserted"
+      "sleep_s": 8
     },
     {
       "seq": 29,
+      "role": "c",
+      "cmd": "vehmove ${svid}",
+      "expect_result": "sample=done",
+      "note": "REPORT: the sample readback (dist is asserted on the sample's log line above)"
+    },
+    {
+      "seq": 30,
       "role": "h",
       "cmd": "vehmove ${svid}",
       "expect_result": "sample=done",
       "note": "REPORT: how far the owner's own scooter moved meanwhile - not asserted"
     },
     {
-      "seq": 30,
+      "seq": 31,
       "role": "h",
       "cmd": "board ${svid}",
       "expect_result": "^OK board vid=${svid} own=True ",
@@ -226,61 +247,90 @@
       ]
     },
     {
-      "seq": 31,
+      "seq": 32,
+      "role": "h",
+      "cmd": "useown ${svid}",
+      "expect_result": "^OK useown vid=${svid} handled=\\S+ inVehicle=False drivenRemotely=True$",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] toast: 'Someone is using this right now\\.'",
+          "within_s": 10,
+          "since_prev_step": true
+        }
+      ],
+      "note": "TEST (review MED-2): the OWNER uses the interact key on his own scooter while the friend rides it - the scooter's native Interact enters DIRECTLY (no DriveVehicle); the one-possession guard must refuse it and he stays on foot"
+    },
+    {
+      "seq": 33,
       "role": "c",
       "cmd": "exitride",
       "expect_result": "^OK exitride driver vid=BAMP_${svid}"
     },
     {
-      "seq": 32,
+      "seq": 34,
       "role": "c",
       "sleep_s": 5
     },
     {
-      "seq": 33,
+      "seq": 35,
+      "role": "c",
+      "cmd": "vehmove ${svid}",
+      "expect_result": "^OK vehmove vid=${svid} which=copy name=\\S+ kinematic=(\\d+)/\\1 ",
+      "note": "TEST: the friend got off - the copy is frozen again (kinematic N/N)"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "cmd": "vehmove ${svid}",
+      "expect_result": "^OK vehmove vid=${svid} which=own name=\\S+ kinematic=${hostKin} ",
+      "note": "TEST: the owner's own scooter reads the same kinematic count as before the borrow (the release restored what the follow froze)"
+    },
+    {
+      "seq": 37,
       "role": "h",
       "cmd": "board ${svid}",
       "expect_result": "^OK board vid=${svid} own=True drivenRemotely=False",
       "note": "REVERSE: the owner takes his own scooter again (native DriveVehicle)"
     },
     {
-      "seq": 34,
+      "seq": 38,
       "role": "h",
       "sleep_s": 8
     },
     {
-      "seq": 35,
+      "seq": 39,
       "role": "c",
       "cmd": "ghostclick ${svid}",
       "expect_result": "^OK ghostclick vid=${svid} reason=owner-using routed",
-      "note": "DESIGNED: the friend clicks the scooter the owner rides - CanDriveGhost refuses 'owner-using' (VehicleManager.cs:2969); the toast the friend gets is in the report"
+      "note": "DESIGNED: the friend clicks the scooter the owner rides - CanDriveGhost refuses 'owner-using' (VehicleManager.cs:3079); the toast the friend gets is in the report"
     },
     {
-      "seq": 36,
+      "seq": 40,
       "role": "h",
       "cmd": "exitride",
       "expect_result": "^OK exitride driver vid=${svid}"
     },
     {
-      "seq": 37,
+      "seq": 41,
       "role": "c",
       "cmd": "merge leave",
       "expect_result": "OK merge leave sent",
       "note": "FIXTURE HYGIENE: end dissolved"
     },
     {
-      "seq": 38,
+      "seq": 42,
       "role": "h",
       "sleep_s": 5
     },
     {
-      "seq": 39,
+      "seq": 43,
       "role": "h",
       "cmd": "mergestatus",
       "expect_result": "member=False"
     },
     {
-      "seq": 40,
+      "seq": 44,
       "role": "both",
       "cmd": "mark TEST SCOOTER END",
       "expect_result": "OK MARK"

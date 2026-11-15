@@ -48,6 +48,7 @@ namespace BigAmbitionsMP
             try
             {
                 var inst = __instance != null ? __instance.vehicleInstance : null;
+                if (EnterGuard.CopyInUse(inst)) return false;   // T-70: the owner took it back during my walk to the door
                 if (inst != null && VehicleManager.IsDrivenRemotely(inst.id))
                 {
                     Plugin.Logger.LogInfo($"[Drive] owner enter on driven car '{inst.id}' → boarding as a passenger (ride along).");
@@ -58,6 +59,53 @@ namespace BigAmbitionsMP
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Drive] hijack-guard: {ex.Message}"); }
             return true;
         }
+    }
+
+    /// <summary>T-70: the one-possession rule at the moment an enter commits, for the two vehicle kinds whose own Interact
+    /// enters DIRECTLY (decompile ScooterController.cs:168-177, HandTruck.cs:101-127 - no DriveVehicle, so the DriveVehicle
+    /// gates never see it) and, for the copy case, for cars too (Patch_CarController_EnterVehicle_BlockHijack).
+    /// (1) My own real vehicle while a borrower drives it: refused (the follow would drag me toward the borrower).
+    /// (2) A partner's copy whose owner is using it right now: refused (the click-time check is stale after the walk).
+    /// Both reuse the toasts the DriveVehicle path already shows.</summary>
+    internal static class EnterGuard
+    {
+        internal static bool CopyInUse(VehicleInstance? inst)
+        {
+            if (!VehicleManager.CopyOwnerUsing(inst)) return false;
+            Plugin.Logger.LogInfo($"[Drive] enter on copy '{inst!.id}' refused at the door — its owner is using it now.");
+            PassengerHud.Toast("Nothing to take.");
+            return true;
+        }
+
+        internal static bool Refuse(VehicleController vc)
+        {
+            try
+            {
+                var inst = vc != null ? vc.vehicleInstance : null;
+                if (inst == null || string.IsNullOrEmpty(inst.id)) return false;
+                if (CopyInUse(inst)) return true;
+                if (!VehicleManager.IsForeignProxy(inst) && VehicleManager.IsDrivenRemotely(inst.id))
+                {
+                    Plugin.Logger.LogInfo($"[Drive] owner direct enter on '{inst.id}' refused — a borrower is driving it.");
+                    PassengerHud.Toast("Someone is using this right now.");
+                    return true;
+                }
+            }
+            catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Drive] enter guard: {ex.Message}"); }
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(ScooterController), nameof(ScooterController.EnterVehicle))]
+    public static class Patch_ScooterController_EnterVehicle_OnePossession
+    {
+        static bool Prefix(ScooterController __instance) => !EnterGuard.Refuse(__instance);
+    }
+
+    [HarmonyPatch(typeof(HandTruck), nameof(HandTruck.EnterVehicle))]
+    public static class Patch_HandTruck_EnterVehicle_OnePossession
+    {
+        static bool Prefix(HandTruck __instance) => !EnterGuard.Refuse(__instance);
     }
 
     /// <summary>Phase 2 C (owner ride): intercept the owner's "drive my car" click BEFORE the native

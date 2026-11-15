@@ -62,6 +62,25 @@ namespace BigAmbitionsMP
         static void Finalizer() { if (EnterVehicleScope.Depth > 0) EnterVehicleScope.Depth--; }
     }
 
+    /// <summary>T-70: physics authority on a partner's vehicle copy moves to the LOCAL driver (the copy simulates, the
+    /// owner's real vehicle follows it). Postfixes on the BASE methods every vehicle controller calls - enter: Car :525,
+    /// Scooter :194, HandTruck :153; exit: Car :561, Scooter :224, HandTruck :216 (decompile build 3682). A postfix runs
+    /// only when the base method returned without throwing; an entry refused before the base (the scooter with an item
+    /// in hands, ScooterController.cs:183-187) never reaches it, and an early return inside the base leaves
+    /// controlledByPlayer unset (VehicleController.cs:341), so in both cases nothing is lifted. The work and its rule
+    /// live in VehicleManager (LiftForeignCopyForDriver / RefreezeForeignCopy).</summary>
+    [HarmonyPatch(typeof(VehicleController), nameof(VehicleController.EnterVehicle))]
+    public static class Patch_VehicleController_EnterVehicle_ForeignCopyPhysics
+    {
+        static void Postfix(VehicleController __instance) { VehicleManager.LiftForeignCopyForDriver(__instance); }
+    }
+
+    [HarmonyPatch(typeof(VehicleController), nameof(VehicleController.ExitVehicle))]
+    public static class Patch_VehicleController_ExitVehicle_ForeignCopyPhysics
+    {
+        static void Postfix(VehicleController __instance) { VehicleManager.RefreezeForeignCopy(__instance); }
+    }
+
     /// <summary>NULLNAME-1 (bundle 20260918-013040) — HALF-POSSESSION ROLLBACK. VehicleController.
     /// EnterVehicle (decompile VehicleController.cs:305-375) sets SaveGameManager.Current.ActiveVehicleId
     /// and controlledByPlayer at :340-341 and only THEN calls ItemPanelUI.SetVehicle at :357. A throw in

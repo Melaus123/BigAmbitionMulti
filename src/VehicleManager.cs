@@ -144,7 +144,8 @@ namespace BigAmbitionsMP
         // Remote side: each vehicle is a persistent "ghost" spawned with the real
         // game vehicle (CreateAndSpawnVehicle), kept out of our owned set, physics
         // frozen, interaction + ownership icon suppressed, an owner-name label
-        // above it, driven purely by the synced transform.  A ghost is despawned
+        // above it, driven purely by the synced transform (T-70: except while the
+        // LOCAL player drives a granted copy, which then simulates).  A ghost is despawned
         // only when its vehicle drops out of the owner's fleet (sold) or the owner
         // disconnects.
 
@@ -168,6 +169,9 @@ namespace BigAmbitionsMP
             public bool        Service;             // 2026-09-02: a mirrored private-driver / arrival car (see ServiceCars) — not boardable, not borrowable, GhostTaxi-ridable
             public PointOfInterest? Poi;             // 4d R2: the KEPT map pin of a car this member holds keys to (null = destroyed, the old behaviour)
             public Color32     PinColour;            // 4d R2: the owner's colour, re-applied after the game repaints the pin on enter/exit
+            // T-70: every rigidbody of this copy paired with its PREFAB isKinematic, recorded just before the spawn
+            // freeze and before the game's own Start() (SpawnRemoteVehicle). The local driver's enter gives the dynamic ones back (LiftForeignCopyForDriver).
+            public List<KeyValuePair<Rigidbody, bool>> NativeKinematic = new();
         }
         private static float _nextPinPaint;   // 4d R2: throttle for the kept-pin re-tint
         private const float MaxVehicleExtrapolateSeconds = 0.3f;
@@ -1470,6 +1474,11 @@ namespace BigAmbitionsMP
             // path froze only the ROOT, and the 0.11 prefabs carry dynamic
             // child rigidbodies — the client could shove the host's parked
             // vehicles by walking into them (resurfaced bug, 2026-06-12).
+            // T-70: record each body's own isKinematic FIRST. A local driver's enter
+            // gives the dynamic ones back and the exit freezes them again. (Before
+            // T-70 the freeze was never lifted and a borrowed scooter could not move:
+            // rig run T-SCOOTER-20261115-021236, kinematic 2/2, 0.00 m under full throttle.)
+            var nativeKinematic = new List<KeyValuePair<Rigidbody, bool>>();
             try
             {
                 var rbs = go.GetComponentsInChildren(typeof(Rigidbody), true);
@@ -1477,7 +1486,9 @@ namespace BigAmbitionsMP
                     for (int i = 0; i < rbs.Length; i++)
                     {
                         var rb = rbs[i] as Rigidbody;
-                        if (rb != null) rb.isKinematic = true;
+                        if (rb == null) continue;
+                        nativeKinematic.Add(new KeyValuePair<Rigidbody, bool>(rb, rb.isKinematic));
+                        rb.isKinematic = true;
                     }
             }
             catch { }
@@ -1497,7 +1508,9 @@ namespace BigAmbitionsMP
                 $"{ownedBefore}→{ownedAfterSpawn}→{ownedAfterStrip}, poi='{poiName}', " +
                 $"{killed} gameplay component(s) destroyed.");
 
-            return FinishGhost(go, ownerId, e, pos, rot, loadingPos, keptPoi, keptColour);
+            var spawned = FinishGhost(go, ownerId, e, pos, rot, loadingPos, keptPoi, keptColour);
+            spawned.NativeKinematic = nativeKinematic;
+            return spawned;
         }
 
         /// <summary>The common tail of every ghost spawn (player body or, since A2 2026-09-02, the service look-alike):
@@ -2261,12 +2274,16 @@ namespace BigAmbitionsMP
         // H-CARCOND-1 trace [VehCond]: 40 lines per session, shared by the sender and receiver halves.
         private static int   _vehCondLogged      = 0;
         private static float _lastStreamedDamage = -1f;
-        private sealed class DrivenFollow { public Vector3 Pos; public Quaternion Rot = Quaternion.identity; public float Until; public float LastDamage = -1f; public string Driver = ""; public bool Hide; public Vector3 RideOff; public string Bldg = ""; }
+        // T-70: Bodies = every rigidbody of MY vehicle paired with its isKinematic as it was when the follow began
+        // (BeginOwnedFollow, before the follow freezes them); the release restores exactly that (RestoreKinematic).
+        private sealed class DrivenFollow { public Vector3 Pos; public Quaternion Rot = Quaternion.identity; public float Until; public float LastDamage = -1f; public string Driver = ""; public bool Hide; public Vector3 RideOff; public string Bldg = ""; public List<KeyValuePair<Rigidbody, bool>> Bodies = new(); }
         private static readonly Dictionary<string, DrivenFollow> _ownedFollowing = new();   // MY cars driven remotely
         // Round-74: cars a borrower RELEASED inside an interior WE haven't loaded stay kinematic
         // (parked-dormant) until we load that interior — resuming physics over an unloaded floor
         // dropped them into the void and the native OnDisable deregistration ate them.
-        private static readonly Dictionary<string, string> _dormantReleases = new();   // vid → interior addressKey
+        // T-70: the follow's body record travels with the dormant entry, so the wake restores it.
+        private sealed class DormantRelease { public string Bldg = ""; public List<KeyValuePair<Rigidbody, bool>> Bodies = new(); }
+        private static readonly Dictionary<string, DormantRelease> _dormantReleases = new();   // vid → interior addressKey + pre-follow body state
         private const float DriveSyncTimeout = 1.5f;
 
         /// <summary>True if vid (one of MY cars) is currently driven remotely — used to redirect the owner's
@@ -2277,6 +2294,14 @@ namespace BigAmbitionsMP
         /// granted proxy — ids carry the BAMP_ prefix from SpawnRemoteVehicle; the rig's BAMP_TESTRIG is local)? The sale guards key
         /// on this. FUTURE (user ruling 2026-09-05): the merger project will allow selling a partner's car — lift it HERE with a
         /// merger/partner predicate, never by removing the guards.</summary>
+        /// <summary>T-70: the OWNER is driving/pushing the vehicle this copy stands for RIGHT NOW (fleet e.Driving), read
+        /// live at the moment a local enter commits - the click-time check (CanDriveGhost) can be minutes stale after a walk.</summary>
+        internal static bool CopyOwnerUsing(VehicleInstance? inst)
+        {
+            try { return IsForeignProxy(inst) && _remoteVehicles.TryGetValue(inst!.id.Substring(5), out var rv) && rv != null && rv.OwnerUsing; }
+            catch { return false; }
+        }
+
         public static bool IsForeignProxy(VehicleInstance? inst)
         {
             try
@@ -2285,6 +2310,64 @@ namespace BigAmbitionsMP
                 return id.StartsWith("BAMP_", StringComparison.Ordinal) && !id.StartsWith("BAMP_TESTRIG", StringComparison.Ordinal);
             }
             catch { return false; }
+        }
+
+        /// <summary>T-70 (postfix on the base VehicleController.EnterVehicle, VehicleProxyCargoGuard.cs): THIS machine has
+        /// just become the driver of a partner's vehicle copy. Physics authority moves to the driver — the copy simulates,
+        /// the owner's real vehicle follows it (BeginOwnedFollow) — so the copy gets back the dynamic bodies the spawn
+        /// freeze took. Rule: write ONLY false, and only to bodies the game had non-kinematic before the mod froze them;
+        /// never write true here. The postfix runs at the end of base.EnterVehicle, before the subclass tail (decompile
+        /// CarController.cs:525 base call, :541 StartEngine → :597 main body non-kinematic), and since nothing here ever
+        /// writes true it cannot re-freeze a body the game unfreezes. Bodies the game had kinematic stay as the spawn
+        /// freeze left them (kinematic), which is their game state.</summary>
+        internal static void LiftForeignCopyForDriver(VehicleController vc)
+        {
+            try
+            {
+                var inst = vc != null ? vc.vehicleInstance : null;
+                if (inst == null || !vc!.controlledByPlayer || !IsForeignProxy(inst)) return;
+                string vid = inst.id.Substring(5);
+                if (!_remoteVehicles.TryGetValue(vid, out var rv) || rv == null)
+                {
+                    Plugin.Logger.LogWarning($"[Drive] borrowed copy '{vid}': driver on, but no copy record holds its rigidbodies — left frozen.");
+                    return;
+                }
+                int lifted = 0;
+                foreach (var kv in rv.NativeKinematic)
+                    if (kv.Key != null && !kv.Value && kv.Key.isKinematic) { kv.Key.isKinematic = false; lifted++; }
+                Plugin.Logger.LogInfo($"[Drive] borrowed copy '{vid}': driver on — {lifted} of {rv.NativeKinematic.Count} rigidbody(ies) back to the game's dynamic state.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] borrowed copy lift: {ex.Message}"); }
+        }
+
+        /// <summary>T-70 (postfix on the base VehicleController.ExitVehicle, VehicleProxyCargoGuard.cs): the local driver has
+        /// left a partner's vehicle copy — freeze every body again, exactly as at spawn, so the copy goes back to following
+        /// the owner's broadcast and cannot be shoved (SpawnRemoteVehicle freeze comment).</summary>
+        internal static void RefreezeForeignCopy(VehicleController vc)
+        {
+            try
+            {
+                var inst = vc != null ? vc.vehicleInstance : null;
+                if (inst == null || !IsForeignProxy(inst)) return;
+                string vid = inst.id.Substring(5);
+                var go = _remoteVehicles.TryGetValue(vid, out var rv) && rv?.Go != null ? rv.Go : vc!.gameObject;
+                int was = FreezeCopyBodies(go, out int total);
+                Plugin.Logger.LogInfo($"[Drive] borrowed copy '{vid}': driver off — all {total} rigidbody(ies) frozen again ({was} were dynamic).");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] borrowed copy re-freeze: {ex.Message}"); }
+        }
+
+        /// <summary>T-70: set every rigidbody under a copy kinematic (the spawn freeze); returns how many were dynamic.</summary>
+        private static int FreezeCopyBodies(GameObject go, out int total)
+        {
+            int was = 0; total = 0;
+            foreach (var rb in go.GetComponentsInChildren<Rigidbody>(true))
+            {
+                if (rb == null) continue;
+                total++;
+                if (!rb.isKinematic) { was++; rb.isKinematic = true; }
+            }
+            return was;
         }
 
         /// <summary>Per-tick (TickPositionSync): broadcast the pose of a proxy I'm driving; on exit send a
@@ -2365,6 +2448,19 @@ namespace BigAmbitionsMP
                         if (pt != null) parkState = (int)pt.parkingState;
                     }
                     catch { }
+                    // T-70 backstop: the exit postfix (RefreezeForeignCopy) freezes the copy again, but a
+                    // THROWING native exit (ExitIfLocallyDriven's fallback) never reaches it — a copy left
+                    // dynamic here would be shoved about and fall out of step with the owner's broadcast.
+                    try
+                    {
+                        var cgo = GhostTransform(_drivingRealVid)?.gameObject;
+                        if (cgo != null)
+                        {
+                            int was = FreezeCopyBodies(cgo, out int total);
+                            if (was > 0) Plugin.Logger.LogWarning($"[Drive] borrowed copy '{_drivingRealVid}' was still dynamic after the drive ended — {was} of {total} rigidbody(ies) frozen now.");
+                        }
+                    }
+                    catch (Exception ex) { Plugin.Logger.LogWarning($"[Drive] borrowed copy release freeze: {ex.Message}"); }
                     VehicleHorns.ClearLatchOf(GhostTransform(_drivingRealVid));   // T-31: a honk in the last send window must not ride the next borrow
                     SendDrive(new VehicleDrivePayload { VehicleId = _drivingRealVid, OwnerId = _drivingOwner, DriverId = MPConfig.PlayerId, Released = true, ParkState = parkState, T = Time.unscaledTime });
                     Plugin.Logger.LogInfo($"[Drive] exited borrowed '{_drivingRealVid}' — sent release (parkState={parkState}).");
@@ -2397,18 +2493,19 @@ namespace BigAmbitionsMP
                 try { TickOwnedVehicleInteriorMask(); }
                 catch (Exception ex) { Plugin.Logger.LogWarning($"[Vehicle] owned interior mask: {ex.Message}"); }
 
-                // Round-74: wake dormant-parked cars once WE load the interior they were released in.
+                // Round-74: wake dormant-parked cars once WE load the interior they were released in
+                // (T-70: each body back to the isKinematic it had before the borrow).
                 if (_dormantReleases.Count > 0)
                 {
                     List<string> wake = null;
                     foreach (var kv in _dormantReleases)
-                        if (kv.Value == MPRegisterSync.CurrentShopAddress) (wake ??= new List<string>()).Add(kv.Key);
+                        if (kv.Value.Bldg == MPRegisterSync.CurrentShopAddress) (wake ??= new List<string>()).Add(kv.Key);
                     if (wake != null)
                         foreach (var vid in wake)
                         {
+                            var dorm = _dormantReleases[vid];
                             _dormantReleases.Remove(vid);
-                            var dgo = FindOwnedGo(vid);
-                            if (dgo != null) { try { foreach (var rb in dgo.GetComponentsInChildren<Rigidbody>(true)) if (rb != null) rb.isKinematic = false; } catch { } }
+                            if (FindOwnedGo(vid) != null) RestoreKinematic(dorm.Bodies);
                             Plugin.Logger.LogInfo($"[Drive] dormant-parked '{vid}' woken — its interior is loaded here now.");
                         }
                 }
@@ -2461,7 +2558,7 @@ namespace BigAmbitionsMP
                 }
                 if (!_ownedFollowing.TryGetValue(p.VehicleId, out var f))
                 {
-                    f = new DrivenFollow(); _ownedFollowing[p.VehicleId] = f; BeginOwnedFollow(ownedGo, p.VehicleId);
+                    f = new DrivenFollow(); _ownedFollowing[p.VehicleId] = f; BeginOwnedFollow(ownedGo, p.VehicleId, f);
                     DropExitCleared(p.VehicleId, "a partner grabbed it");   // H-CARTICON-1 fold
                     // Round-74: SEED the follow target from the cart's CURRENT pose. f.Pos was born
                     // Vector3.zero, and a borrow that STARTED indoors (every packet Bldg-tagged under
@@ -2542,10 +2639,37 @@ namespace BigAmbitionsMP
             return null;
         }
 
-        private static void BeginOwnedFollow(GameObject go, string vid)
+        private static void BeginOwnedFollow(GameObject go, string vid, DrivenFollow f)
         {
+            // T-70: record each body's own isKinematic BEFORE freezing — the release restores exactly that (a scooter
+            // keeps its kinematic child body; a parked car keeps its kinematic main body, decompile CarController.cs:607).
+            // A vehicle still parked DORMANT from an earlier borrow is frozen by THAT hold, not by the game: the follow
+            // takes over its record and the dormant hold ends (its wake would otherwise unfreeze the vehicle mid-follow).
+            // Merged per body: a body the dormant hold recorded keeps its recorded (pre-hold) value; any other live body
+            // (the vehicle was rebuilt since, e.g. a save reload, so the hold never froze it) is recorded as it is now.
+            Dictionary<Rigidbody, bool>? held = null;
+            if (_dormantReleases.TryGetValue(vid, out var dorm))
+            {
+                _dormantReleases.Remove(vid);
+                held = new Dictionary<Rigidbody, bool>();
+                foreach (var kv in dorm.Bodies) if (kv.Key != null) held[kv.Key] = kv.Value;
+                Plugin.Logger.LogInfo($"[Drive] my car '{vid}' borrowed again while parked dormant in '{dorm.Bldg}' — the follow takes over that hold ({held.Count} of {dorm.Bodies.Count} held bodies still live).");
+            }
+            try
+            {
+                foreach (var rb in go.GetComponentsInChildren<Rigidbody>(true))
+                    if (rb != null) f.Bodies.Add(new KeyValuePair<Rigidbody, bool>(rb, held != null && held.TryGetValue(rb, out var was) ? was : rb.isKinematic));
+            }
+            catch { }
             try { foreach (var rb in go.GetComponentsInChildren<Rigidbody>(true)) if (rb != null) rb.isKinematic = true; } catch { }
             Plugin.Logger.LogInfo($"[Drive] my car '{vid}' is being driven remotely → following the driver.");
+        }
+
+        /// <summary>T-70: every recorded rigidbody back to the isKinematic it had before the follow froze it. A body
+        /// destroyed since (Unity null) is skipped.</summary>
+        private static void RestoreKinematic(List<KeyValuePair<Rigidbody, bool>> bodies)
+        {
+            try { foreach (var kv in bodies) if (kv.Key != null) kv.Key.isKinematic = kv.Value; } catch { }
         }
 
         private static void ReleaseOwnedFollow(string vid)
@@ -2560,17 +2684,19 @@ namespace BigAmbitionsMP
             if (go != null)
             {
                 // Round-74: resume physics ONLY where this machine can simulate the ground under the
-                // cart — outdoors, or an interior WE currently have loaded. Released inside an
+                // cart — outdoors, or an interior WE currently have loaded. T-70: "resume" = every body
+                // back to the isKinematic it had when the follow began (BeginOwnedFollow), never "all
+                // dynamic" — that left a parked car's main body dynamic (the game parks it kinematic,
+                // CarController.cs:607) and stripped a scooter's kinematic child. Released inside an
                 // interior we have NOT loaded, the cart stays kinematic (parked-dormant; position and
                 // data stay correct, the fleet keeps listing it, the borrower's ghost stays put)
                 // until we enter that building — un-kinematic over an unloaded floor dropped it into
                 // the void and the native deregistration ate it (both stuck-trolley reports).
                 bool safeHere = string.IsNullOrEmpty(f.Bldg) || f.Bldg == MPRegisterSync.CurrentShopAddress;
-                if (safeHere)
-                { try { foreach (var rb in go.GetComponentsInChildren<Rigidbody>(true)) if (rb != null) rb.isKinematic = false; } catch { } }
+                if (safeHere) RestoreKinematic(f.Bodies);
                 else
                 {
-                    _dormantReleases[vid] = f.Bldg;
+                    _dormantReleases[vid] = new DormantRelease { Bldg = f.Bldg, Bodies = f.Bodies };
                     Plugin.Logger.LogInfo($"[Drive] my car '{vid}' released inside '{f.Bldg}' (not loaded here) — parked dormant until I enter that building.");
                 }
                 // Persist the borrower's parking NATIVELY: transform → instance (SavePosition) and
