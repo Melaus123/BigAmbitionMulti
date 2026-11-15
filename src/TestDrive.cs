@@ -1066,9 +1066,15 @@ namespace BigAmbitionsMP
 
                 // ── session control ───────────────────────────────────────────
                 case "host":
+                {
                     if (MPServer.IsRunning) return "OK server already running";
-                    return MPServer.Start(int.TryParse(arg, out var port) ? port : 7777)
-                        ? "OK server started" : "ERR MPServer.Start returned false";
+                    if (!MPServer.Start(int.TryParse(arg, out var port) ? port : 7777)) return "ERR MPServer.Start returned false";
+                    // The server moves to the next port when its own is taken by another program (MPServer
+                    // "port N in use - hosting on N+1"); a bare 'join' on the other instance reads this file
+                    // (same testdrive folder) so it knocks on the port actually bound.
+                    try { File.WriteAllText(Path.Combine(_dir ?? Path.Combine(MPConfig.DataRootPath, "testdrive"), "host-port.txt"), $"{MPServer.BoundPort} {System.Diagnostics.Process.GetCurrentProcess().Id}"); } catch { }
+                    return $"OK server started port={MPServer.BoundPort}";
+                }
 
                 case "hostnew":
                     // Round-256: start a NEW game from the lobby — same entry the UI's
@@ -2732,6 +2738,18 @@ namespace BigAmbitionsMP
                 {
                     if (MPClient.IsConnected) return "OK already connected";
                     string ip = "127.0.0.1"; int p = 7777;
+                    // Bare 'join': the port the rig's host instance actually bound ('host' writes it), used only
+                    // while the process that wrote it is still running - a file left by a closed host is ignored.
+                    try
+                    {
+                        var hp = File.ReadAllText(Path.Combine(_dir ?? Path.Combine(MPConfig.DataRootPath, "testdrive"), "host-port.txt")).Split(' ');
+                        if (hp.Length == 2 && int.TryParse(hp[0], out var bound) && bound > 0 && int.TryParse(hp[1], out var hpid))
+                        {
+                            var hproc = System.Diagnostics.Process.GetProcessById(hpid);
+                            if (!hproc.HasExited) p = bound;
+                        }
+                    }
+                    catch { }
                     if (arg.Length > 0)
                     {
                         var a = arg.Split(':');
