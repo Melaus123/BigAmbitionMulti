@@ -6784,6 +6784,10 @@ namespace BigAmbitionsMP
                 case "horn":      return DevT31.Horn(arg);        // T-31 lever: the game's own horn on the car I drive (DevT31.cs)
                 case "hornstate": return DevT31.HornState(arg);   // T-31 lever: own cars + remote copies' horn state (DevT31.cs)
                 case "logoregen": return DevT8.LogoRegen(arg);    // T-8 lever: queue logo renders so one is in flight at a leave (DevT8.cs)
+                case "rentscooter": return DevT70.RentScooter(arg);   // T-70 lever: rent an e-scooter through the rental point's own Interact + confirm (DevT70.cs)
+                case "vehmove":     return DevT70.VehMove(arg);       // T-70 readout: kinematic/frozen/NWH state of a vehicle here + timed move sample (DevT70.cs)
+                case "throttle":    return DevT70.Throttle(arg);      // T-70 lever: hold throttle on the vehicle I ride via a DEV NWH input provider (DevT70.cs)
+                case "ghostclick":  return DevT70.GhostClick(arg);    // T-70 lever: the mod's ghost-click entry on another player's vehicle (DevT70.cs)
 
                 case "board":
                 {

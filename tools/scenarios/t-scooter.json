@@ -1,0 +1,289 @@
+{
+  "id": "T-SCOOTER",
+  "title": "T-70 (bundle 20261114-110317, mod 0.3.3: 'if you rent scooter your friend can't use it'). REPRODUCE + MEASURE, no fix: the host rents an e-scooter the game's way, the merged friend gets on it, throttles 5 s, and vehmove records kinematic/frozen counts and the distance moved on both machines (suspect A: the copy's rigidbodies are frozen kinematic). The owner then clicks his scooter while the friend rides (suspect B: board request on a 0-seat scooter) and the toast he is shown is logged. Reverse: the owner rides, the friend's click meets the designed 'owner-using' refusal. Ends dissolved; NO save.",
+  "preconditions": "Fixture save1 (host melaus, Client1), the host outdoors near a loaded scooter rental point with money for the fee. Dev build with the T-70 levers (DevT70.cs): rentscooter, vehmove <vid> [seconds], throttle <0..1> [seconds], ghostclick <vid>, and the DEV toast log line '[TestDrive] toast: '...''; plus drive/board/ride/exitride (H-OWNERRIDE).",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "\\[Drive\\] owner-ride guard: ",
+    "\\[Drive\\] TickDriveSync: "
+  ],
+  "oracles_report": [
+    "\\[Drive\\] ",
+    "\\[Ride\\] ",
+    "\\[TestDrive\\] drive: ",
+    "\\[TestDrive\\] rentscooter: ",
+    "\\[TestDrive\\] vehmove: ",
+    "\\[TestDrive\\] throttle",
+    "\\[TestDrive\\] toast: 'Vehicle full\\.'",
+    "\\[TestDrive\\] toast: 'Someone is using this right now\\.'",
+    "\\[TestDrive\\] toast: 'Nothing to take\\.'",
+    "\\[TestDrive\\] toast: "
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 60,
+      "note": "both worlds load and settle"
+    },
+    {
+      "seq": 5,
+      "role": "both",
+      "cmd": "mark TEST SCOOTER START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "cmd": "status",
+      "expect_result": "settled=True"
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 9,
+      "role": "h",
+      "sleep_s": 1
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True"
+    },
+    {
+      "seq": 13,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "ghosts respawn drivable on both machines after the membership edge"
+    },
+    {
+      "seq": 14,
+      "role": "h",
+      "cmd": "rentscooter",
+      "expect_result": "^OK rentscooter vid=\\S+ type=\\S*scooter",
+      "capture": {
+        "svid": "^OK rentscooter vid=(\\S+) "
+      },
+      "note": "PREMISE: the host rents an e-scooter through the rental point's own Interact + confirm (fee, CreateVehicle); the game mounts the renter one frame later"
+    },
+    {
+      "seq": 15,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 16,
+      "role": "h",
+      "cmd": "vehmove ${svid}",
+      "expect_result": "^OK vehmove vid=${svid} which=own ",
+      "note": "REPORT (baseline): the owner's own scooter while the owner rides it - kinematic/frozen/NWH counts"
+    },
+    {
+      "seq": 17,
+      "role": "h",
+      "cmd": "exitride",
+      "expect_result": "^OK exitride driver vid=${svid}",
+      "note": "PREMISE: the rent mounted the host; the host parks and stands beside it"
+    },
+    {
+      "seq": 18,
+      "role": "h",
+      "sleep_s": 25,
+      "note": "the fleet broadcast carries the rented scooter; the client's drivable copy spawns"
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "vehmove ${svid}",
+      "expect_result": "^OK vehmove vid=${svid} which=copy",
+      "note": "PREMISE: the client holds a copy of the host's scooter. REPORT: its kinematic/frozen/NWH counts while parked"
+    },
+    {
+      "seq": 20,
+      "role": "c",
+      "cmd": "drive ${hostPid} ${svid}",
+      "expect_result": "^OK drive vid=${svid} owner=${hostPid} ",
+      "note": "the friend gets on the host's scooter (explicit vid: the passenger-seat filter is skipped)"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "sleep_s": 12,
+      "note": "walk to the scooter + native EnterVehicle; the drive stream starts"
+    },
+    {
+      "seq": 22,
+      "role": "c",
+      "cmd": "ride",
+      "expect_result": "^OK ride local='' seat=-1 driving='${svid}' ",
+      "note": "PREMISE: the client IS driving the host's scooter"
+    },
+    {
+      "seq": 23,
+      "role": "c",
+      "cmd": "vehmove ${svid}",
+      "expect_result": "^OK vehmove vid=${svid} ",
+      "note": "REPORT (suspect A): kinematic/frozen counts, NWH enabled, throttleIn on the friend's ride - not asserted"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "cmd": "vehmove ${svid} 8",
+      "expect_result": "sample=started",
+      "note": "REPORT: does the owner's own scooter follow the friend's ride (sampled on the host)"
+    },
+    {
+      "seq": 25,
+      "role": "c",
+      "cmd": "throttle 1 5",
+      "expect_result": "^OK throttle vid=(BAMP_)?${svid} ",
+      "note": "the friend holds full throttle 5 s through the NWH input-provider layer a key press feeds"
+    },
+    {
+      "seq": 26,
+      "role": "c",
+      "cmd": "vehmove ${svid} 5",
+      "expect_result": "sample=started"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "sleep_s": 8
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "vehmove ${svid}",
+      "expect_result": "sample=done",
+      "note": "REPORT (suspect A): dist = how far the friend's ride moved under 5 s of throttle - not asserted"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "vehmove ${svid}",
+      "expect_result": "sample=done",
+      "note": "REPORT: how far the owner's own scooter moved meanwhile - not asserted"
+    },
+    {
+      "seq": 30,
+      "role": "h",
+      "cmd": "board ${svid}",
+      "expect_result": "^OK board vid=${svid} own=True ",
+      "note": "REPORT (suspect B): the OWNER clicks his scooter while the friend rides it (DriveVehicle -> owner-ride patch -> board request; a scooter has 0 passenger seats). drivenRemotely= is recorded. The expect_log shows the first toast the owner was shown; a FAIL there means the owner was shown NOTHING",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[TestDrive\\] toast: '",
+          "within_s": 5
+        }
+      ]
+    },
+    {
+      "seq": 31,
+      "role": "c",
+      "cmd": "exitride",
+      "expect_result": "^OK exitride driver vid=BAMP_${svid}"
+    },
+    {
+      "seq": 32,
+      "role": "c",
+      "sleep_s": 5
+    },
+    {
+      "seq": 33,
+      "role": "h",
+      "cmd": "board ${svid}",
+      "expect_result": "^OK board vid=${svid} own=True drivenRemotely=False",
+      "note": "REVERSE: the owner takes his own scooter again (native DriveVehicle)"
+    },
+    {
+      "seq": 34,
+      "role": "h",
+      "sleep_s": 8
+    },
+    {
+      "seq": 35,
+      "role": "c",
+      "cmd": "ghostclick ${svid}",
+      "expect_result": "^OK ghostclick vid=${svid} reason=owner-using routed",
+      "note": "DESIGNED: the friend clicks the scooter the owner rides - CanDriveGhost refuses 'owner-using' (VehicleManager.cs:2969); the toast the friend gets is in the report"
+    },
+    {
+      "seq": 36,
+      "role": "h",
+      "cmd": "exitride",
+      "expect_result": "^OK exitride driver vid=${svid}"
+    },
+    {
+      "seq": 37,
+      "role": "c",
+      "cmd": "merge leave",
+      "expect_result": "OK merge leave sent",
+      "note": "FIXTURE HYGIENE: end dissolved"
+    },
+    {
+      "seq": 38,
+      "role": "h",
+      "sleep_s": 5
+    },
+    {
+      "seq": 39,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=False"
+    },
+    {
+      "seq": 40,
+      "role": "both",
+      "cmd": "mark TEST SCOOTER END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
