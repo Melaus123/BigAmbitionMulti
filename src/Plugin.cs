@@ -462,6 +462,9 @@ namespace BigAmbitionsMP
             }
             PatchFailCount = failClasses;
             Plugin.Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {deadClasses} dead, {totalPatched} method(s) patched total.");
+            // PROBE-START: P-T71-WINEDETOUR
+            try { ProtonProbe.AfterPatching(); } catch { }   // row T-71 field probe (src/ProtonProbe.cs): under Wine, scans every patched method's detour; plain Windows logs one "not under Wine" line
+            // PROBE-END: P-T71-WINEDETOUR
             if (MpDisabledByPatchFailure)
             {
                 Plugin.Logger.LogError($"[Plugin] {failClasses} patch class(es) FAILED (>= {PatchFailHardBlock}) — systemic; multiplayer entry is DISABLED this run (broken install, conflicting mod, or game update newer than the mod).");

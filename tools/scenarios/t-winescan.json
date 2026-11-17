@@ -1,0 +1,56 @@
+{
+  "id": "T-WINESCAN",
+  "title": "[SOLO] T-71 probe P-T71-WINEDETOUR self-check on Windows: the probe logs 'not under Wine' after patching, and the dev lever 'winescan' scans every patched method's detour and finds no anomaly on a healthy Windows machine.",
+  "preconditions": "Dev build with the winescan lever. Fixture save1.",
+  "instances": 2,
+  "vars": {
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "\\[PROBE T71\\].*(threw|failed|exception)"
+  ],
+  "oracles_report": [
+    "\\[PROBE T71\\]"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "c",
+      "drop": true,
+      "note": "SOLO"
+    },
+    {
+      "seq": 2,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK",
+      "note": "the startup probe line ('not under Wine; probe idle.') is checked as a report oracle"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 4,
+      "role": "h",
+      "sleep_s": 25
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "winescan",
+      "expect_result": "^OK winescan wine=false scanned=[1-9][0-9]{2,} anomalies=0 ",
+      "note": "THE TEST: every patched method scanned (hundreds), no anomaly on a healthy machine; the kinds show which jump encodings MonoMod wrote"
+    },
+    {
+      "seq": 6,
+      "role": "h",
+      "cmd": "mark TEST WINESCAN END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}
