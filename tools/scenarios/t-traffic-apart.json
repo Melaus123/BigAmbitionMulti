@@ -125,7 +125,7 @@
       "seq": 14,
       "role": "h",
       "cmd": "traffic",
-      "expect_result": "^OK traffic role=h .* pvsensed=[1-9]\\d* standins=[1-9]\\d*$",
+      "expect_result": "^OK traffic role=h .* pvsensed=[1-9]\\d* standins=[1-9]\\d*( |$)",
       "note": "T1: the host keeps a visible, sensed stand-in per published car; T2: its player-vehicle ghosts carry the sense proxy"
     },
     {
@@ -145,7 +145,7 @@
       "seq": 17,
       "role": "h",
       "cmd": "traffic",
-      "expect_result": "^OK traffic role=h .* standins=0$",
+      "expect_result": "^OK traffic role=h .* standins=0( |$)",
       "note": "T1: the client's leftovers are gone (old step 13 proved local=0), so every stand-in must have been retired by the absent sweep / 2 s silence rule"
     },
     {
