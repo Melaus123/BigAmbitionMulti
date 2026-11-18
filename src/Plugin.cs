@@ -392,7 +392,8 @@ namespace BigAmbitionsMP
                     Plugin.Logger.LogWarning(
                         $"[Plugin] Harmony is OLDER than the copy this build was compiled against (loaded v{vLoaded}, compiled v{vCompiled}), " +
                         $"from '{(string.IsNullOrEmpty(loc) ? "(in-memory)" : loc)}' — another mod's copy won the load race. " +
-                        "Anything we call that only exists in the newer Harmony would fail there; if whole panels or lists are dead, that folder's mod is the one to update or remove.");
+                        "Anything we call that only exists in the newer Harmony would fail there; if whole panels or lists are dead, that folder's mod is the one to update or remove. " +
+                        "A copy older than 2.4.3 also lacks the fix for game functions whose hooks break when the game's code sits low in memory (seen on Linux/Proton).");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Plugin] Harmony provenance probe: {ex.Message}"); }
             // ── Round-254: the Harmony BOOTSTRAP itself can die before any patching ──
@@ -463,7 +464,7 @@ namespace BigAmbitionsMP
             PatchFailCount = failClasses;
             Plugin.Logger.LogInfo($"[Plugin] Patch summary: {okClasses} class(es) OK, {failClasses} failed, {deadClasses} dead, {totalPatched} method(s) patched total.");
             // PROBE-START: P-T71-WINEDETOUR
-            try { ProtonProbe.AfterPatching(); } catch { }   // row T-71 field probe (src/ProtonProbe.cs): under Wine, scans every patched method's detour; plain Windows logs one "not under Wine" line
+            try { ProtonProbe.AfterPatching(); } catch { }   // row T-71 field probe (src/ProtonProbe.cs): under Wine, scans every patched method's detour; plain Windows arms only the first-fault scan
             // PROBE-END: P-T71-WINEDETOUR
             if (MpDisabledByPatchFailure)
             {

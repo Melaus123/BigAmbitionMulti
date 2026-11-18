@@ -1,18 +1,24 @@
 // PROBE-START: P-T71-WINEDETOUR
 // Registered field probe (row T-71). It SHIPS in release builds on purpose (not behind BAMP_DEV):
 // Linux players (Steam Proton = Wine) must run it. Log lines only, prefix [PROBE T71].
-// Under plain Windows it does nothing beyond one "not under Wine" line (the DEV lever `winescan`
-// runs the same scan regardless, so the rig can check it reports 0 anomalies on Windows).
+// Under plain Windows it does not scan at start-up: it only arms the first-"+ 0x00000>"-fault hook
+// (row T-75: a Windows preview-build host showed the same entry fault), so a Windows bundle with that
+// fault carries the scan too. The DEV lever `winescan` runs the scan regardless.
+// 2026-11-17 (rows T-74/T-75): the Wine fault was traced to MonoMod.Core 1.3.3 (Harmony 2.4.2) writing
+// Rel32Ind64 cells more than 2 GB from methods that sit below 2 GB (upstream MonoMod#308); the mod now
+// bundles Harmony 2.4.3 (MonoMod.Core 1.3.6) - unless another mod's older Harmony loads first, in which case the
+// player runs that copy without the fix (Plugin's 'Harmony provenance' line names it). The probe stays to show that the
+// next bundles are clean.
 //
 // What it reads: for every method Harmony has patched, the ORIGINAL's native entry, where
-// MonoMod.Core (embedded in 0Harmony 2.4.2) wrote the detour jump. Verified in the decompiled
+// MonoMod.Core (embedded in 0Harmony; first verified in 2.4.2) wrote the detour jump. Verified in the decompiled
 // 0Harmony 2.4.2: PlatformTripleDetourFactory.ManagedDetourBox.CreateDetour takes
 // from = Triple.GetNativeMethodBody(Source); MonoRuntime does not request body-thunk walking, so
 // that is GetNativeMethodBodyDirect -> MonoRuntime.GetMethodEntryPoint -> method.MethodHandle
 // .GetFunctionPointer(). The jump kinds x86_64Arch writes: Rel32 `E9 rel32` (5 bytes), Rel32Ind64
 // `FF 25 disp32` with the 8-byte target in a separately allocated PAGE_READWRITE cell within +-2 GB,
 // Abs64 `FF 25 00000000` + inline imm64 (14 bytes). `48 B8 imm64 FF E0` is decoded too, though
-// MonoMod 2.4.2 does not write it as a detour. Every page is VirtualQuery'd before any read.
+// MonoMod.Core (1.3.3 in Harmony 2.4.2, 1.3.6 in 2.4.3) does not write it as a detour. Every page is VirtualQuery'd before any read.
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -76,7 +82,7 @@ namespace BigAmbitionsMP
         {
             try
             {
-                if (!IsWine()) { SafeLog("not under Wine; probe idle."); return; }
+                if (!IsWine()) { Hook(); SafeLog("not under Wine; armed for the first +0x00000 fault only."); return; }
                 LogEnvironment();
                 LogVersions();
                 RunScan("after patching", 0);
