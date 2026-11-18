@@ -5934,8 +5934,15 @@ namespace BigAmbitionsMP
         /// building's owner (buildingOwnerRivalId).  The host's BusinessSync.Tick then
         /// detects the changed reg and relays it to the other clients.  MAIN THREAD.</summary>
         /// <summary>Round-184 fix 3: how long after a player joins their near-empty wholesale
-        /// pushes are treated as the stale/fresh-save signature rather than as truth.</summary>
+        /// pushes are treated as the stale/fresh-save signature rather than as truth. Used by the interior leg and by the
+        /// business leg below OUTSIDE a merger (there an empty record is refused within this window and still wins after
+        /// it). A merger member's empty business record needs the owner's ShutDown mark instead, at any time (T-78).</summary>
         internal const int ResurrectionWindowMs = 10 * 60 * 1000;
+
+        /// <summary>T-78 F4: the business leg's REFUSED warning per address - the first one, then at most one per
+        /// EmptyRefuseLogMs carrying how many were refused in between. The push-back runs on every refusal (the heal needs it).</summary>
+        private const int EmptyRefuseLogMs = 5 * 60 * 1000;
+        private static readonly Dictionary<string, (int At, int Since)> _emptyRefuseLog = new();
 
         public static void ApplyClientBusinessChange(BusinessInfo info)
         {
@@ -5955,23 +5962,42 @@ namespace BigAmbitionsMP
                         "refused; the world-ready ledger sweep drops the stale reservation on the next host load.");
                     return;
                 }
-                // Round-184 fix 3 (business leg): an EMPTY business record from a recently-joined
-                // sender may not blank a live one — same stale/fresh-save signature as the
-                // interior leg (rig-proven: Testbiz1's name → '' within seconds of the rejoin).
-                // Push our record back so the owner's machine re-learns its own business.
+                // Round-184 fix 3 (business leg), T-78 (v29) D4: for a MERGER member's shop an EMPTY business record may
+                // not blank a live one unless the owner's machine says its own teardown ran (info.ShutDown) - the 10-minute
+                // post-join window (ResurrectionWindowMs) let a stale empty copy wipe a business started in a partner's
+                // building (bench T-T78-REPRO-20261118-033156). OUTSIDE a merger the window still decides: refused within
+                // it, and an empty record wins after it, ShutDown or not. Push our record back so the owner's machine
+                // re-learns its business (MergerStart.TryHealEmptyOwnCopy); the warning is throttled per address (F4).
                 try
                 {
                     bool incomingEmpty = string.IsNullOrEmpty(info.BusinessName)
                         && (string.IsNullOrEmpty(info.BusinessTypeName)
                             || info.BusinessTypeName.EndsWith("_empty", StringComparison.Ordinal));
                     string curName = ""; try { curName = reg?.BusinessName?.ToString() ?? ""; } catch { }
-                    if (incomingEmpty && curName.Length > 0
-                        && !string.IsNullOrEmpty(info.OwnerPlayerId)
-                        && MPServer.JoinedAtByPid.TryGetValue(info.OwnerPlayerId, out var jMs)
-                        && unchecked(Environment.TickCount - jMs) < ResurrectionWindowMs)
+                    // Manager fold (builder FOUND 2): the always-refuse rule is for a MERGER member's shop only - a partner's start
+                    // can sit on the host while the owner's own copy is empty. Outside a merger nobody else can start a business in
+                    // that building, so an owner's legitimately empty copy (an older save loaded) keeps the old 10-minute window.
+                    bool mergedOwner = false;
+                    try { mergedOwner = !string.IsNullOrEmpty(info.OwnerPlayerId) && MergerSync.InAnyGroup(info.OwnerPlayerId); } catch { }
+                    bool refuse = incomingEmpty && curName.Length > 0 && !info.ShutDown
+                        && (mergedOwner
+                            || (!string.IsNullOrEmpty(info.OwnerPlayerId)
+                                && MPServer.JoinedAtByPid.TryGetValue(info.OwnerPlayerId, out var jMs)
+                                && unchecked(Environment.TickCount - jMs) < ResurrectionWindowMs));
+                    if (refuse)
                     {
-                        Plugin.Logger.LogWarning($"[Patcher/Host] business change REFUSED for '{info.AddressKey}': recently-joined '{info.OwnerPlayerId}' pushed an EMPTY record over live business '{curName}' — stale/fresh-save signature (round-184); pushing ours back.");
-                        try { if (reg != null) BusinessSync.PushBusinessNow(reg, "resurrection-guard heal (round-184)"); } catch { }
+                        string rk = info.AddressKey ?? "";
+                        int nowMs = Environment.TickCount;
+                        bool firstRefusal = !_emptyRefuseLog.TryGetValue(rk, out var rl);
+                        if (firstRefusal || unchecked(nowMs - rl.At) >= EmptyRefuseLogMs)
+                        {
+                            Plugin.Logger.LogWarning($"[Patcher/Host] business change REFUSED for '{info.AddressKey}': '{info.OwnerPlayerId}' pushed an EMPTY record over live business '{curName}' — "
+                                + (mergedOwner ? "not a shutdown (T-78)" : "recently joined, stale/fresh-save signature (round-184)") + "; pushing ours back."
+                                + (!firstRefusal && rl.Since > 0 ? $" ({rl.Since} refused since)" : ""));
+                            _emptyRefuseLog[rk] = (nowMs, 0);
+                        }
+                        else _emptyRefuseLog[rk] = (rl.At, rl.Since + 1);
+                        try { if (reg != null) BusinessSync.PushBusinessNow(reg, "empty-record guard heal (T-78)"); } catch { }
                         return;
                     }
                 }
@@ -6064,6 +6090,7 @@ namespace BigAmbitionsMP
 
                 // Tier A (name/type/closed) + rental-marketplace state.  Owner-authored / host-AI-economy view —
                 // skip entirely for the receiver's OWN shop so a stale/blank host replica can't overwrite it.
+                bool heldBefore = false; try { heldBefore = MergerStart.HoldsBusiness(reg); } catch { }   // T-78 F5: read by the member-side page switch after the logo copy below
                 if (!receiverOwnsThis)
                 {
                     // Tier A — name, type, closed.
@@ -6177,6 +6204,22 @@ namespace BigAmbitionsMP
                     reg.AvailableForRent    = info.AvailableForRent;
                     reg.RentPerDay          = info.RentPerDay;
                     reg.lastDeposit         = info.LastDeposit;
+
+                }
+                else
+                {
+                    // T-78 F3: the host's record for my own shop arrives EMPTY - my shutdown has landed there (or it never
+                    // held one), so my ShutDown mark has done its job: a stale mark sent on my first poll after a rejoin must
+                    // never blank a business a stand-in started there meanwhile (D69).
+                    try
+                    {
+                        if (!MPServer.IsRunning && string.IsNullOrEmpty(info.BusinessName) && !MergerStart.IsLiveType(info.BusinessTypeName))
+                            BusinessSync.ClearShutDown(info.AddressKey ?? "", "the host's record for it arrived empty");
+                    }
+                    catch { }
+                    // T-78 D5: my OWN shop's identity is never taken from a record - except when my copy is EMPTY, I did
+                    // not shut it down, and the company record carries a live business: adopt it with the game's own start.
+                    MergerStart.TryHealEmptyOwnCopy(reg, info);
                 }
 
                 // Round-204b: stash the host's takeover valuation for the client-side
@@ -6283,6 +6326,20 @@ namespace BigAmbitionsMP
                         reg.logoSettings.fontColor       = new SerializableColor(info.FontColorPacked);
                         reg.logoSettings.backgroundColor = new SerializableColor(info.BackgroundColorPacked);
                     }
+
+                    // T-78 F5: a partner's (flipped) building that held NO business now holds one - a ROUTED start landed.
+                    // The game switches its start screen only through OnBusinessStarted inside its own start (that ran on the
+                    // runner's machine), so an open BizMan page here on this building takes the same steps. Re-check MED: only
+                    // AFTER the logo settings above are copied, and never with none - RefreshData asks the logo generator to draw
+                    // from reg.logoSettings, and a null there throws inside its coroutine (BusinessLogoGenerator, no try) and
+                    // freezes every later logo. With no settings yet the page simply stays until it is reopened.
+                    try
+                    {
+                        if (!heldBefore && MergerStart.HoldsBusiness(reg) && reg.logoSettings != null
+                            && MergerFlip.IsFlipped(info.AddressKey ?? ""))
+                            MergerStart.RefreshOpenBizManAfterStart(reg, info.AddressKey ?? "");
+                    }
+                    catch { }
                 }
 
                 // Operating hours (Phase 1c) — without these, suppression on

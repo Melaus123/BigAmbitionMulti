@@ -700,6 +700,7 @@ namespace BigAmbitionsMP
             {
                 b.BusinessName = reg.BusinessName ?? "";
                 b.TemporarilyClosed = reg.temporarilyClosed;   // T-77: a stand-in's open/closed switch travels the same way
+                b.BusinessTypeName = reg.businessTypeName ?? "";   // T-78 (D69): a business a stand-in STARTED goes home too
                 var ls = reg.logoSettings;
                 if (ls != null)
                     b.Logo = new SettingsInfo
@@ -1169,6 +1170,9 @@ namespace BigAmbitionsMP
                                                + "machine - skipped (my own state stands for it).");
                         continue;
                     }
+                    // T-78 D7 (D69): a business the stand-in STARTED in my empty building is started here first (the game's own
+                    // start, diploma bypassed), so the returned name/logo and the open/closed switch below land on it.
+                    MergerStart.TryAdoptReturnedStart(reg, b);
                     SharedShopWorkTabs.ApplyReturnedIdentity(reg, b);   // T-24 slice 1B (decision 12): a stand-in's rename/logo
                     // T-77: a stand-in's open/closed switch goes home too (null = not carried). Assigned + notified, never the
                     // native toggle (opening would pay the licensing fees again); my own business poll then republishes it.

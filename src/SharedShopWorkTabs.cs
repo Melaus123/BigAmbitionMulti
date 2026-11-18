@@ -6325,7 +6325,7 @@ namespace BigAmbitionsMP
         /// member shut down. The game's own teardown does all of it (BusinessHelper.ShutdownBusiness,
         /// decompile Helpers/BusinessHelper.cs:931 - the same call BizManSettings.ShutdownBusiness makes at
         /// BizManSettings.cs:375); the rental itself is untouched, exactly as native leaves it.</summary>
-        private static void ApplyRoutedShutdown(BuildingRegistration reg, SharedWorkEditPayload p)
+        internal static void ApplyRoutedShutdown(BuildingRegistration reg, SharedWorkEditPayload p)   // internal: TestDrive `shutbiz` (T-78)
         {
             try
             {
@@ -6350,6 +6350,29 @@ namespace BigAmbitionsMP
                 Plugin.Logger.LogInfo($"[Merger] shutdown applied for '{p.AddressKey}' from '{p.PlayerId}': '{name}' closed with the game's own teardown.");
             }
             catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] shutdown REFUSED for '{p.AddressKey}': {ex.Message}"); }
+        }
+
+        /// <summary>T-78 D3 - RUNNER, MAIN THREAD: start the business a LIVE company member started in this machine's EMPTY
+        /// building (the member's game ran the front checks, D1, and its diploma check is the one that counts, D70). The
+        /// game's own StartBusinessUI.SetUpBusiness runs here through MergerStart.RunGameStart with the diploma check
+        /// bypassed for that one call; my normal business publish then carries the new name and type to everyone.</summary>
+        private static void ApplyRoutedStart(BuildingRegistration reg, SharedWorkEditPayload p)
+        {
+            string name = p.StrValue ?? "", type = p.TypeName ?? "";
+            try
+            {
+                if (reg == null)
+                { Plugin.Logger.LogWarning($"[Merger] start REFUSED for '{p.AddressKey}' from '{p.PlayerId}': no registration here."); return; }
+                if (!MergerFlip.BooksHere(reg))
+                { Plugin.Logger.LogWarning($"[Merger] start REFUSED for '{p.AddressKey}' from '{p.PlayerId}': not run here."); return; }
+                if (MergerStart.HoldsBusiness(reg))
+                { Plugin.Logger.LogWarning($"[Merger] start REFUSED for '{p.AddressKey}' from '{p.PlayerId}': a business already runs here ('{reg.BusinessName}', {reg.businessTypeName})."); return; }
+                if (MergerStart.RunGameStart(reg, name, type, bypassDiploma: true, out var why))
+                    Plugin.Logger.LogInfo($"[Merger] start applied for '{p.AddressKey}' from '{p.PlayerId}': '{name}' type={type}");
+                else
+                    Plugin.Logger.LogWarning($"[Merger] start REFUSED for '{p.AddressKey}' from '{p.PlayerId}' ('{name}' type={type}): {why}.");
+            }
+            catch (Exception ex) { Plugin.Logger.LogWarning($"[Merger] start REFUSED for '{p.AddressKey}': {ex.Message}"); }
         }
 
         // ═══════════════ owner-side edit apply ═══════════════
@@ -6431,6 +6454,7 @@ namespace BigAmbitionsMP
                 // state, not tab edits, so neither echoes a tab snapshot.
                 if (p.Op == "mergerterminate") { ApplyRoutedTerminate(reg, p); return; }
                 if (p.Op == "mergershutdown")  { ApplyRoutedShutdown(reg, p); return; }
+                if (p.Op == "mergerstart")     { ApplyRoutedStart(reg, p); return; }      // T-78 D3
 
                 bool applied; string echoTab;
                 if (p.Op == "rename" || p.Op == "logo")

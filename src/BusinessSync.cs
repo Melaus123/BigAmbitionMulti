@@ -32,6 +32,26 @@ namespace BigAmbitionsMP
 
         private static readonly Dictionary<string, BusinessInfo> _lastSent = new();
 
+        /// <summary>T-78 (v29) D4: addresses whose business THIS machine closed with the game's own teardown on a shop it
+        /// truly owns (Patch_ShutdownBusiness_MarkShutDown). While such a copy stays empty, every record ReadInfo builds for
+        /// it carries ShutDown=true - the host accepts an empty record over a live business only then. The mark clears
+        /// when a business is started there again, or when the host's own record for it arrives empty (ClearShutDown). Kept for the process (not cleared by Reset): a shutdown that has not
+        /// reached the host before a disconnect must still be honoured on the next join of this session.</summary>
+        private static readonly HashSet<string> _shutDownHere = new();
+        internal static void MarkShutDown(string addressKey)
+        { if (string.IsNullOrEmpty(addressKey)) return; lock (_shutDownHere) _shutDownHere.Add(addressKey); }
+        internal static bool IsShutDownHere(string addressKey)
+        { if (string.IsNullOrEmpty(addressKey)) return false; lock (_shutDownHere) return _shutDownHere.Contains(addressKey); }
+        /// <summary>T-78 F3 (OWNER): the host's own record for the address arrived EMPTY (GameStatePatcher.ApplyBusinessInfoLocal,
+        /// own-shop branch) - the shutdown has landed there, so the mark has done its job. Cleared, so a stale ShutDown carried on
+        /// this machine's first poll after a rejoin can never blank a business a stand-in started there meanwhile (D69).</summary>
+        internal static void ClearShutDown(string addressKey, string why)
+        {
+            if (string.IsNullOrEmpty(addressKey)) return;
+            bool removed; lock (_shutDownHere) removed = _shutDownHere.Remove(addressKey);
+            if (removed) Plugin.Logger.LogInfo($"[BusinessSync] shutdown mark cleared for '{addressKey}': {why} (T-78).");
+        }
+
         /// <summary>Owner-authoritative open/closed truth per business address (0 = unknown, 1 = open,
         /// 2 = closed). Written when a BusinessInfo is received/relayed (GameStatePatcher apply) and read by
         /// the IsBusinessOpen patch so non-owners use the OWNER's computed open-state instead of re-deriving
@@ -877,6 +897,15 @@ namespace BigAmbitionsMP
 
                 if (!string.IsNullOrEmpty(info.BusinessName))
                     info.LogoFiles = ReadLogoFilesCached(info.BusinessName, info.LogoShape);
+                // T-78 D4: an empty copy I shut down myself says so; a business started here again clears the mark.
+                try
+                {
+                    if (string.IsNullOrEmpty(info.BusinessName) && !MergerStart.IsLiveType(info.BusinessTypeName))
+                        info.ShutDown = IsShutDownHere(addr);
+                    else if (IsShutDownHere(addr))
+                        lock (_shutDownHere) _shutDownHere.Remove(addr);
+                }
+                catch { }
                 return info;
             }
             catch
@@ -1005,7 +1034,8 @@ namespace BigAmbitionsMP
                 && a.OwnerPlayerId            == b.OwnerPlayerId          // rent-vs-deed split 2026-07-07:
                 && a.DeedOwnerPlayerId        == b.DeedOwnerPlayerId      // attribution changes must republish
                 && a.AiValuation              == b.AiValuation            // round-204b: daily income roll → republish (whole-dollar rounded at source)
-                && a.OwnerOpenState           == b.OwnerOpenState;
+                && a.OwnerOpenState           == b.OwnerOpenState
+                && a.ShutDown                 == b.ShutDown;              // T-78 D4
         }
 
         private static bool ScheduleEqual(System.Collections.Generic.List<ScheduleDayInfo> a, System.Collections.Generic.List<ScheduleDayInfo> b)

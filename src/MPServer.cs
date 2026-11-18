@@ -807,10 +807,20 @@ namespace BigAmbitionsMP
                 // is back) - a late final bundle must never overwrite a newer toggle by the next stand-in or the returned owner.
                 bool liveStandIn = MergerAbsence.Marks.TryGetValue(mark.OwnerStable, out var liveMark) && liveMark != null
                                    && liveMark.SimulatorPid == senderPid && !liveMark.OwnerBack;
+                // T-78 D7 (D69): a business the client stand-in STARTED in the away owner's building rides the same paperwork
+                // (BusinessName + BusinessTypeName); it lands on the host's EMPTY copy without the native start (the host
+                // does not run that shop) and the host's scan publishes it - before the open/closed switch below.
                 if (senderPid != MPConfig.PlayerId && liveStandIn && moved.Businesses != null)
                     foreach (var mb in moved.Businesses)
                     {
-                        if (mb == null || !mb.TemporarilyClosed.HasValue || string.IsNullOrEmpty(mb.AddressKey)) continue;
+                        if (mb == null || string.IsNullOrEmpty(mb.AddressKey)) continue;
+                        try
+                        {
+                            var sreg = GameStatePatcher.FindRegistration(mb.AddressKey);
+                            if (sreg != null) MergerStart.HostAdoptStandInStart(sreg, mb, senderPid);
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] stand-in start '{mb.AddressKey}' from '{senderPid}': {ex.Message}"); }
+                        if (!mb.TemporarilyClosed.HasValue) continue;
                         try
                         {
                             var hreg = GameStatePatcher.FindRegistration(mb.AddressKey);
@@ -11906,7 +11916,8 @@ namespace BigAmbitionsMP
                        || p.Op == "mergercampaign"    // H-MERGERHIRE-1: the recruitment booking rides the same gate
                        || p.Op == "mergerfurniture" || p.Op == "mergerfood"    // furniture and food deliveries for a partner's shop
                        || p.Op == "mergermove" || p.Op == "mergerinterior"     // T-24 part 2: moving and interior bookings
-                       || p.Op == "mergercancel";                              // T-24 slice 1B (decision 26): a member cancels its routed booking
+                       || p.Op == "mergercancel"                               // T-24 slice 1B (decision 26): a member cancels its routed booking
+                       || p.Op == "mergerstart";                               // T-78: a member starts a business in a partner's empty building
                 if (w4 && !weMember)
                 { Plugin.Logger.LogWarning($"[Merger] {p.Op} by '{senderPid}' on '{p.AddressKey}' REFUSED: not a company member with owner '{ownerPid}'."); return; }
                 // 4c part 2a (E4): the host SERIALISES plan edits per plan id. A second leg carrying a
@@ -11973,7 +11984,8 @@ namespace BigAmbitionsMP
                 bool skipAddrGate = p.Op == "mergerplan" || p.Op == "mergerterminate" || p.Op == "mergershutdown"
                                  || p.Op == "mergerfurniture" || p.Op == "mergerfood"
                                  || p.Op == "mergermove" || p.Op == "mergerinterior"    // T-24 part 2: any rented building, as the game's pickers
-                                 || p.Op == "mergercancel";                             // T-24 slice 1B: the building its booking was routed by
+                                 || p.Op == "mergercancel"                              // T-24 slice 1B: the building its booking was routed by
+                                 || p.Op == "mergerstart";                              // T-78: a start targets exactly an EMPTY building
                 if (!skipAddrGate && !SharedWorkAddressAllowed(p.AddressKey, weMember))
                 { Plugin.Logger.LogWarning($"[SharedShop] work edit by '{senderPid}' for excluded '{p.AddressKey}' (empty premises / HQ) — dropped."); return; }
                 string wtarget = RouteTargetFor(p.AddressKey, originOwner);   // W3-0 (T-24 fold F1: the ORIGIN's owner - the sender itself for a move from its own building)
@@ -12040,6 +12052,7 @@ namespace BigAmbitionsMP
                 {
                     if (p.Op == "mergerterminate")     Plugin.Logger.LogInfo($"[Merger] terminate-rental routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergershutdown") Plugin.Logger.LogInfo($"[Merger] shutdown routed to '{wtarget}' for '{p.AddressKey}'");
+                    else if (p.Op == "mergerstart")    Plugin.Logger.LogInfo($"[Merger] start routed to '{wtarget}' for '{p.AddressKey}': '{p.StrValue}' type={p.TypeName}");
                     else if (p.Op == "mergercontract") Plugin.Logger.LogInfo($"[Merger] contract create routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergersellall")  Plugin.Logger.LogInfo($"[Merger] sell-all routed to '{wtarget}' for '{p.AddressKey}'");
                     else if (p.Op == "mergercampaign") Plugin.Logger.LogInfo($"[Merger] campaign booking routed to '{wtarget}' for '{p.AddressKey}' ({p.SkillName}, {p.IntValue} candidates, {p.Days} days)");

@@ -1320,6 +1320,49 @@ namespace BigAmbitionsMP
                     return $"OK '{sAddr}' now reads name='{sName}' type=fastfoodrestaurant avail=False";
                 }
 
+                case "startbiz":
+                {
+                    // T-78 D8: the game's own StartBusinessUI.SetUpBusiness through MergerStart.RunGameStart - the PLAYER's
+                    // path on this machine (diploma NOT bypassed; the D1 prefix decides): on a member's replica of a partner's
+                    // building it routes ("[Merger] start routed"), on the machine that runs the shop it starts natively.
+                    var bt = arg.Split(' ');
+                    if (bt.Length < 4) return "ERR usage: startbiz <type-suffix> <num> <ba:street_x> <name...>";
+                    string bType = "ba:businesstype_" + bt[0];
+                    string bAddr = bt[1] + " " + bt[2];
+                    string bName = string.Join(" ", bt, 3, bt.Length - 3);
+                    var breg = GameStatePatcher.FindRegistration(bAddr);
+                    if (breg == null) return $"ERR no registration for '{bAddr}'";
+                    bool bHeld = MergerStart.RunGameStart(breg, bName, bType, bypassDiploma: false, out var bWhy);
+                    if (!bHeld && bWhy.StartsWith("no StartBusinessUI", StringComparison.Ordinal)) return "ERR startbiz: " + bWhy;
+                    return $"OK startbiz '{bAddr}' type={bType} name='{bName}' local name='{breg.BusinessName ?? ""}' type={breg.businessTypeName}";
+                }
+
+                case "shutbiz":
+                {
+                    // T-78 D8: the game's own business teardown (BusinessHelper.ShutdownBusiness - what BizManSettings' confirm
+                    // runs, via the same follow-ups as the routed shutdown) on a shop THIS machine truly owns.
+                    string zAddr = arg.Trim();
+                    if (zAddr.Length == 0) return "ERR usage: shutbiz <num> <ba:street_x>";
+                    var zreg = GameStatePatcher.FindRegistration(zAddr);
+                    if (zreg == null) return $"ERR no registration for '{zAddr}'";
+                    if (!MergerFlip.TrulyMine(zreg)) return $"ERR '{zAddr}' is not truly mine on this machine";
+                    string zKey = GameStateReader.AddressKey(zreg);
+                    string zWas = zreg.BusinessName ?? "";
+                    SharedShopWorkTabs.ApplyRoutedShutdown(zreg, new SharedWorkEditPayload { PlayerId = MPConfig.PlayerId, AddressKey = zKey, Op = "mergershutdown" });
+                    return $"OK shutbiz '{zKey}' was='{zWas}' now name='{zreg.BusinessName ?? ""}' type={zreg.businessTypeName} shutDownMark={BusinessSync.IsShutDownHere(zKey)}";
+                }
+
+                case "healhold":
+                {
+                    // T-78 F6 rig lever: hold the owner's empty-copy heal (MergerStart.TryHealEmptyOwnCopy logs "[Merger] heal
+                    // held (rig)" and returns) so the host's refusal of this owner's empty record can be observed; "off" lets
+                    // the next received record heal it.
+                    string hh = arg.Trim().ToLowerInvariant();
+                    if (hh != "on" && hh != "off") return "ERR usage: healhold on|off";
+                    MergerStart.SetHealHold(hh == "on");
+                    return $"OK healhold {hh}";
+                }
+
                 case "settype":
                 {
                     // H-CLOCK60-1 rig lever (user-approved 2026-09-20). IN MEMORY ONLY: stamps a business

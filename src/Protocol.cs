@@ -755,7 +755,7 @@ namespace BigAmbitionsMP
         public ContractInfo? Contract { get; set; }    // v18 7b: "contract"/"endcontract" — identity + (for "contract") the desired state; days OWNER-basis via OwnerDay
         public int    OwnerDay   { get; set; } = -1;   // v18 7b: the SENDER's Day for rebasing Contract.NextDeliveryDay
         public string AgencyKey  { get; set; } = "";   // v18 7c: marketing ops — the agency building's address key
-        public string TypeName   { get; set; } = "";   // v18 7c: marketing ops — MarketingTypeName as its enum NAME (a reorder in a game update must not silently re-point a campaign); BoolValue carries "enabled" 
+        public string TypeName   { get; set; } = "";   // v18 7c: marketing ops — MarketingTypeName as its enum NAME (a reorder in a game update must not silently re-point a campaign); BoolValue carries "enabled". T-78 (v29) "mergerstart" (a member starts a business in a merged partner's EMPTY building, applied by the runner with the game's own StartBusinessUI.SetUpBusiness): TypeName = the business type id, StrValue = the business name 
         public SettingsInfo? Settings { get; set; }    // v18 7d: "logo" — the five values LogoCustomizer would have written; "rename" uses StrValue
         public string SkillName  { get; set; } = "";   // v18 7d uniforms: which skill's uniform
         public string PresetId   { get; set; } = "";   // v18 7d uniforms: the OWNER's preset id ("" clears)
@@ -2837,6 +2837,12 @@ namespace BigAmbitionsMP
     {
         /// <summary>"StreetNumber StreetName" e.g. "14 OakStreet".  Matches BuildingOwners keys.</summary>
         public string AddressKey         { get; set; } = "";
+        /// <summary>T-78 (v29): the OWNER's machine closed this business with the game's own teardown and its copy is still
+        /// empty (BusinessSync._shutDownHere; cleared once the host's record for it arrives empty). For a MERGER member's shop
+        /// the host accepts an EMPTY record over a live business only when this is true (GameStatePatcher.ApplyClientBusinessChange;
+        /// otherwise refused and ours pushed back). Outside a merger an empty record is refused only within the 10-minute
+        /// post-join window (round-184) and still wins after it, ShutDown or not.</summary>
+        public bool ShutDown { get; set; }
 
         // ── Tier A (always sync'd, always all clients) ────────────────────────
         public string BusinessName       { get; set; } = "";
@@ -4604,6 +4610,10 @@ namespace BigAmbitionsMP
         // hand-back carries a stand-in's toggle home (PaperworkSync.ApplyReturnedBusinesses), and the host applies a client
         // stand-in's from its paperwork (MPServer.HostFileSimulatedPaperwork). NULL = not carried: the receiver's own value stands.
         public bool? TemporarilyClosed { get; set; }
+        // T-78 (v29; D69): the business TYPE as the sender holds it, so a business a STAND-IN started in an away owner's
+        // building goes home with the hand-back (MergerStart.TryAdoptReturnedStart) and onto the host's copy for a client
+        // stand-in (MPServer.HostFileSimulatedPaperwork). "" = not carried: the receiver's own business stands.
+        public string BusinessTypeName { get; set; } = "";
         public List<PwOrderHistoryEntry> OrderHistory { get; set; } = new();
         public List<PwOrder>   UnprocessedCompletedOrders { get; set; } = new();
         public List<PwFactoryExport>     FactoryExports { get; set; } = new();
