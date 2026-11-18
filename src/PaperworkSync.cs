@@ -699,6 +699,7 @@ namespace BigAmbitionsMP
             try
             {
                 b.BusinessName = reg.BusinessName ?? "";
+                b.TemporarilyClosed = reg.temporarilyClosed;   // T-77: a stand-in's open/closed switch travels the same way
                 var ls = reg.logoSettings;
                 if (ls != null)
                     b.Logo = new SettingsInfo
@@ -1169,6 +1170,10 @@ namespace BigAmbitionsMP
                         continue;
                     }
                     SharedShopWorkTabs.ApplyReturnedIdentity(reg, b);   // T-24 slice 1B (decision 12): a stand-in's rename/logo
+                    // T-77: a stand-in's open/closed switch goes home too (null = not carried). Assigned + notified, never the
+                    // native toggle (opening would pay the licensing fees again); my own business poll then republishes it.
+                    if (b.TemporarilyClosed.HasValue && b.TemporarilyClosed.Value != reg.temporarilyClosed)
+                        GameStatePatcher.SetOpenStateNoNative(reg, b.AddressKey, b.TemporarilyClosed.Value, "returned from the stand-in");
                     int oh = PwFill<PwOrderHistoryEntry>(reg, "orderHistory", b.OrderHistory, (o, h) =>
                     {
                         PwSet(o, "dayNumber", h.DayNumber);

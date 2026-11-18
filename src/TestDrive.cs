@@ -1282,6 +1282,20 @@ namespace BigAmbitionsMP
                     return nFound == 0 ? "OK none for rent" : $"OK {nFound} for-rent: {found}";
                 }
 
+                case "shopclosed":
+                {
+                    // T-77 rig lever: flip a shop's 'Temporarily Closed' switch the way the player's BizMan switch does -
+                    // the game's own BuildingRegistration.TemporarilyClose (decompile BizManBusiness.cs:152), so every mod
+                    // hook on it (the merger route, the instant push) runs exactly as for a player. Usage: shopclosed on|off <addr>
+                    var ck = arg.Split(new[] { ' ' }, 2);
+                    if (ck.Length < 2 || (ck[0] != "on" && ck[0] != "off")) return "ERR usage: shopclosed on|off <num> <ba:street_x>";
+                    var creg2 = GameStatePatcher.FindRegistration(ck[1]);
+                    if (creg2 == null) return $"ERR no registration for '{ck[1]}'";
+                    bool cwant = ck[0] == "on";
+                    try { creg2.TemporarilyClose(cwant); } catch (Exception exC) { return "ERR " + exC.Message; }
+                    return $"OK shopclosed '{ck[1]}' asked={cwant} now closed={creg2.temporarilyClosed} books={MergerFlip.BooksHere(creg2)}";
+                }
+
                 case "setbiz":
                 {
                     // Round-260b: stamp a business name+type onto a reg — synthesizes the
@@ -4131,7 +4145,8 @@ namespace BigAmbitionsMP
                     try { qname  = qreg.BusinessName?.ToString() ?? ""; }        catch { }
                     try { qtype  = qreg.businessTypeName?.ToString() ?? ""; }    catch { }
                     return $"OK rented={qreg.RentedByPlayer} stamp='{qstamp}' forRent={qreg.AvailableForRent} type={qtype} "
-                         + $"name='{qname}' days={qdays} shifts={qshifts} flipped={MergerFlip.IsFlipped(qkey)} parked='{MergerFlip.ParkedRunner(qkey)}'";
+                         + $"name='{qname}' days={qdays} shifts={qshifts} flipped={MergerFlip.IsFlipped(qkey)} parked='{MergerFlip.ParkedRunner(qkey)}'"
+                         + $" closed={qreg.temporarilyClosed} books={MergerFlip.BooksHere(qreg)} open={Helpers.BusinessHelper.IsBusinessOpen(qreg)}";   // T-77: the open/closed switch + 'this machine runs it'
                 }
 
                 case "ownflip":

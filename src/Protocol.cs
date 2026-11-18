@@ -1939,7 +1939,9 @@ namespace BigAmbitionsMP
         //      books split per owner the same way); the host's stored paperwork entries - and so the manifest's Paperwork section -
         //      hold the deflated form ("dz1:" + base64; plain JSON from an older manifest still loads). The envelope frame is
         //      unchanged (Freeze/WireLength are local, never serialised).
-        public const int Version = 28;
+        //      T-77 (2026-11-18, v29): BusinessPaperwork gains TemporarilyClosed (bool?, null = not carried) - paperwork carries a
+        //      stand-in's open/closed switch home (the absence hand-back) and to the host (a client stand-in cannot publish the shop).
+        public const int Version = 29;
     }
 
     /// <summary>Sent by client on connect.</summary>
@@ -4598,6 +4600,10 @@ namespace BigAmbitionsMP
         // "" / null = not carried (an older bundle): the owner's own name and logo stand.
         public string BusinessName { get; set; } = "";
         public SettingsInfo? Logo { get; set; }
+        // T-77 (v29): the shop's open/closed switch (BuildingRegistration.temporarilyClosed) as the sender holds it. The absence
+        // hand-back carries a stand-in's toggle home (PaperworkSync.ApplyReturnedBusinesses), and the host applies a client
+        // stand-in's from its paperwork (MPServer.HostFileSimulatedPaperwork). NULL = not carried: the receiver's own value stands.
+        public bool? TemporarilyClosed { get; set; }
         public List<PwOrderHistoryEntry> OrderHistory { get; set; } = new();
         public List<PwOrder>   UnprocessedCompletedOrders { get; set; } = new();
         public List<PwFactoryExport>     FactoryExports { get; set; } = new();

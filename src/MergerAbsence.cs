@@ -1087,6 +1087,25 @@ namespace BigAmbitionsMP
         public static int SimulatedCount => _simHere.Count;
         public static IReadOnlyList<AbsenceInfo> Known => _known;
 
+        /// <summary>T-77 review HIGH, HOST, MAIN THREAD: AwayAnywhere's host half without its snapshot allocation - for a hot
+        /// read (BusinessHelper.IsBusinessOpen runs per shop many times a frame). Does a LIVE absence mark name that address -
+        /// a stand-in is designated and the owner is not back yet (re-check: an OwnerBack mark lingers until the return is
+        /// acknowledged, and then the returned owner computes the shop's state itself)?</summary>
+        public static bool HostMarksAddress(string addressKey)
+        {
+            if (string.IsNullOrEmpty(addressKey) || _marks.Count == 0) return false;
+            foreach (var kv in _marks)
+            {
+                var m = kv.Value;
+                if (m == null || m.OwnerBack || string.IsNullOrEmpty(m.SimulatorPid)) continue;
+                var ads = m.Addresses;
+                if (ads == null) continue;
+                for (int i = 0; i < ads.Count; i++)
+                    if (string.Equals(ads[i], addressKey, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
         /// <summary>H-MERGERHIRE-1: is that address one SOMEBODY is standing in for right now - i.e. does the
         /// host's absence table (fanned to every machine inside MergerState, ApplyStateAbsences above) name it?
         /// True on the ABSENT OWNER's own machines too, which is harmless: they cannot see a partner's picker

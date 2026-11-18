@@ -5608,8 +5608,9 @@ namespace BigAmbitionsMP
 
         // Merger slice 3 — routed open/close toggle: the BizMan toggle calls BuildingRegistration.
         // TemporarilyClose, which on a FLIPPED replica would only mutate the local copy (the owner's
-        // synced truth then overwrites it — the toggle "doesn't stick"). Route it to the true owner,
-        // who runs the native method (licensing/customer-entry/todo side effects fire on the
+        // synced truth then overwrites it — the toggle "doesn't stick"). Route it to the machine that
+        // RUNS the shop (the true owner, or the absence stand-in while the owner is away - T-77), which
+        // runs the native method (licensing/customer-entry/todo side effects fire on the
         // authoritative machine) and whose sync republishes the state to everyone. Inert without a
         // merger (IsFlipped false for everything).
         [HarmonyPatch(typeof(BuildingRegistration), nameof(BuildingRegistration.TemporarilyClose))]
@@ -5627,13 +5628,17 @@ namespace BigAmbitionsMP
                     // toggling the owner's shop ran the NATIVE method and mutated their own replica — the owner
                     // never heard about it, and the round-122 immediate push skips it because TrulyMine is false
                     // on that machine. Everything needed already existed: RouteTemporarilyClose sends it, the
-                    // host grant-gates it in HostRouteBusinessEdit and applies or relays to the owner, and the
+                    // host gates it against the shop's owner in HostRouteBusinessEdit (ShopGate) and applies or relays to the shop's runner, and the
                     // owner's own TemporarilyClose then runs natively (licensing, customer entries, todo) and
                     // republishes. So this just widens WHO gets routed.
                     bool routeAsHelper = false;
                     try { routeAsHelper = !MergerFlip.TrulyMine(__instance) && GrantSync.IsHelperBusiness(key); }
                     catch { }
                     if (!MergerFlip.IsFlipped(key) && !routeAsHelper) return true;   // genuinely mine → native
+                    // T-77: the machine that RUNS the shop - its true owner, or the absence stand-in whose replica stays
+                    // flipped (MergerFlip.BooksHere) - runs the game's own toggle: its own click, and the routed apply
+                    // (BusinessSync.ApplyRoutedTemporarilyClose), which would otherwise be caught here and routed again.
+                    if (MergerFlip.BooksHere(__instance)) return true;
                     BusinessSync.RouteTemporarilyClose(key, closed);
                     return false;
                 }
@@ -8170,12 +8175,19 @@ namespace BigAmbitionsMP
                 {
                     if (!MPServer.IsRunning && !MPClient.InMpGame) return true;   // SP — real check
                     if (buildingRegistration == null) return true;
-                    // TrulyMine, not the raw flag: a merger-flipped partner shop must CONSUME the
-                    // owner's synced open truth, not locally re-derive it (run-4: P1's local "close"
-                    // of P2's shop diverged silently — the owner stays the open-state authority).
-                    if (MergerFlip.TrulyMine(buildingRegistration)) return true;   // my own shop — I'm the authority
+                    // BooksHere, not the raw flag: a merger-flipped partner shop must CONSUME the runner's
+                    // synced open truth, not locally re-derive it (run-4: P1's local "close" of P2's shop
+                    // diverged silently). The runner is the authority: the true owner, or (T-77) the absence
+                    // stand-in - else a stand-in served the away owner's last reported state forever.
+                    if (MergerFlip.BooksHere(buildingRegistration)) return true;   // I run this shop — I'm the authority
                     string addr = GameStateReader.AddressKey(buildingRegistration);
                     if (string.IsNullOrEmpty(addr)) return true;
+                    // T-77 review HIGH: on the HOST, a partner shop whose owner is away and which a CLIENT stand-in runs has
+                    // no fresh owner truth (the owner publishes nothing; the client stand-in cannot publish the shop - its
+                    // switch reaches the host's copy through its paperwork). The host derives it from that copy, and its
+                    // business scan publishes the result (BusinessSync's OwnerOpenState) to everyone. Not gated on the host's own flip: a host
+                    // outside the away owner's company holds no flip for that shop but still relays its open state (re-check HIGH).
+                    if (MPServer.IsRunning && MergerAbsence.HostMarksAddress(addr)) return true;
                     if (BusinessSync.OwnerOpenByAddress.TryGetValue(addr, out var st) && st != 0)
                     {
                         __result = (st == 1);   // 1 = open, 2 = closed — the owner's synced truth

@@ -1030,7 +1030,21 @@ namespace BigAmbitionsMP
             {
                 if (!MPServer.IsRunning && !MPClient.IsConnected) return;
                 if (__instance == null) return;
-                if (!MergerFlip.TrulyMine(__instance)) return;   // only the true owner announces its own shop
+                // Only the machine that RUNS the shop announces it: its true owner, or (T-77) the absence stand-in
+                // (BooksHere). A HOST stand-in pushes at once like an owner; a CLIENT stand-in cannot publish a shop it
+                // does not own (BusinessSync's client publish and the host's owner check refuse it), so its switch rides
+                // its paperwork (BusinessPaperwork.TemporarilyClosed), published soon - the host applies it on filing.
+                if (!MergerFlip.TrulyMine(__instance))
+                {
+                    if (!MergerFlip.BooksHere(__instance)) return;   // a replica - not this machine's to announce
+                    if (!MPServer.IsRunning)
+                    {
+                        PaperworkSync.MarkUrgent();
+                        Plugin.Logger.LogInfo($"[BusinessSync] stand-in {(closed ? "closed" : "opened")} '{GameStateReader.AddressKey(__instance)}' - "
+                                            + "rides the next paperwork bundle (published soon).");
+                        return;
+                    }
+                }
                 BusinessSync.PushBusinessNow(__instance, closed ? "shop closed" : "shop opened");
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[BusinessSync] close-toggle push: {ex.Message}"); }

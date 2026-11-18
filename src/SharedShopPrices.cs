@@ -278,22 +278,26 @@ namespace BigAmbitionsMP
             catch (Exception ex) { Plugin.Logger.LogWarning($"{Tag} sales history: {ex.Message}"); }
         }
 
-        /// <summary>OWNER, MAIN THREAD: answer ONE editor with the recent per-item sales of that shop.</summary>
+        /// <summary>OWNER (or a HOST running the shop as an away owner's stand-in - T-77), MAIN THREAD: answer ONE
+        /// editor with the recent per-item sales of that shop.</summary>
         private static void OwnerAnswerHistory(SharedSalesHistoryPayload req)
         {
             // Merger phase 2 wave 2 (2026-09-11): the READ-side UNION — a DIRECT Business grant, or membership of
             // my merged company. Decomposed rather than one GrantSync.IsGranted call so the sending log can say
             // which of the two let the request in (the shape ApplyOnOwner already uses for routed price edits).
-            bool histDirect = GrantSync.IsGrantedDirect(GrantKind.Business, MPConfig.PlayerId, req.PlayerId);
-            bool histMerged = !histDirect && MergerSync.MergedRuntime(MPConfig.PlayerId, req.PlayerId);
-            if (!histDirect && !histMerged)
+            var reg = GameStatePatcher.FindRegistration(req.AddressKey);
+            // T-77: a HOST stand-in answers for the away owner. The host's route (MPServer.HostRouteSharedSalesHistory)
+            // already gated the asker against the TRUE owner (ShopGateFor); this machine's own grants are not the question.
+            bool histStandIn = reg != null && MPServer.IsRunning && !MergerFlip.TrulyMine(reg) && MergerFlip.BooksHere(reg);
+            bool histDirect = !histStandIn && GrantSync.IsGrantedDirect(GrantKind.Business, MPConfig.PlayerId, req.PlayerId);
+            bool histMerged = !histStandIn && !histDirect && MergerSync.MergedRuntime(MPConfig.PlayerId, req.PlayerId);
+            if (!histStandIn && !histDirect && !histMerged)
             {
                 if (_logged.Add("hist-nogrant|" + req.PlayerId))
                     Plugin.Logger.LogInfo($"{Tag} sales-history request from '{req.PlayerId}' but they hold no Business grant from me and are not a member of my company — ignored.");
                 return;
             }
-            var reg = GameStatePatcher.FindRegistration(req.AddressKey);
-            if (reg == null || !MergerFlip.TrulyMine(reg)) return;
+            if (reg == null || !MergerFlip.BooksHere(reg)) return;   // T-77: the true owner, or the stand-in that runs it
             var gi = SaveGameManager.Current;
             if (gi == null) return;
             int today = gi.Day;
@@ -341,7 +345,7 @@ namespace BigAmbitionsMP
                     }
             }
             catch { }
-            Plugin.Logger.LogInfo($"{Tag} sending '{req.PlayerId}' the last {HistoryDays} days of sales for '{req.AddressKey}': {reply.Days.Count} day(s), {rows} row(s), {reply.Products.Count} product(s) on sale.{(histMerged ? " (merged)" : "")}");
+            Plugin.Logger.LogInfo($"{Tag} sending '{req.PlayerId}' the last {HistoryDays} days of sales for '{req.AddressKey}': {reply.Days.Count} day(s), {rows} row(s), {reply.Products.Count} product(s) on sale.{(histMerged ? " (merged)" : histStandIn ? " (as the away owner's stand-in)" : "")}");
             if (MPServer.IsRunning) MPServer.HostRouteSharedSalesHistory(reply, MPConfig.PlayerId);
             else if (MPClient.IsConnected) MPClient.SendEnvelope(MessageEnvelope.Create(MessageType.SharedSalesHistory, MPConfig.PlayerId, reply));
         }

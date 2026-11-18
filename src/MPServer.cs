@@ -799,6 +799,26 @@ namespace BigAmbitionsMP
                 if (addrs.Count == 0) continue;
                 var moved = PaperworkSync.SplitOutAddresses(p, addrs, out int parts);
                 if (parts == 0) continue;
+                // T-77: a CLIENT stand-in cannot publish a shop it does not own (BusinessSync's client publish and the
+                // host's owner check refuse it), so its open/closed switch rides this paperwork: it lands on the host's
+                // copy - assigned + notified, never the native toggle - and the host's business scan publishes it. The
+                // host's own bundle needs nothing (its native toggle already set the flag).
+                // Review LOW-MED: only while this sender is the LIVE stand-in (not a 60-s hand-back mark, not once the owner
+                // is back) - a late final bundle must never overwrite a newer toggle by the next stand-in or the returned owner.
+                bool liveStandIn = MergerAbsence.Marks.TryGetValue(mark.OwnerStable, out var liveMark) && liveMark != null
+                                   && liveMark.SimulatorPid == senderPid && !liveMark.OwnerBack;
+                if (senderPid != MPConfig.PlayerId && liveStandIn && moved.Businesses != null)
+                    foreach (var mb in moved.Businesses)
+                    {
+                        if (mb == null || !mb.TemporarilyClosed.HasValue || string.IsNullOrEmpty(mb.AddressKey)) continue;
+                        try
+                        {
+                            var hreg = GameStatePatcher.FindRegistration(mb.AddressKey);
+                            if (hreg != null && hreg.temporarilyClosed != mb.TemporarilyClosed.Value)
+                                GameStatePatcher.SetOpenStateNoNative(hreg, mb.AddressKey, mb.TemporarilyClosed.Value, "from the stand-in's paperwork");
+                        }
+                        catch (Exception ex) { Plugin.Logger.LogWarning($"[Paperwork] stand-in open state '{mb.AddressKey}' from '{senderPid}': {ex.Message}"); }
+                    }
 
                 string have;
                 lock (_paperwork) have = _paperwork.TryGetValue(mark.OwnerStable, out var pe) ? pe.Text : "";   // fold F3
@@ -9318,6 +9338,19 @@ namespace BigAmbitionsMP
             return "";
         }
 
+        /// <summary>T-77, MAIN THREAD: WHERE a routed business edit (the open/closed toggle) must run - the staff
+        /// route's shape (HostRouteSharedStaffEdit): the ledger owner, the ONE owner/member gate (an away owner's
+        /// stable-id entry counts their company), then RouteTargetFor (the online owner, else the absence stand-in).
+        /// "" = refused; every refusal is logged here or by ShopGate / RouteTargetFor.</summary>
+        internal static string BusinessEditTargetFor(string addressKey, string senderPid)
+        {
+            string ownerPid = SharedShopOwnerPid(addressKey);
+            if (ownerPid.Length == 0)
+            { Plugin.Logger.LogWarning($"[Merger] business edit for unowned '{addressKey}' — dropped."); return ""; }
+            if (!ShopGateFor("BusinessEdit", addressKey, ownerPid, senderPid, GrantBusiness, out _)) return "";
+            return RouteTargetFor(addressKey, ownerPid);
+        }
+
         /// <summary>ABSENT-OWNER-GATES-1 G2 (review fold): where a helper sale, an interior edit or a cleaning report goes. An
         /// ONLINE owner (or the host, or no owner) is returned as it is; an ABSENT owner's report goes to the stand-in simulating
         /// that owner (RouteTargetFor - the storage route's answer), which logs when nobody can take it (""). A stand-in that sent
@@ -11658,15 +11691,22 @@ namespace BigAmbitionsMP
                 {
                     if (ownerPid == senderPid) return;
                     if (!ShopGateFor("SharedSalesHistory", p.AddressKey, ownerPid, senderPid, GrantBusiness, out _)) return;   // ABSENT-OWNER-GATES-1
+                    // T-77: an away owner's shop that THIS host runs as their stand-in is answered here - its books are
+                    // the live ones (before this the ask died below with "owner offline - no answer").
+                    if (MergerAbsence.SimulatesHere(p.AddressKey)) { SharedShopPrices.HandleSalesHistory(p); return; }
                     if (!AskOwnerOnline("sales-history", p.AddressKey, senderPid, ownerPid)) return;   // W3-0 r1 (F7)
                     if (ownerPid == MPConfig.PlayerId) SharedShopPrices.HandleSalesHistory(p);
                     else SendToPid(ownerPid, MessageEnvelope.Create(MessageType.SharedSalesHistory, "host", p));
                 }
                 else if (p.Action == "snapshot")
                 {
-                    if (senderPid != ownerPid) { Plugin.Logger.LogWarning($"[SharedShop] sales snapshot for '{p.AddressKey}' from non-owner '{senderPid}' — dropped."); return; }
+                    // T-77: the answer comes from the ledger owner, or from this host when it runs an away owner's shop as their stand-in.
+                    bool hostStandIn = senderPid == MPConfig.PlayerId && MergerAbsence.SimulatesHere(p.AddressKey);
+                    if (senderPid != ownerPid && !hostStandIn) { Plugin.Logger.LogWarning($"[SharedShop] sales snapshot for '{p.AddressKey}' from non-owner '{senderPid}' — dropped."); return; }
                     if (string.IsNullOrEmpty(p.ToPid)) return;
-                    if (!GrantSync.IsGranted(GrantKind.Business, ownerPid, p.ToPid)) return;   // wave 2: UNION
+                    // T-77: the ONE owner/member gate (was a raw IsGranted against the ledger value, which refused every asker of an
+                    // away owner's shop once the ledger held their stable id).
+                    if (!ShopGateFor("SharedSalesHistory", p.AddressKey, ownerPid, p.ToPid, GrantBusiness, out _)) return;
                     if (p.ToPid == MPConfig.PlayerId) SharedShopPrices.HandleSalesHistory(p);
                     else SendToPid(p.ToPid, MessageEnvelope.Create(MessageType.SharedSalesHistory, "host", p));
                 }

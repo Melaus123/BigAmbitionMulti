@@ -857,10 +857,15 @@ namespace BigAmbitionsMP
                 // owner→host→other-clients verbatim and nobody re-derives it (2026-06-19 shop-closed bug).
                 try
                 {
-                    // TrulyMine: only the TRUE owner computes canonical open truth — a merger-flipped
-                    // partner shop must pass through the owner's received value, or a member's local
-                    // toggle publishes bogus "owner truth" (run-4: P1 closed P2's shop, P2 saw open).
-                    if (MergerFlip.TrulyMine(reg))
+                    // BooksHere: only the machine that RUNS the shop (its true owner, or the absence stand-in -
+                    // T-77) computes canonical open truth; a merger-flipped partner shop elsewhere must pass through
+                    // the runner's received value, or a member's local toggle publishes bogus "owner truth"
+                    // (run-4: P1 closed P2's shop, P2 saw open).
+                    // T-77 review HIGH: the HOST also derives it for a partner shop whose owner is away (a CLIENT stand-in
+                    // runs it but cannot publish it; its switch reaches the host's copy through its paperwork) - the
+                    // IsBusinessOpen prefix (Patch_IsBusinessOpen_OwnerTruth) lets the real check run for exactly these.
+                    if (MergerFlip.BooksHere(reg)
+                        || (MPServer.IsRunning && MergerAbsence.HostMarksAddress(addr)))
                         info.OwnerOpenState = BusinessHelper.IsBusinessOpen(reg) ? 1 : 2;
                     else if (OwnerOpenByAddress.TryGetValue(addr, out var ownerSt))
                         info.OwnerOpenState = ownerSt;
@@ -1203,36 +1208,43 @@ namespace BigAmbitionsMP
         // A member's native TemporarilyClose on a FLIPPED replica is intercepted
         // (Patch_TemporarilyClose_MergerRoute) and lands here instead of mutating the replica.
 
-        /// <summary>MEMBER machine: send the toggle to the owner (host arbitrates + relays).</summary>
+        /// <summary>MEMBER machine: send the toggle to the machine that runs the shop - the owner, or its absence
+        /// stand-in (host arbitrates + relays).</summary>
         public static void RouteTemporarilyClose(string addressKey, bool closed)
         {
             var p = new BusinessEditPayload { AddressKey = addressKey, TemporarilyClosed = closed };
             if (MPServer.IsRunning) HostRouteBusinessEdit(p, MPConfig.PlayerId);
             else                    MPClient.SendBusinessEdit(p);
-            Plugin.Logger.LogInfo($"[Merger] routed TemporarilyClose({closed}) for '{addressKey}' to the owner.");
+            Plugin.Logger.LogInfo($"[Merger] routed TemporarilyClose({closed}) for '{addressKey}' to the owner (or its stand-in).");
         }
 
-        /// <summary>HOST (main thread): grant-gate the edit (merger unions into the Business grant) and
-        /// apply locally when the host owns the shop, else relay to the owner's machine.</summary>
+        /// <summary>HOST (main thread): gate the edit against the shop's owner and deliver it to the machine that
+        /// RUNS the shop - applied here when that is the host (owner or stand-in), else relayed to it.</summary>
         public static void HostRouteBusinessEdit(BusinessEditPayload p, string senderPid)
         {
             try
             {
                 if (p == null || string.IsNullOrEmpty(p.AddressKey) || string.IsNullOrEmpty(senderPid)) return;
-                if (!MPServer.BuildingOwners.TryGetValue(p.AddressKey, out var owner) || string.IsNullOrEmpty(owner))
-                { Plugin.Logger.LogWarning($"[Merger] business edit for unowned '{p.AddressKey}' — dropped."); return; }
-                string ownerPid = owner == "host" ? MPConfig.PlayerId : owner;
-                if (ownerPid != senderPid && !GrantSync.IsGranted(GrantKind.Business, ownerPid, senderPid))
-                { Plugin.Logger.LogWarning($"[Merger] business edit by '{senderPid}' on '{p.AddressKey}' (owner '{ownerPid}') — no access, dropped."); return; }
-                if (ownerPid == MPConfig.PlayerId) ApplyRoutedTemporarilyClose(p);
-                else MPServer.SendBusinessEditTo(ownerPid, p);
+                // T-77: the staff route's shape (MPServer.HostRouteSharedStaffEdit). The old raw IsGranted gate against
+                // BuildingOwners refused every edit on an away owner's shop after a reload (the ledger holds their STABLE
+                // id) and, before one, relayed to an offline pid where SendToPid dropped it without a word. Now: the
+                // owner gate that understands an away owner, then the online owner or else the absence stand-in.
+                // "" = refused - the helpers log every refusal themselves.
+                string target = MPServer.BusinessEditTargetFor(p.AddressKey, senderPid);
+                if (target.Length == 0) return;
+                if (target == MPConfig.PlayerId) ApplyRoutedTemporarilyClose(p);
+                else if (target == senderPid)
+                    Plugin.Logger.LogWarning($"[Merger] business edit by '{senderPid}' on '{p.AddressKey}': the sender itself runs that shop "
+                                           + "(its own toggle should have run natively) - not sent back to it, dropped.");
+                else MPServer.SendBusinessEditTo(target, p);
             }
             catch (System.Exception ex) { Plugin.Logger.LogWarning($"[Merger] HostRouteBusinessEdit: {ex.Message}"); }
         }
 
-        /// <summary>OWNER machine (main thread): run the game's own toggle — every native side effect
-        /// (licensing on reopen, customer entries, todo task) fires on the authoritative machine, and
-        /// the regular business sync republishes the new truth to everyone.</summary>
+        /// <summary>The machine that RUNS the shop (main thread; its true owner, or the absence stand-in - T-77):
+        /// run the game's own toggle — every native side effect (licensing on reopen, customer entries, todo
+        /// task) fires on the authoritative machine, and the regular business sync (on a CLIENT stand-in, its
+        /// paperwork) republishes the new truth to everyone.</summary>
         public static void ApplyRoutedTemporarilyClose(BusinessEditPayload p)
         {
             try
@@ -1244,11 +1256,13 @@ namespace BigAmbitionsMP
                     if (reg == null) continue;
                     string key; try { key = GameStateReader.AddressKey(reg); } catch { continue; }
                     if (key != p.AddressKey) continue;
-                    if (!MergerFlip.TrulyMine(reg))
-                    { Plugin.Logger.LogWarning($"[Merger] routed toggle for '{key}' but this machine is not its true owner — dropped."); return; }
+                    // T-77: the true owner OR the absence stand-in (BooksHere) runs it; the native call below passes
+                    // straight through Patch_TemporarilyClose_MergerRoute on either.
+                    if (!MergerFlip.BooksHere(reg))
+                    { Plugin.Logger.LogWarning($"[Merger] routed toggle for '{key}' but this machine does not run that shop — dropped."); return; }
                     if (reg.temporarilyClosed == p.TemporarilyClosed) return;   // idempotent
                     reg.TemporarilyClose(p.TemporarilyClosed);
-                    Plugin.Logger.LogInfo($"[Merger] owner applied routed TemporarilyClose({p.TemporarilyClosed}) on '{key}'.");
+                    Plugin.Logger.LogInfo($"[Merger] {(MergerFlip.TrulyMine(reg) ? "owner" : "stand-in")} applied routed TemporarilyClose({p.TemporarilyClosed}) on '{key}'.");
                     try { SharedShopVisibility.RefreshOpenStateIfPageOpen(key); } catch { }   // the owner's open BizMan page follows the switch at once (same for a merger member's toggle)
                     return;
                 }

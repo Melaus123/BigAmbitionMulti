@@ -1,0 +1,301 @@
+{
+  "id": "T-T77-STANDIN-TOGGLE",
+  "title": "T-77: while a merger partner is away, the host (their stand-in) reopens the partner's closed shop with the game's own switch; it stays open (no spring-back, no 'no access'), and the open state goes home to the owner on return and is not undone by the owner's own poll. NO save.",
+  "preconditions": "Fixture save1 (host melaus, client Client1; the client rents at least one shop). Dev build with T-77 (shopclosed lever; regstate prints closed= and books=). Uses the driver's drop/relaunch steps. FIXTURE HYGIENE: NOTHING is saved.",
+  "instances": 2,
+  "vars": {
+    "clientPid": "Client1",
+    "hostPid": "melaus",
+    "session": "save1"
+  },
+  "oracles_absent": [
+    "NullReferenceException",
+    "HarmonyException",
+    "Patching exception",
+    "no access, dropped",
+    "business edit for unowned",
+    "routed toggle for '.*' but this machine does not run that shop",
+    "the sender itself runs that shop",
+    "\\[Paperwork\\] stand-in open state"
+  ],
+  "oracles_report": [
+    "\\[Merger\\] routed TemporarilyClose",
+    "applied routed TemporarilyClose",
+    "is now (OPEN|CLOSED)",
+    "\\[BusinessSync\\] Sent change",
+    "\\[Absence\\]"
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "role": "h",
+      "cmd": "host",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 2,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 3,
+      "role": "h",
+      "cmd": "hostload ${session}",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)",
+          "within_s": 240
+        },
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady",
+          "within_s": 60
+        }
+      ]
+    },
+    {
+      "seq": 4,
+      "role": "both",
+      "cmd": "mark TEST T77 START",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 5,
+      "role": "h",
+      "cmd": "merge propose ${clientPid}",
+      "expect_result": "OK merge propose sent"
+    },
+    {
+      "seq": 6,
+      "role": "c",
+      "cmd": "merge accept",
+      "expect_result": "OK merge accept sent",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[BAMP\\] \\[Merger\\] FORMED group",
+          "within_s": 20
+        }
+      ]
+    },
+    {
+      "seq": 7,
+      "role": "h",
+      "sleep_s": 3
+    },
+    {
+      "seq": 8,
+      "role": "h",
+      "cmd": "mergestatus",
+      "expect_result": "member=True.*flipped=[1-9]",
+      "capture": {
+        "clientShop": "keys=\\['([^']+)'"
+      },
+      "note": "host view: the client's first flipped building"
+    },
+    {
+      "seq": 9,
+      "role": "c",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK rented=True .*flipped=False .*books=True",
+      "note": "premise: the client truly owns and runs it"
+    },
+    {
+      "seq": 10,
+      "role": "c",
+      "cmd": "shopclosed on ${clientShop}",
+      "expect_result": "^OK shopclosed .* now closed=True books=True",
+      "note": "the OWNER closes its own shop with the game's own switch (native)"
+    },
+    {
+      "seq": 11,
+      "role": "h",
+      "sleep_s": 10,
+      "note": "the owner's instant push reaches the host"
+    },
+    {
+      "seq": 12,
+      "role": "h",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK .*flipped=True .*closed=True books=False",
+      "note": "premise: the host's copy shows it closed; the host does not run it yet"
+    },
+    {
+      "role": "h",
+      "cmd": "shopclosed off ${clientShop}",
+      "expect_result": "^OK shopclosed .* asked=False now closed=True books=False",
+      "expect_log": [
+        {
+          "role": "c",
+          "regex": "\\[Merger\\] owner applied routed TemporarilyClose\\(False\\) on '${clientShop}'",
+          "within_s": 15
+        }
+      ],
+      "note": "ONLINE-OWNER LEG: a member's switch on the partner's shop is routed (local flag unchanged) and the owner runs it - the new gate (ShopGateFor + RouteTargetFor) for a live member",
+      "seq": 13
+    },
+    {
+      "role": "h",
+      "sleep_s": 10,
+      "seq": 14
+    },
+    {
+      "role": "h",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK .*closed=False books=False",
+      "note": "the owner's open state came back to the host",
+      "seq": 15
+    },
+    {
+      "role": "c",
+      "cmd": "shopclosed on ${clientShop}",
+      "expect_result": "^OK shopclosed .* now closed=True books=True",
+      "note": "the owner closes it again for the absence leg",
+      "seq": 16
+    },
+    {
+      "role": "h",
+      "sleep_s": 10,
+      "seq": 17
+    },
+    {
+      "role": "h",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK .*closed=True books=False",
+      "seq": 18
+    },
+    {
+      "seq": 19,
+      "role": "c",
+      "cmd": "paperwork push",
+      "expect_result": "^OK paperwork pushed",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Paperwork\\] stored for '${clientPid}'",
+          "within_s": 15
+        }
+      ],
+      "note": "the owner's paperwork is on the host before the absence (normal play publishes it on its own cycle)"
+    },
+    {
+      "seq": 20,
+      "role": "h",
+      "cmd": "mark pre-drop baseline",
+      "expect_result": "OK MARK"
+    },
+    {
+      "seq": 21,
+      "role": "c",
+      "drop": true,
+      "note": "the owner leaves",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] simulating '${clientShop}' for '${clientPid}'",
+          "within_s": 90
+        }
+      ]
+    },
+    {
+      "seq": 22,
+      "role": "h",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK .*closed=True books=True",
+      "note": "premise: the host is now the stand-in that runs the closed shop"
+    },
+    {
+      "seq": 23,
+      "role": "h",
+      "cmd": "shopclosed off ${clientShop}",
+      "expect_result": "^OK shopclosed .* asked=False now closed=False books=True",
+      "note": "THE FIX: the stand-in's own switch runs the game's toggle natively (before T-77: routed to the absent owner and dropped, flag stayed True)"
+    },
+    {
+      "seq": 24,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "more than one business poll cycle: nothing may spring it back"
+    },
+    {
+      "seq": 25,
+      "role": "h",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK .*closed=False books=True",
+      "note": "still open after a full cycle"
+    },
+    {
+      "seq": 26,
+      "role": "h",
+      "sleep_s": 40,
+      "note": "let the host's own paperwork cycle file the away owner's addresses (natural path, no manual push)"
+    },
+    {
+      "seq": 27,
+      "role": "c",
+      "relaunch": true,
+      "note": "the owner returns"
+    },
+    {
+      "seq": 28,
+      "role": "c",
+      "cmd": "join",
+      "expect_result": "^OK"
+    },
+    {
+      "seq": 29,
+      "role": "h",
+      "cmd": "acceptjoin",
+      "expect_result": "^OK",
+      "expect_log": [
+        {
+          "role": "h",
+          "regex": "\\[Absence\\] owner '${clientPid}' returned",
+          "within_s": 120
+        },
+        {
+          "role": "c",
+          "regex": "is now OPEN .*\\(returned from the stand-in\\)",
+          "within_s": 180
+        }
+      ],
+      "note": "THE HAND-BACK: the owner's copy takes the stand-in's open switch without the native method"
+    },
+    {
+      "seq": 30,
+      "role": "c",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK .*flipped=False .*closed=False books=True",
+      "note": "the owner has it open"
+    },
+    {
+      "seq": 31,
+      "role": "h",
+      "sleep_s": 45,
+      "note": "the owner's own business poll runs: it must republish OPEN, never its pre-absence CLOSED"
+    },
+    {
+      "seq": 32,
+      "role": "h",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK .*closed=False books=False",
+      "note": "host agrees, and no longer runs it"
+    },
+    {
+      "seq": 33,
+      "role": "c",
+      "cmd": "regstate ${clientShop}",
+      "expect_result": "^OK .*closed=False",
+      "note": "owner still open after its poll"
+    },
+    {
+      "seq": 34,
+      "role": "both",
+      "cmd": "mark TEST T77 END",
+      "expect_result": "OK MARK"
+    }
+  ]
+}

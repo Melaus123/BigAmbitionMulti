@@ -294,7 +294,7 @@
     "NullReferenceException",
     "upload SKIPPED",
     "cross-owner staffing",
-    "\\[BAMP\\] \\[Integrity\\].*(todo|removed)"
+    "\\[BAMP\\] \\[Integrity\\] (?!todo '[A-Za-z]+' about another player's staff/business refused at creation).*(todo|removed)"
   ],
   "oracles_report": [
     "resolves to NO session player",

@@ -1,0 +1,45 @@
+{
+  "id": "T-T78-REPRO",
+  "title": "T-78 reproduction: a business the HOST starts in the CLIENT's merged building never reaches the client's copy, and the client's empty copy wipes it on the host once the 10-minute post-join refusal window ends (same session, no rejoin). Expected on the current build: steps assert the BUG (client name stays empty; host accepts the empty record). NO save.",
+  "preconditions": "Fixture save1 (host melaus, client Client1). Dev build (rent / forrent / setbiz / regstate / merge levers are BAMP_DEV). FIXTURE HYGIENE: NOTHING is saved. setbiz writes name + type fastfoodrestaurant in memory on the host (TestDrive.cs setbiz) - the stand-in for the game's StartBusinessUI writing the name/type straight onto the host's flipped copy (decompile StartBusinessUI.cs:284-285).",
+  "instances": 2,
+  "vars": { "clientPid": "Client1", "hostPid": "melaus", "session": "save1" },
+  "oracles_absent": [ "NullReferenceException", "HarmonyException", "Patching exception" ],
+  "oracles_report": [
+    "business change REFUSED for",
+    "Client business applied:",
+    "\\[Audit\\] DIVERGED",
+    "\\[BusinessSync\\] Sent change"
+  ],
+  "steps": [
+    { "seq": 1, "role": "h", "cmd": "host", "expect_result": "^OK" },
+    { "seq": 2, "role": "c", "cmd": "join", "expect_result": "^OK" },
+    { "seq": 3, "role": "h", "cmd": "hostload ${session}", "expect_result": "^OK",
+      "expect_log": [
+        { "role": "h", "regex": "\\[BAMP\\] \\[LoadProf\\].*HOST ReleaseStartupHold \\(all players world-ready\\)", "within_s": 240 },
+        { "role": "h", "regex": "\\[BAMP\\] \\[Lifecycle\\] WorldReady", "within_s": 60 } ] },
+    { "seq": 4, "role": "both", "cmd": "mark TEST T78 START", "expect_result": "OK MARK" },
+    { "seq": 5, "role": "c", "cmd": "forrent retail", "expect_result": "^OK [1-9]\\d* for-rent: ", "capture": { "bldg": "for-rent: ([^|]+?)(?: \\||$)" },
+      "note": "a retail unit on the market on the client's machine" },
+    { "seq": 6, "role": "c", "cmd": "rent ${bldg}", "expect_result": "^OK RentBuilding invoked" },
+    { "seq": 7, "role": "h", "sleep_s": 20, "note": "the client's rent reaches the host's ledger" },
+    { "seq": 8, "role": "c", "cmd": "regstate ${bldg}", "expect_result": "^OK rented=True .*name=''", "note": "premise: the client rents it and it holds no business" },
+    { "seq": 9, "role": "h", "cmd": "merge propose ${clientPid}", "expect_result": "OK merge propose sent" },
+    { "seq": 10, "role": "c", "cmd": "merge accept", "expect_result": "OK merge accept sent",
+      "expect_log": [ { "role": "h", "regex": "\\[BAMP\\] \\[Merger\\].*(FORMED|GROWN)", "within_s": 20 } ] },
+    { "seq": 11, "role": "h", "sleep_s": 5 },
+    { "seq": 12, "role": "h", "cmd": "regstate ${bldg}", "expect_result": "^OK rented=True .*flipped=True", "note": "premise: the host shows the client's building as a merged (flipped) shop" },
+    { "seq": 13, "role": "h", "cmd": "setbiz ${bldg} T78 Law", "expect_result": "^OK '.*' now reads name='T78 Law'",
+      "expect_log": [ { "role": "h", "regex": "\\[BusinessSync\\] Sent change ${bldg}: name='T78 Law'", "within_s": 60 } ],
+      "note": "the host starts a business in the client's building; the host broadcasts it" },
+    { "seq": 14, "role": "h", "sleep_s": 60, "note": "two client poll cycles (30 s each)" },
+    { "seq": 15, "role": "c", "cmd": "regstate ${bldg}", "expect_result": "^OK rented=True .*name=''",
+      "note": "BUG LEG 1 (expected on the current build): the owner's copy never learns the business" },
+    { "seq": 16, "role": "h", "cmd": "regstate ${bldg}", "expect_result": "^OK .*name='T78 Law'", "note": "host still holds it inside the refusal window" },
+    { "seq": 17, "role": "h", "cmd": "mark wait for wipe", "expect_result": "OK MARK",
+      "expect_log": [ { "role": "h", "regex": "Client business applied: ${bldg} = ''", "within_s": 720 } ],
+      "note": "BUG LEG 2 (expected on the current build): about 10 min after the client's join the host accepts the owner's empty record" },
+    { "seq": 18, "role": "h", "cmd": "regstate ${bldg}", "expect_result": "^OK .*name=''", "note": "the business is gone on the host too" },
+    { "seq": 19, "role": "both", "cmd": "mark TEST T78 END", "expect_result": "OK MARK" }
+  ]
+}

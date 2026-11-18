@@ -6138,20 +6138,14 @@ namespace BigAmbitionsMP
                     // We deliberately do NOT call the native method: it also runs PayLicensingFees when opening,
                     // which would charge THIS machine for a shop it does not own, and raises a todo task for
                     // someone else's business.  So: assign, then fire only the notify/rebuild half.
-                    bool closedChanged = reg.temporarilyClosed != info.TemporarilyClosed;
-                    reg.temporarilyClosed   = info.TemporarilyClosed;
-                    if (closedChanged)
+                    // T-77: the assign + notify half lives in SetOpenStateNoNative (shared with the absence hand-back and
+                    // the host's filing of a stand-in's paperwork); behaviour and log line unchanged here.
+                    // Review LOW: never over the machine that RUNS the shop (a CLIENT stand-in's toggle waits up to 2 s for its
+                    // paperwork; a host record arriving in that gap must not undo it). The true owner never gets here.
+                    bool closedChanged = !MergerFlip.BooksHere(reg) && SetOpenStateNoNative(reg, info.AddressKey, info.TemporarilyClosed);
+                    if (!closedChanged && typeChanged)
                     {
-                        try { GameEvent.Invoke("ba:gameevent_changedbusinessopenstate"); } catch { }
-                        try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
-                        try { AI.Customers.CustomerEntries.CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness(reg, TimeHelper.GetDayOfWeek()); } catch { }
-                        Plugin.Logger.LogInfo($"[Patcher] '{info.AddressKey}' is now {(info.TemporarilyClosed ? "CLOSED" : "OPEN")} — "
-                            + "notified the game (open-state event + registration change + shopper schedule rebuild).");
-                        try { SharedShopVisibility.RefreshOpenStateIfPageOpen(info.AddressKey); } catch { }   // an open BizMan page follows the switch at once
-                    }
-                    else if (typeChanged)
-                    {
-                        // 1.0 PORT (sweep-2 S4): the closed-flip block above already rings this bell;
+                        // 1.0 PORT (sweep-2 S4): the closed-flip call above (SetOpenStateNoNative) already rings this bell;
                         // ring it for a type-only change too, so the cached BuildingContext.BusinessType
                         // regenerates and the shopper schedule matches the new type. The open-state
                         // GameEvent is deliberately NOT fired — open/closed did not change.
@@ -8556,6 +8550,30 @@ namespace BigAmbitionsMP
             {
                 Plugin.Logger.LogError($"[Patcher] ExecuteLocalRent error: {ex.Message}");
             }
+        }
+
+        /// <summary>T-77 (factored out of ApplyBusinessInfoLocal's ROUND-122 block): set a shop's open/closed flag WITHOUT the
+        /// native BuildingRegistration.TemporarilyClose - opening runs PayLicensingFees, which would charge THIS machine, and it
+        /// raises a todo task - then fire only the native method's notify/rebuild half. For a value that arrives from elsewhere
+        /// (a received record, the absence hand-back, a stand-in's paperwork). Returns true when the flag changed. An empty
+        /// `why` keeps the ROUND-122 log line exactly; otherwise it is named at the end.</summary>
+        internal static bool SetOpenStateNoNative(BuildingRegistration reg, string key, bool closed, string why = "")
+        {
+            if (reg == null) return false;
+            bool changed = reg.temporarilyClosed != closed;
+            reg.temporarilyClosed = closed;
+            if (!changed) return false;
+            try { GameEvent.Invoke("ba:gameevent_changedbusinessopenstate"); } catch { }
+            try { GlobalEvents.onBuildingRegistrationChange?.Invoke(reg.Address); } catch { }
+            try { AI.Customers.CustomerEntries.CustomerEntriesHelper.UpdateCustomerEntriesForPlayerBusiness(reg, TimeHelper.GetDayOfWeek()); } catch { }
+            Plugin.Logger.LogInfo($"[Patcher] '{key}' is now {(closed ? "CLOSED" : "OPEN")} — "
+                + "notified the game (open-state event + registration change + shopper schedule rebuild)."
+                + (string.IsNullOrEmpty(why) ? "" : $" ({why})"));
+            try { SharedShopVisibility.RefreshOpenStateIfPageOpen(key); } catch { }   // an open BizMan page follows the switch at once
+            // Review LOW: the native method's to-do half, for the owner's OWN shop only (the absence hand-back) - the game's
+            // own refresh completes a stale 'temporarily closed' task and raises any missing one (decompile TasksUI.cs:576).
+            if (MergerFlip.TrulyMine(reg)) { try { UI.Tasks.TasksUI.UpdateTasksFromBusiness(reg); } catch { } }
+            return true;
         }
 
         internal static BuildingRegistration? FindRegistration(string addressKey)
