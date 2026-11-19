@@ -643,7 +643,7 @@ namespace BigAmbitionsMP
         /// ReliableOrdered/ReliableUnordered (same library fact as the express-lane note above). So an
         /// over-MTU snapshot falls back to the reliable lane rather than throwing into the send path, and
         /// says so by returning false.</summary>
-        private const int UnreliableHeaderMargin = 16;   // LNL packet header + the length prefix, with slack
+        internal const int UnreliableHeaderMargin = 16;   // LNL packet header + the length prefix, with slack (LnlClientTransport.Send uses it too)
 
         public override bool SendUnreliable(byte[] data)
         {
@@ -885,8 +885,32 @@ namespace BigAmbitionsMP
 
             var writer = new NetDataWriter();
             writer.Put(data);
-            _client?.FirstPeer?.Send(writer, reliable ? DeliveryMethod.ReliableOrdered : DeliveryMethod.Unreliable);
+            var peer = _client?.FirstPeer;
+            if (peer == null) return;
+            var method = DeliveryMethod.ReliableOrdered;
+            if (!reliable)
+            {
+                // T-79: LiteNetLib cannot fragment an UNRELIABLE packet - it throws once length + header exceeds the
+                // peer's MTU (the client's leftover-car beat with ~5 cars did, every 0.2 s, and the host never stood
+                // them in). Same rule as the host's LnlLink.SendUnreliable: an over-MTU message goes ReliableUnordered
+                // on channel 0 - its own stream, so a lost fragment never holds back the ReliableOrdered traffic, and
+                // the host's receive handler ignores the delivery method. Order stays the receiver's Seq guard.
+                int mtu = 0;
+                try { mtu = peer.Mtu; } catch { }
+                if (mtu > 0 && data.Length + LnlLink.UnreliableHeaderMargin <= mtu) method = DeliveryMethod.Unreliable;
+                else
+                {
+                    method = DeliveryMethod.ReliableUnordered;
+                    if (!_overMtuLogged)
+                    {
+                        _overMtuLogged = true;
+                        Plugin.Logger.LogInfo($"[LnlClient] an unreliable message of {data.Length}B is over the link's MTU ({mtu}) - sent reliable-unordered instead (T-79; logged once).");
+                    }
+                }
+            }
+            peer.Send(writer, method);
         }
+        private bool _overMtuLogged;
 
         /// <summary>Round-282: the UDP client has ONE peer and no per-link pump of its
         /// own (its poll loop services the NetManager, not a link registry), and LNL
